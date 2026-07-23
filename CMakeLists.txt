@@ -35,4 +35,43 @@ function(snf_configure_target target_name)
     endif()
 endfunction()
 
+add_library(snf_core STATIC
+    src/core/build_info.cpp
+    src/protocol/frame_codec.cpp
+)
+target_include_directories(snf_core
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+snf_configure_target(snf_core)
+
+add_executable(snf_server
+    src/server_main.cpp
+)
+target_link_libraries(snf_server PRIVATE snf_core)
+snf_configure_target(snf_server)
+
+add_executable(snf_load_client
+    tools/load_client/load_client_main.cpp
+)
+target_link_libraries(snf_load_client PRIVATE snf_core)
+snf_configure_target(snf_load_client)
+
 include(CTest)
+if(BUILD_TESTING)
+    add_executable(snf_unit_tests
+        tests/build_info_test.cpp
+    )
+    target_link_libraries(snf_unit_tests PRIVATE snf_core)
+    snf_configure_target(snf_unit_tests)
+
+    add_test(NAME snf_unit_tests COMMAND snf_unit_tests)
+
+    add_executable(snf_frame_codec_tests
+        tests/frame_codec_test.cpp
+    )
+    target_link_libraries(snf_frame_codec_tests PRIVATE snf_core)
+    snf_configure_target(snf_frame_codec_tests)
+
+    add_test(NAME snf_frame_codec_tests COMMAND snf_frame_codec_tests)
+endif()
