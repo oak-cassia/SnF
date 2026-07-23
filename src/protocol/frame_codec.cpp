@@ -30,7 +30,7 @@ namespace snf::protocol
             throw std::invalid_argument("Unknown message type");
         }
 
-        if (constexpr auto max_payload_size = static_cast<std::size_t>(MAX_BODY_SIZE - MIN_BODY_SIZE); frame.payload.size() > max_payload_size)
+        if (frame.payload.size() > MAX_PAYLOAD_SIZE)
         {
             throw std::length_error("Frame body exceeds the configured maximum size");
         }
