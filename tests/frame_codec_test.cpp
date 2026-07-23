@@ -55,8 +55,45 @@ void test_decodes_a_frame_received_in_two_chunks()
     assert(decoded.payload == frame.payload);
 }
 
+void test_decodes_two_frames_received_together()
+{
+    const Frame ping{
+        .type = MessageType::Ping,
+        .request_id = 1,
+        .payload = {std::byte{0xAA}},
+    };
+    const Frame pong{
+        .type = MessageType::Pong,
+        .request_id = 2,
+        .payload = {std::byte{0xBB}, std::byte{0xCC}},
+    };
+
+    const auto encoded_ping = encode_frame(ping);
+    const auto encoded_pong = encode_frame(pong);
+
+    std::vector<std::byte> received;
+    received.insert(received.end(), encoded_ping.begin(), encoded_ping.end());
+    received.insert(received.end(), encoded_pong.begin(), encoded_pong.end());
+
+    FrameDecoder decoder{};
+    const std::span<const std::byte> received_view{received};
+    const auto result = decoder.append(received_view);
+
+    assert(result.ok());
+    assert(result.frames.size() == 2);
+
+    assert(result.frames[0].type == ping.type);
+    assert(result.frames[0].request_id == ping.request_id);
+    assert(result.frames[0].payload == ping.payload);
+
+    assert(result.frames[1].type == pong.type);
+    assert(result.frames[1].request_id == pong.request_id);
+    assert(result.frames[1].payload == pong.payload);
+}
+
 int main()
 {
     test_encode_frame();
     test_decodes_a_frame_received_in_two_chunks();
+    test_decodes_two_frames_received_together();
 }

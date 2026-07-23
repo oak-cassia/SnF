@@ -66,67 +66,77 @@ namespace snf::protocol
     {
         _buffer.insert(_buffer.end(), bytes.begin(), bytes.end());
 
-        const auto available_bytes = _buffer.size() - _read_offset;
-
-        if (available_bytes < FRAME_LENGTH_FIELD_SIZE)
-        {
-            return {};
-        }
-
-        const std::span<const std::byte> buffer_view{_buffer};
-        const auto body_size = read_u32_be(buffer_view, _read_offset);
-        if (body_size < MIN_BODY_SIZE)
-        {
-            return DecodeResult{
-                .frames = {},
-                .error = DecodeError::InvalidBodyLength,
-            };
-        }
-
-        if (body_size > MAX_BODY_SIZE)
-        {
-            return DecodeResult{
-                .frames = {},
-                .error = DecodeError::BodyTooLarge,
-            };
-        }
-
-        const auto full_frame_size = FRAME_LENGTH_FIELD_SIZE + body_size;
-
-        if (available_bytes < full_frame_size)
-        {
-            return {};
-        }
-
-        const auto request_type = static_cast<MessageType>(read_u16_be(buffer_view, _read_offset + FRAME_LENGTH_FIELD_SIZE));
-
-        if (request_type != MessageType::Ping && request_type != MessageType::Pong)
-        {
-            return DecodeResult{
-                .frames = {},
-                .error = DecodeError::UnknownMessageType,
-            };
-        }
-
-        const auto request_id = read_u32_be(buffer_view, _read_offset + FRAME_LENGTH_FIELD_SIZE + FRAME_TYPE_SIZE);
-
-        const auto payload_begin = _read_offset + FRAME_LENGTH_FIELD_SIZE + MIN_BODY_SIZE;
-        const auto payload_size = body_size - MIN_BODY_SIZE;
-        const auto payload_end = payload_begin + payload_size;
-
         DecodeResult result{};
-        result.frames.push_back(
-            Frame{
-                .type = request_type,
-                .request_id = request_id,
-                .payload = std::vector<std::byte>(buffer_view.begin() + payload_begin, buffer_view.begin() + payload_end),
-            }
-        );
 
-        _read_offset += full_frame_size;
+        while (true)
+        {
+            const auto available_bytes = _buffer.size() - _read_offset;
+
+            if (available_bytes < FRAME_LENGTH_FIELD_SIZE)
+            {
+                break;
+            }
+
+            const std::span<const std::byte> buffer_view{_buffer};
+            const auto body_size = read_u32_be(buffer_view, _read_offset);
+            if (body_size < MIN_BODY_SIZE)
+            {
+                return DecodeResult{
+                    .frames = {},
+                    .error = DecodeError::InvalidBodyLength,
+                };
+            }
+
+            if (body_size > MAX_BODY_SIZE)
+            {
+                return DecodeResult{
+                    .frames = {},
+                    .error = DecodeError::BodyTooLarge,
+                };
+            }
+
+            const auto full_frame_size = static_cast<std::size_t>(FRAME_LENGTH_FIELD_SIZE) + body_size;
+
+            if (available_bytes < full_frame_size)
+            {
+                break;
+            }
+
+            const auto request_type = static_cast<MessageType>(read_u16_be(buffer_view, _read_offset + FRAME_LENGTH_FIELD_SIZE));
+
+            if (request_type != MessageType::Ping && request_type != MessageType::Pong)
+            {
+                return DecodeResult{
+                    .frames = {},
+                    .error = DecodeError::UnknownMessageType,
+                };
+            }
+
+            const auto request_id = read_u32_be(buffer_view, _read_offset + FRAME_LENGTH_FIELD_SIZE + FRAME_TYPE_SIZE);
+
+            const auto payload_begin = _read_offset + FRAME_LENGTH_FIELD_SIZE + MIN_BODY_SIZE;
+            const auto payload_size = static_cast<std::size_t>(body_size - MIN_BODY_SIZE);
+            const auto payload_end = payload_begin + payload_size;
+
+            result.frames.push_back(
+                Frame{
+                    .type = request_type,
+                    .request_id = request_id,
+                    .payload = std::vector<std::byte>(buffer_view.begin() + payload_begin, buffer_view.begin() + payload_end),
+                }
+            );
+
+            _read_offset += full_frame_size;
+        }
+
         if (_read_offset == _buffer.size())
         {
             _buffer.clear();
+            _read_offset = 0;
+        }
+        else if (_read_offset > 0)
+        {
+            _buffer.erase(_buffer.begin(), _buffer.begin() + _read_offset);
             _read_offset = 0;
         }
 
