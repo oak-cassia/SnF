@@ -6,13 +6,13 @@ namespace
 {
     constexpr std::uint32_t BYTE_MASK = 0xFFU;
 
-    void append_u16_be(std::vector<std::byte>& bytes, std::uint16_t value)
+    void append_u16_big_endian(std::vector<std::byte>& bytes, std::uint16_t value)
     {
         bytes.push_back(static_cast<std::byte>((value >> 8U) & BYTE_MASK));
         bytes.push_back(static_cast<std::byte>(value & BYTE_MASK));
     }
 
-    void append_u32_be(std::vector<std::byte>& bytes, std::uint32_t value)
+    void append_u32_big_endian(std::vector<std::byte>& bytes, std::uint32_t value)
     {
         bytes.push_back(static_cast<std::byte>((value >> 24U) & BYTE_MASK));
         bytes.push_back(static_cast<std::byte>((value >> 16U) & BYTE_MASK));
@@ -20,7 +20,7 @@ namespace
         bytes.push_back(static_cast<std::byte>(value & BYTE_MASK));
     }
 
-    std::uint32_t read_u32_be(std::span<const std::byte> bytes, std::size_t offset)
+    std::uint32_t read_u32_big_endian(std::span<const std::byte> bytes, std::size_t offset)
     {
         return (std::to_integer<std::uint32_t>(bytes[offset]) << 24U)
             | (std::to_integer<std::uint32_t>(bytes[offset + 1]) << 16U)
@@ -28,7 +28,7 @@ namespace
             | std::to_integer<std::uint32_t>(bytes[offset + 3]);
     }
 
-    std::uint16_t read_u16_be(std::span<const std::byte> bytes, std::size_t offset)
+    std::uint16_t read_u16_big_endian(std::span<const std::byte> bytes, std::size_t offset)
     {
         return (std::to_integer<std::uint16_t>(bytes[offset]) << 8U)
             | (std::to_integer<std::uint16_t>(bytes[offset + 1]));
@@ -54,9 +54,9 @@ namespace snf::protocol
         std::vector<std::byte> encoded;
         encoded.reserve(FRAME_LENGTH_FIELD_SIZE + body_size);
 
-        append_u32_be(encoded, body_size);
-        append_u16_be(encoded, static_cast<std::uint16_t>(frame.type));
-        append_u32_be(encoded, frame.request_id);
+        append_u32_big_endian(encoded, body_size);
+        append_u16_big_endian(encoded, static_cast<std::uint16_t>(frame.type));
+        append_u32_big_endian(encoded, frame.request_id);
         encoded.insert(encoded.end(), frame.payload.begin(), frame.payload.end());
 
         return encoded;
@@ -78,7 +78,7 @@ namespace snf::protocol
             }
 
             const std::span<const std::byte> buffer_view{_buffer};
-            const auto body_size = read_u32_be(buffer_view, _read_offset);
+            const auto body_size = read_u32_big_endian(buffer_view, _read_offset);
             if (body_size < MIN_BODY_SIZE)
             {
                 return DecodeResult{
@@ -102,7 +102,7 @@ namespace snf::protocol
                 break;
             }
 
-            const auto request_type = static_cast<MessageType>(read_u16_be(buffer_view, _read_offset + FRAME_LENGTH_FIELD_SIZE));
+            const auto request_type = static_cast<MessageType>(read_u16_big_endian(buffer_view, _read_offset + FRAME_LENGTH_FIELD_SIZE));
 
             if (request_type != MessageType::Ping && request_type != MessageType::Pong)
             {
@@ -112,7 +112,7 @@ namespace snf::protocol
                 };
             }
 
-            const auto request_id = read_u32_be(buffer_view, _read_offset + FRAME_LENGTH_FIELD_SIZE + FRAME_TYPE_SIZE);
+            const auto request_id = read_u32_big_endian(buffer_view, _read_offset + FRAME_LENGTH_FIELD_SIZE + FRAME_TYPE_SIZE);
 
             const auto payload_begin = _read_offset + FRAME_LENGTH_FIELD_SIZE + MIN_BODY_SIZE;
             const auto payload_size = static_cast<std::size_t>(body_size - MIN_BODY_SIZE);
