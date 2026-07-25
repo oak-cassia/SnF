@@ -65,6 +65,7 @@ if(BUILD_TESTING)
         tests/unit_test_main.cpp
         tests/build_info_test.cpp
         tests/frame_codec_test.cpp
+        tests/tcp_listener_test.cpp
         tests/unique_file_descriptor_test.cpp
     )
     target_link_libraries(snf_unit_tests PRIVATE snf_core)
