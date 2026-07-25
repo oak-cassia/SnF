@@ -12,6 +12,8 @@
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unordered_map>
+#include <cstddef>
+#include <span>
 
 int main()
 {
@@ -43,6 +45,7 @@ int main()
 
         std::unordered_map<int, snf::net::Session> sessions;
         std::array<epoll_event, 64> events{};
+        std::array<std::byte, 4096> receive_buffer{};
         while (true)
         {
             const int ready_event_count = ::epoll_wait(epoll.getDescriptor(), events.data(), static_cast<int>(events.size()), -1);
@@ -105,7 +108,7 @@ int main()
                         }
 
                         epoll_event client_event{};
-                        client_event.events = EPOLLIN;
+                        client_event.events = EPOLLIN | EPOLLRDHUP;
                         client_event.data.fd = client_descriptor;
 
                         if (::epoll_ctl(
@@ -122,7 +125,118 @@ int main()
                         std::cout << "Accepted client FD: "
                             << client_descriptor << '\n';
                     }
+
+                    continue;
                 }
+
+                // client 수신
+                const int client_descriptor = event.data.fd;
+
+                const auto session_iterator = sessions.find(client_descriptor);
+                if (session_iterator == sessions.end())
+                {
+                    continue;
+                }
+
+                bool should_remove_session = false;
+                if ((event.events & EPOLLERR) != 0)
+                {
+                    should_remove_session = true;
+                }
+
+                const bool has_read_event = (event.events & (EPOLLIN | EPOLLRDHUP | EPOLLHUP)) != 0;
+                if (!should_remove_session && has_read_event)
+                {
+                    while (true)
+                    {
+                        const auto received_byte_count = ::recv(
+                            client_descriptor,
+                            receive_buffer.data(),
+                            receive_buffer.size(),
+                            0
+                        );
+                        if (received_byte_count > 0)
+                        {
+                            const std::span<const std::byte> received_bytes{
+                                receive_buffer.data(),
+                                static_cast<std::size_t>(received_byte_count)
+                            };
+
+                            const auto decode_result = session_iterator->second.appendReceivedBytes(received_bytes);
+
+                            if (!decode_result.ok())
+                            {
+                                std::cerr
+                                    << "Protocol error from client FD: "
+                                    << client_descriptor
+                                    << '\n';
+
+                                should_remove_session = true;
+                                break;
+                            }
+
+                            for (const auto& frame : decode_result.frames)
+                            {
+                                std::cout
+                                    << "Received frame from FD "
+                                    << client_descriptor
+                                    << ", request ID: "
+                                    << frame.request_id
+                                    << '\n';
+                            }
+
+                            continue;
+                        }
+                        if (received_byte_count == 0)
+                        {
+                            should_remove_session = true;
+                            break;
+                        }
+
+                        if (errno == EINTR)
+                        {
+                            continue;
+                        }
+
+                        if (errno == EAGAIN || errno == EWOULDBLOCK)
+                        {
+                            break;
+                        }
+
+                        should_remove_session = true;
+                        break;
+                    }
+                }
+
+                if ((event.events & (EPOLLRDHUP | EPOLLHUP)) != 0)
+                {
+                    should_remove_session = true;
+                }
+
+                if (!should_remove_session)
+                {
+                    continue;
+                }
+
+                if (::epoll_ctl(
+                    epoll.getDescriptor(),
+                    EPOLL_CTL_DEL,
+                    client_descriptor,
+                    nullptr
+                ) == -1)
+                {
+                    std::cerr
+                        << "Failed to remove client FD from epoll: "
+                        << client_descriptor
+                        << '\n';
+                }
+
+                sessions.erase(client_descriptor);
+
+                std::cout
+                    << "Closed client FD: "
+                    << client_descriptor
+                    << '\n';
             }
         }
     }
