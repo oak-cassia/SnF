@@ -1,5 +1,6 @@
 #include "snf/server/tcp_server.hpp"
 
+#include "snf/net/socket_options.hpp"
 #include "snf/net/system_error.hpp"
 #include "snf/net/tcp_listener.hpp"
 
@@ -12,6 +13,7 @@
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <system_error>
+#include <utility>
 
 namespace
 {
@@ -112,10 +114,12 @@ namespace snf::server
                 snf::net::throw_system_error("accept4");
             }
 
+            snf::net::UniqueFileDescriptor client_socket{client_descriptor};
+            snf::net::enable_tcp_no_delay(client_socket.getDescriptor());
+
             const bool inserted =
                 _sessions
-                    .emplace(client_descriptor,
-                             snf::net::Session{snf::net::UniqueFileDescriptor{client_descriptor}})
+                    .emplace(client_descriptor, snf::net::Session{std::move(client_socket)})
                     .second;
 
             if (!inserted)
