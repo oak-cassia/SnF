@@ -38,7 +38,8 @@ endfunction()
 add_library(snf_core STATIC
     src/core/build_info.cpp
     src/protocol/frame_codec.cpp
-    src/net/UniqueFileDescriptor.cpp
+    src/net/unique_file_descriptor.cpp
+    src/net/tcp_listener.cpp
 )
 target_include_directories(snf_core
     PUBLIC
