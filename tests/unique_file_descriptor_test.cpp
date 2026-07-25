@@ -1,19 +1,12 @@
+#include "file_descriptor_test_support.hpp"
 #include "snf/net/unique_file_descriptor.hpp"
 
 #include <cassert>
-#include <cerrno>
-#include <fcntl.h>
 #include <unistd.h>
 #include <utility>
 
 namespace
 {
-
-bool is_closed(const int fd)
-{
-    errno = 0;
-    return ::fcntl(fd, F_GETFD) == -1 && errno == EBADF;
-}
 
 void test_closes_descriptor_when_destroyed()
 {
@@ -27,7 +20,7 @@ void test_closes_descriptor_when_destroyed()
         assert(owner.getDescriptor() == read_fd);
     }
 
-    assert(is_closed(read_fd));
+    assert(snf::test::is_closed(read_fd));
     assert(::close(pipe_fds[1]) == 0);
 }
 
@@ -45,7 +38,7 @@ void test_move_constructor_transfers_ownership()
     assert(moved.getDescriptor() == read_fd);
 
     moved.init();
-    assert(is_closed(read_fd));
+    assert(snf::test::is_closed(read_fd));
     assert(::close(pipe_fds[1]) == 0);
 }
 
@@ -63,12 +56,12 @@ void test_move_assignment_releases_previous_descriptor()
     snf::net::UniqueFileDescriptor source{second_read_fd};
     target = std::move(source);
 
-    assert(is_closed(first_read_fd));
+    assert(snf::test::is_closed(first_read_fd));
     assert(!source.isValid());
     assert(target.getDescriptor() == second_read_fd);
 
     target.init();
-    assert(is_closed(second_read_fd));
+    assert(snf::test::is_closed(second_read_fd));
     assert(::close(first_pipe_fds[1]) == 0);
     assert(::close(second_pipe_fds[1]) == 0);
 }

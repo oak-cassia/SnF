@@ -38,6 +38,7 @@ endfunction()
 add_library(snf_core STATIC
     src/core/build_info.cpp
     src/protocol/frame_codec.cpp
+    src/net/session.cpp
     src/net/unique_file_descriptor.cpp
     src/net/tcp_listener.cpp
 )
@@ -65,6 +66,7 @@ if(BUILD_TESTING)
         tests/unit_test_main.cpp
         tests/build_info_test.cpp
         tests/frame_codec_test.cpp
+        tests/session_test.cpp
         tests/tcp_listener_test.cpp
         tests/unique_file_descriptor_test.cpp
     )
