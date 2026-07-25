@@ -1,22 +1,9 @@
 #include "snf/net/tcp_listener.hpp"
+#include "snf/net/system_error.hpp"
 
-#include <cerrno>
-#include <system_error>
 #include <sys/socket.h>
 #include <fcntl.h>
 #include <netinet/in.h>
-
-namespace
-{
-    [[noreturn]] void throw_system_error(const char* operation)
-    {
-        throw std::system_error{
-            errno,
-            std::generic_category(),
-            operation
-        };
-    }
-}
 
 namespace snf::net
 {
