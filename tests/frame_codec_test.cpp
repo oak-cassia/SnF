@@ -187,7 +187,7 @@ void test_rejects_an_unknown_message_type()
     assert(*result.error == DecodeError::UnknownMessageType);
 }
 
-int main()
+void run_frame_codec_tests()
 {
     test_encode_frame();
     test_decodes_a_frame_received_in_two_chunks();
