@@ -23,8 +23,7 @@ namespace snf::net
                          SOL_SOCKET,
                          SO_REUSEADDR,
                          &reuse_address,
-                         sizeof(reuse_address)
-        ) == -1)
+                         sizeof(reuse_address)) == -1)
         {
             throw_system_error("setsockopt(SO_REUSEADDR)");
         }
@@ -50,8 +49,7 @@ namespace snf::net
 
         if (::bind(listener.getDescriptor(),
                    reinterpret_cast<const sockaddr*>(&address),
-                   address_size
-        ) == -1)
+                   address_size) == -1)
         {
             throw_system_error("bind");
         }

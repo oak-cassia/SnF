@@ -23,15 +23,15 @@ namespace
     std::uint32_t read_u32_big_endian(std::span<const std::byte> bytes, std::size_t offset)
     {
         return (std::to_integer<std::uint32_t>(bytes[offset]) << 24U) |
-            (std::to_integer<std::uint32_t>(bytes[offset + 1]) << 16U) |
-            (std::to_integer<std::uint32_t>(bytes[offset + 2]) << 8U) |
-            std::to_integer<std::uint32_t>(bytes[offset + 3]);
+               (std::to_integer<std::uint32_t>(bytes[offset + 1]) << 16U) |
+               (std::to_integer<std::uint32_t>(bytes[offset + 2]) << 8U) |
+               std::to_integer<std::uint32_t>(bytes[offset + 3]);
     }
 
     std::uint16_t read_u16_big_endian(std::span<const std::byte> bytes, std::size_t offset)
     {
         return (std::to_integer<std::uint16_t>(bytes[offset]) << 8U) |
-            (std::to_integer<std::uint16_t>(bytes[offset + 1]));
+               (std::to_integer<std::uint16_t>(bytes[offset + 1]));
     }
 }
 
@@ -96,7 +96,8 @@ namespace snf::protocol
                 };
             }
 
-            const auto full_frame_size = static_cast<std::size_t>(FRAME_LENGTH_FIELD_SIZE) + body_size;
+            const auto full_frame_size =
+                static_cast<std::size_t>(FRAME_LENGTH_FIELD_SIZE) + body_size;
 
             if (available_bytes < full_frame_size)
             {
@@ -104,8 +105,7 @@ namespace snf::protocol
             }
 
             const auto request_type = static_cast<MessageType>(
-                read_u16_big_endian(buffer_view, _read_offset + FRAME_LENGTH_FIELD_SIZE)
-            );
+                read_u16_big_endian(buffer_view, _read_offset + FRAME_LENGTH_FIELD_SIZE));
 
             if (request_type != MessageType::Ping && request_type != MessageType::Pong)
             {
@@ -116,8 +116,7 @@ namespace snf::protocol
             }
 
             const auto request_id = read_u32_big_endian(
-                buffer_view, _read_offset + FRAME_LENGTH_FIELD_SIZE + FRAME_TYPE_SIZE
-            );
+                buffer_view, _read_offset + FRAME_LENGTH_FIELD_SIZE + FRAME_TYPE_SIZE);
 
             const auto payload_begin = _read_offset + FRAME_LENGTH_FIELD_SIZE + MIN_BODY_SIZE;
             const auto payload_size = static_cast<std::size_t>(body_size - MIN_BODY_SIZE);
