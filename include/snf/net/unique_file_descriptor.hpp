@@ -5,7 +5,7 @@ namespace snf::net
     class UniqueFileDescriptor
     {
     public:
-       static constexpr int INVALID_FD = -1;
+        static constexpr int INVALID_FD = -1;
 
         explicit UniqueFileDescriptor(int file_descriptor = INVALID_FD) noexcept;
         ~UniqueFileDescriptor();

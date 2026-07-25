@@ -2,9 +2,9 @@
 #include "snf/net/session.hpp"
 #include "snf/protocol/frame_codec.hpp"
 
+#include <cassert>
 #include <cstddef>
 #include <span>
-#include <cassert>
 #include <unistd.h>
 #include <utility>
 
@@ -19,13 +19,9 @@ namespace
             snf::net::UniqueFileDescriptor{pipe_file_descriptors[0]},
         };
 
-        const snf::protocol::Frame frame{
-            .type = snf::protocol::MessageType::Ping,
-            .request_id = 1,
-            .payload = {
-                std::byte{0xAA}, std::byte{0xBB}
-            }
-        };
+        const snf::protocol::Frame frame{.type = snf::protocol::MessageType::Ping,
+                                         .request_id = 1,
+                                         .payload = {std::byte{0xAA}, std::byte{0xBB}}};
 
         const auto encoded = snf::protocol::encode_frame(frame);
         const std::span<const std::byte> encoded_view{encoded};
@@ -36,9 +32,8 @@ namespace
         assert(first_result.ok());
         assert(first_result.frames.empty());
 
-        const auto second_result = session.appendReceivedBytes(
-            encoded_view.subspan(first_chunk_size)
-        );
+        const auto second_result =
+            session.appendReceivedBytes(encoded_view.subspan(first_chunk_size));
 
         assert(second_result.ok());
         assert(second_result.frames.size() == 1);

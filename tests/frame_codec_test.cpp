@@ -9,19 +9,25 @@ using namespace snf::protocol;
 
 void test_encode_frame()
 {
-    const snf::protocol::Frame frame{
-        .type = snf::protocol::MessageType::Ping,
-        .request_id = 0x01020304,
-        .payload = {std::byte{0xAA}, std::byte{0xBB}}
-    };
+    const snf::protocol::Frame frame{.type = snf::protocol::MessageType::Ping,
+                                     .request_id = 0x01020304,
+                                     .payload = {std::byte{0xAA}, std::byte{0xBB}}};
 
     const auto result = snf::protocol::encode_frame(frame);
 
     const std::vector<std::byte> expected{
-        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x08},
-        std::byte{0x00}, std::byte{0x01},
-        std::byte{0x01}, std::byte{0x02}, std::byte{0x03}, std::byte{0x04},
-        std::byte{0xAA}, std::byte{0xBB},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x08},
+        std::byte{0x00},
+        std::byte{0x01},
+        std::byte{0x01},
+        std::byte{0x02},
+        std::byte{0x03},
+        std::byte{0x04},
+        std::byte{0xAA},
+        std::byte{0xBB},
     };
 
     assert(result == expected);
@@ -111,11 +117,9 @@ void test_keeps_a_partial_second_frame_for_the_next_append()
 
     std::vector<std::byte> first_received;
     first_received.insert(first_received.end(), encoded_ping.begin(), encoded_ping.end());
-    first_received.insert(
-        first_received.end(),
-        encoded_pong.begin(),
-        encoded_pong.begin() + second_frame_prefix_size
-    );
+    first_received.insert(first_received.end(),
+                          encoded_pong.begin(),
+                          encoded_pong.begin() + second_frame_prefix_size);
 
     const std::span<const std::byte> first_received_view{first_received};
 
@@ -141,7 +145,10 @@ void test_keeps_a_partial_second_frame_for_the_next_append()
 void test_rejects_a_body_smaller_than_minimum()
 {
     const std::vector<std::byte> invalid_frame{
-        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x05},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x05},
     };
     const std::span<const std::byte> invalid_frame_view{invalid_frame};
 
@@ -156,7 +163,10 @@ void test_rejects_a_body_smaller_than_minimum()
 void test_rejects_a_body_larger_than_maximum()
 {
     const std::vector<std::byte> invalid_frame{
-        std::byte{0x00}, std::byte{0x01}, std::byte{0x00}, std::byte{0x01},
+        std::byte{0x00},
+        std::byte{0x01},
+        std::byte{0x00},
+        std::byte{0x01},
     };
     const std::span<const std::byte> invalid_frame_view{invalid_frame};
 
@@ -172,9 +182,16 @@ void test_rejects_a_body_larger_than_maximum()
 void test_rejects_an_unknown_message_type()
 {
     const std::vector<std::byte> invalid_frame{
-        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x06},
-        std::byte{0x00}, std::byte{0x03},
-        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x01},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x06},
+        std::byte{0x00},
+        std::byte{0x03},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x01},
     };
     const std::span<const std::byte> invalid_frame_view{invalid_frame};
 

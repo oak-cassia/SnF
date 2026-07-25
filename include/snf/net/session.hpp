@@ -21,7 +21,8 @@ namespace snf::net
 
         [[nodiscard]] int getDescriptor() const noexcept;
 
-        [[nodiscard]] snf::protocol::DecodeResult appendReceivedBytes(std::span<const std::byte> bytes);
+        [[nodiscard]] snf::protocol::DecodeResult
+        appendReceivedBytes(std::span<const std::byte> bytes);
 
     private:
         UniqueFileDescriptor _socket;

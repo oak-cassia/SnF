@@ -50,6 +50,7 @@ snf_configure_target(snf_core)
 
 add_executable(snf_server
     src/server_main.cpp
+    src/server/tcp_server.cpp
 )
 target_link_libraries(snf_server PRIVATE snf_core)
 snf_configure_target(snf_server)

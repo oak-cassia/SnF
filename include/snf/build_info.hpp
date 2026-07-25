@@ -2,9 +2,10 @@
 
 #include <string_view>
 
-namespace snf {
+namespace snf
+{
 
-[[nodiscard]] std::string_view project_name() noexcept;
-[[nodiscard]] std::string_view project_version() noexcept;
+    [[nodiscard]] std::string_view project_name() noexcept;
+    [[nodiscard]] std::string_view project_version() noexcept;
 
-}  // namespace snf
+} // namespace snf

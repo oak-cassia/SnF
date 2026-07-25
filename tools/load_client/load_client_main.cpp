@@ -2,8 +2,8 @@
 
 #include <iostream>
 
-int main() {
-    std::cout << snf::project_name() << " load-client scaffold v"
-              << snf::project_version() << '\n';
+int main()
+{
+    std::cout << snf::project_name() << " load-client scaffold v" << snf::project_version() << '\n';
     return 0;
 }
