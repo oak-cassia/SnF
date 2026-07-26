@@ -62,10 +62,17 @@ add_executable(snf_server
 target_link_libraries(snf_server PRIVATE snf_server_runtime)
 snf_configure_target(snf_server)
 
+add_library(snf_load_client_runtime STATIC
+    src/load/client_connection.cpp
+    src/load/load_client.cpp
+)
+target_link_libraries(snf_load_client_runtime PUBLIC snf_core)
+snf_configure_target(snf_load_client_runtime)
+
 add_executable(snf_load_client
     tools/load_client/load_client_main.cpp
 )
-target_link_libraries(snf_load_client PRIVATE snf_core)
+target_link_libraries(snf_load_client PRIVATE snf_load_client_runtime)
 snf_configure_target(snf_load_client)
 
 include(CTest)
@@ -98,4 +105,18 @@ if(BUILD_TESTING)
 
     add_test(NAME snf_integration_tests COMMAND snf_integration_tests)
     set_tests_properties(snf_integration_tests PROPERTIES TIMEOUT 15)
+
+    add_executable(snf_load_client_integration_tests
+        tests/load_client_integration_test.cpp
+    )
+    target_link_libraries(snf_load_client_integration_tests
+        PRIVATE
+            snf_load_client_runtime
+            snf_server_runtime
+            Threads::Threads
+    )
+    snf_configure_target(snf_load_client_integration_tests)
+
+    add_test(NAME snf_load_client_integration_tests COMMAND snf_load_client_integration_tests)
+    set_tests_properties(snf_load_client_integration_tests PROPERTIES TIMEOUT 15)
 endif()
