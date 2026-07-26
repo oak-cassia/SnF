@@ -142,6 +142,44 @@ void test_keeps_a_partial_second_frame_for_the_next_append()
     assert(second_result.frames[0].payload == pong.payload);
 }
 
+void test_decodes_the_minimum_body_size()
+{
+    const Frame frame{
+        .type = MessageType::Ping,
+        .request_id = 1,
+        .payload = {},
+    };
+
+    const auto encoded = encode_frame(frame);
+    FrameDecoder decoder{};
+    const auto result = decoder.append(encoded);
+
+    assert(result.ok());
+    assert(result.frames.size() == 1);
+    assert(result.frames[0].type == frame.type);
+    assert(result.frames[0].request_id == frame.request_id);
+    assert(result.frames[0].payload.empty());
+}
+
+void test_decodes_the_maximum_body_size()
+{
+    const Frame frame{
+        .type = MessageType::Ping,
+        .request_id = 2,
+        .payload = std::vector<std::byte>(MAX_PAYLOAD_SIZE, std::byte{0xA5}),
+    };
+
+    const auto encoded = encode_frame(frame);
+    FrameDecoder decoder{};
+    const auto result = decoder.append(encoded);
+
+    assert(result.ok());
+    assert(result.frames.size() == 1);
+    assert(result.frames[0].type == frame.type);
+    assert(result.frames[0].request_id == frame.request_id);
+    assert(result.frames[0].payload == frame.payload);
+}
+
 void test_rejects_a_body_smaller_than_minimum()
 {
     const std::vector<std::byte> invalid_frame{
@@ -210,6 +248,8 @@ void run_frame_codec_tests()
     test_decodes_a_frame_received_in_two_chunks();
     test_decodes_two_frames_received_together();
     test_keeps_a_partial_second_frame_for_the_next_append();
+    test_decodes_the_minimum_body_size();
+    test_decodes_the_maximum_body_size();
     test_rejects_a_body_smaller_than_minimum();
     test_rejects_a_body_larger_than_maximum();
     test_rejects_an_unknown_message_type();
