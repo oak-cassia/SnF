@@ -40,6 +40,7 @@ add_library(snf_core STATIC
     src/protocol/frame_codec.cpp
     src/net/session.cpp
     src/net/socket_options.cpp
+    src/net/termination_signal.cpp
     src/net/unique_file_descriptor.cpp
     src/net/tcp_listener.cpp
 )
@@ -49,11 +50,16 @@ target_include_directories(snf_core
 )
 snf_configure_target(snf_core)
 
-add_executable(snf_server
-    src/server_main.cpp
+add_library(snf_server_runtime STATIC
     src/server/tcp_server.cpp
 )
-target_link_libraries(snf_server PRIVATE snf_core)
+target_link_libraries(snf_server_runtime PUBLIC snf_core)
+snf_configure_target(snf_server_runtime)
+
+add_executable(snf_server
+    src/server_main.cpp
+)
+target_link_libraries(snf_server PRIVATE snf_server_runtime)
 snf_configure_target(snf_server)
 
 add_executable(snf_load_client
@@ -64,6 +70,8 @@ snf_configure_target(snf_load_client)
 
 include(CTest)
 if(BUILD_TESTING)
+    find_package(Threads REQUIRED)
+
     add_executable(snf_unit_tests
         tests/unit_test_main.cpp
         tests/build_info_test.cpp
@@ -77,4 +85,17 @@ if(BUILD_TESTING)
     snf_configure_target(snf_unit_tests)
 
     add_test(NAME snf_unit_tests COMMAND snf_unit_tests)
+
+    add_executable(snf_integration_tests
+        tests/tcp_server_integration_test.cpp
+    )
+    target_link_libraries(snf_integration_tests
+        PRIVATE
+            snf_server_runtime
+            Threads::Threads
+    )
+    snf_configure_target(snf_integration_tests)
+
+    add_test(NAME snf_integration_tests COMMAND snf_integration_tests)
+    set_tests_properties(snf_integration_tests PROPERTIES TIMEOUT 15)
 endif()

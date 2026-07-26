@@ -3,6 +3,7 @@
 #include "snf/net/session.hpp"
 #include "snf/net/unique_file_descriptor.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <unordered_map>
 
@@ -11,7 +12,9 @@ namespace snf::server
     class TcpServer
     {
     public:
-        explicit TcpServer(std::uint16_t port);
+        explicit TcpServer(
+            std::uint16_t port,
+            std::chrono::milliseconds shutdown_grace_period = std::chrono::milliseconds{5000});
 
         TcpServer(const TcpServer&) = delete;
         TcpServer& operator=(const TcpServer&) = delete;
@@ -19,16 +22,32 @@ namespace snf::server
         TcpServer(TcpServer&&) = delete;
         TcpServer& operator=(TcpServer&&) = delete;
 
-        void run();
+        [[nodiscard]] std::uint16_t getPort() const noexcept;
+
+        void run(int termination_signal_descriptor = snf::net::UniqueFileDescriptor::INVALID_FD);
+        void requestStop() noexcept;
 
     private:
         void registerListener() const;
+        void registerControlDescriptor(int descriptor) const;
         void acceptPendingClients();
         void handleClientEvent(int client_descriptor, std::uint32_t event_flags);
+        void handleStopRequest();
+        void handleTerminationSignal(int signal_descriptor);
+        void beginShutdown();
+        [[nodiscard]] bool flushPendingSend(snf::net::Session& session);
+        void updateClientEvents(const snf::net::Session& session) const;
         void removeSession(int client_descriptor);
+        void closeRemainingSessions();
+        [[nodiscard]] int getEpollWaitTimeout() const;
 
         snf::net::UniqueFileDescriptor _listener;
         snf::net::UniqueFileDescriptor _epoll;
+        snf::net::UniqueFileDescriptor _stop_event;
+        std::uint16_t _port;
+        std::chrono::milliseconds _shutdown_grace_period;
+        std::chrono::steady_clock::time_point _shutdown_deadline{};
+        bool _is_stopping{false};
         std::unordered_map<int, snf::net::Session> _sessions;
     };
 }
