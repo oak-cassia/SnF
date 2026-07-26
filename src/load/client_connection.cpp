@@ -38,9 +38,16 @@ namespace
 
 namespace snf::load
 {
-    ClientConnection::ClientConnection(const std::string_view host, const std::uint16_t port)
+    ClientConnection::ClientConnection(const std::string_view host,
+                                       const std::uint16_t port,
+                                       const std::uint32_t request_id,
+                                       const std::chrono::milliseconds connect_timeout,
+                                       const std::chrono::milliseconds request_timeout)
         : _socket(create_client_socket())
+        , _request_id(request_id)
         , _request_payload{std::byte{0x53}, std::byte{0x6E}, std::byte{0x46}}
+        , _request_timeout(request_timeout)
+        , _deadline(std::chrono::steady_clock::now() + connect_timeout)
     {
         snf::net::enable_tcp_no_delay(_socket.getDescriptor());
 
@@ -106,6 +113,16 @@ namespace snf::load
     bool ClientConnection::isComplete() const noexcept
     {
         return _state == State::Complete;
+    }
+
+    std::chrono::steady_clock::time_point ClientConnection::getDeadline() const noexcept
+    {
+        return _deadline;
+    }
+
+    std::string ClientConnection::getTimeoutError() const
+    {
+        return _state == State::Connecting ? "Connect timeout" : "Request timeout";
     }
 
     std::chrono::steady_clock::duration ClientConnection::getRoundTripTime() const noexcept
@@ -256,6 +273,7 @@ namespace snf::load
 
         _pending_send_bytes = snf::protocol::encode_frame(request);
         _request_started_at = std::chrono::steady_clock::now();
+        _deadline = _request_started_at + _request_timeout;
         _state = State::SendingRequest;
     }
 

@@ -72,6 +72,7 @@ namespace
         const snf::load::LoadClient client{snf::load::LoadClientConfig{
             .host = "127.0.0.1",
             .port = server.getPort(),
+            .connections = 8,
             .connect_timeout = 1s,
             .request_timeout = 1s,
         }};
@@ -80,7 +81,15 @@ namespace
 
         assert(result.success);
         assert(result.error.empty());
-        assert(result.round_trip_time >= std::chrono::steady_clock::duration::zero());
+        assert(result.requested_connections == 8);
+        assert(result.successful_connections == 8);
+        assert(result.failed_connections == 0);
+        assert(result.round_trip_times.size() == 8);
+
+        for (const auto round_trip_time : result.round_trip_times)
+        {
+            assert(round_trip_time >= std::chrono::steady_clock::duration::zero());
+        }
 
         server.stop();
     }
@@ -98,6 +107,7 @@ namespace
         const snf::load::LoadClient client{snf::load::LoadClientConfig{
             .host = "127.0.0.1",
             .port = closed_port,
+            .connections = 4,
             .connect_timeout = 200ms,
             .request_timeout = 200ms,
         }};
@@ -106,6 +116,9 @@ namespace
 
         assert(!result.success);
         assert(!result.error.empty());
+        assert(result.requested_connections == 4);
+        assert(result.successful_connections == 0);
+        assert(result.failed_connections == 4);
     }
 }
 

@@ -12,11 +12,16 @@
 #include <exception>
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <sys/epoll.h>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace
 {
+    constexpr std::size_t MAX_READY_EVENTS = 256;
+
     snf::net::UniqueFileDescriptor create_epoll_instance()
     {
         const int epoll_descriptor = ::epoll_create1(EPOLL_CLOEXEC);
@@ -54,6 +59,23 @@ namespace
             snf::net::throw_system_error("epoll_ctl(client)");
         }
     }
+
+    void remove_epoll_events(const int epoll_descriptor, const int connection_descriptor)
+    {
+        if (::epoll_ctl(epoll_descriptor, EPOLL_CTL_DEL, connection_descriptor, nullptr) == -1 &&
+            errno != ENOENT && errno != EBADF)
+        {
+            snf::net::throw_system_error("epoll_ctl(EPOLL_CTL_DEL client)");
+        }
+    }
+
+    void remember_first_error(std::string& first_error, const std::string& error)
+    {
+        if (first_error.empty())
+        {
+            first_error = error;
+        }
+    }
 }
 
 namespace snf::load
@@ -65,29 +87,79 @@ namespace snf::load
 
     LoadClientResult LoadClient::run() const
     {
+        LoadClientResult result{
+            .success = false,
+            .error = {},
+            .requested_connections = _config.connections,
+            .successful_connections = 0,
+            .failed_connections = 0,
+            .round_trip_times = {},
+        };
+
         try
         {
-            const auto epoll = create_epoll_instance();
-            ClientConnection connection{_config.host, _config.port};
-            update_epoll_events(epoll.getDescriptor(), connection, EPOLL_CTL_ADD);
-
-            auto deadline =
-                std::chrono::steady_clock::now() +
-                (connection.isConnecting() ? _config.connect_timeout : _config.request_timeout);
-
-            std::array<epoll_event, 1> events{};
-
-            // PONG을 검증하거나 connect/request timeout 또는 I/O 오류가 발생할 때까지 실행한다.
-            while (!connection.isComplete())
+            if (_config.connections == 0 ||
+                _config.connections > std::numeric_limits<std::uint32_t>::max())
             {
-                const int wait_timeout = get_wait_timeout(deadline);
-                if (wait_timeout == 0)
+                return LoadClientResult{
+                    .success = false,
+                    .error = "Connection count is out of range",
+                    .requested_connections = _config.connections,
+                    .successful_connections = 0,
+                    .failed_connections = _config.connections,
+                    .round_trip_times = {},
+                };
+            }
+
+            const auto epoll = create_epoll_instance();
+            std::unordered_map<int, ClientConnection> connections;
+            connections.reserve(_config.connections);
+            result.round_trip_times.reserve(_config.connections);
+
+            for (std::size_t connection_index = 0; connection_index < _config.connections;
+                 ++connection_index)
+            {
+                try
                 {
-                    return LoadClientResult{
-                        .error = connection.isConnecting() ? "Connect timeout" : "Request timeout",
+                    ClientConnection connection{
+                        _config.host,
+                        _config.port,
+                        static_cast<std::uint32_t>(connection_index + 1),
+                        _config.connect_timeout,
+                        _config.request_timeout,
                     };
+
+                    const int connection_descriptor = connection.getDescriptor();
+                    update_epoll_events(epoll.getDescriptor(), connection, EPOLL_CTL_ADD);
+
+                    const bool inserted =
+                        connections.emplace(connection_descriptor, std::move(connection)).second;
+
+                    if (!inserted)
+                    {
+                        throw std::logic_error{"Duplicate client descriptor"};
+                    }
+                }
+                catch (const std::exception& error)
+                {
+                    ++result.failed_connections;
+                    remember_first_error(result.error, error.what());
+                }
+            }
+
+            std::array<epoll_event, MAX_READY_EVENTS> events{};
+
+            // 모든 연결이 PONG을 검증하거나 timeout 또는 I/O 오류로 종료될 때까지 실행한다.
+            while (!connections.empty())
+            {
+                auto earliest_deadline = std::chrono::steady_clock::time_point::max();
+                for (const auto& connection_entry : connections)
+                {
+                    earliest_deadline =
+                        std::min(earliest_deadline, connection_entry.second.getDeadline());
                 }
 
+                const int wait_timeout = get_wait_timeout(earliest_deadline);
                 const int ready_event_count = ::epoll_wait(epoll.getDescriptor(),
                                                            events.data(),
                                                            static_cast<int>(events.size()),
@@ -103,61 +175,87 @@ namespace snf::load
                     snf::net::throw_system_error("epoll_wait");
                 }
 
-                if (ready_event_count == 0)
+                for (int event_index = 0; event_index < ready_event_count; ++event_index)
                 {
-                    return LoadClientResult{
-                        .error = connection.isConnecting() ? "Connect timeout" : "Request timeout",
-                    };
-                }
-
-                const std::uint32_t event_flags = events.front().events;
-                const bool was_connecting = connection.isConnecting();
-                std::optional<std::string> error;
-
-                if ((event_flags & EPOLLOUT) != 0)
-                {
-                    error = connection.handleWritable();
-                }
-
-                if (!error && (event_flags & (EPOLLIN | EPOLLRDHUP | EPOLLHUP)) != 0)
-                {
-                    error = connection.handleReadable();
-                }
-
-                if (!error && !connection.isComplete() && (event_flags & EPOLLERR) != 0)
-                {
-                    error = connection.getSocketError();
-                    if (!error)
+                    const epoll_event& event = events[event_index];
+                    const auto connection_iterator = connections.find(event.data.fd);
+                    if (connection_iterator == connections.end())
                     {
-                        error = "Socket reported EPOLLERR";
+                        continue;
+                    }
+
+                    ClientConnection& connection = connection_iterator->second;
+                    std::optional<std::string> connection_error;
+
+                    if ((event.events & EPOLLOUT) != 0)
+                    {
+                        connection_error = connection.handleWritable();
+                    }
+
+                    if (!connection_error &&
+                        (event.events & (EPOLLIN | EPOLLRDHUP | EPOLLHUP)) != 0)
+                    {
+                        connection_error = connection.handleReadable();
+                    }
+
+                    if (!connection_error && !connection.isComplete() &&
+                        (event.events & EPOLLERR) != 0)
+                    {
+                        connection_error = connection.getSocketError();
+                        if (!connection_error)
+                        {
+                            connection_error = "Socket reported EPOLLERR";
+                        }
+                    }
+
+                    if (connection.isComplete())
+                    {
+                        result.round_trip_times.push_back(connection.getRoundTripTime());
+                        ++result.successful_connections;
+                        remove_epoll_events(epoll.getDescriptor(), event.data.fd);
+                        connections.erase(connection_iterator);
+                    }
+                    else if (connection_error)
+                    {
+                        ++result.failed_connections;
+                        remember_first_error(result.error, *connection_error);
+                        remove_epoll_events(epoll.getDescriptor(), event.data.fd);
+                        connections.erase(connection_iterator);
+                    }
+                    else
+                    {
+                        update_epoll_events(epoll.getDescriptor(), connection, EPOLL_CTL_MOD);
                     }
                 }
 
-                if (error)
+                const auto now = std::chrono::steady_clock::now();
+                for (auto connection_iterator = connections.begin();
+                     connection_iterator != connections.end();)
                 {
-                    return LoadClientResult{.error = std::move(*error)};
-                }
+                    if (now < connection_iterator->second.getDeadline())
+                    {
+                        ++connection_iterator;
+                        continue;
+                    }
 
-                if (was_connecting && !connection.isConnecting())
-                {
-                    deadline = std::chrono::steady_clock::now() + _config.request_timeout;
-                }
-
-                if (!connection.isComplete())
-                {
-                    update_epoll_events(epoll.getDescriptor(), connection, EPOLL_CTL_MOD);
+                    ++result.failed_connections;
+                    remember_first_error(result.error,
+                                         connection_iterator->second.getTimeoutError());
+                    remove_epoll_events(epoll.getDescriptor(), connection_iterator->first);
+                    connection_iterator = connections.erase(connection_iterator);
                 }
             }
 
-            return LoadClientResult{
-                .success = true,
-                .error = {},
-                .round_trip_time = connection.getRoundTripTime(),
-            };
+            result.success = result.successful_connections == result.requested_connections &&
+                             result.failed_connections == 0;
+            return result;
         }
         catch (const std::exception& error)
         {
-            return LoadClientResult{.error = error.what()};
+            remember_first_error(result.error, error.what());
+            result.failed_connections =
+                result.requested_connections - result.successful_connections;
+            return result;
         }
     }
 }
