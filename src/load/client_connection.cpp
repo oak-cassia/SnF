@@ -13,6 +13,7 @@
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <system_error>
+#include <utility>
 
 namespace
 {
@@ -21,6 +22,22 @@ namespace
     std::string describe_error(const std::string_view operation, const int error_number)
     {
         return std::string{operation} + ": " + std::generic_category().message(error_number);
+    }
+
+    snf::load::ClientError socket_error(const std::string_view operation, const int error_number)
+    {
+        return snf::load::ClientError{
+            .kind = snf::load::ClientErrorKind::Socket,
+            .message = describe_error(operation, error_number),
+        };
+    }
+
+    snf::load::ClientError protocol_error(std::string message)
+    {
+        return snf::load::ClientError{
+            .kind = snf::load::ClientErrorKind::Protocol,
+            .message = std::move(message),
+        };
     }
 
     snf::net::UniqueFileDescriptor create_client_socket()
@@ -34,20 +51,28 @@ namespace
 
         return snf::net::UniqueFileDescriptor{socket_descriptor};
     }
+
+    std::vector<std::byte> encode_timestamp(const std::uint64_t timestamp)
+    {
+        std::vector<std::byte> payload;
+        payload.reserve(sizeof(timestamp));
+
+        for (int shift = 56; shift >= 0; shift -= 8)
+        {
+            payload.push_back(static_cast<std::byte>((timestamp >> shift) & 0xFFU));
+        }
+
+        return payload;
+    }
 }
 
 namespace snf::load
 {
     ClientConnection::ClientConnection(const std::string_view host,
                                        const std::uint16_t port,
-                                       const std::uint32_t request_id,
-                                       const std::chrono::milliseconds connect_timeout,
-                                       const std::chrono::milliseconds request_timeout)
+                                       const std::chrono::milliseconds connect_timeout)
         : _socket(create_client_socket())
-        , _request_id(request_id)
-        , _request_payload{std::byte{0x53}, std::byte{0x6E}, std::byte{0x46}}
-        , _request_timeout(request_timeout)
-        , _deadline(std::chrono::steady_clock::now() + connect_timeout)
+        , _connect_deadline(std::chrono::steady_clock::now() + connect_timeout)
     {
         snf::net::enable_tcp_no_delay(_socket.getDescriptor());
 
@@ -73,7 +98,7 @@ namespace snf::load
 
         if (connect_result == 0)
         {
-            beginRequest();
+            _state = State::Connected;
             return;
         }
 
@@ -92,14 +117,14 @@ namespace snf::load
     {
         std::uint32_t events = EPOLLRDHUP;
 
-        if (_state == State::Connecting || _state == State::SendingRequest)
-        {
-            events |= EPOLLOUT;
-        }
-
-        if (_state == State::SendingRequest || _state == State::AwaitingResponse)
+        if (_state == State::Connected)
         {
             events |= EPOLLIN;
+        }
+
+        if (_state == State::Connecting || !_pending_send_bytes.empty())
+        {
+            events |= EPOLLOUT;
         }
 
         return events;
@@ -110,44 +135,86 @@ namespace snf::load
         return _state == State::Connecting;
     }
 
-    bool ClientConnection::isComplete() const noexcept
+    bool ClientConnection::isConnected() const noexcept
     {
-        return _state == State::Complete;
+        return _state == State::Connected;
+    }
+
+    bool ClientConnection::canStartRequest() const noexcept
+    {
+        return isConnected() && _pending_send_bytes.empty() && !_outstanding_request.has_value();
+    }
+
+    bool ClientConnection::isIdle() const noexcept
+    {
+        return _pending_send_bytes.empty() && !_outstanding_request.has_value();
     }
 
     std::chrono::steady_clock::time_point ClientConnection::getDeadline() const noexcept
     {
-        return _deadline;
+        if (isConnecting())
+        {
+            return _connect_deadline;
+        }
+
+        if (_outstanding_request)
+        {
+            return _outstanding_request->deadline;
+        }
+
+        return std::chrono::steady_clock::time_point::max();
     }
 
-    std::string ClientConnection::getTimeoutError() const
+    void ClientConnection::enqueuePing(const std::chrono::milliseconds request_timeout)
     {
-        return _state == State::Connecting ? "Connect timeout" : "Request timeout";
+        if (!canStartRequest())
+        {
+            throw std::logic_error{"Connection already has an outstanding request"};
+        }
+
+        const auto started_at = std::chrono::steady_clock::now();
+        const auto timestamp = static_cast<std::uint64_t>(started_at.time_since_epoch().count());
+        auto payload = encode_timestamp(timestamp);
+
+        const snf::protocol::Frame request{
+            .type = snf::protocol::MessageType::Ping,
+            .request_id = _next_request_id,
+            .payload = payload,
+        };
+
+        _pending_send_bytes = snf::protocol::encode_frame(request);
+        _send_offset = 0;
+        _outstanding_request = OutstandingRequest{
+            .request_id = _next_request_id,
+            .payload = std::move(payload),
+            .started_at = started_at,
+            .deadline = started_at + request_timeout,
+        };
+
+        ++_next_request_id;
+        if (_next_request_id == 0)
+        {
+            ++_next_request_id;
+        }
     }
 
-    std::chrono::steady_clock::duration ClientConnection::getRoundTripTime() const noexcept
+    WriteResult ClientConnection::handleWritable()
     {
-        return _response_received_at - _request_started_at;
-    }
+        WriteResult result{};
 
-    std::optional<std::string> ClientConnection::handleWritable()
-    {
         if (_state == State::Connecting)
         {
-            if (const auto socket_error = getSocketError())
+            if (const auto pending_socket_error = getSocketError())
             {
-                return socket_error;
+                result.error = pending_socket_error;
+                return result;
             }
 
-            beginRequest();
+            _state = State::Connected;
+            result.connected = true;
         }
 
-        if (_state != State::SendingRequest)
-        {
-            return std::nullopt;
-        }
-
-        // PING Frame 전체를 보내거나 socket이 EAGAIN을 반환할 때까지 전송한다.
+        // 현재 PING을 모두 보내거나 socket이 EAGAIN을 반환할 때까지 전송한다.
         while (_send_offset < _pending_send_bytes.size())
         {
             const auto sent_byte_count = ::send(_socket.getDescriptor(),
@@ -168,24 +235,29 @@ namespace snf::load
 
             if (sent_byte_count == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
             {
-                return std::nullopt;
+                return result;
             }
 
-            const int error_number = errno;
-            return describe_error("send", error_number);
+            result.error = socket_error("send", errno);
+            return result;
         }
 
-        _pending_send_bytes.clear();
-        _send_offset = 0;
-        _state = State::AwaitingResponse;
-        return std::nullopt;
+        if (!_pending_send_bytes.empty())
+        {
+            _pending_send_bytes.clear();
+            _send_offset = 0;
+            result.sent_requests = 1;
+        }
+
+        return result;
     }
 
-    std::optional<std::string> ClientConnection::handleReadable()
+    ReadResult ClientConnection::handleReadable()
     {
+        ReadResult result{};
         std::array<std::byte, RECEIVE_BUFFER_SIZE> receive_buffer{};
 
-        // PONG을 완성하거나 socket이 EAGAIN, EOF, 오류를 반환할 때까지 수신한다.
+        // 수신 가능한 모든 PONG을 읽거나 EAGAIN, EOF, 오류가 발생할 때까지 반복한다.
         while (true)
         {
             const auto received_byte_count =
@@ -199,25 +271,21 @@ namespace snf::load
 
                 if (!decode_result.ok())
                 {
-                    return std::string{"Protocol error while decoding PONG"};
+                    result.error = protocol_error("Protocol error while decoding PONG");
+                    return result;
                 }
 
-                if (decode_result.frames.size() > 1)
+                for (const auto& response : decode_result.frames)
                 {
-                    return std::string{"Received more than one response for one request"};
-                }
-
-                if (!decode_result.frames.empty())
-                {
-                    if (const auto validation_error =
-                            validateResponse(decode_result.frames.front()))
+                    if (const auto validation_error = validateResponse(response))
                     {
-                        return validation_error;
+                        result.error = validation_error;
+                        return result;
                     }
 
-                    _response_received_at = std::chrono::steady_clock::now();
-                    _state = State::Complete;
-                    return std::nullopt;
+                    result.round_trip_times.push_back(std::chrono::steady_clock::now() -
+                                                      _outstanding_request->started_at);
+                    _outstanding_request.reset();
                 }
 
                 continue;
@@ -225,7 +293,8 @@ namespace snf::load
 
             if (received_byte_count == 0)
             {
-                return std::string{"Server closed the connection before PONG"};
+                result.error = socket_error("recv", ECONNRESET);
+                return result;
             }
 
             if (errno == EINTR)
@@ -235,64 +304,54 @@ namespace snf::load
 
             if (errno == EAGAIN || errno == EWOULDBLOCK)
             {
-                return std::nullopt;
+                return result;
             }
 
-            const int error_number = errno;
-            return describe_error("recv", error_number);
+            result.error = socket_error("recv", errno);
+            return result;
         }
     }
 
-    std::optional<std::string> ClientConnection::getSocketError() const
+    std::optional<ClientError> ClientConnection::getSocketError() const
     {
-        int socket_error = 0;
-        auto option_size = static_cast<socklen_t>(sizeof(socket_error));
+        int pending_error = 0;
+        auto option_size = static_cast<socklen_t>(sizeof(pending_error));
 
         if (::getsockopt(
-                _socket.getDescriptor(), SOL_SOCKET, SO_ERROR, &socket_error, &option_size) == -1)
+                _socket.getDescriptor(), SOL_SOCKET, SO_ERROR, &pending_error, &option_size) == -1)
         {
-            const int error_number = errno;
-            return describe_error("getsockopt(SO_ERROR)", error_number);
+            return socket_error("getsockopt(SO_ERROR)", errno);
         }
 
-        if (socket_error != 0)
+        if (pending_error != 0)
         {
-            return describe_error("connect", socket_error);
+            return socket_error("connect", pending_error);
         }
 
         return std::nullopt;
     }
 
-    void ClientConnection::beginRequest()
+    std::optional<ClientError>
+    ClientConnection::validateResponse(const snf::protocol::Frame& response) const
     {
-        const snf::protocol::Frame request{
-            .type = snf::protocol::MessageType::Ping,
-            .request_id = _request_id,
-            .payload = _request_payload,
-        };
+        if (!_outstanding_request)
+        {
+            return protocol_error("Received PONG without an outstanding PING");
+        }
 
-        _pending_send_bytes = snf::protocol::encode_frame(request);
-        _request_started_at = std::chrono::steady_clock::now();
-        _deadline = _request_started_at + _request_timeout;
-        _state = State::SendingRequest;
-    }
-
-    std::optional<std::string>
-    ClientConnection::validateResponse(const snf::protocol::Frame& response)
-    {
         if (response.type != snf::protocol::MessageType::Pong)
         {
-            return std::string{"Response type is not PONG"};
+            return protocol_error("Response type is not PONG");
         }
 
-        if (response.request_id != _request_id)
+        if (response.request_id != _outstanding_request->request_id)
         {
-            return std::string{"PONG request ID does not match PING"};
+            return protocol_error("PONG request ID does not match PING");
         }
 
-        if (response.payload != _request_payload)
+        if (response.payload != _outstanding_request->payload)
         {
-            return std::string{"PONG payload does not match PING"};
+            return protocol_error("PONG payload does not match PING");
         }
 
         return std::nullopt;

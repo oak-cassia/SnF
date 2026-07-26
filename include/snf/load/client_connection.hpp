@@ -13,14 +13,37 @@
 
 namespace snf::load
 {
+    enum class ClientErrorKind
+    {
+        Socket,
+        Protocol,
+    };
+
+    struct ClientError
+    {
+        ClientErrorKind kind;
+        std::string message;
+    };
+
+    struct WriteResult
+    {
+        bool connected{false};
+        std::size_t sent_requests{0};
+        std::optional<ClientError> error;
+    };
+
+    struct ReadResult
+    {
+        std::vector<std::chrono::steady_clock::duration> round_trip_times;
+        std::optional<ClientError> error;
+    };
+
     class ClientConnection
     {
     public:
         ClientConnection(std::string_view host,
                          std::uint16_t port,
-                         std::uint32_t request_id,
-                         std::chrono::milliseconds connect_timeout,
-                         std::chrono::milliseconds request_timeout);
+                         std::chrono::milliseconds connect_timeout);
 
         ClientConnection(const ClientConnection&) = delete;
         ClientConnection& operator=(const ClientConnection&) = delete;
@@ -31,38 +54,41 @@ namespace snf::load
         [[nodiscard]] int getDescriptor() const noexcept;
         [[nodiscard]] std::uint32_t getDesiredEvents() const noexcept;
         [[nodiscard]] bool isConnecting() const noexcept;
-        [[nodiscard]] bool isComplete() const noexcept;
+        [[nodiscard]] bool isConnected() const noexcept;
+        [[nodiscard]] bool canStartRequest() const noexcept;
+        [[nodiscard]] bool isIdle() const noexcept;
         [[nodiscard]] std::chrono::steady_clock::time_point getDeadline() const noexcept;
-        [[nodiscard]] std::string getTimeoutError() const;
-        [[nodiscard]] std::chrono::steady_clock::duration getRoundTripTime() const noexcept;
 
-        [[nodiscard]] std::optional<std::string> handleWritable();
-        [[nodiscard]] std::optional<std::string> handleReadable();
-        [[nodiscard]] std::optional<std::string> getSocketError() const;
+        void enqueuePing(std::chrono::milliseconds request_timeout);
+        [[nodiscard]] WriteResult handleWritable();
+        [[nodiscard]] ReadResult handleReadable();
+        [[nodiscard]] std::optional<ClientError> getSocketError() const;
 
     private:
         enum class State
         {
             Connecting,
-            SendingRequest,
-            AwaitingResponse,
-            Complete,
+            Connected,
         };
 
-        void beginRequest();
-        [[nodiscard]] std::optional<std::string>
-        validateResponse(const snf::protocol::Frame& response);
+        struct OutstandingRequest
+        {
+            std::uint32_t request_id;
+            std::vector<std::byte> payload;
+            std::chrono::steady_clock::time_point started_at;
+            std::chrono::steady_clock::time_point deadline;
+        };
+
+        [[nodiscard]] std::optional<ClientError>
+        validateResponse(const snf::protocol::Frame& response) const;
 
         snf::net::UniqueFileDescriptor _socket;
         State _state{State::Connecting};
         snf::protocol::FrameDecoder _frame_decoder;
         std::vector<std::byte> _pending_send_bytes;
         std::size_t _send_offset{0};
-        std::uint32_t _request_id{1};
-        std::vector<std::byte> _request_payload;
-        std::chrono::milliseconds _request_timeout;
-        std::chrono::steady_clock::time_point _deadline;
-        std::chrono::steady_clock::time_point _request_started_at{};
-        std::chrono::steady_clock::time_point _response_received_at{};
+        std::uint32_t _next_request_id{1};
+        std::chrono::steady_clock::time_point _connect_deadline;
+        std::optional<OutstandingRequest> _outstanding_request;
     };
 }

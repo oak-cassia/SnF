@@ -1,7 +1,9 @@
 #include "snf/load/load_client.hpp"
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <iomanip>
@@ -9,13 +11,16 @@
 #include <optional>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace
 {
     void print_usage(const std::string_view program_name)
     {
         std::cout << "Usage: " << program_name
-                  << " [--host 127.0.0.1] [--port 7777] [--connections 100]\n";
+                  << " [--host 127.0.0.1] [--port 7777] [--connections 100]"
+                     " [--duration 30] [--requests-per-second 1]"
+                     " [--connect-timeout-ms 5000] [--request-timeout-ms 3000]\n";
     }
 
     std::optional<std::uint16_t> parse_port(const std::string_view text)
@@ -31,19 +36,31 @@ namespace
         return static_cast<std::uint16_t>(value);
     }
 
-    std::optional<std::size_t> parse_connection_count(const std::string_view text)
+    std::optional<std::size_t> parse_positive_size(const std::string_view text,
+                                                   const std::size_t maximum)
     {
         std::size_t value = 0;
         const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
 
-        constexpr std::size_t MAX_CONNECTION_COUNT = 100'000;
         if (error != std::errc{} || end != text.data() + text.size() || value == 0 ||
-            value > MAX_CONNECTION_COUNT)
+            value > maximum)
         {
             return std::nullopt;
         }
 
         return value;
+    }
+
+    double percentile(const std::vector<double>& sorted_values, const double ratio)
+    {
+        if (sorted_values.empty())
+        {
+            return 0.0;
+        }
+
+        const auto index = static_cast<std::size_t>(
+            std::ceil(ratio * static_cast<double>(sorted_values.size())) - 1.0);
+        return sorted_values[std::min(index, sorted_values.size() - 1)];
     }
 }
 
@@ -61,7 +78,9 @@ int main(const int argument_count, char* arguments[])
             return 0;
         }
 
-        if (argument != "--host" && argument != "--port" && argument != "--connections")
+        if (argument != "--host" && argument != "--port" && argument != "--connections" &&
+            argument != "--duration" && argument != "--requests-per-second" &&
+            argument != "--connect-timeout-ms" && argument != "--request-timeout-ms")
         {
             std::cerr << "Unknown option: " << argument << '\n';
             return 1;
@@ -92,7 +111,7 @@ int main(const int argument_count, char* arguments[])
         }
         else if (argument == "--connections")
         {
-            const auto connections = parse_connection_count(value);
+            const auto connections = parse_positive_size(value, 100'000);
             if (!connections)
             {
                 std::cerr << "Invalid connection count: " << value << '\n';
@@ -101,26 +120,94 @@ int main(const int argument_count, char* arguments[])
 
             config.connections = *connections;
         }
+        else if (argument == "--duration")
+        {
+            const auto duration_seconds = parse_positive_size(value, 86'400);
+            if (!duration_seconds)
+            {
+                std::cerr << "Invalid duration: " << value << '\n';
+                return 1;
+            }
+
+            config.duration = std::chrono::seconds{static_cast<std::int64_t>(*duration_seconds)};
+        }
+        else if (argument == "--requests-per-second")
+        {
+            const auto requests_per_second = parse_positive_size(value, 1'000'000);
+            if (!requests_per_second)
+            {
+                std::cerr << "Invalid requests per second: " << value << '\n';
+                return 1;
+            }
+
+            config.requests_per_second = *requests_per_second;
+        }
+        else if (argument == "--connect-timeout-ms")
+        {
+            const auto timeout = parse_positive_size(value, 3'600'000);
+            if (!timeout)
+            {
+                std::cerr << "Invalid connect timeout: " << value << '\n';
+                return 1;
+            }
+
+            config.connect_timeout = std::chrono::milliseconds{static_cast<std::int64_t>(*timeout)};
+        }
+        else if (argument == "--request-timeout-ms")
+        {
+            const auto timeout = parse_positive_size(value, 3'600'000);
+            if (!timeout)
+            {
+                std::cerr << "Invalid request timeout: " << value << '\n';
+                return 1;
+            }
+
+            config.request_timeout = std::chrono::milliseconds{static_cast<std::int64_t>(*timeout)};
+        }
     }
 
     const snf::load::LoadClient client{std::move(config)};
     const auto result = client.run();
 
-    std::chrono::steady_clock::duration total_round_trip_time{};
+    std::vector<double> round_trip_milliseconds;
+    round_trip_milliseconds.reserve(result.round_trip_times.size());
+
+    double total_round_trip_milliseconds = 0.0;
     for (const auto round_trip_time : result.round_trip_times)
     {
-        total_round_trip_time += round_trip_time;
+        const double value = std::chrono::duration<double, std::milli>{round_trip_time}.count();
+        round_trip_milliseconds.push_back(value);
+        total_round_trip_milliseconds += value;
     }
 
+    std::ranges::sort(round_trip_milliseconds);
+
     const double average_round_trip_milliseconds =
-        result.round_trip_times.empty()
+        round_trip_milliseconds.empty()
             ? 0.0
-            : std::chrono::duration<double, std::milli>{total_round_trip_time}.count() /
-                  result.round_trip_times.size();
+            : total_round_trip_milliseconds / round_trip_milliseconds.size();
+
+    const double load_duration_seconds =
+        std::chrono::duration<double>{result.load_duration}.count();
+    const double throughput =
+        load_duration_seconds > 0.0
+            ? static_cast<double>(result.received_responses) / load_duration_seconds
+            : 0.0;
 
     std::cout << "Connections: " << result.successful_connections << '/'
               << result.requested_connections << " succeeded, " << result.failed_connections
-              << " failed\n";
+              << " failed, peak active " << result.maximum_active_connections << '\n';
+    std::cout << "Requests: " << result.sent_requests << " sent, " << result.received_responses
+              << " received, " << result.request_timeouts << " timeout, "
+              << result.invalid_responses << " invalid, " << result.socket_errors
+              << " socket error\n";
+
+    std::cout << std::fixed << std::setprecision(3) << "Throughput: " << throughput
+              << " responses/s\n"
+              << "RTT ms: avg " << average_round_trip_milliseconds << ", p50 "
+              << percentile(round_trip_milliseconds, 0.50) << ", p95 "
+              << percentile(round_trip_milliseconds, 0.95) << ", p99 "
+              << percentile(round_trip_milliseconds, 0.99) << '\n';
 
     if (!result.success)
     {
@@ -128,7 +215,5 @@ int main(const int argument_count, char* arguments[])
         return 1;
     }
 
-    std::cout << std::fixed << std::setprecision(3)
-              << "Average RTT: " << average_round_trip_milliseconds << " ms\n";
     return 0;
 }

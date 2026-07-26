@@ -73,6 +73,8 @@ namespace
             .host = "127.0.0.1",
             .port = server.getPort(),
             .connections = 8,
+            .duration = 250ms,
+            .requests_per_second = 20,
             .connect_timeout = 1s,
             .request_timeout = 1s,
         }};
@@ -84,7 +86,13 @@ namespace
         assert(result.requested_connections == 8);
         assert(result.successful_connections == 8);
         assert(result.failed_connections == 0);
-        assert(result.round_trip_times.size() == 8);
+        assert(result.maximum_active_connections == 8);
+        assert(result.sent_requests >= 8);
+        assert(result.received_responses == result.sent_requests);
+        assert(result.request_timeouts == 0);
+        assert(result.invalid_responses == 0);
+        assert(result.socket_errors == 0);
+        assert(result.round_trip_times.size() == result.received_responses);
 
         for (const auto round_trip_time : result.round_trip_times)
         {
@@ -108,6 +116,8 @@ namespace
             .host = "127.0.0.1",
             .port = closed_port,
             .connections = 4,
+            .duration = 100ms,
+            .requests_per_second = 10,
             .connect_timeout = 200ms,
             .request_timeout = 200ms,
         }};
