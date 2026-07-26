@@ -20,6 +20,7 @@ C++20과 Linux `epoll`로 만든 단일 스레드 실시간 TCP 서버 연습 �
 - `eventfd` 기반 `requestStop()`
 - `signalfd` 기반 SIGINT·SIGTERM
 - 기본 5초 pending send drain과 graceful shutdown
+- 종료 시 수락·종료 연결, 송수신 Frame, protocol error 통계 출력
 
 ### 부하 테스트 클라이언트
 

@@ -57,7 +57,7 @@ namespace snf::net
         return std::span<const std::byte>{pending_send.bytes}.subspan(pending_send.offset);
     }
 
-    void Session::consumeSentBytes(const std::size_t byte_count)
+    bool Session::consumeSentBytes(const std::size_t byte_count)
     {
         if (_send_queue.empty() || byte_count > getPendingSendBytes().size())
         {
@@ -71,6 +71,9 @@ namespace snf::net
         if (pending_send.offset == pending_send.bytes.size())
         {
             _send_queue.pop_front();
+            return true;
         }
+
+        return false;
     }
 }

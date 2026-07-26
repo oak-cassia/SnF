@@ -104,6 +104,11 @@ namespace snf::server
         return _port;
     }
 
+    const TcpServerStats& TcpServer::getStats() const noexcept
+    {
+        return _stats;
+    }
+
     void TcpServer::run(const int termination_signal_descriptor)
     {
         if (termination_signal_descriptor != snf::net::UniqueFileDescriptor::INVALID_FD)
@@ -273,6 +278,7 @@ namespace snf::server
                 snf::net::throw_system_error("epoll_ctl(EPOLL_CTL_ADD client)");
             }
 
+            ++_stats.accepted_connections;
             std::cout << "Accepted client FD: " << client_descriptor << '\n';
         }
     }
@@ -311,6 +317,7 @@ namespace snf::server
 
                     if (!decode_result.ok())
                     {
+                        ++_stats.protocol_errors;
                         std::cerr << "Protocol error from client FD: " << client_descriptor << '\n';
 
                         should_remove_session = true;
@@ -319,8 +326,11 @@ namespace snf::server
 
                     for (const auto& frame : decode_result.frames)
                     {
+                        ++_stats.received_frames;
+
                         if (frame.type != snf::protocol::MessageType::Ping)
                         {
+                            ++_stats.protocol_errors;
                             std::cerr
                                 << "Unexpected message type from client FD: " << client_descriptor
                                 << '\n';
@@ -504,7 +514,10 @@ namespace snf::server
 
             if (sent_byte_count > 0)
             {
-                session.consumeSentBytes(static_cast<std::size_t>(sent_byte_count));
+                if (session.consumeSentBytes(static_cast<std::size_t>(sent_byte_count)))
+                {
+                    ++_stats.sent_frames;
+                }
                 continue;
             }
 
@@ -564,6 +577,7 @@ namespace snf::server
         }
 
         _sessions.erase(session_iterator);
+        ++_stats.closed_connections;
 
         std::cout << "Closed client FD: " << client_descriptor << '\n';
     }

@@ -19,6 +19,15 @@ namespace snf::server
         std::optional<int> client_send_buffer_size;
     };
 
+    struct TcpServerStats
+    {
+        std::uint64_t accepted_connections{0};
+        std::uint64_t closed_connections{0};
+        std::uint64_t received_frames{0};
+        std::uint64_t sent_frames{0};
+        std::uint64_t protocol_errors{0};
+    };
+
     class TcpServer
     {
     public:
@@ -34,6 +43,7 @@ namespace snf::server
         TcpServer& operator=(TcpServer&&) = delete;
 
         [[nodiscard]] std::uint16_t getPort() const noexcept;
+        [[nodiscard]] const TcpServerStats& getStats() const noexcept;
 
         void run(int termination_signal_descriptor = snf::net::UniqueFileDescriptor::INVALID_FD);
         void requestStop() noexcept;
@@ -62,5 +72,6 @@ namespace snf::server
         std::chrono::steady_clock::time_point _shutdown_deadline{};
         bool _is_stopping{false};
         std::unordered_map<int, snf::net::Session> _sessions;
+        TcpServerStats _stats;
     };
 }

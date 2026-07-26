@@ -34,7 +34,7 @@ namespace snf::net
         [[nodiscard]] std::size_t getPendingSendByteCount() const noexcept;
         [[nodiscard]] std::span<const std::byte> getPendingSendBytes() const noexcept;
 
-        void consumeSentBytes(std::size_t byte_count);
+        [[nodiscard]] bool consumeSentBytes(std::size_t byte_count);
 
     private:
         struct PendingSend

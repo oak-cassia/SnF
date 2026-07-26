@@ -79,6 +79,11 @@ namespace
             return _server.getPort();
         }
 
+        [[nodiscard]] const snf::server::TcpServerStats& getStats() const noexcept
+        {
+            return _server.getStats();
+        }
+
         void stop()
         {
             _server.requestStop();
@@ -263,6 +268,13 @@ namespace
         assert_pong(response, request);
 
         server.stop();
+
+        const auto& stats = server.getStats();
+        assert(stats.accepted_connections == 1);
+        assert(stats.closed_connections == 1);
+        assert(stats.received_frames == 1);
+        assert(stats.sent_frames == 1);
+        assert(stats.protocol_errors == 0);
     }
 
     void test_decodes_ping_sent_one_byte_at_a_time()

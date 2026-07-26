@@ -85,14 +85,14 @@ namespace
         assert(std::ranges::equal(session.getPendingSendBytes(), encoded_frame));
 
         constexpr std::size_t sent_byte_count = 5;
-        session.consumeSentBytes(sent_byte_count);
+        assert(!session.consumeSentBytes(sent_byte_count));
 
         assert(session.getPendingSendByteCount() == encoded_frame.size() - sent_byte_count);
         assert(
             std::ranges::equal(session.getPendingSendBytes(),
                                std::span<const std::byte>{encoded_frame}.subspan(sent_byte_count)));
 
-        session.consumeSentBytes(encoded_frame.size() - sent_byte_count);
+        assert(session.consumeSentBytes(encoded_frame.size() - sent_byte_count));
         assert(!session.hasPendingSend());
         assert(session.getPendingSendByteCount() == 0);
 
@@ -126,7 +126,7 @@ namespace
         assert(session.enqueueFrame(second_frame));
         assert(std::ranges::equal(session.getPendingSendBytes(), first_encoded_frame));
 
-        session.consumeSentBytes(first_encoded_frame.size());
+        assert(session.consumeSentBytes(first_encoded_frame.size()));
         assert(std::ranges::equal(session.getPendingSendBytes(), second_encoded_frame));
 
         assert(::close(pipe_file_descriptors[1]) == 0);
