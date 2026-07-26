@@ -135,7 +135,9 @@ CLI 기본값:
 Connections: 1000/1000 succeeded, 0 failed, peak active 1000
 Requests: 300000 sent, 300000 received, 0 timeout, 0 invalid, 0 socket error
 Throughput: 10000.000 responses/s
-RTT ms: avg 9.705, p50 9.080, p95 13.697, p99 16.382
+RTT ms: avg 9.430, p50 8.569, p95 13.928, p99 15.392
+Server summary: 1000 accepted, 1000 closed, 300000 frames received,
+300000 frames sent, 0 protocol errors
 ```
 
 Debug 및 ASan·UBSan 구성에서도 단위 테스트, TCP loopback 테스트, 느린 client 백프레셔,
