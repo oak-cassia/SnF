@@ -4,14 +4,25 @@
 #include "snf/net/unique_file_descriptor.hpp"
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <unordered_map>
 
 namespace snf::server
 {
+    struct TcpServerConfig
+    {
+        std::uint16_t port{7777};
+        std::chrono::milliseconds shutdown_grace_period{5000};
+        std::size_t max_pending_send_bytes{snf::net::MAX_PENDING_SEND_BYTES};
+        std::optional<int> client_send_buffer_size;
+    };
+
     class TcpServer
     {
     public:
+        explicit TcpServer(TcpServerConfig config);
         explicit TcpServer(
             std::uint16_t port,
             std::chrono::milliseconds shutdown_grace_period = std::chrono::milliseconds{5000});
@@ -46,6 +57,8 @@ namespace snf::server
         snf::net::UniqueFileDescriptor _stop_event;
         std::uint16_t _port;
         std::chrono::milliseconds _shutdown_grace_period;
+        std::size_t _max_pending_send_bytes;
+        std::optional<int> _client_send_buffer_size;
         std::chrono::steady_clock::time_point _shutdown_deadline{};
         bool _is_stopping{false};
         std::unordered_map<int, snf::net::Session> _sessions;

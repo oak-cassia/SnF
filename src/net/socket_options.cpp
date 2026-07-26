@@ -12,13 +12,19 @@ namespace snf::net
     {
         constexpr int enabled = 1;
 
-        if (::setsockopt(socket_descriptor,
-                         IPPROTO_TCP,
-                         TCP_NODELAY,
-                         &enabled,
-                         sizeof(enabled)) == -1)
+        if (::setsockopt(socket_descriptor, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled)) ==
+            -1)
         {
             throw_system_error("setsockopt(TCP_NODELAY)");
+        }
+    }
+
+    void set_socket_send_buffer_size(const int socket_descriptor, const int byte_count)
+    {
+        if (::setsockopt(
+                socket_descriptor, SOL_SOCKET, SO_SNDBUF, &byte_count, sizeof(byte_count)) == -1)
+        {
+            throw_system_error("setsockopt(SO_SNDBUF)");
         }
     }
 }

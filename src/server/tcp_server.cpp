@@ -68,16 +68,35 @@ namespace
 
 namespace snf::server
 {
-    TcpServer::TcpServer(const std::uint16_t port,
-                         const std::chrono::milliseconds shutdown_grace_period)
-        : _listener(snf::net::create_tcp_listener(port))
+    TcpServer::TcpServer(TcpServerConfig config)
+        : _listener(snf::net::create_tcp_listener(config.port))
         , _epoll(create_epoll_instance())
         , _stop_event(create_stop_event())
         , _port(get_listener_port(_listener.getDescriptor()))
-        , _shutdown_grace_period(shutdown_grace_period)
+        , _shutdown_grace_period(config.shutdown_grace_period)
+        , _max_pending_send_bytes(config.max_pending_send_bytes)
+        , _client_send_buffer_size(config.client_send_buffer_size)
     {
+        if (_shutdown_grace_period < std::chrono::milliseconds::zero() ||
+            _max_pending_send_bytes == 0 ||
+            (_client_send_buffer_size && *_client_send_buffer_size <= 0))
+        {
+            throw std::invalid_argument{"Invalid TCP server configuration"};
+        }
+
         registerListener();
         registerControlDescriptor(_stop_event.getDescriptor());
+    }
+
+    TcpServer::TcpServer(const std::uint16_t port,
+                         const std::chrono::milliseconds shutdown_grace_period)
+        : TcpServer(TcpServerConfig{
+              .port = port,
+              .shutdown_grace_period = shutdown_grace_period,
+              .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
+              .client_send_buffer_size = std::nullopt,
+          })
+    {
     }
 
     std::uint16_t TcpServer::getPort() const noexcept
@@ -227,8 +246,16 @@ namespace snf::server
             snf::net::UniqueFileDescriptor client_socket{client_descriptor};
             snf::net::enable_tcp_no_delay(client_socket.getDescriptor());
 
+            if (_client_send_buffer_size)
+            {
+                snf::net::set_socket_send_buffer_size(client_socket.getDescriptor(),
+                                                      *_client_send_buffer_size);
+            }
+
             const bool inserted =
-                _sessions.emplace(client_descriptor, snf::net::Session{std::move(client_socket)})
+                _sessions
+                    .emplace(client_descriptor,
+                             snf::net::Session{std::move(client_socket), _max_pending_send_bytes})
                     .second;
 
             if (!inserted)

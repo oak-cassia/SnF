@@ -5,6 +5,7 @@
 #include "snf/server/tcp_server.hpp"
 
 #include <arpa/inet.h>
+#include <array>
 #include <cassert>
 #include <cerrno>
 #include <chrono>
@@ -12,6 +13,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <optional>
+#include <poll.h>
 #include <span>
 #include <sys/socket.h>
 #include <thread>
@@ -28,7 +31,21 @@ namespace
     public:
         explicit RunningServer(
             const int termination_signal_descriptor = snf::net::UniqueFileDescriptor::INVALID_FD)
-            : _server(0, 200ms)
+            : RunningServer(
+                  snf::server::TcpServerConfig{
+                      .port = 0,
+                      .shutdown_grace_period = 200ms,
+                      .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
+                      .client_send_buffer_size = std::nullopt,
+                  },
+                  termination_signal_descriptor)
+        {
+        }
+
+        explicit RunningServer(
+            snf::server::TcpServerConfig config,
+            const int termination_signal_descriptor = snf::net::UniqueFileDescriptor::INVALID_FD)
+            : _server(std::move(config))
             , _termination_signal_descriptor(termination_signal_descriptor)
             , _thread(
                   [this]
@@ -85,7 +102,9 @@ namespace
         std::thread _thread;
     };
 
-    snf::net::UniqueFileDescriptor connect_client(const std::uint16_t port)
+    snf::net::UniqueFileDescriptor
+    connect_client(const std::uint16_t port,
+                   const std::optional<int> receive_buffer_size = std::nullopt)
     {
         snf::net::UniqueFileDescriptor client_socket{
             ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
@@ -101,6 +120,15 @@ namespace
                             SO_RCVTIMEO,
                             &timeout,
                             sizeof(timeout)) == 0);
+
+        if (receive_buffer_size)
+        {
+            assert(::setsockopt(client_socket.getDescriptor(),
+                                SOL_SOCKET,
+                                SO_RCVBUF,
+                                &*receive_buffer_size,
+                                sizeof(*receive_buffer_size)) == 0);
+        }
         assert(::setsockopt(client_socket.getDescriptor(),
                             SOL_SOCKET,
                             SO_SNDTIMEO,
@@ -187,6 +215,34 @@ namespace
         assert(result.frames[0].type == snf::protocol::MessageType::Pong);
         assert(result.frames[0].request_id == request.request_id);
         assert(result.frames[0].payload == request.payload);
+    }
+
+    void receive_until_closed(const int socket_descriptor)
+    {
+        std::array<std::byte, 65536> receive_buffer{};
+
+        while (true)
+        {
+            const auto result =
+                ::recv(socket_descriptor, receive_buffer.data(), receive_buffer.size(), 0);
+
+            if (result > 0)
+            {
+                continue;
+            }
+
+            if (result == 0 || (result == -1 && errno == ECONNRESET))
+            {
+                return;
+            }
+
+            if (result == -1 && errno == EINTR)
+            {
+                continue;
+            }
+
+            assert(false);
+        }
     }
 
     void test_returns_pong_for_ping()
@@ -332,6 +388,89 @@ namespace
                          sizeof(server_address)) == -1);
     }
 
+    void test_closes_slow_client_when_send_queue_exceeds_limit()
+    {
+        const snf::protocol::Frame request{
+            .type = snf::protocol::MessageType::Ping,
+            .request_id = 7,
+            .payload = std::vector<std::byte>(snf::protocol::MAX_PAYLOAD_SIZE, std::byte{0xAA}),
+        };
+        const auto encoded_request = snf::protocol::encode_frame(request);
+
+        RunningServer server{snf::server::TcpServerConfig{
+            .port = 0,
+            .shutdown_grace_period = 200ms,
+            .max_pending_send_bytes = encoded_request.size(),
+            .client_send_buffer_size = std::nullopt,
+        }};
+        const auto slow_client = connect_client(server.getPort());
+
+        std::vector<std::byte> bundled_requests = encoded_request;
+        bundled_requests.insert(
+            bundled_requests.end(), encoded_request.begin(), encoded_request.end());
+        send_all(slow_client.getDescriptor(), bundled_requests);
+        receive_until_closed(slow_client.getDescriptor());
+
+        const auto healthy_client = connect_client(server.getPort());
+        const snf::protocol::Frame healthy_request{
+            .type = snf::protocol::MessageType::Ping,
+            .request_id = 8,
+            .payload = {},
+        };
+        const auto healthy_encoded_request = snf::protocol::encode_frame(healthy_request);
+        send_all(healthy_client.getDescriptor(), healthy_encoded_request);
+        const auto response =
+            receive_exact(healthy_client.getDescriptor(), healthy_encoded_request.size());
+        assert_pong(response, healthy_request);
+
+        server.stop();
+    }
+
+    void test_shutdown_forces_slow_client_closed_after_grace_period()
+    {
+        constexpr auto shutdown_grace_period = 150ms;
+        RunningServer server{snf::server::TcpServerConfig{
+            .port = 0,
+            .shutdown_grace_period = shutdown_grace_period,
+            .max_pending_send_bytes = 8 * 1024 * 1024,
+            .client_send_buffer_size = 1024,
+        }};
+        const auto slow_client = connect_client(server.getPort(), 1024);
+
+        const snf::protocol::Frame request{
+            .type = snf::protocol::MessageType::Ping,
+            .request_id = 9,
+            .payload = std::vector<std::byte>(snf::protocol::MAX_PAYLOAD_SIZE, std::byte{0xBB}),
+        };
+        const auto encoded_request = snf::protocol::encode_frame(request);
+        std::vector<std::byte> bundled_requests;
+        constexpr int REQUEST_COUNT = 64;
+        bundled_requests.reserve(encoded_request.size() * REQUEST_COUNT);
+
+        for (int request_index = 0; request_index < REQUEST_COUNT; ++request_index)
+        {
+            bundled_requests.insert(
+                bundled_requests.end(), encoded_request.begin(), encoded_request.end());
+        }
+
+        send_all(slow_client.getDescriptor(), bundled_requests);
+
+        pollfd response_poll{
+            .fd = slow_client.getDescriptor(),
+            .events = POLLIN,
+            .revents = 0,
+        };
+        assert(::poll(&response_poll, 1, 1000) == 1);
+        assert((response_poll.revents & POLLIN) != 0);
+
+        const auto stop_started_at = std::chrono::steady_clock::now();
+        server.stop();
+        const auto stop_duration = std::chrono::steady_clock::now() - stop_started_at;
+
+        assert(stop_duration >= shutdown_grace_period / 2);
+        assert(stop_duration < 1s);
+    }
+
     void test_termination_signal_stops_server(const int signal_number)
     {
         const auto termination_signal = snf::net::create_termination_signal_listener();
@@ -349,6 +488,8 @@ int main()
     test_decodes_multiple_pings_from_one_send();
     test_survives_client_close_during_partial_frame();
     test_request_stop_closes_listener_and_active_sessions();
+    test_closes_slow_client_when_send_queue_exceeds_limit();
+    test_shutdown_forces_slow_client_closed_after_grace_period();
     test_termination_signal_stops_server(SIGINT);
     test_termination_signal_stops_server(SIGTERM);
 }
