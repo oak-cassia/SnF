@@ -2,6 +2,7 @@
 
 #include "snf/net/session.hpp"
 #include "snf/net/unique_file_descriptor.hpp"
+#include "snf/server/message_dispatcher.hpp"
 
 #include <chrono>
 #include <cstddef>
@@ -72,6 +73,7 @@ namespace snf::server
         std::chrono::steady_clock::time_point _shutdown_deadline{};
         bool _is_stopping{false};
         std::unordered_map<int, snf::net::Session> _sessions;
+        MessageDispatcher _message_dispatcher;
         TcpServerStats _stats;
     };
 }

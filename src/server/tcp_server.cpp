@@ -328,32 +328,33 @@ namespace snf::server
                     {
                         ++_stats.received_frames;
 
-                        if (frame.type != snf::protocol::MessageType::Ping)
+                        const auto dispatch_result = _message_dispatcher.dispatch(frame);
+                        if (!dispatch_result.handled())
                         {
                             ++_stats.protocol_errors;
-                            std::cerr
-                                << "Unexpected message type from client FD: " << client_descriptor
-                                << '\n';
+                            std::cerr << "No handler for message type from client FD: "
+                                      << client_descriptor << '\n';
                             should_remove_session = true;
                             break;
                         }
 
-                        const snf::protocol::Frame response{
-                            .type = snf::protocol::MessageType::Pong,
-                            .request_id = frame.request_id,
-                            .payload = frame.payload,
-                        };
-
-                        if (!session_iterator->second.enqueueFrame(response))
+                        for (const auto& response : dispatch_result.responses)
                         {
-                            std::cerr
-                                << "Send queue limit exceeded for client FD: " << client_descriptor
-                                << '\n';
-                            should_remove_session = true;
-                            break;
+                            if (!session_iterator->second.enqueueFrame(response))
+                            {
+                                std::cerr << "Send queue limit exceeded for client FD: "
+                                          << client_descriptor << '\n';
+                                should_remove_session = true;
+                                break;
+                            }
+
+                            should_update_events = true;
                         }
 
-                        should_update_events = true;
+                        if (should_remove_session)
+                        {
+                            break;
+                        }
                     }
 
                     if (should_remove_session)

@@ -51,6 +51,7 @@ target_include_directories(snf_core
 snf_configure_target(snf_core)
 
 add_library(snf_server_runtime STATIC
+    src/server/message_dispatcher.cpp
     src/server/tcp_server.cpp
 )
 target_link_libraries(snf_server_runtime PUBLIC snf_core)
@@ -83,12 +84,13 @@ if(BUILD_TESTING)
         tests/unit_test_main.cpp
         tests/build_info_test.cpp
         tests/frame_codec_test.cpp
+        tests/message_dispatcher_test.cpp
         tests/session_test.cpp
         tests/socket_options_test.cpp
         tests/tcp_listener_test.cpp
         tests/unique_file_descriptor_test.cpp
     )
-    target_link_libraries(snf_unit_tests PRIVATE snf_core)
+    target_link_libraries(snf_unit_tests PRIVATE snf_server_runtime)
     snf_configure_target(snf_unit_tests)
 
     add_test(NAME snf_unit_tests COMMAND snf_unit_tests)
