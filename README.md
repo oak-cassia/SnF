@@ -13,6 +13,7 @@ C++20과 Linux `epoll`로 만든 단일 스레드 실시간 TCP 서버 연습 �
 - RAII 기반 client FD와 Session 수명 관리
 - 길이 기반 binary Frame decode
 - 부분 수신과 여러 Frame 일괄 수신
+- `unordered_map<MessageType, Handler>` 기반 메시지 dispatch
 - PING 요청에 request ID와 payload가 같은 PONG 응답
 - 부분 송신 queue와 동적 `EPOLLOUT`
 - Session별 기본 1 MiB 백프레셔
@@ -150,12 +151,7 @@ pending send graceful shutdown, load client 통합 테스트가 모두 통과했
 | Frame과 codec | `include/snf/protocol/`, `src/protocol/` |
 | FD와 socket 설정 | `include/snf/net/`, `src/net/` |
 | Session | `include/snf/net/session.hpp`, `src/net/session.cpp` |
+| 메시지 dispatcher | `include/snf/server/message_dispatcher.hpp`, `src/server/message_dispatcher.cpp` |
 | epoll 서버 | `include/snf/server/tcp_server.hpp`, `src/server/tcp_server.cpp` |
 | 부하 클라이언트 | `include/snf/load/`, `src/load/`, `tools/load_client/` |
 | 단위·통합 테스트 | `tests/` |
-
-## 다음 단계
-
-첫 마일스톤 이후에는 heartbeat와 idle timeout, 방 입장, 보스 전투, 방 단위 순차 실행,
-worker thread 완료 queue와 TSan 검증 순으로 확장한다. MySQL, Redis, 재접속, C# 운영 도구는
-그 이후 단계다.
