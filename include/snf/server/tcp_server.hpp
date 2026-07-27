@@ -6,7 +6,6 @@
 
 #include <chrono>
 #include <cstddef>
-#include <cstdint>
 #include <optional>
 #include <unordered_map>
 
@@ -32,7 +31,7 @@ namespace snf::server
     class TcpServer
     {
     public:
-        explicit TcpServer(TcpServerConfig config);
+        explicit TcpServer(const TcpServerConfig& config);
         explicit TcpServer(
             std::uint16_t port,
             std::chrono::milliseconds shutdown_grace_period = std::chrono::milliseconds{5000});
@@ -47,7 +46,7 @@ namespace snf::server
         [[nodiscard]] const TcpServerStats& getStats() const noexcept;
 
         void run(int termination_signal_descriptor = snf::net::UniqueFileDescriptor::INVALID_FD);
-        void requestStop() noexcept;
+        void requestStop() const noexcept;
 
     private:
         void registerListener() const;

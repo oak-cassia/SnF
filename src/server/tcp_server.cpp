@@ -9,7 +9,6 @@
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
-#include <cstdint>
 #include <iostream>
 #include <limits>
 #include <netinet/in.h>
@@ -57,7 +56,7 @@ namespace
         auto address_size = static_cast<socklen_t>(sizeof(address));
 
         if (::getsockname(
-                listener_descriptor, reinterpret_cast<sockaddr*>(&address), &address_size) == -1)
+            listener_descriptor, reinterpret_cast<sockaddr*>(&address), &address_size) == -1)
         {
             snf::net::throw_system_error("getsockname");
         }
@@ -68,14 +67,14 @@ namespace
 
 namespace snf::server
 {
-    TcpServer::TcpServer(TcpServerConfig config)
+    TcpServer::TcpServer(const TcpServerConfig& config)
         : _listener(snf::net::create_tcp_listener(config.port))
-        , _epoll(create_epoll_instance())
-        , _stop_event(create_stop_event())
-        , _port(get_listener_port(_listener.getDescriptor()))
-        , _shutdown_grace_period(config.shutdown_grace_period)
-        , _max_pending_send_bytes(config.max_pending_send_bytes)
-        , _client_send_buffer_size(config.client_send_buffer_size)
+          , _epoll(create_epoll_instance())
+          , _stop_event(create_stop_event())
+          , _port(get_listener_port(_listener.getDescriptor()))
+          , _shutdown_grace_period(config.shutdown_grace_period)
+          , _max_pending_send_bytes(config.max_pending_send_bytes)
+          , _client_send_buffer_size(config.client_send_buffer_size)
     {
         if (_shutdown_grace_period < std::chrono::milliseconds::zero() ||
             _max_pending_send_bytes == 0 ||
@@ -91,11 +90,11 @@ namespace snf::server
     TcpServer::TcpServer(const std::uint16_t port,
                          const std::chrono::milliseconds shutdown_grace_period)
         : TcpServer(TcpServerConfig{
-              .port = port,
-              .shutdown_grace_period = shutdown_grace_period,
-              .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
-              .client_send_buffer_size = std::nullopt,
-          })
+            .port = port,
+            .shutdown_grace_period = shutdown_grace_period,
+            .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
+            .client_send_buffer_size = std::nullopt,
+        })
     {
     }
 
@@ -183,8 +182,9 @@ namespace snf::server
         closeRemainingSessions();
     }
 
-    void TcpServer::requestStop() noexcept
+    void TcpServer::requestStop() const noexcept
     {
+        // 값을 0에서 1로 주어, run 함수에서 중단을 알 수 있게 함
         constexpr std::uint64_t stop_value = 1;
 
         while (::write(_stop_event.getDescriptor(), &stop_value, sizeof(stop_value)) == -1)
@@ -259,9 +259,9 @@ namespace snf::server
 
             const bool inserted =
                 _sessions
-                    .emplace(client_descriptor,
-                             snf::net::Session{std::move(client_socket), _max_pending_send_bytes})
-                    .second;
+                .emplace(client_descriptor,
+                         snf::net::Session{std::move(client_socket), _max_pending_send_bytes})
+                .second;
 
             if (!inserted)
             {
@@ -273,7 +273,7 @@ namespace snf::server
             client_event.data.fd = client_descriptor;
 
             if (::epoll_ctl(
-                    _epoll.getDescriptor(), EPOLL_CTL_ADD, client_descriptor, &client_event) == -1)
+                _epoll.getDescriptor(), EPOLL_CTL_ADD, client_descriptor, &client_event) == -1)
             {
                 snf::net::throw_system_error("epoll_ctl(EPOLL_CTL_ADD client)");
             }
@@ -310,7 +310,8 @@ namespace snf::server
                 if (received_byte_count > 0)
                 {
                     const std::span<const std::byte> received_bytes{
-                        receive_buffer.data(), static_cast<std::size_t>(received_byte_count)};
+                        receive_buffer.data(), static_cast<std::size_t>(received_byte_count)
+                    };
 
                     const auto decode_result =
                         session_iterator->second.appendReceivedBytes(received_bytes);
@@ -333,7 +334,7 @@ namespace snf::server
                         {
                             ++_stats.protocol_errors;
                             std::cerr << "No handler for message type from client FD: "
-                                      << client_descriptor << '\n';
+                                << client_descriptor << '\n';
                             should_remove_session = true;
                             break;
                         }
@@ -343,7 +344,7 @@ namespace snf::server
                             if (!session_iterator->second.enqueueFrame(response))
                             {
                                 std::cerr << "Send queue limit exceeded for client FD: "
-                                          << client_descriptor << '\n';
+                                    << client_descriptor << '\n';
                                 should_remove_session = true;
                                 break;
                             }
@@ -475,8 +476,7 @@ namespace snf::server
         if (_listener.isValid())
         {
             if (::epoll_ctl(
-                    _epoll.getDescriptor(), EPOLL_CTL_DEL, _listener.getDescriptor(), nullptr) ==
-                -1)
+                _epoll.getDescriptor(), EPOLL_CTL_DEL, _listener.getDescriptor(), nullptr) == -1)
             {
                 snf::net::throw_system_error("epoll_ctl(EPOLL_CTL_DEL listener)");
             }
@@ -574,7 +574,7 @@ namespace snf::server
         {
             const int error_number = errno;
             std::cerr << "Failed to remove client FD " << client_descriptor
-                      << " from epoll: " << std::generic_category().message(error_number) << '\n';
+                << " from epoll: " << std::generic_category().message(error_number) << '\n';
         }
 
         _sessions.erase(session_iterator);
