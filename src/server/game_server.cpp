@@ -23,21 +23,25 @@ namespace
 namespace snf::server
 {
     GameServer::GameServer(const GameServerConfig& config)
-        : _inbound_commands(config.inbound_queue_capacity)
-        , _network_actions(config.outbound_queue_capacity)
+        : _network_actions(config.outbound_queue_capacity)
         , _outbound_event(create_outbound_event())
+        , _actor_runtime(ActorRuntimeConfig{
+                             .worker_count = config.actor_worker_count,
+                             .queue_capacity_per_worker = config.actor_queue_capacity_per_worker,
+                             .message_dispatcher_factory = {},
+                             .on_worker_failure = [this] { requestStop(); },
+                         },
+                         _network_actions,
+                         _outbound_event.getDescriptor())
         , _tcp_server(TcpServerConfig{
               .port = config.port,
               .shutdown_grace_period = config.shutdown_grace_period,
               .max_pending_send_bytes = config.max_pending_send_bytes,
               .client_send_buffer_size = config.client_send_buffer_size,
           },
-          _inbound_commands,
+          _actor_runtime,
           _network_actions,
           _outbound_event.getDescriptor())
-        , _game_runtime(_inbound_commands,
-                        _network_actions,
-                        _outbound_event.getDescriptor())
     {
     }
 
@@ -48,7 +52,8 @@ namespace snf::server
               .shutdown_grace_period = shutdown_grace_period,
               .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
               .client_send_buffer_size = std::nullopt,
-              .inbound_queue_capacity = 4096,
+              .actor_worker_count = 2,
+              .actor_queue_capacity_per_worker = 4096,
               .outbound_queue_capacity = 4096,
           })
     {
@@ -57,8 +62,15 @@ namespace snf::server
     GameServer::~GameServer()
     {
         requestStop();
-        cancelGameRuntime();
-        joinGameRuntime();
+        cancelActorRuntime();
+        try
+        {
+            joinActorRuntime();
+        }
+        catch (...)
+        {
+            // A destructor cannot propagate a worker failure. run() reports it instead.
+        }
     }
 
     std::uint16_t GameServer::getPort() const noexcept
@@ -71,9 +83,14 @@ namespace snf::server
         return _tcp_server.getStats();
     }
 
+    ActorRuntimeStats GameServer::getActorRuntimeStats() const
+    {
+        return _actor_runtime.getStats();
+    }
+
     void GameServer::run(const int termination_signal_descriptor)
     {
-        startGameRuntime();
+        startActorRuntime();
 
         try
         {
@@ -81,17 +98,19 @@ namespace snf::server
         }
         catch (...)
         {
-            cancelGameRuntime();
-            joinGameRuntime();
+            cancelActorRuntime();
+            try
+            {
+                joinActorRuntime();
+            }
+            catch (...)
+            {
+                // Preserve the reactor failure that entered this path.
+            }
             throw;
         }
 
-        joinGameRuntime();
-
-        if (_game_runtime_error)
-        {
-            std::rethrow_exception(_game_runtime_error);
-        }
+        joinActorRuntime();
     }
 
     void GameServer::requestStop() const noexcept
@@ -99,7 +118,7 @@ namespace snf::server
         _tcp_server.requestStop();
     }
 
-    void GameServer::startGameRuntime()
+    void GameServer::startActorRuntime()
     {
         if (_has_run)
         {
@@ -108,34 +127,17 @@ namespace snf::server
 
         _has_run = true;
 
-        _game_worker = std::jthread{
-            [this]
-            {
-                try
-                {
-                    _game_runtime.run();
-                }
-                catch (...)
-                {
-                    _game_runtime_error = std::current_exception();
-                    _inbound_commands.cancel();
-                    _network_actions.cancel();
-                    requestStop();
-                }
-            }};
+        _actor_runtime.start();
     }
 
-    void GameServer::joinGameRuntime()
+    void GameServer::joinActorRuntime()
     {
-        if (_game_worker.joinable())
-        {
-            _game_worker.join();
-        }
+        _actor_runtime.join();
     }
 
-    void GameServer::cancelGameRuntime() noexcept
+    void GameServer::cancelActorRuntime() noexcept
     {
-        _inbound_commands.cancel();
+        _actor_runtime.cancel();
         _network_actions.cancel();
     }
 }

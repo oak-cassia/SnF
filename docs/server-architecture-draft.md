@@ -205,8 +205,9 @@ Player Runtime은 `player_id`를 기준으로 shard한다.
 worker_index = hash(player_id) % player_worker_count;
 ```
 
-동일 PlayerActor의 명령은 항상 같은 Worker에서 순차 실행한다. 초기 구현은 Worker별
-bounded command queue를 사용한다.
+동일 PlayerActor의 명령은 항상 같은 Worker에서 순차 실행한다. PlayerActor를 추가하기 전인
+현재 단계에서는 `ActorRuntime`이 연결 generation을 임시 `ActorId`로 사용해 기본 2개의
+Worker별 bounded command queue에 shard한다.
 
 ```cpp
 player_runtime.post(player_id, PlayerCommand{...});
@@ -570,49 +571,61 @@ include/snf/
 ```text
 epoll Reactor
 → Frame decode
-→ InboundCommand bounded queue
-→ GameRuntime Worker
+→ InboundCommand
+→ CommandIngress
+→ ActorRuntime shard queue
+→ ActorWorker
 → NetworkAction bounded queue
 → eventfd
 → Reactor send
 ```
 
 Session은 단조 증가 generation을 포함하는 `ConnectionId`를 받고, Reactor는 현재 ID와
-일치하는 `NetworkAction`만 적용한다. shutdown은 inbound queue close, GameRuntime drain
-통지, Session 송신 queue drain 순서로 진행하며 deadline 이후에는 양쪽 queue를 cancel한다.
+일치하는 `NetworkAction`만 적용한다. 1단계에서는 이 경계가 단일 queue와 GameRuntime
+Worker로 동작했으며, 2단계에서 아래 ActorRuntime으로 교체했다.
 
-### 단계 2: Player Runtime
+### 단계 2: Sharded ActorRuntime (완료)
 
-- PlayerWorker 하나와 bounded queue를 구현한다.
+- Reactor는 `CommandIngress`에 직접 게시하고 중앙 router thread를 두지 않는다.
+- 연결 generation을 임시 `ActorId`로 사용하며 `actor_id.value % worker_count`로 기본 2개
+  Worker에 shard한다.
+- Worker별 bounded queue는 accepted/processed/rejected-full, depth/high-water mark,
+  평균·최대 queue wait를 기록한다.
+- `close()`는 accepted command를 모두 drain한 뒤 마지막 Worker가 `GameRuntimeDrained`를 한 번
+  발행하고, `cancel()`은 queued command를 폐기한다.
+- 같은 Actor의 FIFO·단일 실행, shard 간 병렬 실행, shard별 포화 격리, drain/cancel/예외 전파를
+  테스트한다.
+
+### 단계 3: PlayerActor와 Mailbox
+
 - PlayerActor만 Player 상태를 수정하게 한다.
-- 동일 Player 명령의 순서와 단일 실행을 테스트한다.
+- Actor별 mailbox, ready queue와 lifecycle을 도입한다.
 - DB는 아직 in-memory repository로 대체할 수 있다.
 
-### 단계 3: World Runtime
+### 단계 4: Coroutine Actor
+
+- 실제 비동기 대기에서만 suspend하고, resume은 원래 ActorRuntime으로 되돌린다.
+- suspend된 Actor의 일반 command는 mailbox에서 기다리게 한다.
+
+### 단계 5: World Runtime
 
 - 주입 가능한 Clock을 사용하는 FixedTickExecutor를 구현한다.
 - Zone 하나에서 입력, 이동, 충돌, AOI의 최소 vertical slice를 만든다.
 - tick overrun과 command queue 지연을 측정한다.
 
-### 단계 4: Battle Runtime
+### 단계 6: Battle Runtime
 
 - CombatRoom 생성과 종료 lifecycle을 구현한다.
 - World에서 Battle로 route와 상태 소유권을 전환한다.
 - 전투 중 충돌 처리와 BattleResult의 멱등 적용을 검증한다.
 
-### 단계 5: Persistence와 Shared Content
+### 단계 7: Persistence와 Shared Content
 
 - bounded DB Worker Pool과 완료 메시지 반환을 구현한다.
 - entity version으로 오래된 완료 결과를 거부한다.
 - Party 또는 Matchmaking 중 하나를 공유 Actor의 대표 vertical slice로 구현한다.
 
-### 단계 6: Multi-Worker Sharding
-
-- Player, World 또는 Battle Runtime을 2개 이상 Worker로 확장한다.
-- shard별 queue와 metric을 추가한다.
-- hot Zone 또는 hot Room 탐지와 분산 정책을 검증한다.
-
-### 단계 7: 프로세스 분리 실험
+### 단계 8: 프로세스 분리 실험
 
 단일 프로세스 경계를 검증한 뒤에만 다음 순서로 분리한다.
 

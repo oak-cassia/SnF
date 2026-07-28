@@ -17,12 +17,14 @@ namespace
         assert(queue.tryPush(20));
         assert(!queue.tryPush(30));
         assert(queue.size() == 2);
+        assert(queue.highWaterMark() == 2);
 
         const auto first = queue.tryPop();
         const auto second = queue.tryPop();
         assert(first && *first == 10);
         assert(second && *second == 20);
         assert(!queue.tryPop());
+        assert(queue.highWaterMark() == 2);
     }
 
     void test_close_rejects_new_items_after_draining_existing_items()

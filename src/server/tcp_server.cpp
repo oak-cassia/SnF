@@ -75,7 +75,7 @@ namespace
 namespace snf::server
 {
     TcpServer::TcpServer(const TcpServerConfig& config,
-                         snf::runtime::BoundedQueue<InboundCommand>& inbound_commands,
+                         CommandIngress& command_ingress,
                          snf::runtime::BoundedQueue<NetworkAction>& network_actions,
                          const int outbound_event_descriptor)
         : _listener(snf::net::create_tcp_listener(config.port))
@@ -85,7 +85,7 @@ namespace snf::server
         , _shutdown_grace_period(config.shutdown_grace_period)
         , _max_pending_send_bytes(config.max_pending_send_bytes)
         , _client_send_buffer_size(config.client_send_buffer_size)
-        , _inbound_commands(inbound_commands)
+        , _command_ingress(command_ingress)
         , _network_actions(network_actions)
         , _outbound_event_descriptor(outbound_event_descriptor)
     {
@@ -124,7 +124,7 @@ namespace snf::server
 
         while (true)
         {
-            if (_is_stopping && _game_runtime_drained && _sessions.empty())
+            if (_is_stopping && _actor_runtime_drained && _sessions.empty())
             {
                 break;
             }
@@ -367,14 +367,20 @@ namespace snf::server
                     for (const auto& frame : decode_result.frames)
                     {
                         ++_stats.received_frames;
-                        if (!_inbound_commands.tryPush(InboundCommand{
-                                .connection = session_iterator->second.getConnectionId(),
-                                .frame = frame,
-                            }))
+                        const ConnectionId connection = session_iterator->second.getConnectionId();
+                        const PostResult post_result = _command_ingress.tryPost(InboundCommand{
+                            .actor = ActorId{.value = connection.generation},
+                            .connection = connection,
+                            .frame = frame,
+                        });
+                        if (post_result != PostResult::Accepted)
                         {
-                            ++_stats.game_queue_overflows;
-                            std::cerr << "Game queue limit exceeded for client FD: "
-                                      << client_descriptor << '\n';
+                            if (post_result == PostResult::Full)
+                            {
+                                ++_stats.actor_queue_overflows;
+                                std::cerr << "Actor queue limit exceeded for client FD: "
+                                          << client_descriptor << '\n';
+                            }
                             should_remove_session = true;
                             break;
                         }
@@ -420,7 +426,7 @@ namespace snf::server
             should_remove_session = !flushPendingSend(session_iterator->second);
             should_update_events = !should_remove_session;
 
-            if (_is_stopping && _game_runtime_drained &&
+            if (_is_stopping && _actor_runtime_drained &&
                 !session_iterator->second.hasPendingSend())
             {
                 should_remove_session = true;
@@ -500,16 +506,16 @@ namespace snf::server
 
                     ++_stats.protocol_errors;
                     std::cerr << "Closing client FD " << network_action.connection.descriptor
-                              << " because GameRuntime requested "
+                              << " because ActorRuntime requested "
                               << to_string(network_action.reason) << '\n';
                     removeSession(network_action.connection.descriptor);
                 }
                 else
                 {
-                    _game_runtime_drained = true;
+                    _actor_runtime_drained = true;
                     if (_is_stopping)
                     {
-                        completeShutdownAfterGameRuntimeDrained();
+                        completeShutdownAfterActorRuntimeDrained();
                     }
                 }
             },
@@ -569,7 +575,7 @@ namespace snf::server
 
         _is_stopping = true;
         _shutdown_deadline = std::chrono::steady_clock::now() + _shutdown_grace_period;
-        _inbound_commands.close();
+        _command_ingress.close();
 
         if (_listener.isValid())
         {
@@ -588,13 +594,13 @@ namespace snf::server
             updateClientEvents(session);
         }
 
-        if (_game_runtime_drained)
+        if (_actor_runtime_drained)
         {
-            completeShutdownAfterGameRuntimeDrained();
+            completeShutdownAfterActorRuntimeDrained();
         }
     }
 
-    void TcpServer::completeShutdownAfterGameRuntimeDrained()
+    void TcpServer::completeShutdownAfterActorRuntimeDrained()
     {
         std::vector<int> sessions_without_pending_send;
         for (const auto& [client_descriptor, session] : _sessions)
@@ -617,7 +623,7 @@ namespace snf::server
 
     void TcpServer::cancelQueues()
     {
-        _inbound_commands.cancel();
+        _command_ingress.cancel();
         _network_actions.cancel();
     }
 

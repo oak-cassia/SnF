@@ -434,14 +434,15 @@ namespace
         assert(server.getStats().protocol_errors >= 1);
     }
 
-    void test_overflowed_inbound_queue_closes_only_that_connection()
+    void test_overflowed_actor_queue_closes_only_that_connection()
     {
         RunningServer server{snf::server::GameServerConfig{
             .port = 0,
             .shutdown_grace_period = 200ms,
             .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
             .client_send_buffer_size = std::nullopt,
-            .inbound_queue_capacity = 1,
+            .actor_worker_count = 2,
+            .actor_queue_capacity_per_worker = 1,
             .outbound_queue_capacity = 1,
         }};
         const auto overloaded_client = connect_client(server.getPort());
@@ -475,7 +476,7 @@ namespace
                     healthy_request);
 
         server.stop();
-        assert(server.getStats().game_queue_overflows >= 1);
+        assert(server.getStats().actor_queue_overflows >= 1);
         assert(server.getStats().stale_network_actions >= 1);
     }
 
@@ -610,7 +611,7 @@ int main()
     test_decodes_multiple_pings_from_one_send();
     test_survives_client_close_during_partial_frame();
     test_closes_connection_for_an_unregistered_message();
-    test_overflowed_inbound_queue_closes_only_that_connection();
+    test_overflowed_actor_queue_closes_only_that_connection();
     test_request_stop_closes_listener_and_active_sessions();
     test_closes_slow_client_when_send_queue_exceeds_limit();
     test_shutdown_forces_slow_client_closed_after_grace_period();

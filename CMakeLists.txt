@@ -52,7 +52,7 @@ snf_configure_target(snf_core)
 
 add_library(snf_server_runtime STATIC
     src/server/message_dispatcher.cpp
-    src/server/game_runtime.cpp
+    src/server/actor_runtime.cpp
     src/server/game_server.cpp
     src/server/tcp_server.cpp
 )
@@ -87,7 +87,7 @@ if(BUILD_TESTING)
         tests/build_info_test.cpp
         tests/frame_codec_test.cpp
         tests/bounded_queue_test.cpp
-        tests/game_runtime_test.cpp
+        tests/actor_runtime_test.cpp
         tests/message_dispatcher_test.cpp
         tests/session_test.cpp
         tests/socket_options_test.cpp

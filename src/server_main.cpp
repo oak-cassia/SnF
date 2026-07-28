@@ -18,8 +18,21 @@ int main()
                   << stats.closed_connections << " closed, " << stats.received_frames
                   << " frames received, " << stats.sent_frames << " frames sent, "
                   << stats.protocol_errors << " protocol errors, "
-                  << stats.game_queue_overflows << " game queue overflows, "
+                  << stats.actor_queue_overflows << " actor queue overflows, "
                   << stats.stale_network_actions << " stale network actions\n";
+
+        const auto actor_runtime_stats = server.getActorRuntimeStats();
+        for (std::size_t worker_index = 0; worker_index < actor_runtime_stats.workers.size();
+             ++worker_index)
+        {
+            const auto& worker = actor_runtime_stats.workers[worker_index];
+            std::cout << "Actor worker " << worker_index << ": " << worker.accepted
+                      << " accepted, " << worker.processed << " processed, "
+                      << worker.rejected_full << " rejected-full, depth "
+                      << worker.queue_depth << ", high-water " << worker.queue_high_water_mark
+                      << ", queue wait avg/max " << worker.average_queue_wait.count() << "/"
+                      << worker.max_queue_wait.count() << " ns\n";
+        }
     }
     catch (const std::exception& error)
     {

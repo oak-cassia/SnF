@@ -1,7 +1,7 @@
 void run_build_info_tests();
 void run_bounded_queue_tests();
 void run_frame_codec_tests();
-void run_game_runtime_tests();
+void run_actor_runtime_tests();
 void run_message_dispatcher_tests();
 void run_session_tests();
 void run_socket_options_tests();
@@ -13,7 +13,7 @@ int main()
     run_build_info_tests();
     run_bounded_queue_tests();
     run_frame_codec_tests();
-    run_game_runtime_tests();
+    run_actor_runtime_tests();
     run_message_dispatcher_tests();
     run_session_tests();
     run_socket_options_tests();

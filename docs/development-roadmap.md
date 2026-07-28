@@ -35,14 +35,19 @@ epoll Reactor
 
 완료 기준: 기존 단위·통합·1,000 연결 부하 테스트가 새 경계를 거쳐 통과한다.
 
-## 2. Sharded ActorRuntime
+## 2. Sharded ActorRuntime (완료)
 
-- `actor_id`를 기준으로 담당 Worker를 결정한다.
-- 동일 Actor는 항상 한 번에 한 Worker에서만 실행한다.
-- Worker별 bounded queue와 queue 지연 metric을 추가한다.
-- 최소 두 Worker에서 서로 다른 Actor가 병렬 실행되는지 검증한다.
+- `ActorId{uint64_t}`와 `CommandIngress`를 도입하고, 연결 generation을 임시 Actor ID로
+  사용한다.
+- 기본 2 Worker(`actor_worker_count=2`)와 Worker별 4,096개 bounded queue를 사용한다.
+- 동일 Actor는 항상 한 Worker FIFO에서 실행하며, 서로 다른 shard는 병렬로 실행한다.
+- `close()` drain, `cancel()` discard, 첫 Worker 예외 취소·전파와 `GameRuntimeDrained` 1회
+  발행을 구현한다.
+- Worker별 accepted/processed/rejected-full, depth/high-water mark, 평균·최대 queue wait를
+  snapshot과 종료 summary로 제공한다.
 
-완료 기준: 동일 Actor의 순서와 단일 실행, 서로 다른 shard의 병렬 실행이 테스트된다.
+완료 기준: 동일 Actor의 순서와 단일 실행, 서로 다른 shard의 병렬 실행, shard별 포화 격리,
+drain/cancel/예외 전파와 metrics가 테스트된다.
 
 ## 3. PlayerActor와 Mailbox
 

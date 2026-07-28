@@ -16,8 +16,18 @@ namespace snf::server
         [[nodiscard]] bool operator==(const ConnectionId&) const noexcept = default;
     };
 
+    // Connection generations are monotonic for the lifetime of the reactor, so they
+    // provide a stable temporary routing key until authenticated user IDs exist.
+    struct ActorId
+    {
+        std::uint64_t value{0};
+
+        [[nodiscard]] bool operator==(const ActorId&) const noexcept = default;
+    };
+
     struct InboundCommand
     {
+        ActorId actor;
         ConnectionId connection;
         snf::protocol::Frame frame;
     };

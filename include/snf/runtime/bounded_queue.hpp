@@ -39,6 +39,7 @@ namespace snf::runtime
                 }
 
                 _items.emplace_back(std::forward<U>(item));
+                updateHighWaterMark();
             }
 
             _not_empty.notify_one();
@@ -65,6 +66,7 @@ namespace snf::runtime
                 }
 
                 _items.emplace_back(std::forward<U>(item));
+                updateHighWaterMark();
             }
 
             _not_empty.notify_one();
@@ -143,6 +145,12 @@ namespace snf::runtime
             return _capacity;
         }
 
+        [[nodiscard]] std::size_t highWaterMark() const
+        {
+            std::lock_guard lock{_mutex};
+            return _high_water_mark;
+        }
+
         [[nodiscard]] bool isClosed() const
         {
             std::lock_guard lock{_mutex};
@@ -156,11 +164,20 @@ namespace snf::runtime
         }
 
     private:
+        void updateHighWaterMark() noexcept
+        {
+            if (_items.size() > _high_water_mark)
+            {
+                _high_water_mark = _items.size();
+            }
+        }
+
         const std::size_t _capacity;
         mutable std::mutex _mutex;
         std::condition_variable _not_empty;
         std::condition_variable _not_full;
         std::deque<T> _items;
+        std::size_t _high_water_mark{0};
         bool _closed{false};
         bool _cancelled{false};
     };

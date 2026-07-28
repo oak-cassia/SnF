@@ -3,6 +3,7 @@
 #include "snf/net/session.hpp"
 #include "snf/net/unique_file_descriptor.hpp"
 #include "snf/runtime/bounded_queue.hpp"
+#include "snf/server/command_ingress.hpp"
 #include "snf/server/runtime_types.hpp"
 
 #include <chrono>
@@ -28,17 +29,17 @@ namespace snf::server
         std::uint64_t received_frames{0};
         std::uint64_t sent_frames{0};
         std::uint64_t protocol_errors{0};
-        std::uint64_t game_queue_overflows{0};
+        std::uint64_t actor_queue_overflows{0};
         std::uint64_t stale_network_actions{0};
     };
 
-    // The epoll reactor. GameServer owns the queues and uses this component only to
-    // decode inbound frames and apply NetworkAction values on the reactor thread.
+    // The epoll reactor. GameServer provides an ingress and outbound queue; this component
+    // only decodes inbound frames and applies NetworkAction values on the reactor thread.
     class TcpServer
     {
     public:
         TcpServer(const TcpServerConfig& config,
-                  snf::runtime::BoundedQueue<InboundCommand>& inbound_commands,
+                  CommandIngress& command_ingress,
                   snf::runtime::BoundedQueue<NetworkAction>& network_actions,
                   int outbound_event_descriptor);
 
@@ -64,7 +65,7 @@ namespace snf::server
         void handleStopRequest();
         void handleTerminationSignal(int signal_descriptor);
         void beginShutdown();
-        void completeShutdownAfterGameRuntimeDrained();
+        void completeShutdownAfterActorRuntimeDrained();
         void cancelQueues();
         [[nodiscard]] bool flushPendingSend(snf::net::Session& session);
         void updateClientEvents(const snf::net::Session& session) const;
@@ -80,13 +81,13 @@ namespace snf::server
         std::chrono::milliseconds _shutdown_grace_period;
         std::size_t _max_pending_send_bytes;
         std::optional<int> _client_send_buffer_size;
-        snf::runtime::BoundedQueue<InboundCommand>& _inbound_commands;
+        CommandIngress& _command_ingress;
         snf::runtime::BoundedQueue<NetworkAction>& _network_actions;
         int _outbound_event_descriptor;
         std::chrono::steady_clock::time_point _shutdown_deadline{};
         std::uint64_t _next_connection_generation{0};
         bool _is_stopping{false};
-        bool _game_runtime_drained{false};
+        bool _actor_runtime_drained{false};
         std::unordered_map<int, snf::net::Session> _sessions;
         // epoll may return a copied event after its FD has been closed and reused.
         // Generation tokens let the reactor discard that event instead of targeting the new FD.
