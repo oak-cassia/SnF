@@ -29,6 +29,11 @@ namespace
 {
     constexpr std::size_t MAX_READY_EVENTS = 64;
     constexpr std::size_t RECEIVE_BUFFER_SIZE = 4096;
+    constexpr std::uint64_t LISTENER_EVENT_TOKEN = std::numeric_limits<std::uint64_t>::max();
+    constexpr std::uint64_t STOP_EVENT_TOKEN = LISTENER_EVENT_TOKEN - 1;
+    constexpr std::uint64_t OUTBOUND_EVENT_TOKEN = STOP_EVENT_TOKEN - 1;
+    constexpr std::uint64_t TERMINATION_SIGNAL_EVENT_TOKEN = OUTBOUND_EVENT_TOKEN - 1;
+    constexpr std::uint64_t MAX_CONNECTION_GENERATION = TERMINATION_SIGNAL_EVENT_TOKEN - 1;
 
     snf::net::UniqueFileDescriptor create_epoll_instance()
     {
@@ -93,8 +98,8 @@ namespace snf::server
         }
 
         registerListener();
-        registerControlDescriptor(_stop_event.getDescriptor());
-        registerControlDescriptor(_outbound_event_descriptor);
+        registerControlDescriptor(_stop_event.getDescriptor(), STOP_EVENT_TOKEN);
+        registerControlDescriptor(_outbound_event_descriptor, OUTBOUND_EVENT_TOKEN);
     }
 
     std::uint16_t TcpServer::getPort() const noexcept
@@ -111,7 +116,8 @@ namespace snf::server
     {
         if (termination_signal_descriptor != snf::net::UniqueFileDescriptor::INVALID_FD)
         {
-            registerControlDescriptor(termination_signal_descriptor);
+            registerControlDescriptor(termination_signal_descriptor,
+                                      TERMINATION_SIGNAL_EVENT_TOKEN);
         }
 
         std::array<epoll_event, MAX_READY_EVENTS> events{};
@@ -147,17 +153,17 @@ namespace snf::server
 
             for (int event_index = 0; event_index < ready_event_count; ++event_index)
             {
-                const int ready_descriptor = events[event_index].data.fd;
+                const std::uint64_t event_token = events[event_index].data.u64;
 
-                if (ready_descriptor == _stop_event.getDescriptor())
+                if (event_token == STOP_EVENT_TOKEN)
                 {
                     handleStopRequest();
                 }
-                else if (ready_descriptor == termination_signal_descriptor)
+                else if (event_token == TERMINATION_SIGNAL_EVENT_TOKEN)
                 {
                     handleTerminationSignal(termination_signal_descriptor);
                 }
-                else if (ready_descriptor == _outbound_event_descriptor)
+                else if (event_token == OUTBOUND_EVENT_TOKEN)
                 {
                     handleOutboundActions();
                 }
@@ -166,15 +172,16 @@ namespace snf::server
             for (int event_index = 0; event_index < ready_event_count; ++event_index)
             {
                 const epoll_event& event = events[event_index];
+                const std::uint64_t event_token = event.data.u64;
 
-                if (event.data.fd == _stop_event.getDescriptor() ||
-                    event.data.fd == termination_signal_descriptor ||
-                    event.data.fd == _outbound_event_descriptor)
+                if (event_token == STOP_EVENT_TOKEN ||
+                    event_token == TERMINATION_SIGNAL_EVENT_TOKEN ||
+                    event_token == OUTBOUND_EVENT_TOKEN)
                 {
                     continue;
                 }
 
-                if (event.data.fd == _listener.getDescriptor())
+                if (event_token == LISTENER_EVENT_TOKEN)
                 {
                     if (!_is_stopping)
                     {
@@ -184,7 +191,15 @@ namespace snf::server
                     continue;
                 }
 
-                handleClientEvent(event.data.fd, event.events);
+                const auto descriptor_iterator =
+                    _client_descriptors_by_event_token.find(event_token);
+                if (descriptor_iterator == _client_descriptors_by_event_token.end())
+                {
+                    continue;
+                }
+
+                const int client_descriptor = descriptor_iterator->second;
+                handleClientEvent(client_descriptor, event.events);
             }
         }
 
@@ -210,7 +225,7 @@ namespace snf::server
     {
         epoll_event listener_event{};
         listener_event.events = EPOLLIN;
-        listener_event.data.fd = _listener.getDescriptor();
+        listener_event.data.u64 = LISTENER_EVENT_TOKEN;
 
         if (::epoll_ctl(_epoll.getDescriptor(),
                         EPOLL_CTL_ADD,
@@ -221,11 +236,12 @@ namespace snf::server
         }
     }
 
-    void TcpServer::registerControlDescriptor(const int descriptor) const
+    void TcpServer::registerControlDescriptor(const int descriptor,
+                                              const std::uint64_t event_token) const
     {
         epoll_event control_event{};
         control_event.events = EPOLLIN;
-        control_event.data.fd = descriptor;
+        control_event.data.u64 = event_token;
 
         if (::epoll_ctl(_epoll.getDescriptor(), EPOLL_CTL_ADD, descriptor, &control_event) == -1)
         {
@@ -264,6 +280,11 @@ namespace snf::server
                                                       *_client_send_buffer_size);
             }
 
+            if (_next_connection_generation == MAX_CONNECTION_GENERATION)
+            {
+                throw std::overflow_error{"Connection generation exhausted"};
+            }
+
             const ConnectionId connection{
                 .descriptor = client_descriptor,
                 .generation = ++_next_connection_generation,
@@ -280,9 +301,17 @@ namespace snf::server
                 throw std::logic_error{"A session already owns the client descriptor"};
             }
 
+            const bool event_token_inserted =
+                _client_descriptors_by_event_token.emplace(connection.generation, client_descriptor)
+                    .second;
+            if (!event_token_inserted)
+            {
+                throw std::logic_error{"A client event token is already registered"};
+            }
+
             epoll_event client_event{};
             client_event.events = EPOLLIN | EPOLLRDHUP;
-            client_event.data.fd = client_descriptor;
+            client_event.data.u64 = connection.generation;
 
             if (::epoll_ctl(
                     _epoll.getDescriptor(), EPOLL_CTL_ADD, client_descriptor, &client_event) == -1)
@@ -629,7 +658,7 @@ namespace snf::server
     {
         epoll_event client_event{};
         client_event.events = EPOLLRDHUP;
-        client_event.data.fd = session.getDescriptor();
+        client_event.data.u64 = session.getConnectionId().generation;
 
         if (!_is_stopping)
         {
@@ -664,6 +693,8 @@ namespace snf::server
                       << std::generic_category().message(error_number) << '\n';
         }
 
+        _client_descriptors_by_event_token.erase(
+            session_iterator->second.getConnectionId().generation);
         _sessions.erase(session_iterator);
         ++_stats.closed_connections;
         std::cout << "Closed client FD: " << client_descriptor << '\n';

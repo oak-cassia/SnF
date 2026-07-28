@@ -56,7 +56,7 @@ namespace snf::server
 
     private:
         void registerListener() const;
-        void registerControlDescriptor(int descriptor) const;
+        void registerControlDescriptor(int descriptor, std::uint64_t event_token) const;
         void acceptPendingClients();
         void handleClientEvent(int client_descriptor, std::uint32_t event_flags);
         void handleOutboundActions();
@@ -88,6 +88,9 @@ namespace snf::server
         bool _is_stopping{false};
         bool _game_runtime_drained{false};
         std::unordered_map<int, snf::net::Session> _sessions;
+        // epoll may return a copied event after its FD has been closed and reused.
+        // Generation tokens let the reactor discard that event instead of targeting the new FD.
+        std::unordered_map<std::uint64_t, int> _client_descriptors_by_event_token;
         TcpServerStats _stats;
     };
 }

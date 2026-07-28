@@ -180,6 +180,38 @@ namespace
         }
     }
 
+    void send_until_complete_or_closed(const int socket_descriptor,
+                                       const std::span<const std::byte> bytes)
+    {
+        std::size_t sent_byte_count = 0;
+
+        while (sent_byte_count < bytes.size())
+        {
+            const auto result = ::send(socket_descriptor,
+                                       bytes.data() + sent_byte_count,
+                                       bytes.size() - sent_byte_count,
+                                       MSG_NOSIGNAL);
+
+            if (result > 0)
+            {
+                sent_byte_count += static_cast<std::size_t>(result);
+                continue;
+            }
+
+            if (result == -1 && errno == EINTR)
+            {
+                continue;
+            }
+
+            if (result == -1 && (errno == EPIPE || errno == ECONNRESET))
+            {
+                return;
+            }
+
+            assert(false);
+        }
+    }
+
     std::vector<std::byte> receive_exact(const int socket_descriptor,
                                          const std::size_t expected_byte_count)
     {
@@ -498,7 +530,7 @@ namespace
             bundled_requests.insert(
                 bundled_requests.end(), encoded_request.begin(), encoded_request.end());
         }
-        send_all(slow_client.getDescriptor(), bundled_requests);
+        send_until_complete_or_closed(slow_client.getDescriptor(), bundled_requests);
         receive_until_closed(slow_client.getDescriptor());
 
         const auto healthy_client = connect_client(server.getPort());
