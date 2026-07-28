@@ -510,13 +510,17 @@ namespace snf::server
                               << to_string(network_action.reason) << '\n';
                     removeSession(network_action.connection.descriptor);
                 }
-                else
+                else if constexpr (std::is_same_v<Action, GameRuntimeDrained>)
                 {
                     _actor_runtime_drained = true;
                     if (_is_stopping)
                     {
                         completeShutdownAfterActorRuntimeDrained();
                     }
+                }
+                else
+                {
+                    abortShutdownAfterActorRuntimeFailure();
                 }
             },
             std::move(action));
@@ -619,6 +623,14 @@ namespace snf::server
         {
             removeSession(client_descriptor);
         }
+    }
+
+    void TcpServer::abortShutdownAfterActorRuntimeFailure()
+    {
+        _actor_runtime_drained = true;
+        beginShutdown();
+        cancelQueues();
+        closeRemainingSessions();
     }
 
     void TcpServer::cancelQueues()

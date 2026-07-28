@@ -593,6 +593,8 @@ Worker로 동작했으며, 2단계에서 아래 ActorRuntime으로 교체했다.
   평균·최대 queue wait를 기록한다.
 - `close()`는 accepted command를 모두 drain한 뒤 마지막 Worker가 `GameRuntimeDrained`를 한 번
   발행하고, `cancel()`은 queued command를 폐기한다.
+- drain과 cancel은 atomic completion state에서 하나만 승리하며, Worker 실패는
+  `ActorRuntimeFailed`를 발행해 shutdown deadline을 기다리지 않고 Reactor를 중단한다.
 - 같은 Actor의 FIFO·단일 실행, shard 간 병렬 실행, shard별 포화 격리, drain/cancel/예외 전파를
   테스트한다.
 

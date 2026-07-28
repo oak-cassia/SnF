@@ -32,6 +32,7 @@ non-blocking 부하 테스트 클라이언트와 1,000개 연결 승인 시험�
 - `eventfd` 기반 `requestStop()`
 - `signalfd` 기반 SIGINT·SIGTERM
 - 기본 5초 ActorRuntime drain → `GameRuntimeDrained` 1회 → pending send drain graceful shutdown
+- Worker 실패는 `ActorRuntimeFailed`를 발행해 grace period를 기다리지 않고 즉시 종료
 - 종료 시 수락·종료 연결, 송수신 Frame, protocol error, queue overflow, stale action 및 Worker별
   ActorRuntime 통계 출력
 

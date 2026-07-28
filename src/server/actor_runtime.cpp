@@ -129,7 +129,7 @@ namespace snf::server
         }
 
         _input_state = InputState::Closed;
-        _normal_drain_requested.store(true, std::memory_order_release);
+        _completion_state.store(CompletionState::DrainRequested, std::memory_order_release);
         for (const auto& worker : _workers)
         {
             worker->commands.close();
@@ -145,7 +145,16 @@ namespace snf::server
         }
 
         _input_state = InputState::Cancelled;
-        _cancelled.store(true, std::memory_order_release);
+        CompletionState completion = _completion_state.load(std::memory_order_acquire);
+        while (completion != CompletionState::Cancelled &&
+               completion != CompletionState::DrainWon &&
+               completion != CompletionState::Failed &&
+               !_completion_state.compare_exchange_weak(completion,
+                                                        CompletionState::Cancelled,
+                                                        std::memory_order_acq_rel,
+                                                        std::memory_order_acquire))
+        {
+        }
         for (const auto& worker : _workers)
         {
             worker->commands.cancel();
@@ -257,15 +266,16 @@ namespace snf::server
     {
         const std::size_t completed =
             _finished_workers.fetch_add(1, std::memory_order_acq_rel) + 1;
-        if (completed != _worker_count ||
-            !_normal_drain_requested.load(std::memory_order_acquire) ||
-            _cancelled.load(std::memory_order_acquire))
+        if (completed != _worker_count)
         {
             return;
         }
 
-        bool expected = false;
-        if (_drained_published.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+        CompletionState expected = CompletionState::DrainRequested;
+        if (_completion_state.compare_exchange_strong(expected,
+                                                      CompletionState::DrainWon,
+                                                      std::memory_order_acq_rel,
+                                                      std::memory_order_acquire))
         {
             static_cast<void>(publish(GameRuntimeDrained{}));
         }
@@ -286,7 +296,19 @@ namespace snf::server
             _worker_error = std::move(error);
         }
 
+        _completion_state.store(CompletionState::Failed, std::memory_order_release);
         cancel();
+
+        try
+        {
+            static_cast<void>(publish(ActorRuntimeFailed{}));
+        }
+        catch (...)
+        {
+            // The original worker exception remains authoritative. The stop callback
+            // below is the fallback when the failure action cannot be published.
+        }
+
         if (_on_worker_failure)
         {
             try

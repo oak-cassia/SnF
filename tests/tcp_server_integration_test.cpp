@@ -13,9 +13,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <future>
 #include <optional>
 #include <poll.h>
 #include <span>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
@@ -25,6 +27,36 @@
 namespace
 {
     using namespace std::chrono_literals;
+
+    class RecordingCommandIngress final : public snf::server::CommandIngress
+    {
+    public:
+        [[nodiscard]] snf::server::PostResult
+        tryPost(snf::server::InboundCommand) override
+        {
+            return snf::server::PostResult::Closed;
+        }
+
+        void close() noexcept override
+        {
+            closed = true;
+        }
+
+        void cancel() noexcept override
+        {
+            cancelled = true;
+        }
+
+        bool closed{false};
+        bool cancelled{false};
+    };
+
+    snf::net::UniqueFileDescriptor make_eventfd()
+    {
+        const int descriptor = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+        assert(descriptor != -1);
+        return snf::net::UniqueFileDescriptor{descriptor};
+    }
 
     class RunningServer
     {
@@ -602,6 +634,51 @@ namespace
         assert(::kill(::getpid(), signal_number) == 0);
         server.join();
     }
+
+    void test_actor_runtime_failure_aborts_without_waiting_for_grace_period()
+    {
+        RecordingCommandIngress ingress;
+        snf::runtime::BoundedQueue<snf::server::NetworkAction> outbound{8};
+        const auto outbound_event = make_eventfd();
+        snf::server::TcpServer server{
+            snf::server::TcpServerConfig{
+                .port = 0,
+                .shutdown_grace_period = 5s,
+                .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
+                .client_send_buffer_size = std::nullopt,
+            },
+            ingress,
+            outbound,
+            outbound_event.getDescriptor()};
+
+        std::promise<void> server_finished;
+        const auto finished = server_finished.get_future();
+        std::exception_ptr server_error;
+        std::thread server_thread{
+            [&]
+            {
+                try
+                {
+                    server.run();
+                }
+                catch (...)
+                {
+                    server_error = std::current_exception();
+                }
+                server_finished.set_value();
+            }};
+
+        assert(outbound.tryPush(snf::server::ActorRuntimeFailed{}));
+        constexpr std::uint64_t wakeup_value = 1;
+        assert(::write(outbound_event.getDescriptor(), &wakeup_value, sizeof(wakeup_value)) ==
+               sizeof(wakeup_value));
+        assert(finished.wait_for(1s) == std::future_status::ready);
+        server_thread.join();
+
+        assert(server_error == nullptr);
+        assert(ingress.closed);
+        assert(ingress.cancelled);
+    }
 }
 
 int main()
@@ -617,4 +694,5 @@ int main()
     test_shutdown_forces_slow_client_closed_after_grace_period();
     test_termination_signal_stops_server(SIGINT);
     test_termination_signal_stops_server(SIGTERM);
+    test_actor_runtime_failure_aborts_without_waiting_for_grace_period();
 }

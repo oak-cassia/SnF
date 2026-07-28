@@ -66,6 +66,7 @@ namespace snf::server
         void handleTerminationSignal(int signal_descriptor);
         void beginShutdown();
         void completeShutdownAfterActorRuntimeDrained();
+        void abortShutdownAfterActorRuntimeFailure();
         void cancelQueues();
         [[nodiscard]] bool flushPendingSend(snf::net::Session& session);
         void updateClientEvents(const snf::net::Session& session) const;

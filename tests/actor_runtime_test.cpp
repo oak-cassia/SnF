@@ -395,6 +395,7 @@ namespace
         assert(first_handler_started.wait_for(1s) == std::future_status::ready);
         assert(runtime.tryPost(make_command(0, 2, snf::protocol::MessageType::Pong)) ==
                snf::server::PostResult::Accepted);
+        runtime.close();
         runtime.cancel();
         runtime.cancel();
         assert(runtime.tryPost(make_command(0, 3, snf::protocol::MessageType::Pong)) ==
@@ -485,6 +486,11 @@ namespace
             rethrown = std::string_view{error.what()} == "test worker failure";
         }
         assert(rethrown);
+
+        const auto failure_action = outbound.tryPop();
+        assert(failure_action.has_value());
+        assert(std::holds_alternative<snf::server::ActorRuntimeFailed>(*failure_action));
+        assert(!outbound.tryPop().has_value());
     }
 }
 

@@ -53,7 +53,12 @@ namespace snf::server
     {
     };
 
-    using NetworkAction = std::variant<SendFrame, CloseConnection, GameRuntimeDrained>;
+    struct ActorRuntimeFailed
+    {
+    };
+
+    using NetworkAction =
+        std::variant<SendFrame, CloseConnection, GameRuntimeDrained, ActorRuntimeFailed>;
 
     [[nodiscard]] constexpr std::string_view to_string(const CloseReason reason) noexcept
     {

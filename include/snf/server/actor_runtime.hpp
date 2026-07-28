@@ -104,6 +104,15 @@ namespace snf::server
             Cancelled,
         };
 
+        enum class CompletionState
+        {
+            Open,
+            DrainRequested,
+            Cancelled,
+            DrainWon,
+            Failed,
+        };
+
         void runWorker(std::size_t worker_index);
         void workerFinished() noexcept;
         void recordWorkerFailure(std::exception_ptr error) noexcept;
@@ -123,10 +132,8 @@ namespace snf::server
         mutable std::mutex _state_mutex;
         InputState _input_state{InputState::NotStarted};
         bool _started{false};
-        std::atomic<bool> _normal_drain_requested{false};
-        std::atomic<bool> _cancelled{false};
+        std::atomic<CompletionState> _completion_state{CompletionState::Open};
         std::atomic<std::size_t> _finished_workers{0};
-        std::atomic<bool> _drained_published{false};
         std::atomic<bool> _worker_failure_recorded{false};
         mutable std::mutex _error_mutex;
         std::exception_ptr _worker_error;

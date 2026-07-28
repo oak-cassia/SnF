@@ -41,8 +41,10 @@ epoll Reactor
   사용한다.
 - 기본 2 Worker(`actor_worker_count=2`)와 Worker별 4,096개 bounded queue를 사용한다.
 - 동일 Actor는 항상 한 Worker FIFO에서 실행하며, 서로 다른 shard는 병렬로 실행한다.
-- `close()` drain, `cancel()` discard, 첫 Worker 예외 취소·전파와 `GameRuntimeDrained` 1회
-  발행을 구현한다.
+- atomic completion state로 `close()` drain과 `cancel()` discard를 경쟁 없이 결정하고,
+  `GameRuntimeDrained`를 한 번만 발행한다.
+- 첫 Worker 예외는 전체 shard를 취소하고 `ActorRuntimeFailed`로 Reactor를 즉시 종료한 뒤
+  호출자에게 전파한다.
 - Worker별 accepted/processed/rejected-full, depth/high-water mark, 평균·최대 queue wait를
   snapshot과 종료 summary로 제공한다.
 
