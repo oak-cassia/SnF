@@ -52,12 +52,17 @@ namespace
 
         const int read_file_descriptor = pipe_file_descriptors[0];
         snf::net::UniqueFileDescriptor socket{read_file_descriptor};
+        const snf::server::ConnectionId connection_id{
+            .descriptor = read_file_descriptor,
+            .generation = 99,
+        };
 
         {
-            snf::net::Session session{std::move(socket)};
+            snf::net::Session session{std::move(socket), connection_id};
 
             assert(!socket.isValid());
             assert(session.getDescriptor() == read_file_descriptor);
+            assert(session.getConnectionId() == connection_id);
         }
 
         assert(snf::test::is_closed(read_file_descriptor));

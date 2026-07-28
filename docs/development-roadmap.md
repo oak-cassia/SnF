@@ -17,21 +17,21 @@ Network Runtime
 실행 순서는 기존 계획의 `1 → 2 → 3 → 4 → 8 → 6 → 7`이며, 아래에서는 실제 진행
 순서대로 다시 번호를 매겼다.
 
-## 1. Network와 GameRuntime 분리
+## 1. Network와 GameRuntime 분리 (완료)
 
 ```text
 epoll Reactor
 → InboundCommand
 → GameWorker
-→ OutboundMessage
+→ NetworkAction
 → eventfd
 → Reactor send
 ```
 
-- 논리 `ConnectionId + generation`을 도입한다.
-- inbound/outbound bounded queue를 구현한다.
+- 논리 `ConnectionId + generation`을 도입했다.
+- inbound/outbound bounded queue와 outbound `eventfd` wake-up을 구현했다.
 - 현재 PING/PONG을 GameWorker까지 왕복시킨다.
-- 순서, stale response, queue 포화와 graceful shutdown을 검증한다.
+- 순서, stale response, queue 포화와 graceful shutdown을 테스트한다.
 
 완료 기준: 기존 단위·통합·1,000 연결 부하 테스트가 새 경계를 거쳐 통과한다.
 

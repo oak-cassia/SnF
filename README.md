@@ -1,8 +1,8 @@
 # SnF
 
-C++20과 Linux `epoll`로 만든 단일 스레드 실시간 TCP 서버 연습 프로젝트다. 현재 첫 번째
-마일스톤인 PING/PONG 서버, graceful shutdown, non-blocking 부하 테스트 클라이언트와
-1,000개 연결 승인 시험까지 완료했다.
+C++20과 Linux `epoll`로 만든 실시간 TCP 게임 서버 연습 프로젝트다. Network Reactor 하나와
+GameWorker 하나를 bounded queue와 `eventfd`로 분리했으며, PING/PONG, graceful shutdown,
+non-blocking 부하 테스트 클라이언트와 1,000개 연결 승인 시험을 제공한다.
 
 ## 현재 기능
 
@@ -13,15 +13,18 @@ C++20과 Linux `epoll`로 만든 단일 스레드 실시간 TCP 서버 연습 �
 - RAII 기반 client FD와 Session 수명 관리
 - 길이 기반 binary Frame decode
 - 부분 수신과 여러 Frame 일괄 수신
-- `unordered_map<MessageType, Handler>` 기반 메시지 dispatch
-- PING 요청에 request ID와 payload가 같은 PONG 응답
+- Reactor → inbound bounded queue → GameWorker → outbound bounded queue 구조
+- `ConnectionId(fd, generation)`으로 늦은 응답과 FD 재사용 응답 차단
+- GameWorker가 `unordered_map<MessageType, Handler>` 기반 dispatch와 PING/PONG 처리 담당
+- outbound `eventfd` wake-up과 Reactor의 Session 송신 queue 반영
+- inbound queue 포화 시 해당 연결만 종료, outbound queue는 GameWorker에 backpressure 전달
 - 부분 송신 queue와 동적 `EPOLLOUT`
 - Session별 기본 1 MiB 백프레셔
 - client socket `TCP_NODELAY`
 - `eventfd` 기반 `requestStop()`
 - `signalfd` 기반 SIGINT·SIGTERM
-- 기본 5초 pending send drain과 graceful shutdown
-- 종료 시 수락·종료 연결, 송수신 Frame, protocol error 통계 출력
+- 기본 5초 inbound drain → GameRuntimeDrained → pending send drain graceful shutdown
+- 종료 시 수락·종료 연결, 송수신 Frame, protocol error, queue overflow, stale action 통계 출력
 
 ### 부하 테스트 클라이언트
 
@@ -130,15 +133,17 @@ CLI 기본값:
 
 ## 첫 마일스톤 승인 결과
 
-2026-07-26, Ubuntu 24.04 Docker container의 Release 빌드에서 다음 명령을 실행했다.
+2026-07-28, Ubuntu 24.04 Docker container의 Release 빌드에서 1,000개 연결과 연결당
+초당 10개 요청(총 10,000 responses/s)으로 다음 결과를 확인했다.
 
 ```text
 Connections: 1000/1000 succeeded, 0 failed, peak active 1000
-Requests: 300000 sent, 300000 received, 0 timeout, 0 invalid, 0 socket error
+Requests: 30000 sent, 30000 received, 0 timeout, 0 invalid, 0 socket error
 Throughput: 10000.000 responses/s
-RTT ms: avg 9.430, p50 8.569, p95 13.928, p99 15.392
-Server summary: 1000 accepted, 1000 closed, 300000 frames received,
-300000 frames sent, 0 protocol errors
+RTT ms: avg 9.408, p50 7.496, p95 14.834, p99 65.433
+Server summary: 1000 accepted, 1000 closed, 30000 frames received,
+30000 frames sent, 0 protocol errors, 0 game queue overflows,
+0 stale network actions
 ```
 
 Debug 및 ASan·UBSan 구성에서도 단위 테스트, TCP loopback 테스트, 느린 client 백프레셔,

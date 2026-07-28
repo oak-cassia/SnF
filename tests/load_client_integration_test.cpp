@@ -1,5 +1,5 @@
 #include "snf/load/load_client.hpp"
-#include "snf/server/tcp_server.hpp"
+#include "snf/server/game_server.hpp"
 
 #include <cassert>
 #include <chrono>
@@ -61,7 +61,7 @@ namespace
         }
 
     private:
-        snf::server::TcpServer _server;
+        snf::server::GameServer _server;
         std::exception_ptr _server_error;
         std::thread _thread;
     };

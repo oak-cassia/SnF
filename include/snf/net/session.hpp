@@ -2,6 +2,7 @@
 
 #include "snf/net/unique_file_descriptor.hpp"
 #include "snf/protocol/frame_codec.hpp"
+#include "snf/server/runtime_types.hpp"
 
 #include <cstddef>
 #include <deque>
@@ -17,6 +18,9 @@ namespace snf::net
     public:
         explicit Session(UniqueFileDescriptor socket,
                          std::size_t max_pending_send_bytes = MAX_PENDING_SEND_BYTES) noexcept;
+        explicit Session(UniqueFileDescriptor socket,
+                         snf::server::ConnectionId connection_id,
+                         std::size_t max_pending_send_bytes = MAX_PENDING_SEND_BYTES) noexcept;
 
         Session(const Session&) = delete;
         Session& operator=(const Session&) = delete;
@@ -25,6 +29,7 @@ namespace snf::net
         Session& operator=(Session&&) noexcept = default;
 
         [[nodiscard]] int getDescriptor() const noexcept;
+        [[nodiscard]] const snf::server::ConnectionId& getConnectionId() const noexcept;
 
         [[nodiscard]] snf::protocol::DecodeResult
         appendReceivedBytes(std::span<const std::byte> bytes);
@@ -44,6 +49,7 @@ namespace snf::net
         };
 
         UniqueFileDescriptor _socket;
+        snf::server::ConnectionId _connection_id;
         snf::protocol::FrameDecoder _frame_decoder;
         std::deque<PendingSend> _send_queue;
         std::size_t _pending_send_byte_count{0};

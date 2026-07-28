@@ -563,19 +563,23 @@ include/snf/
 
 ## 13. 현재 구조에서의 발전 단계
 
-### 단계 1: Network와 게임 로직 분리
+### 단계 1: Network와 게임 로직 분리 (완료)
 
-현재 `TcpServer`의 동기식 `MessageDispatcher::dispatch()` 호출을 다음 구조로 바꾼다.
+`TcpServer`의 동기식 `MessageDispatcher::dispatch()` 호출은 다음 구조로 분리했다.
 
 ```text
 epoll Reactor
 → Frame decode
-→ CommandRouter
-→ Runtime.post(entityId, command)
+→ InboundCommand bounded queue
+→ GameRuntime Worker
+→ NetworkAction bounded queue
+→ eventfd
+→ Reactor send
 ```
 
-이 단계에서 논리 `ConnectionId`, inbound/outbound bounded queue와 `eventfd` wake-up을
-도입한다.
+Session은 단조 증가 generation을 포함하는 `ConnectionId`를 받고, Reactor는 현재 ID와
+일치하는 `NetworkAction`만 적용한다. shutdown은 inbound queue close, GameRuntime drain
+통지, Session 송신 queue drain 순서로 진행하며 deadline 이후에는 양쪽 queue를 cancel한다.
 
 ### 단계 2: Player Runtime
 

@@ -2,10 +2,12 @@
 
 #include "snf/net/session.hpp"
 #include "snf/net/unique_file_descriptor.hpp"
-#include "snf/server/message_dispatcher.hpp"
+#include "snf/runtime/bounded_queue.hpp"
+#include "snf/server/runtime_types.hpp"
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <unordered_map>
 
@@ -26,15 +28,19 @@ namespace snf::server
         std::uint64_t received_frames{0};
         std::uint64_t sent_frames{0};
         std::uint64_t protocol_errors{0};
+        std::uint64_t game_queue_overflows{0};
+        std::uint64_t stale_network_actions{0};
     };
 
+    // The epoll reactor. GameServer owns the queues and uses this component only to
+    // decode inbound frames and apply NetworkAction values on the reactor thread.
     class TcpServer
     {
     public:
-        explicit TcpServer(const TcpServerConfig& config);
-        explicit TcpServer(
-            std::uint16_t port,
-            std::chrono::milliseconds shutdown_grace_period = std::chrono::milliseconds{5000});
+        TcpServer(const TcpServerConfig& config,
+                  snf::runtime::BoundedQueue<InboundCommand>& inbound_commands,
+                  snf::runtime::BoundedQueue<NetworkAction>& network_actions,
+                  int outbound_event_descriptor);
 
         TcpServer(const TcpServer&) = delete;
         TcpServer& operator=(const TcpServer&) = delete;
@@ -53,14 +59,19 @@ namespace snf::server
         void registerControlDescriptor(int descriptor) const;
         void acceptPendingClients();
         void handleClientEvent(int client_descriptor, std::uint32_t event_flags);
+        void handleOutboundActions();
+        void handleNetworkAction(NetworkAction action);
         void handleStopRequest();
         void handleTerminationSignal(int signal_descriptor);
         void beginShutdown();
+        void completeShutdownAfterGameRuntimeDrained();
+        void cancelQueues();
         [[nodiscard]] bool flushPendingSend(snf::net::Session& session);
         void updateClientEvents(const snf::net::Session& session) const;
         void removeSession(int client_descriptor);
         void closeRemainingSessions();
         [[nodiscard]] int getEpollWaitTimeout() const;
+        [[nodiscard]] snf::net::Session* findCurrentSession(ConnectionId connection);
 
         snf::net::UniqueFileDescriptor _listener;
         snf::net::UniqueFileDescriptor _epoll;
@@ -69,10 +80,14 @@ namespace snf::server
         std::chrono::milliseconds _shutdown_grace_period;
         std::size_t _max_pending_send_bytes;
         std::optional<int> _client_send_buffer_size;
+        snf::runtime::BoundedQueue<InboundCommand>& _inbound_commands;
+        snf::runtime::BoundedQueue<NetworkAction>& _network_actions;
+        int _outbound_event_descriptor;
         std::chrono::steady_clock::time_point _shutdown_deadline{};
+        std::uint64_t _next_connection_generation{0};
         bool _is_stopping{false};
+        bool _game_runtime_drained{false};
         std::unordered_map<int, snf::net::Session> _sessions;
-        MessageDispatcher _message_dispatcher;
         TcpServerStats _stats;
     };
 }

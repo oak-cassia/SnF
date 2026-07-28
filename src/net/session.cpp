@@ -11,9 +11,23 @@ namespace snf::net
     {
     }
 
+    Session::Session(UniqueFileDescriptor socket,
+                     const snf::server::ConnectionId connection_id,
+                     const std::size_t max_pending_send_bytes) noexcept
+        : _socket(std::move(socket))
+        , _connection_id(connection_id)
+        , _max_pending_send_bytes(max_pending_send_bytes)
+    {
+    }
+
     int Session::getDescriptor() const noexcept
     {
         return _socket.getDescriptor();
+    }
+
+    const snf::server::ConnectionId& Session::getConnectionId() const noexcept
+    {
+        return _connection_id;
     }
 
     protocol::DecodeResult Session::appendReceivedBytes(std::span<const std::byte> bytes)

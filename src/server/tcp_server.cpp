@@ -19,8 +19,10 @@
 #include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <system_error>
+#include <type_traits>
 #include <unistd.h>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace
@@ -56,7 +58,7 @@ namespace
         auto address_size = static_cast<socklen_t>(sizeof(address));
 
         if (::getsockname(
-            listener_descriptor, reinterpret_cast<sockaddr*>(&address), &address_size) == -1)
+                listener_descriptor, reinterpret_cast<sockaddr*>(&address), &address_size) == -1)
         {
             snf::net::throw_system_error("getsockname");
         }
@@ -67,35 +69,32 @@ namespace
 
 namespace snf::server
 {
-    TcpServer::TcpServer(const TcpServerConfig& config)
+    TcpServer::TcpServer(const TcpServerConfig& config,
+                         snf::runtime::BoundedQueue<InboundCommand>& inbound_commands,
+                         snf::runtime::BoundedQueue<NetworkAction>& network_actions,
+                         const int outbound_event_descriptor)
         : _listener(snf::net::create_tcp_listener(config.port))
-          , _epoll(create_epoll_instance())
-          , _stop_event(create_stop_event())
-          , _port(get_listener_port(_listener.getDescriptor()))
-          , _shutdown_grace_period(config.shutdown_grace_period)
-          , _max_pending_send_bytes(config.max_pending_send_bytes)
-          , _client_send_buffer_size(config.client_send_buffer_size)
+        , _epoll(create_epoll_instance())
+        , _stop_event(create_stop_event())
+        , _port(get_listener_port(_listener.getDescriptor()))
+        , _shutdown_grace_period(config.shutdown_grace_period)
+        , _max_pending_send_bytes(config.max_pending_send_bytes)
+        , _client_send_buffer_size(config.client_send_buffer_size)
+        , _inbound_commands(inbound_commands)
+        , _network_actions(network_actions)
+        , _outbound_event_descriptor(outbound_event_descriptor)
     {
         if (_shutdown_grace_period < std::chrono::milliseconds::zero() ||
             _max_pending_send_bytes == 0 ||
-            (_client_send_buffer_size && *_client_send_buffer_size <= 0))
+            (_client_send_buffer_size && *_client_send_buffer_size <= 0) ||
+            _outbound_event_descriptor == snf::net::UniqueFileDescriptor::INVALID_FD)
         {
             throw std::invalid_argument{"Invalid TCP server configuration"};
         }
 
         registerListener();
         registerControlDescriptor(_stop_event.getDescriptor());
-    }
-
-    TcpServer::TcpServer(const std::uint16_t port,
-                         const std::chrono::milliseconds shutdown_grace_period)
-        : TcpServer(TcpServerConfig{
-            .port = port,
-            .shutdown_grace_period = shutdown_grace_period,
-            .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
-            .client_send_buffer_size = std::nullopt,
-        })
-    {
+        registerControlDescriptor(_outbound_event_descriptor);
     }
 
     std::uint16_t TcpServer::getPort() const noexcept
@@ -117,12 +116,17 @@ namespace snf::server
 
         std::array<epoll_event, MAX_READY_EVENTS> events{};
 
-        // 종료 요청 후 모든 송신 queue가 비거나 종료 유예 시간이 끝날 때까지 실행한다.
-        while (!_is_stopping || !_sessions.empty())
+        while (true)
         {
+            if (_is_stopping && _game_runtime_drained && _sessions.empty())
+            {
+                break;
+            }
+
             const int wait_timeout = getEpollWaitTimeout();
             if (_is_stopping && wait_timeout == 0)
             {
+                cancelQueues();
                 break;
             }
 
@@ -153,6 +157,10 @@ namespace snf::server
                 {
                     handleTerminationSignal(termination_signal_descriptor);
                 }
+                else if (ready_descriptor == _outbound_event_descriptor)
+                {
+                    handleOutboundActions();
+                }
             }
 
             for (int event_index = 0; event_index < ready_event_count; ++event_index)
@@ -160,7 +168,8 @@ namespace snf::server
                 const epoll_event& event = events[event_index];
 
                 if (event.data.fd == _stop_event.getDescriptor() ||
-                    event.data.fd == termination_signal_descriptor)
+                    event.data.fd == termination_signal_descriptor ||
+                    event.data.fd == _outbound_event_descriptor)
                 {
                     continue;
                 }
@@ -184,7 +193,6 @@ namespace snf::server
 
     void TcpServer::requestStop() const noexcept
     {
-        // 값을 0에서 1로 주어, run 함수에서 중단을 알 수 있게 함
         constexpr std::uint64_t stop_value = 1;
 
         while (::write(_stop_event.getDescriptor(), &stop_value, sizeof(stop_value)) == -1)
@@ -227,7 +235,6 @@ namespace snf::server
 
     void TcpServer::acceptPendingClients()
     {
-        // accept 대기열에 남은 연결이 없을 때까지 모두 수락한다.
         while (true)
         {
             const int client_descriptor = ::accept4(
@@ -257,11 +264,16 @@ namespace snf::server
                                                       *_client_send_buffer_size);
             }
 
+            const ConnectionId connection{
+                .descriptor = client_descriptor,
+                .generation = ++_next_connection_generation,
+            };
             const bool inserted =
                 _sessions
-                .emplace(client_descriptor,
-                         snf::net::Session{std::move(client_socket), _max_pending_send_bytes})
-                .second;
+                    .emplace(client_descriptor,
+                             snf::net::Session{
+                                 std::move(client_socket), connection, _max_pending_send_bytes})
+                    .second;
 
             if (!inserted)
             {
@@ -273,7 +285,7 @@ namespace snf::server
             client_event.data.fd = client_descriptor;
 
             if (::epoll_ctl(
-                _epoll.getDescriptor(), EPOLL_CTL_ADD, client_descriptor, &client_event) == -1)
+                    _epoll.getDescriptor(), EPOLL_CTL_ADD, client_descriptor, &client_event) == -1)
             {
                 snf::net::throw_system_error("epoll_ctl(EPOLL_CTL_ADD client)");
             }
@@ -301,7 +313,6 @@ namespace snf::server
                 return;
             }
 
-            // EAGAIN, EOF 또는 복구할 수 없는 소켓 오류가 발생할 때까지 수신한다.
             while (true)
             {
                 const auto received_byte_count =
@@ -320,7 +331,6 @@ namespace snf::server
                     {
                         ++_stats.protocol_errors;
                         std::cerr << "Protocol error from client FD: " << client_descriptor << '\n';
-
                         should_remove_session = true;
                         break;
                     }
@@ -328,32 +338,15 @@ namespace snf::server
                     for (const auto& frame : decode_result.frames)
                     {
                         ++_stats.received_frames;
-
-                        const auto dispatch_result = _message_dispatcher.dispatch(frame);
-                        if (!dispatch_result.handled())
+                        if (!_inbound_commands.tryPush(InboundCommand{
+                                .connection = session_iterator->second.getConnectionId(),
+                                .frame = frame,
+                            }))
                         {
-                            ++_stats.protocol_errors;
-                            std::cerr << "No handler for message type from client FD: "
-                                << client_descriptor << '\n';
+                            ++_stats.game_queue_overflows;
+                            std::cerr << "Game queue limit exceeded for client FD: "
+                                      << client_descriptor << '\n';
                             should_remove_session = true;
-                            break;
-                        }
-
-                        for (const auto& response : dispatch_result.responses)
-                        {
-                            if (!session_iterator->second.enqueueFrame(response))
-                            {
-                                std::cerr << "Send queue limit exceeded for client FD: "
-                                    << client_descriptor << '\n';
-                                should_remove_session = true;
-                                break;
-                            }
-
-                            should_update_events = true;
-                        }
-
-                        if (should_remove_session)
-                        {
                             break;
                         }
                     }
@@ -398,7 +391,8 @@ namespace snf::server
             should_remove_session = !flushPendingSend(session_iterator->second);
             should_update_events = !should_remove_session;
 
-            if (_is_stopping && !session_iterator->second.hasPendingSend())
+            if (_is_stopping && _game_runtime_drained &&
+                !session_iterator->second.hasPendingSend())
             {
                 should_remove_session = true;
             }
@@ -417,6 +411,80 @@ namespace snf::server
         {
             updateClientEvents(_sessions.at(client_descriptor));
         }
+    }
+
+    void TcpServer::handleOutboundActions()
+    {
+        std::uint64_t wakeup_count = 0;
+        while (::read(_outbound_event_descriptor, &wakeup_count, sizeof(wakeup_count)) == -1)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                break;
+            }
+
+            snf::net::throw_system_error("read(outbound eventfd)");
+        }
+
+        while (auto action = _network_actions.tryPop())
+        {
+            handleNetworkAction(std::move(*action));
+        }
+    }
+
+    void TcpServer::handleNetworkAction(NetworkAction action)
+    {
+        std::visit(
+            [this](auto&& network_action)
+            {
+                using Action = std::decay_t<decltype(network_action)>;
+
+                if constexpr (std::is_same_v<Action, SendFrame>)
+                {
+                    auto* session = findCurrentSession(network_action.connection);
+                    if (session == nullptr)
+                    {
+                        return;
+                    }
+
+                    if (!session->enqueueFrame(network_action.frame))
+                    {
+                        std::cerr << "Send queue limit exceeded for client FD: "
+                                  << network_action.connection.descriptor << '\n';
+                        removeSession(network_action.connection.descriptor);
+                        return;
+                    }
+
+                    updateClientEvents(*session);
+                }
+                else if constexpr (std::is_same_v<Action, CloseConnection>)
+                {
+                    if (findCurrentSession(network_action.connection) == nullptr)
+                    {
+                        return;
+                    }
+
+                    ++_stats.protocol_errors;
+                    std::cerr << "Closing client FD " << network_action.connection.descriptor
+                              << " because GameRuntime requested "
+                              << to_string(network_action.reason) << '\n';
+                    removeSession(network_action.connection.descriptor);
+                }
+                else
+                {
+                    _game_runtime_drained = true;
+                    if (_is_stopping)
+                    {
+                        completeShutdownAfterGameRuntimeDrained();
+                    }
+                }
+            },
+            std::move(action));
     }
 
     void TcpServer::handleStopRequest()
@@ -472,11 +540,12 @@ namespace snf::server
 
         _is_stopping = true;
         _shutdown_deadline = std::chrono::steady_clock::now() + _shutdown_grace_period;
+        _inbound_commands.close();
 
         if (_listener.isValid())
         {
             if (::epoll_ctl(
-                _epoll.getDescriptor(), EPOLL_CTL_DEL, _listener.getDescriptor(), nullptr) == -1)
+                    _epoll.getDescriptor(), EPOLL_CTL_DEL, _listener.getDescriptor(), nullptr) == -1)
             {
                 snf::net::throw_system_error("epoll_ctl(EPOLL_CTL_DEL listener)");
             }
@@ -484,8 +553,21 @@ namespace snf::server
             _listener.init();
         }
 
-        std::vector<int> sessions_without_pending_send;
+        for (const auto& [client_descriptor, session] : _sessions)
+        {
+            static_cast<void>(client_descriptor);
+            updateClientEvents(session);
+        }
 
+        if (_game_runtime_drained)
+        {
+            completeShutdownAfterGameRuntimeDrained();
+        }
+    }
+
+    void TcpServer::completeShutdownAfterGameRuntimeDrained()
+    {
+        std::vector<int> sessions_without_pending_send;
         for (const auto& [client_descriptor, session] : _sessions)
         {
             if (session.hasPendingSend())
@@ -504,9 +586,14 @@ namespace snf::server
         }
     }
 
+    void TcpServer::cancelQueues()
+    {
+        _inbound_commands.cancel();
+        _network_actions.cancel();
+    }
+
     bool TcpServer::flushPendingSend(snf::net::Session& session)
     {
-        // 송신 queue가 비거나 소켓이 EAGAIN을 반환할 때까지 전송한다.
         while (session.hasPendingSend())
         {
             const std::span<const std::byte> pending_bytes = session.getPendingSendBytes();
@@ -555,8 +642,7 @@ namespace snf::server
         }
 
         if (::epoll_ctl(
-                _epoll.getDescriptor(), EPOLL_CTL_MOD, session.getDescriptor(), &client_event) ==
-            -1)
+                _epoll.getDescriptor(), EPOLL_CTL_MOD, session.getDescriptor(), &client_event) == -1)
         {
             snf::net::throw_system_error("epoll_ctl(EPOLL_CTL_MOD client)");
         }
@@ -574,12 +660,12 @@ namespace snf::server
         {
             const int error_number = errno;
             std::cerr << "Failed to remove client FD " << client_descriptor
-                << " from epoll: " << std::generic_category().message(error_number) << '\n';
+                      << " from epoll: "
+                      << std::generic_category().message(error_number) << '\n';
         }
 
         _sessions.erase(session_iterator);
         ++_stats.closed_connections;
-
         std::cout << "Closed client FD: " << client_descriptor << '\n';
     }
 
@@ -608,5 +694,17 @@ namespace snf::server
             std::chrono::ceil<std::chrono::milliseconds>(_shutdown_deadline - now);
         return static_cast<int>(
             std::min<std::int64_t>(remaining.count(), std::numeric_limits<int>::max()));
+    }
+
+    snf::net::Session* TcpServer::findCurrentSession(const ConnectionId connection)
+    {
+        const auto iterator = _sessions.find(connection.descriptor);
+        if (iterator == _sessions.end() || iterator->second.getConnectionId() != connection)
+        {
+            ++_stats.stale_network_actions;
+            return nullptr;
+        }
+
+        return &iterator->second;
     }
 }
