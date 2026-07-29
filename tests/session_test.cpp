@@ -52,7 +52,7 @@ namespace
 
         const int read_file_descriptor = pipe_file_descriptors[0];
         snf::net::UniqueFileDescriptor socket{read_file_descriptor};
-        const snf::server::ConnectionId connection_id{
+        const snf::net::ConnectionId connection_id{
             .descriptor = read_file_descriptor,
             .generation = 99,
         };

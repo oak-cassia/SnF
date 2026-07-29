@@ -8,6 +8,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(SNF_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+option(SNF_ENABLE_THREAD_SANITIZER "Enable ThreadSanitizer" OFF)
+
+if(SNF_ENABLE_SANITIZERS AND SNF_ENABLE_THREAD_SANITIZER)
+    message(FATAL_ERROR "Address/Undefined sanitizers cannot be combined with ThreadSanitizer")
+endif()
 
 function(snf_configure_target target_name)
     target_compile_features(${target_name} PRIVATE cxx_std_20)
@@ -33,6 +38,20 @@ function(snf_configure_target target_name)
             -fsanitize=address,undefined
         )
     endif()
+
+    if(SNF_ENABLE_THREAD_SANITIZER)
+        if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+            message(FATAL_ERROR "SNF_ENABLE_THREAD_SANITIZER requires Clang or GCC")
+        endif()
+
+        target_compile_options(${target_name} PRIVATE
+            -fsanitize=thread
+            -fno-omit-frame-pointer
+        )
+        target_link_options(${target_name} PRIVATE
+            -fsanitize=thread
+        )
+    endif()
 endfunction()
 
 add_library(snf_core STATIC
@@ -52,6 +71,13 @@ snf_configure_target(snf_core)
 
 add_library(snf_server_runtime STATIC
     src/server/message_dispatcher.cpp
+    src/server/protocol_gateway.cpp
+    src/server/command_router.cpp
+    src/server/protocol_response_mapper.cpp
+    src/server/protocol_player_effect_sink.cpp
+    src/server/player_actor.cpp
+    src/server/outbound_sink.cpp
+    src/server/runtime_completion.cpp
     src/server/actor_runtime.cpp
     src/server/game_server.cpp
     src/server/tcp_server.cpp
@@ -87,6 +113,12 @@ if(BUILD_TESTING)
         tests/build_info_test.cpp
         tests/frame_codec_test.cpp
         tests/bounded_queue_test.cpp
+        tests/command_router_test.cpp
+        tests/protocol_gateway_test.cpp
+        tests/protocol_response_mapper_test.cpp
+        tests/player_effect_sink_test.cpp
+        tests/runtime_boundaries_test.cpp
+        tests/player_actor_test.cpp
         tests/actor_runtime_test.cpp
         tests/message_dispatcher_test.cpp
         tests/session_test.cpp

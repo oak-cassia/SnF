@@ -1,33 +1,32 @@
 #include "snf/server/actor_runtime.hpp"
 
-#include <cerrno>
 #include <chrono>
 #include <stdexcept>
-#include <sys/eventfd.h>
-#include <unistd.h>
+#include <type_traits>
 #include <utility>
+
+namespace
+{
+    constexpr std::size_t INGRESS_BATCH_SIZE = 64;
+    constexpr std::size_t ACTOR_TURN_BUDGET = 16;
+}
 
 namespace snf::server
 {
     ActorRuntime::ActorRuntime(const ActorRuntimeConfig& config,
-                               snf::runtime::BoundedQueue<NetworkAction>& network_actions,
-                               const int outbound_event_descriptor)
+                               PlayerEffectSink& player_effects,
+                               RuntimeCompletionSink& runtime_completion)
         : _worker_count(config.worker_count)
-        , _network_actions(network_actions)
-        , _outbound_event_descriptor(outbound_event_descriptor)
-        , _message_dispatcher_factory(config.message_dispatcher_factory)
+        , _runtime_id(config.runtime_id)
+        , _player_effects(player_effects)
+        , _runtime_completion(runtime_completion)
+        , _on_worker_start(config.on_worker_start)
+        , _on_before_command(config.on_before_command)
         , _on_worker_failure(config.on_worker_failure)
     {
-        if (_worker_count == 0 || config.queue_capacity_per_worker == 0 ||
-            _outbound_event_descriptor < 0)
+        if (_worker_count == 0 || config.queue_capacity_per_worker == 0)
         {
             throw std::invalid_argument{"Invalid ActorRuntime configuration"};
-        }
-
-        if (!_message_dispatcher_factory)
-        {
-            _message_dispatcher_factory =
-                [](std::size_t) { return MessageDispatcher{}; };
         }
 
         _workers.reserve(_worker_count);
@@ -63,8 +62,8 @@ namespace snf::server
             {
                 for (std::size_t worker_index = 0; worker_index < _worker_count; ++worker_index)
                 {
-                    _workers[worker_index]->thread = std::jthread{
-                        [this, worker_index] { runWorker(worker_index); }};
+                    _workers[worker_index]->thread =
+                        std::jthread{[this, worker_index] { runWorker(worker_index); }};
                 }
             }
             catch (...)
@@ -99,24 +98,76 @@ namespace snf::server
 
     PostResult ActorRuntime::tryPost(InboundCommand command)
     {
+        return postEvent(
+            QueuedEvent{
+                .payload = std::move(command),
+                .enqueued_at = std::chrono::steady_clock::now(),
+            },
+            EventKind::Command);
+    }
+
+    PostResult ActorRuntime::tryPostConnectionClosed(const ProvisionalActorId actor,
+                                                     ConnectionClosed closed)
+    {
+        return postEvent(
+            QueuedEvent{
+                .payload =
+                    ConnectionClosedEvent{
+                        .actor = actor,
+                        .closed = closed,
+                    },
+                .enqueued_at = std::chrono::steady_clock::now(),
+            },
+            EventKind::ConnectionClosed);
+    }
+
+    PostResult ActorRuntime::postEvent(QueuedEvent event, const EventKind kind)
+    {
         std::lock_guard lock{_state_mutex};
         if (_input_state != InputState::Running)
         {
             return PostResult::Closed;
         }
 
-        const std::size_t worker_index = workerIndexFor(command.actor);
-        Worker& worker = *_workers[worker_index];
-        if (!worker.commands.tryPush(QueuedCommand{
-                .command = std::move(command),
-                .enqueued_at = std::chrono::steady_clock::now(),
-            }))
+        const ProvisionalActorId actor =
+            std::visit([](const auto& payload) { return payload.actor; }, event.payload);
+        Worker& worker = *_workers[workerIndexFor(actor)];
+        if (!reserveOutstanding(worker))
         {
-            worker.counters.rejected_full.fetch_add(1, std::memory_order_relaxed);
+            if (kind == EventKind::Command)
+            {
+                worker.counters.rejected_full.fetch_add(1, std::memory_order_relaxed);
+            }
             return PostResult::Full;
         }
 
-        worker.counters.accepted.fetch_add(1, std::memory_order_relaxed);
+        bool pushed = false;
+        try
+        {
+            pushed = worker.ingress.tryPush(std::move(event));
+        }
+        catch (...)
+        {
+            releaseOutstanding(worker);
+            throw;
+        }
+
+        if (!pushed)
+        {
+            releaseOutstanding(worker);
+            // close() cannot race the state check above, so a failed ingress push
+            // here is capacity accounting's conservative fallback.
+            if (kind == EventKind::Command)
+            {
+                worker.counters.rejected_full.fetch_add(1, std::memory_order_relaxed);
+            }
+            return PostResult::Full;
+        }
+
+        if (kind == EventKind::Command)
+        {
+            worker.counters.accepted.fetch_add(1, std::memory_order_relaxed);
+        }
         return PostResult::Accepted;
     }
 
@@ -132,7 +183,7 @@ namespace snf::server
         _completion_state.store(CompletionState::DrainRequested, std::memory_order_release);
         for (const auto& worker : _workers)
         {
-            worker->commands.close();
+            worker->ingress.close();
         }
     }
 
@@ -147,8 +198,7 @@ namespace snf::server
         _input_state = InputState::Cancelled;
         CompletionState completion = _completion_state.load(std::memory_order_acquire);
         while (completion != CompletionState::Cancelled &&
-               completion != CompletionState::DrainWon &&
-               completion != CompletionState::Failed &&
+               completion != CompletionState::DrainWon && completion != CompletionState::Failed &&
                !_completion_state.compare_exchange_weak(completion,
                                                         CompletionState::Cancelled,
                                                         std::memory_order_acq_rel,
@@ -157,11 +207,14 @@ namespace snf::server
         }
         for (const auto& worker : _workers)
         {
-            worker->commands.cancel();
+            discardWorkerCommands(*worker);
         }
+        // Publish waits are released only after every ingress reports cancellation,
+        // so a worker cannot mistake an explicit cancel for an outbound failure.
+        _effect_stop_source.request_stop();
     }
 
-    std::size_t ActorRuntime::workerIndexFor(const ActorId actor) const noexcept
+    std::size_t ActorRuntime::workerIndexFor(const ProvisionalActorId actor) const noexcept
     {
         return static_cast<std::size_t>(actor.value % static_cast<std::uint64_t>(_worker_count));
     }
@@ -185,17 +238,37 @@ namespace snf::server
             const std::uint64_t total_wait =
                 worker->counters.total_queue_wait_nanoseconds.load(std::memory_order_relaxed);
 
+            std::size_t actor_count = 0;
+            std::size_t ready_actor_count = 0;
+            {
+                std::lock_guard lock{worker->scheduling_mutex};
+                actor_count = worker->actors.size();
+                ready_actor_count = worker->ready_actors.size();
+            }
+
             stats.workers.push_back(ActorRuntimeWorkerStats{
                 .accepted = accepted,
                 .processed = worker->counters.processed.load(std::memory_order_relaxed),
                 .rejected_full = worker->counters.rejected_full.load(std::memory_order_relaxed),
-                .queue_depth = worker->commands.size(),
-                .queue_high_water_mark = worker->commands.highWaterMark(),
-                .average_queue_wait = queue_wait_samples == 0
-                                          ? std::chrono::nanoseconds{0}
-                                          : std::chrono::nanoseconds{total_wait / queue_wait_samples},
-                .max_queue_wait = std::chrono::nanoseconds{
-                    worker->counters.max_queue_wait_nanoseconds.load(std::memory_order_relaxed)},
+                .evicted_actors = worker->counters.evicted_actors.load(std::memory_order_relaxed),
+                .queue_depth = worker->outstanding.load(std::memory_order_relaxed),
+                .queue_high_water_mark = static_cast<std::size_t>(
+                    worker->counters.outstanding_high_water_mark.load(std::memory_order_relaxed)),
+                .actor_count = actor_count,
+                .ready_actor_count = ready_actor_count,
+                .mailbox_depth = static_cast<std::size_t>(
+                    worker->counters.mailbox_depth.load(std::memory_order_relaxed)),
+                .mailbox_high_water_mark = static_cast<std::size_t>(
+                    worker->counters.mailbox_high_water_mark.load(std::memory_order_relaxed)),
+                .budget_yield_turns =
+                    worker->counters.budget_yield_turns.load(std::memory_order_relaxed),
+                .average_queue_wait =
+                    queue_wait_samples == 0
+                        ? std::chrono::nanoseconds{0}
+                        : std::chrono::nanoseconds{total_wait / queue_wait_samples},
+                .max_queue_wait =
+                    std::chrono::nanoseconds{worker->counters.max_queue_wait_nanoseconds.load(
+                        std::memory_order_relaxed)},
             });
         }
 
@@ -206,52 +279,28 @@ namespace snf::server
     {
         try
         {
-            MessageDispatcher dispatcher = _message_dispatcher_factory(worker_index);
             Worker& worker = *_workers[worker_index];
-
-            while (const auto queued_command = worker.commands.pop())
+            if (_on_worker_start)
             {
-                const auto waited = std::chrono::steady_clock::now() - queued_command->enqueued_at;
-                const auto wait_nanoseconds = static_cast<std::uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(waited).count());
-                worker.counters.total_queue_wait_nanoseconds.fetch_add(wait_nanoseconds,
-                                                                        std::memory_order_relaxed);
-                worker.counters.queue_wait_samples.fetch_add(1, std::memory_order_relaxed);
-                updateMaximum(worker.counters.max_queue_wait_nanoseconds, wait_nanoseconds);
+                _on_worker_start(worker_index);
+            }
 
-                const auto dispatch_result = dispatcher.dispatch(queued_command->command.frame);
-                if (!dispatch_result.handled())
+            while (fillIngress(worker))
+            {
+                if (!hasReadyActor(worker))
                 {
-                    if (!publish(CloseConnection{
-                            .connection = queued_command->command.connection,
-                            .reason = CloseReason::ProtocolError,
-                        }))
+                    continue;
+                }
+
+                if (!runReadyActorTurn(worker, worker_index))
+                {
+                    if (worker.ingress.isCancelled())
                     {
                         break;
                     }
-                }
-                else
-                {
-                    bool published_all = true;
-                    for (const auto& response : dispatch_result.responses)
-                    {
-                        if (!publish(SendFrame{
-                                .connection = queued_command->command.connection,
-                                .frame = response,
-                            }))
-                        {
-                            published_all = false;
-                            break;
-                        }
-                    }
 
-                    if (!published_all)
-                    {
-                        break;
-                    }
+                    throw std::runtime_error{"ActorRuntime failed to publish a network action"};
                 }
-
-                worker.counters.processed.fetch_add(1, std::memory_order_relaxed);
             }
 
             workerFinished();
@@ -262,10 +311,325 @@ namespace snf::server
         }
     }
 
+    bool ActorRuntime::fillIngress(Worker& worker)
+    {
+        const auto route = [this, &worker](QueuedEvent event)
+        { return routeToMailbox(worker, std::move(event)); };
+
+        std::size_t routed = 0;
+        if (!hasReadyActor(worker))
+        {
+            auto command = worker.ingress.pop();
+            if (!command)
+            {
+                return false;
+            }
+
+            if (!route(std::move(*command)))
+            {
+                return false;
+            }
+            ++routed;
+        }
+
+        while (routed < INGRESS_BATCH_SIZE)
+        {
+            auto command = worker.ingress.tryPop();
+            if (!command)
+            {
+                break;
+            }
+
+            if (!route(std::move(*command)))
+            {
+                return false;
+            }
+            ++routed;
+        }
+
+        return !worker.ingress.isCancelled();
+    }
+
+    bool ActorRuntime::routeToMailbox(Worker& worker, QueuedEvent event)
+    {
+        if (worker.ingress.isCancelled())
+        {
+            releaseOutstanding(worker);
+            return false;
+        }
+
+        const ProvisionalActorId actor_id =
+            std::visit([](const auto& payload) { return payload.actor; }, event.payload);
+        const bool is_close = std::holds_alternative<ConnectionClosedEvent>(event.payload);
+        bool discarded = false;
+        bool consumed_without_slot = false;
+        try
+        {
+            std::lock_guard lock{worker.scheduling_mutex};
+            if (worker.ingress.isCancelled())
+            {
+                discarded = true;
+            }
+            else
+            {
+                auto actor_iterator = worker.actors.find(actor_id);
+                if (actor_iterator == worker.actors.end())
+                {
+                    if (is_close)
+                    {
+                        consumed_without_slot = true;
+                    }
+                    else
+                    {
+                        actor_iterator = worker.actors.try_emplace(actor_id).first;
+                    }
+                }
+
+                if (!consumed_without_slot)
+                {
+                    ActorSlot& slot = actor_iterator->second;
+                    slot.mailbox.push_back(std::move(event));
+                    try
+                    {
+                        if (slot.state == ActorExecutionState::Idle)
+                        {
+                            worker.ready_actors.push_back(actor_iterator->first);
+                            slot.state = ActorExecutionState::Ready;
+                        }
+                    }
+                    catch (...)
+                    {
+                        slot.mailbox.pop_back();
+                        throw;
+                    }
+
+                    const std::uint64_t mailbox_depth =
+                        worker.counters.mailbox_depth.fetch_add(1, std::memory_order_relaxed) + 1;
+                    updateMaximum(worker.counters.mailbox_high_water_mark, mailbox_depth);
+                }
+            }
+        }
+        catch (...)
+        {
+            releaseOutstanding(worker);
+            throw;
+        }
+
+        if (discarded || consumed_without_slot)
+        {
+            releaseOutstanding(worker);
+            return !discarded;
+        }
+
+        return true;
+    }
+
+    bool ActorRuntime::runReadyActorTurn(Worker& worker, const std::size_t worker_index)
+    {
+        ProvisionalActorId actor_id;
+        ActorSlot* slot = nullptr;
+        {
+            std::lock_guard lock{worker.scheduling_mutex};
+            if (worker.ingress.isCancelled())
+            {
+                return false;
+            }
+
+            if (worker.ready_actors.empty())
+            {
+                return true;
+            }
+
+            actor_id = worker.ready_actors.front();
+            worker.ready_actors.pop_front();
+            auto actor_iterator = worker.actors.find(actor_id);
+            if (actor_iterator == worker.actors.end() ||
+                actor_iterator->second.state != ActorExecutionState::Ready ||
+                actor_iterator->second.mailbox.empty())
+            {
+                throw std::logic_error{"ActorRuntime ready queue invariant violated"};
+            }
+
+            slot = &actor_iterator->second;
+            slot->state = ActorExecutionState::Running;
+        }
+
+        std::size_t handled_this_turn = 0;
+        while (handled_this_turn < ACTOR_TURN_BUDGET)
+        {
+            QueuedEvent event;
+            {
+                std::lock_guard lock{worker.scheduling_mutex};
+                if (worker.ingress.isCancelled())
+                {
+                    slot->state = ActorExecutionState::Idle;
+                    return false;
+                }
+
+                if (slot->mailbox.empty())
+                {
+                    slot->state = ActorExecutionState::Idle;
+                    return true;
+                }
+
+                event = std::move(slot->mailbox.front());
+                slot->mailbox.pop_front();
+                worker.counters.mailbox_depth.fetch_sub(1, std::memory_order_relaxed);
+            }
+
+            if (auto* command = std::get_if<InboundCommand>(&event.payload))
+            {
+                const auto waited = std::chrono::steady_clock::now() - event.enqueued_at;
+                const auto wait_nanoseconds = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(waited).count());
+                worker.counters.total_queue_wait_nanoseconds.fetch_add(wait_nanoseconds,
+                                                                       std::memory_order_relaxed);
+                worker.counters.queue_wait_samples.fetch_add(1, std::memory_order_relaxed);
+                updateMaximum(worker.counters.max_queue_wait_nanoseconds, wait_nanoseconds);
+
+                try
+                {
+                    if (_on_before_command)
+                    {
+                        _on_before_command(worker_index, actor_id, command->command);
+                    }
+
+                    PlayerResult result = slot->actor.handle(command->command);
+
+                    if (!_player_effects.apply(command->connection,
+                                               std::move(result),
+                                               _effect_stop_source.get_token()))
+                    {
+                        worker.counters.processed.fetch_add(1, std::memory_order_relaxed);
+                        releaseOutstanding(worker);
+                        return false;
+                    }
+                }
+                catch (...)
+                {
+                    releaseOutstanding(worker);
+                    throw;
+                }
+
+                worker.counters.processed.fetch_add(1, std::memory_order_relaxed);
+                releaseOutstanding(worker);
+                ++handled_this_turn;
+                continue;
+            }
+
+            // Close events are intentionally excluded from command wait and
+            // processing metrics. The owning worker is the only eraser, and this
+            // cached slot pointer is no longer touched after the erase below.
+            static_cast<void>(std::get<ConnectionClosedEvent>(event.payload));
+            releaseOutstanding(worker);
+
+            std::size_t discarded_mailbox_events = 0;
+            {
+                std::lock_guard lock{worker.scheduling_mutex};
+                discarded_mailbox_events = slot->mailbox.size();
+                slot->mailbox.clear();
+                if (discarded_mailbox_events != 0)
+                {
+                    worker.counters.mailbox_depth.fetch_sub(discarded_mailbox_events,
+                                                            std::memory_order_relaxed);
+                    releaseOutstanding(worker, discarded_mailbox_events);
+                }
+
+                const auto actor_iterator = worker.actors.find(actor_id);
+                if (actor_iterator == worker.actors.end() || &actor_iterator->second != slot)
+                {
+                    throw std::logic_error{"ActorRuntime actor eviction invariant violated"};
+                }
+                worker.actors.erase(actor_iterator);
+                worker.counters.evicted_actors.fetch_add(1, std::memory_order_relaxed);
+            }
+
+            return true;
+        }
+
+        std::lock_guard lock{worker.scheduling_mutex};
+        if (worker.ingress.isCancelled())
+        {
+            slot->state = ActorExecutionState::Idle;
+            return false;
+        }
+
+        if (slot->mailbox.empty())
+        {
+            slot->state = ActorExecutionState::Idle;
+        }
+        else
+        {
+            slot->state = ActorExecutionState::Ready;
+            worker.ready_actors.push_back(actor_id);
+            worker.counters.budget_yield_turns.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        return true;
+    }
+
+    bool ActorRuntime::hasReadyActor(const Worker& worker) const
+    {
+        std::lock_guard lock{worker.scheduling_mutex};
+        return !worker.ready_actors.empty();
+    }
+
+    void ActorRuntime::discardWorkerCommands(Worker& worker) noexcept
+    {
+        releaseOutstanding(worker, worker.ingress.cancel());
+
+        std::size_t discarded_mailbox_commands = 0;
+        {
+            std::lock_guard lock{worker.scheduling_mutex};
+            for (auto& [actor_id, slot] : worker.actors)
+            {
+                static_cast<void>(actor_id);
+                discarded_mailbox_commands += slot.mailbox.size();
+                slot.mailbox.clear();
+                if (slot.state == ActorExecutionState::Ready)
+                {
+                    slot.state = ActorExecutionState::Idle;
+                }
+            }
+            worker.ready_actors.clear();
+        }
+
+        if (discarded_mailbox_commands != 0)
+        {
+            worker.counters.mailbox_depth.fetch_sub(discarded_mailbox_commands,
+                                                    std::memory_order_relaxed);
+            releaseOutstanding(worker, discarded_mailbox_commands);
+        }
+    }
+
+    bool ActorRuntime::reserveOutstanding(Worker& worker) noexcept
+    {
+        std::size_t current = worker.outstanding.load(std::memory_order_relaxed);
+        while (current < worker.capacity)
+        {
+            if (worker.outstanding.compare_exchange_weak(
+                    current, current + 1, std::memory_order_acq_rel, std::memory_order_relaxed))
+            {
+                updateMaximum(worker.counters.outstanding_high_water_mark,
+                              static_cast<std::uint64_t>(current + 1));
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    void ActorRuntime::releaseOutstanding(Worker& worker, const std::size_t count) noexcept
+    {
+        if (count != 0)
+        {
+            worker.outstanding.fetch_sub(count, std::memory_order_acq_rel);
+        }
+    }
+
     void ActorRuntime::workerFinished() noexcept
     {
-        const std::size_t completed =
-            _finished_workers.fetch_add(1, std::memory_order_acq_rel) + 1;
+        const std::size_t completed = _finished_workers.fetch_add(1, std::memory_order_acq_rel) + 1;
         if (completed != _worker_count)
         {
             return;
@@ -277,16 +641,15 @@ namespace snf::server
                                                       std::memory_order_acq_rel,
                                                       std::memory_order_acquire))
         {
-            static_cast<void>(publish(GameRuntimeDrained{}));
+            _runtime_completion.notifyDrained(_runtime_id);
         }
     }
 
     void ActorRuntime::recordWorkerFailure(std::exception_ptr error) noexcept
     {
         bool expected = false;
-        if (!_worker_failure_recorded.compare_exchange_strong(expected,
-                                                              true,
-                                                              std::memory_order_acq_rel))
+        if (!_worker_failure_recorded.compare_exchange_strong(
+                expected, true, std::memory_order_acq_rel))
         {
             return;
         }
@@ -299,15 +662,7 @@ namespace snf::server
         _completion_state.store(CompletionState::Failed, std::memory_order_release);
         cancel();
 
-        try
-        {
-            static_cast<void>(publish(ActorRuntimeFailed{}));
-        }
-        catch (...)
-        {
-            // The original worker exception remains authoritative. The stop callback
-            // below is the fallback when the failure action cannot be published.
-        }
+        _runtime_completion.notifyFailed(_runtime_id);
 
         if (_on_worker_failure)
         {
@@ -319,32 +674,6 @@ namespace snf::server
             {
                 // Failure notification must never hide the worker exception.
             }
-        }
-    }
-
-    bool ActorRuntime::publish(NetworkAction action) const
-    {
-        if (!_network_actions.push(std::move(action)))
-        {
-            return false;
-        }
-
-        signalNetwork();
-        return true;
-    }
-
-    void ActorRuntime::signalNetwork() const noexcept
-    {
-        constexpr std::uint64_t wakeup_value = 1;
-
-        while (::write(_outbound_event_descriptor, &wakeup_value, sizeof(wakeup_value)) == -1)
-        {
-            if (errno == EINTR)
-            {
-                continue;
-            }
-
-            return;
         }
     }
 
@@ -364,10 +693,8 @@ namespace snf::server
     {
         std::uint64_t current = target.load(std::memory_order_relaxed);
         while (current < candidate &&
-               !target.compare_exchange_weak(current,
-                                             candidate,
-                                             std::memory_order_relaxed,
-                                             std::memory_order_relaxed))
+               !target.compare_exchange_weak(
+                   current, candidate, std::memory_order_relaxed, std::memory_order_relaxed))
         {
         }
     }

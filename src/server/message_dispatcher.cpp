@@ -9,15 +9,12 @@ namespace snf::server
     {
         const bool registered =
             registerHandler(snf::protocol::MessageType::Ping,
-                            [](const snf::protocol::Frame& request)
+                            [](snf::protocol::Frame request) -> std::optional<PlayerCommand>
                             {
-                                return std::vector<snf::protocol::Frame>{
-                                    snf::protocol::Frame{
-                                        .type = snf::protocol::MessageType::Pong,
-                                        .request_id = request.request_id,
-                                        .payload = request.payload,
-                                    },
-                                };
+                                return PlayerCommand{PingCommand{
+                                    .request_id = request.request_id,
+                                    .payload = std::move(request.payload),
+                                }};
                             });
 
         if (!registered)
@@ -36,20 +33,26 @@ namespace snf::server
         return _handlers.emplace(type, std::move(handler)).second;
     }
 
-    DispatchResult MessageDispatcher::dispatch(const snf::protocol::Frame& request) const
+    DispatchResult MessageDispatcher::dispatch(snf::protocol::Frame request) const
     {
         const auto handler_iterator = _handlers.find(request.type);
         if (handler_iterator == _handlers.end())
         {
             return {
                 .status = DispatchStatus::HandlerNotFound,
-                .responses = {},
+                .command = std::nullopt,
             };
         }
 
-        return {
-            .status = DispatchStatus::Handled,
-            .responses = handler_iterator->second(request),
-        };
+        auto command = handler_iterator->second(std::move(request));
+        return command
+                   ? DispatchResult{
+                         .status = DispatchStatus::Handled,
+                         .command = std::move(command),
+                     }
+                   : DispatchResult{
+                         .status = DispatchStatus::InvalidPayload,
+                         .command = std::nullopt,
+                     };
     }
 }

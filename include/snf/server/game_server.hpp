@@ -4,6 +4,11 @@
 #include "snf/net/unique_file_descriptor.hpp"
 #include "snf/runtime/bounded_queue.hpp"
 #include "snf/server/actor_runtime.hpp"
+#include "snf/server/command_router.hpp"
+#include "snf/server/outbound_sink.hpp"
+#include "snf/server/protocol_gateway.hpp"
+#include "snf/server/protocol_player_effect_sink.hpp"
+#include "snf/server/runtime_completion.hpp"
 #include "snf/server/tcp_server.hpp"
 
 #include <chrono>
@@ -24,6 +29,7 @@ namespace snf::server
         std::size_t actor_worker_count{2};
         std::size_t actor_queue_capacity_per_worker{4096};
         std::size_t outbound_queue_capacity{4096};
+        std::size_t connection_lifecycle_capacity{4096};
     };
 
     using GameServerStats = TcpServerStats;
@@ -56,9 +62,14 @@ namespace snf::server
         void joinActorRuntime();
         void cancelActorRuntime() noexcept;
 
-        snf::runtime::BoundedQueue<NetworkAction> _network_actions;
+        snf::runtime::BoundedQueue<OutboundAction> _outbound_actions;
         snf::net::UniqueFileDescriptor _outbound_event;
+        EventFdOutboundSink _outbound_sink;
+        ProtocolPlayerEffectSink _player_effects;
+        RuntimeCompletionCoordinator _runtime_completion;
         ActorRuntime _actor_runtime;
+        CommandRouter _command_router;
+        ProtocolGateway _protocol_gateway;
         TcpServer _tcp_server;
         bool _has_run{false};
     };

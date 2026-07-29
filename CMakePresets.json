@@ -40,6 +40,15 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "SNF_ENABLE_SANITIZERS": "ON"
       }
+    },
+    {
+      "name": "tsan",
+      "displayName": "ThreadSanitizer",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "SNF_ENABLE_THREAD_SANITIZER": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -54,6 +63,10 @@
     {
       "name": "asan-ubsan",
       "configurePreset": "asan-ubsan"
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan"
     }
   ],
   "testPresets": [
@@ -67,6 +80,13 @@
     {
       "name": "asan-ubsan",
       "configurePreset": "asan-ubsan",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan",
       "output": {
         "outputOnFailure": true
       }

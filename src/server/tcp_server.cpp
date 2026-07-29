@@ -34,6 +34,8 @@ namespace
     constexpr std::uint64_t OUTBOUND_EVENT_TOKEN = STOP_EVENT_TOKEN - 1;
     constexpr std::uint64_t TERMINATION_SIGNAL_EVENT_TOKEN = OUTBOUND_EVENT_TOKEN - 1;
     constexpr std::uint64_t MAX_CONNECTION_GENERATION = TERMINATION_SIGNAL_EVENT_TOKEN - 1;
+    constexpr std::size_t CONNECTION_CLOSE_RETRY_BUDGET = 64;
+    constexpr std::chrono::milliseconds CONNECTION_CLOSE_RETRY_INTERVAL{1};
 
     snf::net::UniqueFileDescriptor create_epoll_instance()
     {
@@ -75,8 +77,9 @@ namespace
 namespace snf::server
 {
     TcpServer::TcpServer(const TcpServerConfig& config,
-                         CommandIngress& command_ingress,
-                         snf::runtime::BoundedQueue<NetworkAction>& network_actions,
+                         FrameIngress& frame_ingress,
+                         snf::runtime::BoundedQueue<OutboundAction>& outbound_actions,
+                         RuntimeCompletionSource& runtime_completion,
                          const int outbound_event_descriptor)
         : _listener(snf::net::create_tcp_listener(config.port))
         , _epoll(create_epoll_instance())
@@ -85,13 +88,16 @@ namespace snf::server
         , _shutdown_grace_period(config.shutdown_grace_period)
         , _max_pending_send_bytes(config.max_pending_send_bytes)
         , _client_send_buffer_size(config.client_send_buffer_size)
-        , _command_ingress(command_ingress)
-        , _network_actions(network_actions)
+        , _connection_lifecycle_capacity(config.connection_lifecycle_capacity)
+        , _frame_ingress(frame_ingress)
+        , _outbound_actions(outbound_actions)
+        , _runtime_completion(runtime_completion)
         , _outbound_event_descriptor(outbound_event_descriptor)
     {
         if (_shutdown_grace_period < std::chrono::milliseconds::zero() ||
             _max_pending_send_bytes == 0 ||
             (_client_send_buffer_size && *_client_send_buffer_size <= 0) ||
+            _connection_lifecycle_capacity == 0 ||
             _outbound_event_descriptor == snf::net::UniqueFileDescriptor::INVALID_FD)
         {
             throw std::invalid_argument{"Invalid TCP server configuration"};
@@ -124,7 +130,9 @@ namespace snf::server
 
         while (true)
         {
-            if (_is_stopping && _actor_runtime_drained && _sessions.empty())
+            retryPendingConnectionCloses();
+
+            if (_is_stopping && _game_runtimes_drained && _sessions.empty())
             {
                 break;
             }
@@ -272,6 +280,15 @@ namespace snf::server
             }
 
             snf::net::UniqueFileDescriptor client_socket{client_descriptor};
+
+            if (!hasAvailableConnectionLifecycleSlot())
+            {
+                ++_stats.connection_lifecycle_rejections;
+                // Leave any remaining listener backlog for a later reactor turn
+                // so a connection flood cannot monopolize this turn.
+                return;
+            }
+
             snf::net::enable_tcp_no_delay(client_socket.getDescriptor());
 
             if (_client_send_buffer_size)
@@ -285,7 +302,7 @@ namespace snf::server
                 throw std::overflow_error{"Connection generation exhausted"};
             }
 
-            const ConnectionId connection{
+            const snf::net::ConnectionId connection{
                 .descriptor = client_descriptor,
                 .generation = ++_next_connection_generation,
             };
@@ -326,13 +343,17 @@ namespace snf::server
 
     void TcpServer::handleClientEvent(const int client_descriptor, const std::uint32_t event_flags)
     {
-        bool should_remove_session = (event_flags & EPOLLERR) != 0;
+        std::optional<ConnectionCloseCause> close_cause;
+        if ((event_flags & EPOLLERR) != 0)
+        {
+            close_cause = ConnectionCloseCause::PeerClosed;
+        }
         bool should_update_events = false;
 
         const bool has_read_event =
             !_is_stopping && (event_flags & (EPOLLIN | EPOLLRDHUP | EPOLLHUP)) != 0;
 
-        if (!should_remove_session && has_read_event)
+        if (!close_cause && has_read_event)
         {
             std::array<std::byte, RECEIVE_BUFFER_SIZE> receive_buffer{};
 
@@ -350,43 +371,55 @@ namespace snf::server
                 if (received_byte_count > 0)
                 {
                     const std::span<const std::byte> received_bytes{
-                        receive_buffer.data(), static_cast<std::size_t>(received_byte_count)
-                    };
+                        receive_buffer.data(), static_cast<std::size_t>(received_byte_count)};
 
-                    const auto decode_result =
+                    auto decode_result =
                         session_iterator->second.appendReceivedBytes(received_bytes);
 
                     if (!decode_result.ok())
                     {
                         ++_stats.protocol_errors;
                         std::cerr << "Protocol error from client FD: " << client_descriptor << '\n';
-                        should_remove_session = true;
+                        close_cause = ConnectionCloseCause::ProtocolError;
                         break;
                     }
 
-                    for (const auto& frame : decode_result.frames)
+                    for (auto& frame : decode_result.frames)
                     {
                         ++_stats.received_frames;
-                        const ConnectionId connection = session_iterator->second.getConnectionId();
-                        const PostResult post_result = _command_ingress.tryPost(InboundCommand{
-                            .actor = ActorId{.value = connection.generation},
+                        const snf::net::ConnectionId connection =
+                            session_iterator->second.getConnectionId();
+                        const FramePostResult post_result = _frame_ingress.tryPost(FrameEnvelope{
                             .connection = connection,
-                            .frame = frame,
+                            .frame = std::move(frame),
                         });
-                        if (post_result != PostResult::Accepted)
+                        if (post_result != FramePostResult::Accepted)
                         {
-                            if (post_result == PostResult::Full)
+                            if (post_result == FramePostResult::UnsupportedMessage ||
+                                post_result == FramePostResult::InvalidPayload)
+                            {
+                                ++_stats.protocol_errors;
+                                std::cerr
+                                    << "Rejected message from client FD: " << client_descriptor
+                                    << '\n';
+                                close_cause = ConnectionCloseCause::ProtocolError;
+                            }
+                            else if (post_result == FramePostResult::Full)
                             {
                                 ++_stats.actor_queue_overflows;
                                 std::cerr << "Actor queue limit exceeded for client FD: "
                                           << client_descriptor << '\n';
+                                close_cause = ConnectionCloseCause::Overflow;
                             }
-                            should_remove_session = true;
+                            else
+                            {
+                                close_cause = ConnectionCloseCause::ServerShutdown;
+                            }
                             break;
                         }
                     }
 
-                    if (should_remove_session)
+                    if (close_cause)
                     {
                         break;
                     }
@@ -396,7 +429,7 @@ namespace snf::server
 
                 if (received_byte_count == 0)
                 {
-                    should_remove_session = true;
+                    close_cause = ConnectionCloseCause::PeerClosed;
                     break;
                 }
 
@@ -410,12 +443,12 @@ namespace snf::server
                     break;
                 }
 
-                should_remove_session = true;
+                close_cause = ConnectionCloseCause::PeerClosed;
                 break;
             }
         }
 
-        if (!should_remove_session && (event_flags & EPOLLOUT) != 0)
+        if (!close_cause && (event_flags & EPOLLOUT) != 0)
         {
             const auto session_iterator = _sessions.find(client_descriptor);
             if (session_iterator == _sessions.end())
@@ -423,24 +456,31 @@ namespace snf::server
                 return;
             }
 
-            should_remove_session = !flushPendingSend(session_iterator->second);
-            should_update_events = !should_remove_session;
+            if (!flushPendingSend(session_iterator->second))
+            {
+                close_cause = ConnectionCloseCause::PeerClosed;
+            }
+            else
+            {
+                should_update_events = true;
+            }
 
-            if (_is_stopping && _actor_runtime_drained &&
+            if (_is_stopping && _game_runtimes_drained &&
                 !session_iterator->second.hasPendingSend())
             {
-                should_remove_session = true;
+                close_cause = ConnectionCloseCause::ServerShutdown;
             }
         }
 
-        if ((event_flags & (EPOLLRDHUP | EPOLLHUP)) != 0)
+        if (!close_cause && (event_flags & (EPOLLRDHUP | EPOLLHUP)) != 0)
         {
-            should_remove_session = true;
+            close_cause = _is_stopping ? ConnectionCloseCause::ServerShutdown
+                                       : ConnectionCloseCause::PeerClosed;
         }
 
-        if (should_remove_session)
+        if (close_cause)
         {
-            removeSession(client_descriptor);
+            removeSession(client_descriptor, *close_cause);
         }
         else if (should_update_events)
         {
@@ -466,13 +506,16 @@ namespace snf::server
             snf::net::throw_system_error("read(outbound eventfd)");
         }
 
-        while (auto action = _network_actions.tryPop())
+        while (auto action = _outbound_actions.tryPop())
         {
-            handleNetworkAction(std::move(*action));
+            handleOutboundAction(std::move(*action));
         }
+
+        handleRuntimeCompletion();
+        retryPendingConnectionCloses();
     }
 
-    void TcpServer::handleNetworkAction(NetworkAction action)
+    void TcpServer::handleOutboundAction(OutboundAction action)
     {
         std::visit(
             [this](auto&& network_action)
@@ -491,13 +534,14 @@ namespace snf::server
                     {
                         std::cerr << "Send queue limit exceeded for client FD: "
                                   << network_action.connection.descriptor << '\n';
-                        removeSession(network_action.connection.descriptor);
+                        removeSession(network_action.connection.descriptor,
+                                      ConnectionCloseCause::Overflow);
                         return;
                     }
 
                     updateClientEvents(*session);
                 }
-                else if constexpr (std::is_same_v<Action, CloseConnection>)
+                else
                 {
                     if (findCurrentSession(network_action.connection) == nullptr)
                     {
@@ -508,22 +552,29 @@ namespace snf::server
                     std::cerr << "Closing client FD " << network_action.connection.descriptor
                               << " because ActorRuntime requested "
                               << to_string(network_action.reason) << '\n';
-                    removeSession(network_action.connection.descriptor);
-                }
-                else if constexpr (std::is_same_v<Action, GameRuntimeDrained>)
-                {
-                    _actor_runtime_drained = true;
-                    if (_is_stopping)
-                    {
-                        completeShutdownAfterActorRuntimeDrained();
-                    }
-                }
-                else
-                {
-                    abortShutdownAfterActorRuntimeFailure();
+                    removeSession(network_action.connection.descriptor,
+                                  ConnectionCloseCause::ProtocolError);
                 }
             },
             std::move(action));
+    }
+
+    void TcpServer::handleRuntimeCompletion()
+    {
+        if (_runtime_completion.anyRuntimeFailed())
+        {
+            abortShutdownAfterActorRuntimeFailure();
+            return;
+        }
+
+        if (!_game_runtimes_drained && _runtime_completion.allRequiredRuntimesDrained())
+        {
+            _game_runtimes_drained = true;
+            if (_is_stopping)
+            {
+                completeShutdownAfterGameRuntimesDrained();
+            }
+        }
     }
 
     void TcpServer::handleStopRequest()
@@ -579,12 +630,16 @@ namespace snf::server
 
         _is_stopping = true;
         _shutdown_deadline = std::chrono::steady_clock::now() + _shutdown_grace_period;
-        _command_ingress.close();
+        _frame_ingress.close();
+        // Closed ingress cannot accept lifecycle retries. Shutdown deliberately
+        // releases their retained slots instead of attempting reinjection.
+        _pending_connection_closes.clear();
 
         if (_listener.isValid())
         {
             if (::epoll_ctl(
-                    _epoll.getDescriptor(), EPOLL_CTL_DEL, _listener.getDescriptor(), nullptr) == -1)
+                    _epoll.getDescriptor(), EPOLL_CTL_DEL, _listener.getDescriptor(), nullptr) ==
+                -1)
             {
                 snf::net::throw_system_error("epoll_ctl(EPOLL_CTL_DEL listener)");
             }
@@ -598,13 +653,13 @@ namespace snf::server
             updateClientEvents(session);
         }
 
-        if (_actor_runtime_drained)
+        if (_game_runtimes_drained)
         {
-            completeShutdownAfterActorRuntimeDrained();
+            completeShutdownAfterGameRuntimesDrained();
         }
     }
 
-    void TcpServer::completeShutdownAfterActorRuntimeDrained()
+    void TcpServer::completeShutdownAfterGameRuntimesDrained()
     {
         std::vector<int> sessions_without_pending_send;
         for (const auto& [client_descriptor, session] : _sessions)
@@ -621,13 +676,13 @@ namespace snf::server
 
         for (const int client_descriptor : sessions_without_pending_send)
         {
-            removeSession(client_descriptor);
+            removeSession(client_descriptor, ConnectionCloseCause::ServerShutdown);
         }
     }
 
     void TcpServer::abortShutdownAfterActorRuntimeFailure()
     {
-        _actor_runtime_drained = true;
+        _game_runtimes_drained = true;
         beginShutdown();
         cancelQueues();
         closeRemainingSessions();
@@ -635,8 +690,8 @@ namespace snf::server
 
     void TcpServer::cancelQueues()
     {
-        _command_ingress.cancel();
-        _network_actions.cancel();
+        _frame_ingress.cancel();
+        _outbound_actions.cancel();
     }
 
     bool TcpServer::flushPendingSend(snf::net::Session& session)
@@ -689,13 +744,14 @@ namespace snf::server
         }
 
         if (::epoll_ctl(
-                _epoll.getDescriptor(), EPOLL_CTL_MOD, session.getDescriptor(), &client_event) == -1)
+                _epoll.getDescriptor(), EPOLL_CTL_MOD, session.getDescriptor(), &client_event) ==
+            -1)
         {
             snf::net::throw_system_error("epoll_ctl(EPOLL_CTL_MOD client)");
         }
     }
 
-    void TcpServer::removeSession(const int client_descriptor)
+    void TcpServer::removeSession(const int client_descriptor, const ConnectionCloseCause cause)
     {
         const auto session_iterator = _sessions.find(client_descriptor);
         if (session_iterator == _sessions.end())
@@ -703,54 +759,120 @@ namespace snf::server
             return;
         }
 
+        const snf::net::ConnectionId connection = session_iterator->second.getConnectionId();
+
         if (::epoll_ctl(_epoll.getDescriptor(), EPOLL_CTL_DEL, client_descriptor, nullptr) == -1)
         {
             const int error_number = errno;
             std::cerr << "Failed to remove client FD " << client_descriptor
-                      << " from epoll: "
-                      << std::generic_category().message(error_number) << '\n';
+                      << " from epoll: " << std::generic_category().message(error_number) << '\n';
         }
 
-        _client_descriptors_by_event_token.erase(
-            session_iterator->second.getConnectionId().generation);
+        _client_descriptors_by_event_token.erase(connection.generation);
         _sessions.erase(session_iterator);
         ++_stats.closed_connections;
         std::cout << "Closed client FD: " << client_descriptor << '\n';
+
+        if (!_is_stopping)
+        {
+            notifyConnectionClosed(ConnectionClosed{
+                .connection = connection,
+                .cause = cause,
+            });
+        }
     }
 
     void TcpServer::closeRemainingSessions()
     {
         while (!_sessions.empty())
         {
-            removeSession(_sessions.begin()->first);
+            removeSession(_sessions.begin()->first, ConnectionCloseCause::ServerShutdown);
         }
+    }
+
+    void TcpServer::notifyConnectionClosed(ConnectionClosed closed)
+    {
+        if (_is_stopping)
+        {
+            return;
+        }
+
+        switch (_frame_ingress.tryPostConnectionClosed(closed))
+        {
+        case PostResult::Accepted:
+        case PostResult::Closed:
+            return;
+        case PostResult::Full:
+            if (!hasAvailableConnectionLifecycleSlot())
+            {
+                throw std::logic_error{"Connection lifecycle capacity invariant violated"};
+            }
+            _pending_connection_closes.push_back(std::move(closed));
+            _stats.pending_connection_closes_high_water_mark =
+                std::max(_stats.pending_connection_closes_high_water_mark,
+                         _pending_connection_closes.size());
+            return;
+        }
+    }
+
+    void TcpServer::retryPendingConnectionCloses()
+    {
+        const std::size_t attempt_count =
+            std::min(_pending_connection_closes.size(), CONNECTION_CLOSE_RETRY_BUDGET);
+
+        for (std::size_t attempt = 0; attempt < attempt_count; ++attempt)
+        {
+            ConnectionClosed closed = std::move(_pending_connection_closes.front());
+            _pending_connection_closes.pop_front();
+
+            if (_frame_ingress.tryPostConnectionClosed(closed) == PostResult::Full)
+            {
+                _pending_connection_closes.push_back(std::move(closed));
+            }
+        }
+    }
+
+    bool TcpServer::hasAvailableConnectionLifecycleSlot() const noexcept
+    {
+        return _sessions.size() < _connection_lifecycle_capacity &&
+               _pending_connection_closes.size() <
+                   _connection_lifecycle_capacity - _sessions.size();
     }
 
     int TcpServer::getEpollWaitTimeout() const
     {
-        if (!_is_stopping)
+        int timeout = -1;
+        if (_is_stopping)
         {
-            return -1;
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= _shutdown_deadline)
+            {
+                timeout = 0;
+            }
+            else
+            {
+                const auto remaining =
+                    std::chrono::ceil<std::chrono::milliseconds>(_shutdown_deadline - now);
+                timeout = static_cast<int>(
+                    std::min<std::int64_t>(remaining.count(), std::numeric_limits<int>::max()));
+            }
         }
 
-        const auto now = std::chrono::steady_clock::now();
-        if (now >= _shutdown_deadline)
+        if (_pending_connection_closes.empty())
         {
-            return 0;
+            return timeout;
         }
 
-        const auto remaining =
-            std::chrono::ceil<std::chrono::milliseconds>(_shutdown_deadline - now);
-        return static_cast<int>(
-            std::min<std::int64_t>(remaining.count(), std::numeric_limits<int>::max()));
+        const int retry_timeout = static_cast<int>(CONNECTION_CLOSE_RETRY_INTERVAL.count());
+        return timeout == -1 ? retry_timeout : std::min(timeout, retry_timeout);
     }
 
-    snf::net::Session* TcpServer::findCurrentSession(const ConnectionId connection)
+    snf::net::Session* TcpServer::findCurrentSession(const snf::net::ConnectionId connection)
     {
         const auto iterator = _sessions.find(connection.descriptor);
         if (iterator == _sessions.end() || iterator->second.getConnectionId() != connection)
         {
-            ++_stats.stale_network_actions;
+            ++_stats.stale_outbound_actions;
             return nullptr;
         }
 

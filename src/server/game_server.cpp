@@ -23,25 +23,35 @@ namespace
 namespace snf::server
 {
     GameServer::GameServer(const GameServerConfig& config)
-        : _network_actions(config.outbound_queue_capacity)
+        : _outbound_actions(config.outbound_queue_capacity)
         , _outbound_event(create_outbound_event())
-        , _actor_runtime(ActorRuntimeConfig{
-                             .worker_count = config.actor_worker_count,
-                             .queue_capacity_per_worker = config.actor_queue_capacity_per_worker,
-                             .message_dispatcher_factory = {},
-                             .on_worker_failure = [this] { requestStop(); },
-                         },
-                         _network_actions,
-                         _outbound_event.getDescriptor())
-        , _tcp_server(TcpServerConfig{
-              .port = config.port,
-              .shutdown_grace_period = config.shutdown_grace_period,
-              .max_pending_send_bytes = config.max_pending_send_bytes,
-              .client_send_buffer_size = config.client_send_buffer_size,
-          },
-          _actor_runtime,
-          _network_actions,
-          _outbound_event.getDescriptor())
+        , _outbound_sink(_outbound_actions, _outbound_event.getDescriptor())
+        , _player_effects(_outbound_sink)
+        , _runtime_completion(runtimeMask(RuntimeId::Player), _outbound_event.getDescriptor())
+        , _actor_runtime(
+              [config]
+              {
+                  ActorRuntimeConfig runtime_config{RuntimeId::Player};
+                  runtime_config.worker_count = config.actor_worker_count;
+                  runtime_config.queue_capacity_per_worker = config.actor_queue_capacity_per_worker;
+                  return runtime_config;
+              }(),
+              _player_effects,
+              _runtime_completion)
+        , _command_router(_actor_runtime)
+        , _protocol_gateway(_command_router)
+        , _tcp_server(
+              TcpServerConfig{
+                  .port = config.port,
+                  .shutdown_grace_period = config.shutdown_grace_period,
+                  .max_pending_send_bytes = config.max_pending_send_bytes,
+                  .client_send_buffer_size = config.client_send_buffer_size,
+                  .connection_lifecycle_capacity = config.connection_lifecycle_capacity,
+              },
+              _protocol_gateway,
+              _outbound_actions,
+              _runtime_completion,
+              _outbound_event.getDescriptor())
     {
     }
 
@@ -55,6 +65,7 @@ namespace snf::server
               .actor_worker_count = 2,
               .actor_queue_capacity_per_worker = 4096,
               .outbound_queue_capacity = 4096,
+              .connection_lifecycle_capacity = 4096,
           })
     {
     }
@@ -137,7 +148,7 @@ namespace snf::server
 
     void GameServer::cancelActorRuntime() noexcept
     {
-        _actor_runtime.cancel();
-        _network_actions.cancel();
+        _protocol_gateway.cancel();
+        _outbound_actions.cancel();
     }
 }

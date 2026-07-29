@@ -12,7 +12,7 @@ namespace snf::net
     }
 
     Session::Session(UniqueFileDescriptor socket,
-                     const snf::server::ConnectionId connection_id,
+                     const ConnectionId connection_id,
                      const std::size_t max_pending_send_bytes) noexcept
         : _socket(std::move(socket))
         , _connection_id(connection_id)
@@ -25,7 +25,7 @@ namespace snf::net
         return _socket.getDescriptor();
     }
 
-    const snf::server::ConnectionId& Session::getConnectionId() const noexcept
+    const ConnectionId& Session::getConnectionId() const noexcept
     {
         return _connection_id;
     }

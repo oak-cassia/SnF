@@ -3,6 +3,7 @@
 > 상태: Draft  
 > 대상: C++20, Linux, `epoll` 기반 실시간 게임 서버  
 > 목표: 월드와 인스턴스 전투가 공존하는 게임 서버의 실행 모델과 상태 소유권 정의
+> 구현 순서는 [개발 로드맵](./development-roadmap.md)을 단일 기준으로 사용한다.
 
 ## 1. 문서 목적
 
@@ -27,14 +28,15 @@ SnF의 최종 학습 목표는 다음과 같다.
 
 ### 2.1 플랫폼 모델
 
-SnF는 Linux 서버이므로 네트워크 계층은 IOCP Worker Pool이 아니라 `epoll` 기반
-Reactor Group으로 구현한다. 상위 게임 계층에서는 이를 `NetworkRuntime`으로 추상화하여
-향후 IOCP 같은 다른 백엔드를 추가할 수 있게 한다.
+SnF는 Linux 서버이므로 네트워크 계층은 `epoll` 기반 Reactor Group으로 시작한다. protocol gateway는
+`FrameIngress`를, ActorRuntime은 `PlayerEffectSink`를 통해 network runtime과 만난다. 어느 쪽도
+backend의 queue나 wake-up primitive를 직접 참조하지 않는다. io_uring은 콘텐츠 단계의 선행 조건이
+아닌 선택적 두 번째 backend다.
 
 ```text
 NetworkRuntime
 ├── Linux: EpollNetworkRuntime
-└── Windows: IocpNetworkRuntime (선택적 확장)
+└── Linux: IoUringNetworkRuntime (선택적 확장)
 ```
 
 ### 2.2 상태 소유권
@@ -139,24 +141,26 @@ Network Runtime의 책임은 다음과 같다.
 - 연결 수락과 종료
 - non-blocking recv/send
 - Frame 조립 및 wire format 검증
-- 세션 인증 상태와 rate limit 확인
-- 패킷에서 typed command 생성
-- Command Router 호출
+- `FrameEnvelope`를 공통 `ProtocolGateway`에 제출
 - outbound queue와 slow client backpressure
-- 프로토콜 오류 처리
+- Gateway 결과에 따른 프로토콜 오류·포화 처리
 
 Network Runtime은 인벤토리, 이동, 충돌, 전투 같은 게임 상태를 수정하지 않는다.
 
-게임 Worker가 응답을 만들면 Session을 소유한 Reactor의 bounded outbound queue에 넣고
-`eventfd`로 Reactor를 깨운다. 실제 Session 조회, encode와 send는 Reactor가 수행한다.
+Actor handler는 `PlayerResult`에 domain effect를 반환하고, `PlayerEffectSink`가 handler 완료 뒤 이를
+적용한다. 현재 `ProtocolPlayerEffectSink`가 `SendResponse`를 `ProtocolResponseMapper`로 `SendFrame`
+으로 바꿔 `OutboundSink`에 게시한다. `EventFdOutboundSink`가 bounded queue와 `eventfd` wake-up을
+캡슐화하며, 실제 Session 조회, encode와 send는 Reactor가 수행한다. runtime drained/failed는 outbound action과 분리된
+`RuntimeCompletionCoordinator`가 추적한다. outbound queue 포화로 Worker가 대기할 때는 publishing
+Runtime의 stop token이 그 대기만 중단하며, 다른 Runtime이 공유하는 sink와 queue는 유지한다.
 
 FD는 재사용될 수 있으므로 다른 Runtime에는 raw FD 대신 다음과 같은 논리 ID를 전달한다.
 
 ```cpp
 struct ConnectionId
 {
-    std::uint64_t value;
-    std::uint32_t generation;
+    int descriptor;
+    std::uint64_t generation;
 };
 ```
 
@@ -164,7 +168,15 @@ struct ConnectionId
 
 ### 4.3 Command Router
 
-Command Router는 패킷 종류와 현재 Session Route를 사용해 상태 소유자를 선택한다.
+현재 `ProtocolGateway`는 연결 generation에서 만든 `ProvisionalActorId`와 typed command 또는
+`ConnectionClosed` lifecycle 사실을 route로 결합하고, `CommandRouter`가 Player ActorRuntime에
+전달한다. 임시 ID는
+인증 전 routing key일 뿐이며 `PlayerId`, DB key, 저장 key 또는 재접속 key가 아니다.
+
+인증과 World/Battle 도입 후에는 `RouteCoordinator`가 `SessionRoute`와 `route_epoch`의
+authoritative owner가 된다. Gateway는 route snapshot과 epoch을 command에 부여하고 destination은
+자신의 activation epoch과 비교한다. epoch은 stale destination 검출 수단이며 route 전환의
+원자성은 별도 transition protocol이 보장한다.
 
 ```cpp
 struct SessionRoute
@@ -172,6 +184,7 @@ struct SessionRoute
     UserId user_id;
     RouteKind kind;   // Player, World, Battle, SharedContent
     EntityId target;  // playerId, zoneId, roomId, partyId 등
+    std::uint64_t epoch;
 };
 ```
 
@@ -205,17 +218,21 @@ Player Runtime은 `player_id`를 기준으로 shard한다.
 worker_index = hash(player_id) % player_worker_count;
 ```
 
-동일 PlayerActor의 명령은 항상 같은 Worker에서 순차 실행한다. PlayerActor를 추가하기 전인
-현재 단계에서는 `ActorRuntime`이 연결 generation을 임시 `ActorId`로 사용해 기본 2개의
-Worker별 bounded command queue에 shard한다.
+동일 PlayerActor의 명령은 항상 같은 Worker에서 순차 실행한다. 인증 전 현재 구현은 연결
+generation을 `ProvisionalActorId`로 사용해 기본 2개 Worker에 shard하고, Worker별 Actor
+mailbox에서 typed command를 순차 실행한다. 영속 `PlayerId`는 인증 vertical slice에서 도입한다.
 
 ```cpp
 player_runtime.post(player_id, PlayerCommand{...});
 ```
 
-Actor 간 메시징과 Actor lifecycle이 복잡해진 후에 Actor별 mailbox와 `ActorRef::tell()`을
-도입할 수 있다. Actor mailbox를 도입하면 ready queue 중복 등록을 방지하고 한 번에 처리할
-메시지 수나 실행 시간에 budget을 둔다.
+현재 Actor mailbox와 ready queue는 중복 ready token을 방지하고 turn당 16개 command budget을
+적용한다. Actor 간 메시징과 복잡한 lifecycle이 필요해지면 `ActorRef::tell()`과 passivation을
+추가한다.
+
+`PlayerActor::state()`의 const 참조는 owning Worker 내부 테스트와 진단에만 사용한다. `const`는
+thread-safe snapshot을 의미하지 않으므로 다른 thread의 상태 조회는 query command 또는 immutable
+snapshot으로 수행한다.
 
 ### 4.5 World Runtime
 
@@ -344,6 +361,7 @@ sequenceDiagram
     autonumber
     participant C as Client
     participant N as Network Reactor
+    participant G as Protocol Gateway
     participant R as Command Router
     participant P as Player Worker
     participant W as World Worker
@@ -352,7 +370,9 @@ sequenceDiagram
 
     C->>N: TCP bytes
     N->>N: recv · frame decode · 최소 검증
-    N->>R: Command(connectionId, requestId)
+    N->>G: FrameEnvelope(connectionId, frame)
+    G->>G: dispatch · payload validation · route snapshot
+    G->>R: RoutedCommand(target, routeEpoch, command)
 
     alt 유저 영구 상태 명령
         R->>P: post(playerId, command)
@@ -413,6 +433,18 @@ sequenceDiagram
 데이터를 소유하고 전투가 끝난 뒤 BattleResult를 적용한다. 두 객체가 같은 전투 상태를
 동시에 수정하지 않는다.
 
+구현 시 route 변경은 `RouteCoordinator`가 직렬화한다.
+
+```text
+이전 destination 입력 중지와 drain 경계 확정
+→ 새 destination activation 완료
+→ SessionRoute target과 epoch 갱신
+→ 새 epoch command 공개
+```
+
+destination은 command의 epoch을 자신의 activation epoch과 비교해 전환 전에 queue에 들어간 stale
+입력을 거부한다. 동일 epoch 안의 중복과 역순은 별도 sequence/idempotency 규칙으로 처리한다.
+
 ## 7. 메시지 규약
 
 Runtime 경계를 넘는 메시지는 immutable value 또는 명확한 단독 소유 값을 사용한다.
@@ -427,6 +459,7 @@ struct MessageEnvelope
     CorrelationId correlation_id;
     EntityId target_id;
     std::optional<ConnectionId> connection_id;
+    std::optional<std::uint64_t> route_epoch;
     std::optional<std::uint64_t> sequence;
     TimePoint deadline;
     MessagePayload payload;
@@ -439,7 +472,8 @@ struct MessageEnvelope
 - `correlation_id`: 요청, DB 작업, 응답 연결
 - `target_id`: shard와 상태 소유자 선택
 - `connection_id`: 응답 Session 수명 검증
-- `sequence`: 필요한 스트림의 순서 검증
+- `route_epoch`: 이전 destination으로 향한 command 검출
+- `sequence`: 동일 route 스트림의 중복·역순 검증
 - `deadline`: 이미 가치가 없어진 작업 폐기
 
 Runtime 사이에서 동기 호출이나 `future.get()`으로 상대 Worker를 기다리지 않는다.
@@ -460,6 +494,19 @@ Runtime 사이에서 동기 호출이나 `future.get()`으로 상대 Worker를 �
 
 입력 종류별로 정책이 다를 수 있다. 이동 입력은 최신 값으로 합칠 수 있지만 아이템 구매나
 전투 결과는 임의로 버리면 안 된다.
+
+명령별 전달 의미와 포화 정책은 다음을 기본값으로 삼는다.
+
+| 종류 | 전달 의미 | 포화 시 정책 |
+| --- | --- | --- |
+| 이동 입력 | 최신 상태 우선 | 최신 입력으로 coalesce/replace |
+| 일반 공격 | route 내 sequence 적용 | stale 폐기 또는 Busy |
+| 구매·보상 | effect를 한 번만 적용 | 명시적 거부, idempotency key와 transaction |
+| `BattleResult` | 임의 유실 금지 | reserved capacity와 retry, persistence 이후 durable handoff 검토 |
+| 악성 요청 | 서비스 보호 우선 | rate limit 또는 연결 종료 |
+
+구매·보상은 exactly-once delivery를 가정하지 않는다. at-least-once 재전달 가능성을
+idempotency와 transaction으로 흡수해 effectively-once application을 만든다.
 
 ## 9. Tick 설계
 
@@ -511,6 +558,7 @@ graceful shutdown은 다음 순서를 권장한다.
 → Session의 새 게임 command 수락 중지
 → World/Battle에 종료 경계 전달
 → 게임 Runtime queue drain
+→ RuntimeCompletionCoordinator가 모든 필수 Runtime drain 확인
 → 필요한 dirty state 저장 요청
 → DB queue drain 또는 timeout
 → outbound queue drain 또는 timeout
@@ -518,8 +566,9 @@ graceful shutdown은 다음 순서를 권장한다.
 → Logger flush
 ```
 
-종료 중에도 다른 Runtime이 이미 파괴된 Session이나 Actor에 메시지를 보내지 않도록 Runtime
-간 수명 순서를 명시해야 한다.
+runtime 완료 상태는 outbound queue와 분리한다. coordinator의 상태가 authoritative하며 wake-up은
+상태 재조회를 촉진하는 hint다. 종료 중에도 다른 Runtime이 이미 파괴된 Session이나 Actor에
+메시지를 보내지 않도록 Runtime 간 수명 순서를 명시해야 한다.
 
 ## 12. 목표 소스 구조
 
@@ -564,82 +613,71 @@ include/snf/
 
 ## 13. 현재 구조에서의 발전 단계
 
-### 단계 1: Network와 게임 로직 분리 (완료)
+실행 순서는 [개발 로드맵](./development-roadmap.md)과 동일하다.
 
-`TcpServer`의 동기식 `MessageDispatcher::dispatch()` 호출은 다음 구조로 분리했다.
+### 단계 1~3: Network 분리, Sharded ActorRuntime, PlayerActor/Mailbox (완료)
 
 ```text
 epoll Reactor
-→ Frame decode
-→ InboundCommand
-→ CommandIngress
-→ ActorRuntime shard queue
-→ ActorWorker
-→ NetworkAction bounded queue
-→ eventfd
+→ FrameIngress
+→ ProtocolGateway(MessageDispatcher)
+→ RoutedCommand
+→ CommandRouter
+→ ActorRuntime shard ingress
+→ PlayerActor mailbox와 ready queue
+→ typed PlayerResult
+→ PlayerEffectSink
+→ ProtocolResponseMapper
+→ OutboundSink
 → Reactor send
 ```
 
-Session은 단조 증가 generation을 포함하는 `ConnectionId`를 받고, Reactor는 현재 ID와
-일치하는 `NetworkAction`만 적용한다. 1단계에서는 이 경계가 단일 queue와 GameRuntime
-Worker로 동작했으며, 2단계에서 아래 ActorRuntime으로 교체했다.
+동일 Actor FIFO·단일 실행, shard 병렬성, fairness budget, backpressure, drain/cancel/실패와
+stale `ConnectionId`를 검증했다.
 
-### 단계 2: Sharded ActorRuntime (완료)
+### 단계 3.5: Coroutine 계약 준비와 경계 강화 (완료)
 
-- Reactor는 `CommandIngress`에 직접 게시하고 중앙 router thread를 두지 않는다.
-- 연결 generation을 임시 `ActorId`로 사용하며 `actor_id.value % worker_count`로 기본 2개
-  Worker에 shard한다.
-- Worker별 bounded queue는 accepted/processed/rejected-full, depth/high-water mark,
-  평균·최대 queue wait를 기록한다.
-- `close()`는 accepted command를 모두 drain한 뒤 마지막 Worker가 `GameRuntimeDrained`를 한 번
-  발행하고, `cancel()`은 queued command를 폐기한다.
-- drain과 cancel은 atomic completion state에서 하나만 승리하며, Worker 실패는
-  `ActorRuntimeFailed`를 발행해 shutdown deadline을 기다리지 않고 Reactor를 중단한다.
-- 같은 Actor의 FIFO·단일 실행, shard 간 병렬 실행, shard별 포화 격리, drain/cancel/예외 전파를
-  테스트한다.
-
-### 단계 3: PlayerActor와 Mailbox
-
-- PlayerActor만 Player 상태를 수정하게 한다.
-- Actor별 mailbox, ready queue와 lifecycle을 도입한다.
-- DB는 아직 in-memory repository로 대체할 수 있다.
+- `ConnectionId`를 net 계층으로 이동하고 연결 기반 키를 `ProvisionalActorId`로 명확히 했다.
+- ActorRuntime에서 raw outbound queue와 `eventfd`, protocol `Frame` 의존을 제거했다.
+- `PlayerResult → PlayerEffectSink → ProtocolResponseMapper → OutboundSink` pipeline을 만들고
+  handler 예외 전에는 effect가 방출되지 않도록 했다.
+- `ConnectionClosed`를 기존 ingress FIFO로 전달한다. reactor는 `Full` lifecycle post를 별도 pending
+  deque에서 budgeted retry하며, owning worker가 close를 소비한 turn 끝에서 actor를 evict한다. active
+  session과 pending close는 bounded lifecycle slot 예산을 공유하고, 소진 시 새 연결을 Actor 생성 전에
+  거부한다.
+- `OutboundAction`과 runtime completion 제어 경로를 분리했다.
+- `RuntimeCompletionCoordinator`가 required runtime mask의 drain/failure를 authoritative state로
+  추적한다.
+- Coroutine continuation, frame 수명과 shutdown 규약은
+  [Coroutine Actor 계약](./coroutine-actor-contract.md)에 고정했다.
 
 ### 단계 4: Coroutine Actor
 
-- 실제 비동기 대기에서만 suspend하고, resume은 원래 ActorRuntime으로 되돌린다.
-- suspend된 Actor의 일반 command는 mailbox에서 기다리게 한다.
+- `ActorTask<PlayerResult>`, bounded continuation reservation과 Worker-affine resume을 구현한다.
+- suspend된 Actor의 command는 mailbox에서 기다리고 다른 Actor는 진행한다.
+- cancel, late completion과 drain 경합을 Debug, sanitizer와 deterministic test로 검증한다.
 
-### 단계 5: World Runtime
+### 단계 5: 인증·영속성 Vertical Slice
 
-- 주입 가능한 Clock을 사용하는 FixedTickExecutor를 구현한다.
-- Zone 하나에서 입력, 이동, 충돌, AOI의 최소 vertical slice를 만든다.
-- tick overrun과 command queue 지연을 측정한다.
+- 영속 `PlayerId`, 비동기 load, 멱등한 구매와 transaction 저장을 구현한다.
+- disconnect/passivation/reconnect 복원까지 하나의 흐름으로 검증한다.
 
-### 단계 6: Battle Runtime
+### 단계 6: 최소 World와 Battle
 
-- CombatRoom 생성과 종료 lifecycle을 구현한다.
-- World에서 Battle로 route와 상태 소유권을 전환한다.
-- 전투 중 충돌 처리와 BattleResult의 멱등 적용을 검증한다.
+- FixedTickExecutor, Zone과 CombatRoom의 최소 이동·충돌·전투 흐름을 구현한다.
+- RouteCoordinator, route epoch, multi-runtime drain과 `BattleResult` 멱등 적용을 검증한다.
 
-### 단계 7: Persistence와 Shared Content
+### 단계 7: Shared Content와 Projection
 
-- bounded DB Worker Pool과 완료 메시지 반환을 구현한다.
-- entity version으로 오래된 완료 결과를 거부한다.
-- Party 또는 Matchmaking 중 하나를 공유 Actor의 대표 vertical slice로 구현한다.
+- Party 또는 Matchmaking 하나를 구현한다.
+- 랭킹과 시즌 정산은 domain event 기반 projection과 재실행 가능한 job으로 분리한다.
 
-### 단계 8: 프로세스 분리 실험
+### 선택적 인프라 트랙: io_uring과 프로세스 분리
 
-단일 프로세스 경계를 검증한 뒤에만 다음 순서로 분리한다.
-
-```text
-단일 GameServer 프로세스
-→ Gateway와 GameNode 분리
-→ WorldNode와 BattleNode 분리
-→ 여러 Node를 위한 Directory와 내부 메시징 추가
-```
-
-프로세스를 분리하기 전에는 Kafka 같은 외부 메시지 브로커를 hot packet path에 두지 않는다.
-단일 프로세스에서는 직접 bounded queue가 더 단순하고 지연도 낮다.
+- 안정된 inbound/outbound/lifecycle 계약을 두 번째 network backend로 검증할 때 io_uring을
+  추가한다.
+- 단일 프로세스 경계를 충분히 검증한 뒤에만 Gateway, WorldNode, BattleNode 분리를 실험한다.
+- 그 전에는 외부 message broker를 hot packet path에 두지 않는다.
 
 ## 14. 검증 기준
 

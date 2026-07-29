@@ -6,6 +6,7 @@
 
 #include <arpa/inet.h>
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <cerrno>
 #include <chrono>
@@ -14,6 +15,7 @@
 #include <cstdint>
 #include <exception>
 #include <future>
+#include <numeric>
 #include <optional>
 #include <poll.h>
 #include <span>
@@ -28,13 +30,21 @@ namespace
 {
     using namespace std::chrono_literals;
 
-    class RecordingCommandIngress final : public snf::server::CommandIngress
+    class RecordingFrameIngress final : public snf::server::FrameIngress
     {
     public:
-        [[nodiscard]] snf::server::PostResult
-        tryPost(snf::server::InboundCommand) override
+        [[nodiscard]] snf::server::FramePostResult tryPost(snf::server::FrameEnvelope) override
         {
-            return snf::server::PostResult::Closed;
+            return snf::server::FramePostResult::Closed;
+        }
+
+        [[nodiscard]] snf::server::PostResult
+        tryPostConnectionClosed(snf::server::ConnectionClosed closed) override
+        {
+            connection_closes.push_back(closed);
+            const std::size_t attempt = lifecycle_attempts.fetch_add(1);
+            return attempt < lifecycle_results.size() ? lifecycle_results[attempt]
+                                                      : lifecycle_fallback;
         }
 
         void close() noexcept override
@@ -49,6 +59,10 @@ namespace
 
         bool closed{false};
         bool cancelled{false};
+        std::vector<snf::server::PostResult> lifecycle_results;
+        snf::server::PostResult lifecycle_fallback{snf::server::PostResult::Accepted};
+        std::vector<snf::server::ConnectionClosed> connection_closes;
+        std::atomic<std::size_t> lifecycle_attempts{0};
     };
 
     snf::net::UniqueFileDescriptor make_eventfd()
@@ -114,6 +128,11 @@ namespace
         [[nodiscard]] const snf::server::GameServerStats& getStats() const noexcept
         {
             return _server.getStats();
+        }
+
+        [[nodiscard]] snf::server::ActorRuntimeStats getActorRuntimeStats() const
+        {
+            return _server.getActorRuntimeStats();
         }
 
         void stop()
@@ -314,6 +333,26 @@ namespace
         }
     }
 
+    std::size_t actor_count(const snf::server::ActorRuntimeStats& stats)
+    {
+        return std::accumulate(
+            stats.workers.begin(),
+            stats.workers.end(),
+            std::size_t{0},
+            [](const std::size_t total, const snf::server::ActorRuntimeWorkerStats& worker)
+            { return total + worker.actor_count; });
+    }
+
+    std::uint64_t evicted_actor_count(const snf::server::ActorRuntimeStats& stats)
+    {
+        return std::accumulate(
+            stats.workers.begin(),
+            stats.workers.end(),
+            std::uint64_t{0},
+            [](const std::uint64_t total, const snf::server::ActorRuntimeWorkerStats& worker)
+            { return total + worker.evicted_actors; });
+    }
+
     void test_returns_pong_for_ping()
     {
         RunningServer server;
@@ -339,6 +378,34 @@ namespace
         assert(stats.received_frames == 1);
         assert(stats.sent_frames == 1);
         assert(stats.protocol_errors == 0);
+    }
+
+    void test_peer_disconnect_evicts_the_player_actor()
+    {
+        RunningServer server;
+        {
+            const auto client = connect_client(server.getPort());
+            const snf::protocol::Frame request{
+                .type = snf::protocol::MessageType::Ping,
+                .request_id = 11,
+                .payload = {},
+            };
+            const auto encoded_request = snf::protocol::encode_frame(request);
+            send_all(client.getDescriptor(), encoded_request);
+            assert_pong(receive_exact(client.getDescriptor(), encoded_request.size()), request);
+        }
+
+        const auto deadline = std::chrono::steady_clock::now() + 1s;
+        while (actor_count(server.getActorRuntimeStats()) != 0 &&
+               std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::sleep_for(5ms);
+        }
+
+        const auto stats = server.getActorRuntimeStats();
+        assert(actor_count(stats) == 0);
+        assert(evicted_actor_count(stats) == 1);
+        server.stop();
     }
 
     void test_decodes_ping_sent_one_byte_at_a_time()
@@ -464,6 +531,7 @@ namespace
 
         server.stop();
         assert(server.getStats().protocol_errors >= 1);
+        assert(actor_count(server.getActorRuntimeStats()) == 1);
     }
 
     void test_overflowed_actor_queue_closes_only_that_connection()
@@ -509,7 +577,7 @@ namespace
 
         server.stop();
         assert(server.getStats().actor_queue_overflows >= 1);
-        assert(server.getStats().stale_network_actions >= 1);
+        assert(server.getStats().stale_outbound_actions >= 1);
     }
 
     void test_request_stop_closes_listener_and_active_sessions()
@@ -637,9 +705,12 @@ namespace
 
     void test_actor_runtime_failure_aborts_without_waiting_for_grace_period()
     {
-        RecordingCommandIngress ingress;
-        snf::runtime::BoundedQueue<snf::server::NetworkAction> outbound{8};
+        RecordingFrameIngress ingress;
+        snf::runtime::BoundedQueue<snf::server::OutboundAction> outbound{8};
         const auto outbound_event = make_eventfd();
+        snf::server::RuntimeCompletionCoordinator runtime_completion{
+            snf::server::runtimeMask(snf::server::RuntimeId::Player),
+            outbound_event.getDescriptor()};
         snf::server::TcpServer server{
             snf::server::TcpServerConfig{
                 .port = 0,
@@ -649,29 +720,26 @@ namespace
             },
             ingress,
             outbound,
+            runtime_completion,
             outbound_event.getDescriptor()};
 
         std::promise<void> server_finished;
         const auto finished = server_finished.get_future();
         std::exception_ptr server_error;
-        std::thread server_thread{
-            [&]
-            {
-                try
-                {
-                    server.run();
-                }
-                catch (...)
-                {
-                    server_error = std::current_exception();
-                }
-                server_finished.set_value();
-            }};
+        std::thread server_thread{[&]
+                                  {
+                                      try
+                                      {
+                                          server.run();
+                                      }
+                                      catch (...)
+                                      {
+                                          server_error = std::current_exception();
+                                      }
+                                      server_finished.set_value();
+                                  }};
 
-        assert(outbound.tryPush(snf::server::ActorRuntimeFailed{}));
-        constexpr std::uint64_t wakeup_value = 1;
-        assert(::write(outbound_event.getDescriptor(), &wakeup_value, sizeof(wakeup_value)) ==
-               sizeof(wakeup_value));
+        runtime_completion.notifyFailed(snf::server::RuntimeId::Player);
         assert(finished.wait_for(1s) == std::future_status::ready);
         server_thread.join();
 
@@ -679,11 +747,139 @@ namespace
         assert(ingress.closed);
         assert(ingress.cancelled);
     }
+
+    void test_retries_a_full_connection_closed_post_without_duplicate_after_acceptance()
+    {
+        RecordingFrameIngress ingress;
+        ingress.lifecycle_results = {
+            snf::server::PostResult::Full,
+            snf::server::PostResult::Full,
+            snf::server::PostResult::Accepted,
+        };
+        snf::runtime::BoundedQueue<snf::server::OutboundAction> outbound{8};
+        const auto outbound_event = make_eventfd();
+        snf::server::RuntimeCompletionCoordinator runtime_completion{
+            snf::server::runtimeMask(snf::server::RuntimeId::Player),
+            outbound_event.getDescriptor()};
+        snf::server::TcpServer server{
+            snf::server::TcpServerConfig{
+                .port = 0,
+                .shutdown_grace_period = 200ms,
+                .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
+                .client_send_buffer_size = std::nullopt,
+            },
+            ingress,
+            outbound,
+            runtime_completion,
+            outbound_event.getDescriptor()};
+
+        std::exception_ptr server_error;
+        std::thread server_thread{[&]
+                                  {
+                                      try
+                                      {
+                                          server.run();
+                                      }
+                                      catch (...)
+                                      {
+                                          server_error = std::current_exception();
+                                      }
+                                  }};
+        {
+            const auto client = connect_client(server.getPort());
+        }
+
+        const auto deadline = std::chrono::steady_clock::now() + 1s;
+        while (ingress.lifecycle_attempts.load() != 3 &&
+               std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::sleep_for(1ms);
+        }
+        assert(ingress.lifecycle_attempts.load() == 3);
+
+        runtime_completion.notifyDrained(snf::server::RuntimeId::Player);
+        server.requestStop();
+        server_thread.join();
+
+        assert(server_error == nullptr);
+        assert(ingress.connection_closes.size() == 3);
+        const auto& first = ingress.connection_closes.front();
+        for (const auto& closed : ingress.connection_closes)
+        {
+            assert(closed.connection == first.connection);
+            assert(closed.cause == snf::server::ConnectionCloseCause::PeerClosed);
+        }
+    }
+
+    void test_bounds_pending_connection_closes_and_rejects_new_connections_at_capacity()
+    {
+        RecordingFrameIngress ingress;
+        ingress.lifecycle_fallback = snf::server::PostResult::Full;
+        snf::runtime::BoundedQueue<snf::server::OutboundAction> outbound{8};
+        const auto outbound_event = make_eventfd();
+        snf::server::RuntimeCompletionCoordinator runtime_completion{
+            snf::server::runtimeMask(snf::server::RuntimeId::Player),
+            outbound_event.getDescriptor()};
+        snf::server::TcpServer server{
+            snf::server::TcpServerConfig{
+                .port = 0,
+                .shutdown_grace_period = 200ms,
+                .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
+                .client_send_buffer_size = std::nullopt,
+                .connection_lifecycle_capacity = 2,
+            },
+            ingress,
+            outbound,
+            runtime_completion,
+            outbound_event.getDescriptor()};
+
+        std::exception_ptr server_error;
+        std::thread server_thread{[&]
+                                  {
+                                      try
+                                      {
+                                          server.run();
+                                      }
+                                      catch (...)
+                                      {
+                                          server_error = std::current_exception();
+                                      }
+                                  }};
+
+        for (std::size_t close_index = 0; close_index < 2; ++close_index)
+        {
+            {
+                const auto client = connect_client(server.getPort());
+            }
+
+            const auto deadline = std::chrono::steady_clock::now() + 1s;
+            while (ingress.lifecycle_attempts.load() < close_index + 1 &&
+                   std::chrono::steady_clock::now() < deadline)
+            {
+                std::this_thread::sleep_for(1ms);
+            }
+            assert(ingress.lifecycle_attempts.load() >= close_index + 1);
+        }
+
+        const auto rejected_client = connect_client(server.getPort());
+        receive_until_closed(rejected_client.getDescriptor());
+
+        runtime_completion.notifyDrained(snf::server::RuntimeId::Player);
+        server.requestStop();
+        server_thread.join();
+
+        assert(server_error == nullptr);
+        assert(server.getStats().accepted_connections == 2);
+        assert(server.getStats().closed_connections == 2);
+        assert(server.getStats().connection_lifecycle_rejections == 1);
+        assert(server.getStats().pending_connection_closes_high_water_mark == 2);
+    }
 }
 
 int main()
 {
     test_returns_pong_for_ping();
+    test_peer_disconnect_evicts_the_player_actor();
     test_decodes_ping_sent_one_byte_at_a_time();
     test_decodes_multiple_pings_from_one_send();
     test_survives_client_close_during_partial_frame();
@@ -695,4 +891,6 @@ int main()
     test_termination_signal_stops_server(SIGINT);
     test_termination_signal_stops_server(SIGTERM);
     test_actor_runtime_failure_aborts_without_waiting_for_grace_period();
+    test_retries_a_full_connection_closed_post_without_duplicate_after_acceptance();
+    test_bounds_pending_connection_closes_and_rejects_new_connections_at_capacity();
 }

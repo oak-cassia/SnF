@@ -1,10 +1,11 @@
 #pragma once
 
 #include "snf/protocol/frame.hpp"
+#include "snf/server/player_command.hpp"
 
 #include <functional>
+#include <optional>
 #include <unordered_map>
-#include <vector>
 
 namespace snf::server
 {
@@ -12,12 +13,13 @@ namespace snf::server
     {
         Handled,
         HandlerNotFound,
+        InvalidPayload,
     };
 
     struct DispatchResult
     {
         DispatchStatus status;
-        std::vector<snf::protocol::Frame> responses;
+        std::optional<PlayerCommand> command;
 
         [[nodiscard]] bool handled() const noexcept
         {
@@ -25,16 +27,17 @@ namespace snf::server
         }
     };
 
+    // The protocol gateway after frame decoding. It rejects unsupported message
+    // types and converts accepted frames into typed commands before actor routing.
     class MessageDispatcher
     {
     public:
-        using Handler =
-            std::function<std::vector<snf::protocol::Frame>(const snf::protocol::Frame&)>;
+        using Handler = std::function<std::optional<PlayerCommand>(snf::protocol::Frame)>;
 
         MessageDispatcher();
 
         [[nodiscard]] bool registerHandler(snf::protocol::MessageType type, Handler handler);
-        [[nodiscard]] DispatchResult dispatch(const snf::protocol::Frame& request) const;
+        [[nodiscard]] DispatchResult dispatch(snf::protocol::Frame request) const;
 
     private:
         std::unordered_map<snf::protocol::MessageType, Handler> _handlers;

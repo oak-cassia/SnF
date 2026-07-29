@@ -6,14 +6,14 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <stop_token>
 #include <utility>
 
 namespace snf::runtime
 {
     // A bounded FIFO queue with two distinct shutdown modes. close() preserves
     // accepted items for consumers, while cancel() abandons them and wakes every waiter.
-    template <typename T>
-    class BoundedQueue
+    template <typename T> class BoundedQueue
     {
     public:
         explicit BoundedQueue(const std::size_t capacity)
@@ -28,8 +28,7 @@ namespace snf::runtime
         BoundedQueue(const BoundedQueue&) = delete;
         BoundedQueue& operator=(const BoundedQueue&) = delete;
 
-        template <typename U>
-        [[nodiscard]] bool tryPush(U&& item)
+        template <typename U> [[nodiscard]] bool tryPush(U&& item)
         {
             {
                 std::lock_guard lock{_mutex};
@@ -48,19 +47,39 @@ namespace snf::runtime
 
         // Waits only on a full queue. The producer is released when capacity becomes
         // available or when close()/cancel() rejects the item.
-        template <typename U>
-        [[nodiscard]] bool push(U&& item)
+        template <typename U> [[nodiscard]] bool push(U&& item)
         {
             {
                 std::unique_lock lock{_mutex};
-                _not_full.wait(lock,
-                               [this]
-                               {
-                                   return _cancelled || _closed ||
-                                          _items.size() < _capacity;
-                               });
+                _not_full.wait(
+                    lock, [this] { return _cancelled || _closed || _items.size() < _capacity; });
 
                 if (_closed || _cancelled)
+                {
+                    return false;
+                }
+
+                _items.emplace_back(std::forward<U>(item));
+                updateHighWaterMark();
+            }
+
+            _not_empty.notify_one();
+            return true;
+        }
+
+        // Preserves blocking backpressure while allowing the producer's own
+        // lifecycle to interrupt a wait on a full queue. Stopping one producer
+        // does not close or cancel the shared queue for other producers.
+        template <typename U> [[nodiscard]] bool push(U&& item, const std::stop_token stop_token)
+        {
+            {
+                std::unique_lock lock{_mutex};
+                const bool can_push = _not_full.wait(
+                    lock,
+                    stop_token,
+                    [this] { return _cancelled || _closed || _items.size() < _capacity; });
+
+                if (!can_push || stop_token.stop_requested() || _closed || _cancelled)
                 {
                     return false;
                 }
@@ -76,11 +95,7 @@ namespace snf::runtime
         [[nodiscard]] std::optional<T> pop()
         {
             std::unique_lock lock{_mutex};
-            _not_empty.wait(lock,
-                            [this]
-                            {
-                                return _cancelled || !_items.empty() || _closed;
-                            });
+            _not_empty.wait(lock, [this] { return _cancelled || !_items.empty() || _closed; });
 
             if (_cancelled || _items.empty())
             {
@@ -122,16 +137,19 @@ namespace snf::runtime
 
         // Used only when graceful shutdown has expired. It abandons queued work and
         // releases every blocked producer and consumer.
-        void cancel()
+        std::size_t cancel()
         {
+            std::size_t discarded_count = 0;
             {
                 std::lock_guard lock{_mutex};
                 _cancelled = true;
+                discarded_count = _items.size();
                 _items.clear();
             }
 
             _not_empty.notify_all();
             _not_full.notify_all();
+            return discarded_count;
         }
 
         [[nodiscard]] std::size_t size() const
@@ -175,7 +193,7 @@ namespace snf::runtime
         const std::size_t _capacity;
         mutable std::mutex _mutex;
         std::condition_variable _not_empty;
-        std::condition_variable _not_full;
+        std::condition_variable_any _not_full;
         std::deque<T> _items;
         std::size_t _high_water_mark{0};
         bool _closed{false};

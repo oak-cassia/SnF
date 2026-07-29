@@ -2,7 +2,9 @@
 
 #include <cassert>
 #include <cstddef>
-#include <vector>
+#include <optional>
+#include <utility>
+#include <variant>
 
 namespace
 {
@@ -18,10 +20,11 @@ namespace
         const auto result = dispatcher.dispatch(request);
 
         assert(result.handled());
-        assert(result.responses.size() == 1);
-        assert(result.responses[0].type == snf::protocol::MessageType::Pong);
-        assert(result.responses[0].request_id == request.request_id);
-        assert(result.responses[0].payload == request.payload);
+        assert(result.command.has_value());
+        const auto* command = std::get_if<snf::server::PingCommand>(&*result.command);
+        assert(command != nullptr);
+        assert(command->request_id == request.request_id);
+        assert(command->payload == request.payload);
     }
 
     void test_reports_a_missing_handler()
@@ -37,7 +40,7 @@ namespace
 
         assert(!result.handled());
         assert(result.status == snf::server::DispatchStatus::HandlerNotFound);
-        assert(result.responses.empty());
+        assert(!result.command.has_value());
     }
 
     void test_registers_an_additional_handler()
@@ -45,7 +48,13 @@ namespace
         snf::server::MessageDispatcher dispatcher;
         const bool registered = dispatcher.registerHandler(
             snf::protocol::MessageType::Pong,
-            [](const snf::protocol::Frame&) { return std::vector<snf::protocol::Frame>{}; });
+            [](snf::protocol::Frame request) -> snf::server::PlayerCommand
+            {
+                return snf::server::PingCommand{
+                    .request_id = request.request_id,
+                    .payload = std::move(request.payload),
+                };
+            });
 
         const snf::protocol::Frame request{
             .type = snf::protocol::MessageType::Pong,
@@ -56,7 +65,8 @@ namespace
 
         assert(registered);
         assert(result.handled());
-        assert(result.responses.empty());
+        assert(result.command.has_value());
+        assert(std::holds_alternative<snf::server::PingCommand>(*result.command));
     }
 
     void test_rejects_a_duplicate_handler()
@@ -65,9 +75,34 @@ namespace
 
         const bool registered = dispatcher.registerHandler(
             snf::protocol::MessageType::Ping,
-            [](const snf::protocol::Frame&) { return std::vector<snf::protocol::Frame>{}; });
+            [](snf::protocol::Frame request) -> snf::server::PlayerCommand
+            {
+                return snf::server::PingCommand{
+                    .request_id = request.request_id,
+                    .payload = std::move(request.payload),
+                };
+            });
 
         assert(!registered);
+    }
+
+    void test_reports_invalid_payload_from_a_registered_handler()
+    {
+        snf::server::MessageDispatcher dispatcher;
+        assert(dispatcher.registerHandler(
+            snf::protocol::MessageType::Pong,
+            [](snf::protocol::Frame) -> std::optional<snf::server::PlayerCommand>
+            { return std::nullopt; }));
+
+        const auto result = dispatcher.dispatch(snf::protocol::Frame{
+            .type = snf::protocol::MessageType::Pong,
+            .request_id = 1,
+            .payload = {},
+        });
+
+        assert(!result.handled());
+        assert(result.status == snf::server::DispatchStatus::InvalidPayload);
+        assert(!result.command.has_value());
     }
 }
 
@@ -77,4 +112,5 @@ void run_message_dispatcher_tests()
     test_reports_a_missing_handler();
     test_registers_an_additional_handler();
     test_rejects_a_duplicate_handler();
+    test_reports_invalid_payload_from_a_registered_handler();
 }
