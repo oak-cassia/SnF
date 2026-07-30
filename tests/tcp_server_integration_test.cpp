@@ -2,6 +2,7 @@
 #include "snf/net/termination_signal.hpp"
 #include "snf/net/unique_file_descriptor.hpp"
 #include "snf/protocol/frame_codec.hpp"
+#include "snf/runtime/runtime_completion.hpp"
 #include "snf/server/game_server.hpp"
 
 #include <arpa/inet.h>
@@ -130,7 +131,7 @@ namespace
             return _server.getStats();
         }
 
-        [[nodiscard]] snf::server::ActorRuntimeStats getActorRuntimeStats() const
+        [[nodiscard]] snf::runtime::ActorRuntimeStats getActorRuntimeStats() const
         {
             return _server.getActorRuntimeStats();
         }
@@ -333,23 +334,23 @@ namespace
         }
     }
 
-    std::size_t actor_count(const snf::server::ActorRuntimeStats& stats)
+    std::size_t actor_count(const snf::runtime::ActorRuntimeStats& stats)
     {
         return std::accumulate(
             stats.workers.begin(),
             stats.workers.end(),
             std::size_t{0},
-            [](const std::size_t total, const snf::server::ActorRuntimeWorkerStats& worker)
+            [](const std::size_t total, const snf::runtime::ActorRuntimeWorkerStats& worker)
             { return total + worker.actor_count; });
     }
 
-    std::uint64_t evicted_actor_count(const snf::server::ActorRuntimeStats& stats)
+    std::uint64_t evicted_actor_count(const snf::runtime::ActorRuntimeStats& stats)
     {
         return std::accumulate(
             stats.workers.begin(),
             stats.workers.end(),
             std::uint64_t{0},
-            [](const std::uint64_t total, const snf::server::ActorRuntimeWorkerStats& worker)
+            [](const std::uint64_t total, const snf::runtime::ActorRuntimeWorkerStats& worker)
             { return total + worker.evicted_actors; });
     }
 
@@ -531,7 +532,9 @@ namespace
 
         server.stop();
         assert(server.getStats().protocol_errors >= 1);
-        assert(actor_count(server.getActorRuntimeStats()) == 1);
+        // Worker-owned wrappers are destroyed before the Logic Runtime worker
+        // exits, so a completed shutdown retains no inactive Player slot.
+        assert(actor_count(server.getActorRuntimeStats()) == 0);
     }
 
     void test_overflowed_actor_queue_closes_only_that_connection()
@@ -708,8 +711,8 @@ namespace
         RecordingFrameIngress ingress;
         snf::runtime::BoundedQueue<snf::server::OutboundAction> outbound{8};
         const auto outbound_event = make_eventfd();
-        snf::server::RuntimeCompletionCoordinator runtime_completion{
-            snf::server::runtimeMask(snf::server::RuntimeId::Player),
+        snf::runtime::RuntimeCompletionCoordinator runtime_completion{
+            snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
             outbound_event.getDescriptor()};
         snf::server::TcpServer server{
             snf::server::TcpServerConfig{
@@ -739,7 +742,7 @@ namespace
                                       server_finished.set_value();
                                   }};
 
-        runtime_completion.notifyFailed(snf::server::RuntimeId::Player);
+        runtime_completion.notifyFailed(snf::runtime::RuntimeId::Logic);
         assert(finished.wait_for(1s) == std::future_status::ready);
         server_thread.join();
 
@@ -758,8 +761,8 @@ namespace
         };
         snf::runtime::BoundedQueue<snf::server::OutboundAction> outbound{8};
         const auto outbound_event = make_eventfd();
-        snf::server::RuntimeCompletionCoordinator runtime_completion{
-            snf::server::runtimeMask(snf::server::RuntimeId::Player),
+        snf::runtime::RuntimeCompletionCoordinator runtime_completion{
+            snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
             outbound_event.getDescriptor()};
         snf::server::TcpServer server{
             snf::server::TcpServerConfig{
@@ -797,7 +800,7 @@ namespace
         }
         assert(ingress.lifecycle_attempts.load() == 3);
 
-        runtime_completion.notifyDrained(snf::server::RuntimeId::Player);
+        runtime_completion.notifyDrained(snf::runtime::RuntimeId::Logic);
         server.requestStop();
         server_thread.join();
 
@@ -817,8 +820,8 @@ namespace
         ingress.lifecycle_fallback = snf::server::PostResult::Full;
         snf::runtime::BoundedQueue<snf::server::OutboundAction> outbound{8};
         const auto outbound_event = make_eventfd();
-        snf::server::RuntimeCompletionCoordinator runtime_completion{
-            snf::server::runtimeMask(snf::server::RuntimeId::Player),
+        snf::runtime::RuntimeCompletionCoordinator runtime_completion{
+            snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
             outbound_event.getDescriptor()};
         snf::server::TcpServer server{
             snf::server::TcpServerConfig{
@@ -864,7 +867,7 @@ namespace
         const auto rejected_client = connect_client(server.getPort());
         receive_until_closed(rejected_client.getDescriptor());
 
-        runtime_completion.notifyDrained(snf::server::RuntimeId::Player);
+        runtime_completion.notifyDrained(snf::runtime::RuntimeId::Logic);
         server.requestStop();
         server_thread.join();
 

@@ -3,14 +3,13 @@
 #include <atomic>
 #include <cstdint>
 
-namespace snf::server
+namespace snf::runtime
 {
+    // Phase 3.8 has one logic scheduler. More ids may be added only when a
+    // separate runtime lifecycle is introduced.
     enum class RuntimeId : std::uint8_t
     {
-        Player = 0,
-        World,
-        Battle,
-        SharedContent,
+        Logic = 0,
     };
 
     [[nodiscard]] constexpr std::uint64_t runtimeMask(const RuntimeId runtime) noexcept
@@ -32,15 +31,15 @@ namespace snf::server
     public:
         virtual ~RuntimeCompletionSource() = default;
 
-        // These are authoritative level-triggered states. The eventfd wake-up is
-        // only a hint, so a coalesced wake cannot lose completion information.
+        // These are authoritative level-triggered states. The eventfd wake-up
+        // is only a hint, so coalesced wakes cannot lose completion facts.
         [[nodiscard]] virtual bool allRequiredRuntimesDrained() const noexcept = 0;
         [[nodiscard]] virtual bool anyRuntimeFailed() const noexcept = 0;
     };
 
-    // Coordinates lifecycle completion independently from the bounded outbound
-    // data queue. Multiple notifications are idempotent and cannot be rejected by
-    // data-plane backpressure.
+    // Completion is intentionally independent from data-plane backpressure.
+    // The mask constructor is retained to make the coordinator explicit, but
+    // Phase 3.8 accepts the Logic runtime only.
     class RuntimeCompletionCoordinator final : public RuntimeCompletionSink,
                                                public RuntimeCompletionSource
     {

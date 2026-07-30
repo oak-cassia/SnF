@@ -2,13 +2,15 @@
 
 #include "snf/net/session.hpp"
 #include "snf/net/unique_file_descriptor.hpp"
+#include "snf/runtime/actor_runtime.hpp"
 #include "snf/runtime/bounded_queue.hpp"
-#include "snf/server/actor_runtime.hpp"
+#include "snf/runtime/runtime_completion.hpp"
 #include "snf/server/command_router.hpp"
 #include "snf/server/outbound_sink.hpp"
+#include "snf/server/player_actor_binding.hpp"
+#include "snf/server/player_actor_ingress.hpp"
 #include "snf/server/protocol_gateway.hpp"
 #include "snf/server/protocol_player_effect_sink.hpp"
-#include "snf/server/runtime_completion.hpp"
 #include "snf/server/tcp_server.hpp"
 
 #include <chrono>
@@ -34,7 +36,8 @@ namespace snf::server
 
     using GameServerStats = TcpServerStats;
 
-    // Composes the reactor, sharded ActorRuntime, outbound hand-off queue and eventfd wake-up.
+    // Composes the reactor, Logic ActorRuntime, Player binding, outbound hand-off
+    // queue and eventfd wake-up.
     class GameServer
     {
     public:
@@ -52,7 +55,7 @@ namespace snf::server
 
         [[nodiscard]] std::uint16_t getPort() const noexcept;
         [[nodiscard]] const GameServerStats& getStats() const noexcept;
-        [[nodiscard]] ActorRuntimeStats getActorRuntimeStats() const;
+        [[nodiscard]] snf::runtime::ActorRuntimeStats getActorRuntimeStats() const;
 
         void run(int termination_signal_descriptor = snf::net::UniqueFileDescriptor::INVALID_FD);
         void requestStop() const noexcept;
@@ -66,8 +69,12 @@ namespace snf::server
         snf::net::UniqueFileDescriptor _outbound_event;
         EventFdOutboundSink _outbound_sink;
         ProtocolPlayerEffectSink _player_effects;
-        RuntimeCompletionCoordinator _runtime_completion;
-        ActorRuntime _actor_runtime;
+        snf::runtime::RuntimeCompletionCoordinator _runtime_completion;
+        // Bindings must outlive the generic runtime: the worker owns the
+        // wrapper destruction, while this object owns Player dependencies.
+        PlayerActorBinding _player_actor_binding;
+        snf::runtime::ActorRuntime _logic_runtime;
+        PlayerActorIngress _player_actor_ingress;
         CommandRouter _command_router;
         ProtocolGateway _protocol_gateway;
         TcpServer _tcp_server;

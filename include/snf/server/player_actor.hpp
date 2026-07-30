@@ -41,14 +41,4 @@ namespace snf::server
 
         PlayerState _state;
     };
-
-    // Suspended is reserved for coroutine continuation work. No transition into
-    // it is exposed until the coroutine runtime is introduced.
-    enum class ActorExecutionState
-    {
-        Idle,
-        Ready,
-        Running,
-        Suspended,
-    };
 }

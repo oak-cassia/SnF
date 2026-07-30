@@ -27,18 +27,20 @@ namespace snf::server
         , _outbound_event(create_outbound_event())
         , _outbound_sink(_outbound_actions, _outbound_event.getDescriptor())
         , _player_effects(_outbound_sink)
-        , _runtime_completion(runtimeMask(RuntimeId::Player), _outbound_event.getDescriptor())
-        , _actor_runtime(
+        , _runtime_completion(snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
+                              _outbound_event.getDescriptor())
+        , _player_actor_binding(_player_effects)
+        , _logic_runtime(
               [config]
               {
-                  ActorRuntimeConfig runtime_config{RuntimeId::Player};
+                  snf::runtime::ActorRuntimeConfig runtime_config;
                   runtime_config.worker_count = config.actor_worker_count;
                   runtime_config.queue_capacity_per_worker = config.actor_queue_capacity_per_worker;
                   return runtime_config;
               }(),
-              _player_effects,
               _runtime_completion)
-        , _command_router(_actor_runtime)
+        , _player_actor_ingress(_logic_runtime, _player_actor_binding)
+        , _command_router(_player_actor_ingress)
         , _protocol_gateway(_command_router)
         , _tcp_server(
               TcpServerConfig{
@@ -53,6 +55,7 @@ namespace snf::server
               _runtime_completion,
               _outbound_event.getDescriptor())
     {
+        _logic_runtime.registerBinding(_player_actor_binding);
     }
 
     GameServer::GameServer(const std::uint16_t port,
@@ -94,9 +97,9 @@ namespace snf::server
         return _tcp_server.getStats();
     }
 
-    ActorRuntimeStats GameServer::getActorRuntimeStats() const
+    snf::runtime::ActorRuntimeStats GameServer::getActorRuntimeStats() const
     {
-        return _actor_runtime.getStats();
+        return _logic_runtime.getStats();
     }
 
     void GameServer::run(const int termination_signal_descriptor)
@@ -138,12 +141,12 @@ namespace snf::server
 
         _has_run = true;
 
-        _actor_runtime.start();
+        _logic_runtime.start();
     }
 
     void GameServer::joinActorRuntime()
     {
-        _actor_runtime.join();
+        _logic_runtime.join();
     }
 
     void GameServer::cancelActorRuntime() noexcept

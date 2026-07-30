@@ -6,7 +6,7 @@
 
 namespace snf::server
 {
-    struct InboundCommand
+    struct PlayerInboundCommand
     {
         ProvisionalActorId actor;
         snf::net::ConnectionId connection;

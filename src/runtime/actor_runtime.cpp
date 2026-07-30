@@ -1,27 +1,89 @@
-#include "snf/server/actor_runtime.hpp"
+#include "snf/runtime/actor_runtime.hpp"
+
+#include "snf/runtime/bounded_queue.hpp"
 
 #include <chrono>
+#include <deque>
+#include <optional>
 #include <stdexcept>
-#include <type_traits>
 #include <utility>
 
 namespace
 {
     constexpr std::size_t INGRESS_BATCH_SIZE = 64;
-    constexpr std::size_t ACTOR_TURN_BUDGET = 16;
+    constexpr std::size_t ACTOR_TURN_COMMAND_BUDGET = 16;
 }
 
-namespace snf::server
+namespace snf::runtime
 {
+    struct ActorRuntime::QueuedSubmission
+    {
+        ActorSubmission submission;
+        std::chrono::steady_clock::time_point enqueued_at;
+    };
+
+    struct ActorRuntime::ActorSlotEntry
+    {
+        ActorBinding* binding;
+        std::unique_ptr<ActorSlot> actor;
+        std::deque<QueuedSubmission> mailbox;
+        ActorExecutionState state{ActorExecutionState::Idle};
+    };
+
+    struct ActorRuntime::WorkerCounters
+    {
+        std::atomic<std::uint64_t> accepted{0};
+        std::atomic<std::uint64_t> processed{0};
+        std::atomic<std::uint64_t> rejected_full{0};
+        std::atomic<std::uint64_t> evicted_actors{0};
+        std::atomic<std::uint64_t> queue_wait_samples{0};
+        std::atomic<std::uint64_t> total_queue_wait_nanoseconds{0};
+        std::atomic<std::uint64_t> max_queue_wait_nanoseconds{0};
+        std::atomic<std::uint64_t> outstanding_high_water_mark{0};
+        std::atomic<std::uint64_t> mailbox_depth{0};
+        std::atomic<std::uint64_t> mailbox_high_water_mark{0};
+        std::atomic<std::uint64_t> budget_yield_turns{0};
+    };
+
+    struct ActorRuntime::Worker
+    {
+        explicit Worker(const std::size_t queue_capacity)
+            : ingress(queue_capacity)
+            , capacity(queue_capacity)
+        {
+        }
+
+        BoundedQueue<QueuedSubmission> ingress;
+        const std::size_t capacity;
+        std::atomic<std::size_t> outstanding{0};
+        WorkerCounters counters;
+        mutable std::mutex scheduling_mutex;
+        std::unordered_map<ActorKey, ActorSlotEntry, ActorKeyHash> actors;
+        std::deque<ActorKey> ready_actors;
+        std::jthread thread;
+    };
+
+    const ActorKey& ActorSubmission::target() const noexcept
+    {
+        return _target;
+    }
+
+    ActorActivation ActorSubmission::activation() const noexcept
+    {
+        return _activation;
+    }
+
+    ActorAccounting ActorSubmission::accounting() const noexcept
+    {
+        return _accounting;
+    }
+
     ActorRuntime::ActorRuntime(const ActorRuntimeConfig& config,
-                               PlayerEffectSink& player_effects,
                                RuntimeCompletionSink& runtime_completion)
         : _worker_count(config.worker_count)
-        , _runtime_id(config.runtime_id)
-        , _player_effects(player_effects)
         , _runtime_completion(runtime_completion)
         , _on_worker_start(config.on_worker_start)
-        , _on_before_command(config.on_before_command)
+        , _on_before_dispatch(config.on_before_dispatch)
         , _on_worker_failure(config.on_worker_failure)
     {
         if (_worker_count == 0 || config.queue_capacity_per_worker == 0)
@@ -40,6 +102,21 @@ namespace snf::server
     {
         cancel();
         joinWorkers();
+    }
+
+    void ActorRuntime::registerBinding(ActorBinding& binding)
+    {
+        std::lock_guard lock{_state_mutex};
+        if (_started)
+        {
+            throw std::logic_error{"ActorRuntime bindings must be registered before start"};
+        }
+
+        const bool inserted = _bindings.emplace(binding.kind(), &binding).second;
+        if (!inserted)
+        {
+            throw std::invalid_argument{"ActorRuntime already has a binding for this ActorKind"};
+        }
     }
 
     void ActorRuntime::start()
@@ -96,45 +173,26 @@ namespace snf::server
         }
     }
 
-    PostResult ActorRuntime::tryPost(InboundCommand command)
-    {
-        return postEvent(
-            QueuedEvent{
-                .payload = std::move(command),
-                .enqueued_at = std::chrono::steady_clock::now(),
-            },
-            EventKind::Command);
-    }
-
-    PostResult ActorRuntime::tryPostConnectionClosed(const ProvisionalActorId actor,
-                                                     ConnectionClosed closed)
-    {
-        return postEvent(
-            QueuedEvent{
-                .payload =
-                    ConnectionClosedEvent{
-                        .actor = actor,
-                        .closed = closed,
-                    },
-                .enqueued_at = std::chrono::steady_clock::now(),
-            },
-            EventKind::ConnectionClosed);
-    }
-
-    PostResult ActorRuntime::postEvent(QueuedEvent event, const EventKind kind)
+    PostResult ActorRuntime::tryPost(ActorSubmission submission)
     {
         std::lock_guard lock{_state_mutex};
+        const auto binding_iterator = _bindings.find(submission.target().kind);
+        if (binding_iterator == _bindings.end() || binding_iterator->second != submission._binding)
+        {
+            throw std::invalid_argument{
+                "ActorSubmission was not made by the registered ActorBinding"};
+        }
+
         if (_input_state != InputState::Running)
         {
             return PostResult::Closed;
         }
 
-        const ProvisionalActorId actor =
-            std::visit([](const auto& payload) { return payload.actor; }, event.payload);
-        Worker& worker = *_workers[workerIndexFor(actor)];
+        Worker& worker = *_workers[workerIndexFor(submission.target())];
+        const ActorAccounting accounting = submission.accounting();
         if (!reserveOutstanding(worker))
         {
-            if (kind == EventKind::Command)
+            if (accounting == ActorAccounting::Command)
             {
                 worker.counters.rejected_full.fetch_add(1, std::memory_order_relaxed);
             }
@@ -144,7 +202,10 @@ namespace snf::server
         bool pushed = false;
         try
         {
-            pushed = worker.ingress.tryPush(std::move(event));
+            pushed = worker.ingress.tryPush(QueuedSubmission{
+                .submission = std::move(submission),
+                .enqueued_at = std::chrono::steady_clock::now(),
+            });
         }
         catch (...)
         {
@@ -155,16 +216,16 @@ namespace snf::server
         if (!pushed)
         {
             releaseOutstanding(worker);
-            // close() cannot race the state check above, so a failed ingress push
-            // here is capacity accounting's conservative fallback.
-            if (kind == EventKind::Command)
+            // The state mutex makes a close race impossible here. A failed push
+            // is consequently the conservative capacity fallback.
+            if (accounting == ActorAccounting::Command)
             {
                 worker.counters.rejected_full.fetch_add(1, std::memory_order_relaxed);
             }
             return PostResult::Full;
         }
 
-        if (kind == EventKind::Command)
+        if (accounting == ActorAccounting::Command)
         {
             worker.counters.accepted.fetch_add(1, std::memory_order_relaxed);
         }
@@ -205,18 +266,19 @@ namespace snf::server
                                                         std::memory_order_acquire))
         {
         }
+
         for (const auto& worker : _workers)
         {
-            discardWorkerCommands(*worker);
+            discardWorkerSubmissions(*worker);
         }
-        // Publish waits are released only after every ingress reports cancellation,
-        // so a worker cannot mistake an explicit cancel for an outbound failure.
-        _effect_stop_source.request_stop();
+        // A binding may be waiting on an external backpressure point. Its token
+        // is runtime-local, so cancelling it never cancels a shared outbound queue.
+        _dispatch_stop_source.request_stop();
     }
 
-    std::size_t ActorRuntime::workerIndexFor(const ProvisionalActorId actor) const noexcept
+    std::size_t ActorRuntime::workerIndexFor(const ActorKey& key) const noexcept
     {
-        return static_cast<std::size_t>(actor.value % static_cast<std::uint64_t>(_worker_count));
+        return ActorKeyHash{}(key) % _worker_count;
     }
 
     std::size_t ActorRuntime::workerCount() const noexcept
@@ -231,8 +293,6 @@ namespace snf::server
 
         for (const auto& worker : _workers)
         {
-            const std::uint64_t accepted =
-                worker->counters.accepted.load(std::memory_order_relaxed);
             const std::uint64_t queue_wait_samples =
                 worker->counters.queue_wait_samples.load(std::memory_order_relaxed);
             const std::uint64_t total_wait =
@@ -247,7 +307,7 @@ namespace snf::server
             }
 
             stats.workers.push_back(ActorRuntimeWorkerStats{
-                .accepted = accepted,
+                .accepted = worker->counters.accepted.load(std::memory_order_relaxed),
                 .processed = worker->counters.processed.load(std::memory_order_relaxed),
                 .rejected_full = worker->counters.rejected_full.load(std::memory_order_relaxed),
                 .evicted_actors = worker->counters.evicted_actors.load(std::memory_order_relaxed),
@@ -277,9 +337,9 @@ namespace snf::server
 
     void ActorRuntime::runWorker(const std::size_t worker_index)
     {
+        Worker& worker = *_workers[worker_index];
         try
         {
-            Worker& worker = *_workers[worker_index];
             if (_on_worker_start)
             {
                 _on_worker_start(worker_index);
@@ -299,33 +359,35 @@ namespace snf::server
                         break;
                     }
 
-                    throw std::runtime_error{"ActorRuntime failed to publish a network action"};
+                    throw std::runtime_error{"ActorRuntime binding stopped without cancellation"};
                 }
             }
 
+            destroyWorkerActors(worker);
             workerFinished();
         }
         catch (...)
         {
             recordWorkerFailure(std::current_exception());
+            destroyWorkerActors(worker);
         }
     }
 
     bool ActorRuntime::fillIngress(Worker& worker)
     {
-        const auto route = [this, &worker](QueuedEvent event)
-        { return routeToMailbox(worker, std::move(event)); };
+        const auto route = [this, &worker](QueuedSubmission submission)
+        { return routeToMailbox(worker, std::move(submission)); };
 
         std::size_t routed = 0;
         if (!hasReadyActor(worker))
         {
-            auto command = worker.ingress.pop();
-            if (!command)
+            auto submission = worker.ingress.pop();
+            if (!submission)
             {
                 return false;
             }
 
-            if (!route(std::move(*command)))
+            if (!route(std::move(*submission)))
             {
                 return false;
             }
@@ -334,13 +396,13 @@ namespace snf::server
 
         while (routed < INGRESS_BATCH_SIZE)
         {
-            auto command = worker.ingress.tryPop();
-            if (!command)
+            auto submission = worker.ingress.tryPop();
+            if (!submission)
             {
                 break;
             }
 
-            if (!route(std::move(*command)))
+            if (!route(std::move(*submission)))
             {
                 return false;
             }
@@ -350,7 +412,7 @@ namespace snf::server
         return !worker.ingress.isCancelled();
     }
 
-    bool ActorRuntime::routeToMailbox(Worker& worker, QueuedEvent event)
+    bool ActorRuntime::routeToMailbox(Worker& worker, QueuedSubmission submission)
     {
         if (worker.ingress.isCancelled())
         {
@@ -358,9 +420,14 @@ namespace snf::server
             return false;
         }
 
-        const ProvisionalActorId actor_id =
-            std::visit([](const auto& payload) { return payload.actor; }, event.payload);
-        const bool is_close = std::holds_alternative<ConnectionClosedEvent>(event.payload);
+        const ActorKey key = submission.submission.target();
+        const auto binding_iterator = _bindings.find(key.kind);
+        if (binding_iterator == _bindings.end())
+        {
+            releaseOutstanding(worker);
+            throw std::logic_error{"ActorRuntime binding registry changed while running"};
+        }
+
         bool discarded = false;
         bool consumed_without_slot = false;
         try
@@ -372,23 +439,36 @@ namespace snf::server
             }
             else
             {
-                auto actor_iterator = worker.actors.find(actor_id);
+                auto actor_iterator = worker.actors.find(key);
                 if (actor_iterator == worker.actors.end())
                 {
-                    if (is_close)
+                    if (submission.submission.activation() == ActorActivation::ExistingOnly)
                     {
                         consumed_without_slot = true;
                     }
                     else
                     {
-                        actor_iterator = worker.actors.try_emplace(actor_id).first;
+                        auto actor = binding_iterator->second->activate(key.entity);
+                        if (!actor)
+                        {
+                            throw std::logic_error{"ActorBinding::activate returned no slot"};
+                        }
+                        actor_iterator = worker.actors
+                                             .emplace(key,
+                                                      ActorSlotEntry{
+                                                          .binding = binding_iterator->second,
+                                                          .actor = std::move(actor),
+                                                          .mailbox = {},
+                                                          .state = ActorExecutionState::Idle,
+                                                      })
+                                             .first;
                     }
                 }
 
                 if (!consumed_without_slot)
                 {
-                    ActorSlot& slot = actor_iterator->second;
-                    slot.mailbox.push_back(std::move(event));
+                    ActorSlotEntry& slot = actor_iterator->second;
+                    slot.mailbox.push_back(std::move(submission));
                     try
                     {
                         if (slot.state == ActorExecutionState::Idle)
@@ -426,8 +506,8 @@ namespace snf::server
 
     bool ActorRuntime::runReadyActorTurn(Worker& worker, const std::size_t worker_index)
     {
-        ProvisionalActorId actor_id;
-        ActorSlot* slot = nullptr;
+        ActorKey key;
+        ActorSlotEntry* slot = nullptr;
         {
             std::lock_guard lock{worker.scheduling_mutex};
             if (worker.ingress.isCancelled())
@@ -440,9 +520,9 @@ namespace snf::server
                 return true;
             }
 
-            actor_id = worker.ready_actors.front();
+            key = worker.ready_actors.front();
             worker.ready_actors.pop_front();
-            auto actor_iterator = worker.actors.find(actor_id);
+            const auto actor_iterator = worker.actors.find(key);
             if (actor_iterator == worker.actors.end() ||
                 actor_iterator->second.state != ActorExecutionState::Ready ||
                 actor_iterator->second.mailbox.empty())
@@ -454,10 +534,10 @@ namespace snf::server
             slot->state = ActorExecutionState::Running;
         }
 
-        std::size_t handled_this_turn = 0;
-        while (handled_this_turn < ACTOR_TURN_BUDGET)
+        std::size_t handled_commands = 0;
+        while (handled_commands < ACTOR_TURN_COMMAND_BUDGET)
         {
-            QueuedEvent event;
+            std::optional<QueuedSubmission> queued;
             {
                 std::lock_guard lock{worker.scheduling_mutex};
                 if (worker.ingress.isCancelled())
@@ -472,12 +552,14 @@ namespace snf::server
                     return true;
                 }
 
-                event = std::move(slot->mailbox.front());
+                queued.emplace(std::move(slot->mailbox.front()));
                 slot->mailbox.pop_front();
                 worker.counters.mailbox_depth.fetch_sub(1, std::memory_order_relaxed);
             }
 
-            if (auto* command = std::get_if<InboundCommand>(&event.payload))
+            QueuedSubmission& event = *queued;
+            const bool is_command = event.submission.accounting() == ActorAccounting::Command;
+            if (is_command)
             {
                 const auto waited = std::chrono::steady_clock::now() - event.enqueued_at;
                 const auto wait_nanoseconds = static_cast<std::uint64_t>(
@@ -486,65 +568,65 @@ namespace snf::server
                                                                        std::memory_order_relaxed);
                 worker.counters.queue_wait_samples.fetch_add(1, std::memory_order_relaxed);
                 updateMaximum(worker.counters.max_queue_wait_nanoseconds, wait_nanoseconds);
-
-                try
-                {
-                    if (_on_before_command)
-                    {
-                        _on_before_command(worker_index, actor_id, command->command);
-                    }
-
-                    PlayerResult result = slot->actor.handle(command->command);
-
-                    if (!_player_effects.apply(command->connection,
-                                               std::move(result),
-                                               _effect_stop_source.get_token()))
-                    {
-                        worker.counters.processed.fetch_add(1, std::memory_order_relaxed);
-                        releaseOutstanding(worker);
-                        return false;
-                    }
-                }
-                catch (...)
-                {
-                    releaseOutstanding(worker);
-                    throw;
-                }
-
-                worker.counters.processed.fetch_add(1, std::memory_order_relaxed);
-                releaseOutstanding(worker);
-                ++handled_this_turn;
-                continue;
             }
 
-            // Close events are intentionally excluded from command wait and
-            // processing metrics. The owning worker is the only eraser, and this
-            // cached slot pointer is no longer touched after the erase below.
-            static_cast<void>(std::get<ConnectionClosedEvent>(event.payload));
-            releaseOutstanding(worker);
-
-            std::size_t discarded_mailbox_events = 0;
+            ActorDispatchResult result;
+            try
             {
-                std::lock_guard lock{worker.scheduling_mutex};
-                discarded_mailbox_events = slot->mailbox.size();
-                slot->mailbox.clear();
-                if (discarded_mailbox_events != 0)
+                if (_on_before_dispatch)
                 {
-                    worker.counters.mailbox_depth.fetch_sub(discarded_mailbox_events,
-                                                            std::memory_order_relaxed);
-                    releaseOutstanding(worker, discarded_mailbox_events);
+                    _on_before_dispatch(worker_index, key, event.submission);
                 }
-
-                const auto actor_iterator = worker.actors.find(actor_id);
-                if (actor_iterator == worker.actors.end() || &actor_iterator->second != slot)
-                {
-                    throw std::logic_error{"ActorRuntime actor eviction invariant violated"};
-                }
-                worker.actors.erase(actor_iterator);
-                worker.counters.evicted_actors.fetch_add(1, std::memory_order_relaxed);
+                result = slot->binding->dispatch(
+                    *slot->actor, event.submission, _dispatch_stop_source.get_token());
+            }
+            catch (...)
+            {
+                releaseOutstanding(worker);
+                throw;
             }
 
-            return true;
+            if (result == ActorDispatchResult::Stopped)
+            {
+                releaseOutstanding(worker);
+                if (!worker.ingress.isCancelled())
+                {
+                    throw std::logic_error{"ActorBinding returned Stopped before cancellation"};
+                }
+                return false;
+            }
+
+            releaseOutstanding(worker);
+            if (is_command)
+            {
+                worker.counters.processed.fetch_add(1, std::memory_order_relaxed);
+                ++handled_commands;
+            }
+
+            if (result == ActorDispatchResult::Evict)
+            {
+                std::size_t discarded_mailbox_submissions = 0;
+                {
+                    std::lock_guard lock{worker.scheduling_mutex};
+                    discarded_mailbox_submissions = slot->mailbox.size();
+                    slot->mailbox.clear();
+                    if (discarded_mailbox_submissions != 0)
+                    {
+                        worker.counters.mailbox_depth.fetch_sub(discarded_mailbox_submissions,
+                                                                std::memory_order_relaxed);
+                        releaseOutstanding(worker, discarded_mailbox_submissions);
+                    }
+
+                    const auto actor_iterator = worker.actors.find(key);
+                    if (actor_iterator == worker.actors.end() || &actor_iterator->second != slot)
+                    {
+                        throw std::logic_error{"ActorRuntime actor eviction invariant violated"};
+                    }
+                    worker.actors.erase(actor_iterator);
+                    worker.counters.evicted_actors.fetch_add(1, std::memory_order_relaxed);
+                }
+                return true;
+            }
         }
 
         std::lock_guard lock{worker.scheduling_mutex};
@@ -561,7 +643,7 @@ namespace snf::server
         else
         {
             slot->state = ActorExecutionState::Ready;
-            worker.ready_actors.push_back(actor_id);
+            worker.ready_actors.push_back(key);
             worker.counters.budget_yield_turns.fetch_add(1, std::memory_order_relaxed);
         }
 
@@ -574,17 +656,17 @@ namespace snf::server
         return !worker.ready_actors.empty();
     }
 
-    void ActorRuntime::discardWorkerCommands(Worker& worker) noexcept
+    void ActorRuntime::discardWorkerSubmissions(Worker& worker) noexcept
     {
         releaseOutstanding(worker, worker.ingress.cancel());
 
-        std::size_t discarded_mailbox_commands = 0;
+        std::size_t discarded_mailbox_submissions = 0;
         {
             std::lock_guard lock{worker.scheduling_mutex};
-            for (auto& [actor_id, slot] : worker.actors)
+            for (auto& [key, slot] : worker.actors)
             {
-                static_cast<void>(actor_id);
-                discarded_mailbox_commands += slot.mailbox.size();
+                static_cast<void>(key);
+                discarded_mailbox_submissions += slot.mailbox.size();
                 slot.mailbox.clear();
                 if (slot.state == ActorExecutionState::Ready)
                 {
@@ -594,11 +676,25 @@ namespace snf::server
             worker.ready_actors.clear();
         }
 
-        if (discarded_mailbox_commands != 0)
+        if (discarded_mailbox_submissions != 0)
         {
-            worker.counters.mailbox_depth.fetch_sub(discarded_mailbox_commands,
+            worker.counters.mailbox_depth.fetch_sub(discarded_mailbox_submissions,
                                                     std::memory_order_relaxed);
-            releaseOutstanding(worker, discarded_mailbox_commands);
+            releaseOutstanding(worker, discarded_mailbox_submissions);
+        }
+    }
+
+    void ActorRuntime::destroyWorkerActors(Worker& worker) noexcept
+    {
+        try
+        {
+            std::lock_guard lock{worker.scheduling_mutex};
+            worker.ready_actors.clear();
+            worker.actors.clear();
+        }
+        catch (...)
+        {
+            // Actor destructors must not make a worker failure unreportable.
         }
     }
 
@@ -641,7 +737,7 @@ namespace snf::server
                                                       std::memory_order_acq_rel,
                                                       std::memory_order_acquire))
         {
-            _runtime_completion.notifyDrained(_runtime_id);
+            _runtime_completion.notifyDrained(RuntimeId::Logic);
         }
     }
 
@@ -661,8 +757,7 @@ namespace snf::server
 
         _completion_state.store(CompletionState::Failed, std::memory_order_release);
         cancel();
-
-        _runtime_completion.notifyFailed(_runtime_id);
+        _runtime_completion.notifyFailed(RuntimeId::Logic);
 
         if (_on_worker_failure)
         {

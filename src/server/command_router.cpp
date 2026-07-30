@@ -11,7 +11,7 @@ namespace
 
 namespace snf::server
 {
-    CommandRouter::CommandRouter(CommandIngress& player_commands) noexcept
+    CommandRouter::CommandRouter(PlayerCommandIngress& player_commands) noexcept
         : _player_commands(player_commands)
     {
     }
@@ -24,7 +24,7 @@ namespace snf::server
                 using Route = std::decay_t<decltype(route)>;
                 if constexpr (std::is_same_v<Route, PlayerCommandRoute>)
                 {
-                    return _player_commands.tryPost(InboundCommand{
+                    return _player_commands.tryPost(PlayerInboundCommand{
                         .actor = route.actor,
                         .connection = connection,
                         .command = std::move(route.command),

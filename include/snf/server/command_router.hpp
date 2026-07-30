@@ -1,6 +1,6 @@
 #pragma once
 
-#include "snf/server/command_ingress.hpp"
+#include "snf/server/player_command_ingress.hpp"
 #include "snf/server/routed_command_ingress.hpp"
 
 namespace snf::server
@@ -10,13 +10,13 @@ namespace snf::server
     class CommandRouter final : public RoutedCommandIngress
     {
     public:
-        explicit CommandRouter(CommandIngress& player_commands) noexcept;
+        explicit CommandRouter(PlayerCommandIngress& player_commands) noexcept;
 
         [[nodiscard]] PostResult tryPost(RoutedCommand command) override;
         void close() noexcept override;
         void cancel() noexcept override;
 
     private:
-        CommandIngress& _player_commands;
+        PlayerCommandIngress& _player_commands;
     };
 }

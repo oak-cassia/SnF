@@ -69,6 +69,19 @@ target_include_directories(snf_core
 )
 snf_configure_target(snf_core)
 
+find_package(Threads REQUIRED)
+
+add_library(snf_runtime STATIC
+    src/runtime/runtime_completion.cpp
+    src/runtime/actor_runtime.cpp
+)
+target_include_directories(snf_runtime
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(snf_runtime PUBLIC Threads::Threads)
+snf_configure_target(snf_runtime)
+
 add_library(snf_server_runtime STATIC
     src/server/message_dispatcher.cpp
     src/server/protocol_gateway.cpp
@@ -76,13 +89,13 @@ add_library(snf_server_runtime STATIC
     src/server/protocol_response_mapper.cpp
     src/server/protocol_player_effect_sink.cpp
     src/server/player_actor.cpp
+    src/server/player_actor_binding.cpp
+    src/server/player_actor_ingress.cpp
     src/server/outbound_sink.cpp
-    src/server/runtime_completion.cpp
-    src/server/actor_runtime.cpp
     src/server/game_server.cpp
     src/server/tcp_server.cpp
 )
-target_link_libraries(snf_server_runtime PUBLIC snf_core)
+target_link_libraries(snf_server_runtime PUBLIC snf_core snf_runtime)
 snf_configure_target(snf_server_runtime)
 
 add_executable(snf_server
@@ -106,8 +119,6 @@ snf_configure_target(snf_load_client)
 
 include(CTest)
 if(BUILD_TESTING)
-    find_package(Threads REQUIRED)
-
     add_executable(snf_unit_tests
         tests/unit_test_main.cpp
         tests/build_info_test.cpp

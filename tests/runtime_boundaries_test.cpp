@@ -1,7 +1,7 @@
 #include "snf/net/unique_file_descriptor.hpp"
 #include "snf/runtime/bounded_queue.hpp"
+#include "snf/runtime/runtime_completion.hpp"
 #include "snf/server/outbound_sink.hpp"
-#include "snf/server/runtime_completion.hpp"
 
 #include <cassert>
 #include <chrono>
@@ -77,20 +77,17 @@ namespace
 
         const auto event = make_eventfd();
         constexpr std::uint64_t required =
-            snf::server::runtimeMask(snf::server::RuntimeId::Player) |
-            snf::server::runtimeMask(snf::server::RuntimeId::World);
-        snf::server::RuntimeCompletionCoordinator completion{required, event.getDescriptor()};
+            snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic);
+        snf::runtime::RuntimeCompletionCoordinator completion{required, event.getDescriptor()};
 
-        completion.notifyDrained(snf::server::RuntimeId::Player);
-        assert(!completion.allRequiredRuntimesDrained());
-        completion.notifyDrained(snf::server::RuntimeId::World);
+        completion.notifyDrained(snf::runtime::RuntimeId::Logic);
         assert(completion.allRequiredRuntimesDrained());
         assert(!completion.anyRuntimeFailed());
 
-        completion.notifyFailed(snf::server::RuntimeId::Battle);
-        completion.notifyFailed(snf::server::RuntimeId::Battle);
+        completion.notifyFailed(snf::runtime::RuntimeId::Logic);
+        completion.notifyFailed(snf::runtime::RuntimeId::Logic);
         assert(completion.anyRuntimeFailed());
-        assert(read_wakeup_count(event.getDescriptor()) == 4);
+        assert(read_wakeup_count(event.getDescriptor()) == 3);
         assert(full_outbound.size() == 1);
     }
 
@@ -171,7 +168,7 @@ namespace
         bool empty_required_mask_rejected = false;
         try
         {
-            [[maybe_unused]] snf::server::RuntimeCompletionCoordinator completion{
+            [[maybe_unused]] snf::runtime::RuntimeCompletionCoordinator completion{
                 0, event.getDescriptor()};
         }
         catch (const std::invalid_argument&)

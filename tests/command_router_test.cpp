@@ -1,4 +1,5 @@
 #include "snf/server/command_router.hpp"
+#include "snf/server/player_command_ingress.hpp"
 
 #include <cassert>
 #include <optional>
@@ -7,16 +8,17 @@
 
 namespace
 {
-    class RecordingCommandIngress final : public snf::server::CommandIngress
+    class RecordingCommandIngress final : public snf::server::PlayerCommandIngress
     {
     public:
-        [[nodiscard]] snf::server::PostResult tryPost(snf::server::InboundCommand command) override
+        [[nodiscard]] snf::runtime::PostResult
+        tryPost(snf::server::PlayerInboundCommand command) override
         {
             posted = std::move(command);
             return result;
         }
 
-        [[nodiscard]] snf::server::PostResult
+        [[nodiscard]] snf::runtime::PostResult
         tryPostConnectionClosed(snf::server::ProvisionalActorId actor,
                                 snf::server::ConnectionClosed closed) override
         {
@@ -35,9 +37,9 @@ namespace
             ++cancel_count;
         }
 
-        snf::server::PostResult result{snf::server::PostResult::Accepted};
-        snf::server::PostResult lifecycle_result{snf::server::PostResult::Accepted};
-        std::optional<snf::server::InboundCommand> posted;
+        snf::runtime::PostResult result{snf::runtime::PostResult::Accepted};
+        snf::runtime::PostResult lifecycle_result{snf::runtime::PostResult::Accepted};
+        std::optional<snf::server::PlayerInboundCommand> posted;
         std::optional<snf::server::ProvisionalActorId> closed_actor;
         std::optional<snf::server::ConnectionClosed> closed_connection;
         int close_count{0};
@@ -47,7 +49,7 @@ namespace
     void test_routes_player_command_and_preserves_post_result()
     {
         RecordingCommandIngress player_commands;
-        player_commands.result = snf::server::PostResult::Full;
+        player_commands.result = snf::runtime::PostResult::Full;
         snf::server::CommandRouter router{player_commands};
 
         const auto result = router.tryPost(snf::server::RoutedCommand{
@@ -59,7 +61,7 @@ namespace
                 },
         });
 
-        assert(result == snf::server::PostResult::Full);
+        assert(result == snf::runtime::PostResult::Full);
         assert(player_commands.posted.has_value());
         assert(player_commands.posted->actor.value == 77);
         assert(player_commands.posted->connection.descriptor == 42);
@@ -84,7 +86,7 @@ namespace
     void test_routes_connection_closed_and_preserves_post_result()
     {
         RecordingCommandIngress player_commands;
-        player_commands.lifecycle_result = snf::server::PostResult::Full;
+        player_commands.lifecycle_result = snf::runtime::PostResult::Full;
         snf::server::CommandRouter router{player_commands};
 
         const auto result = router.tryPost(snf::server::RoutedCommand{
@@ -96,7 +98,7 @@ namespace
                 },
         });
 
-        assert(result == snf::server::PostResult::Full);
+        assert(result == snf::runtime::PostResult::Full);
         assert(player_commands.closed_actor.has_value());
         assert(player_commands.closed_actor->value == 77);
         assert(player_commands.closed_connection.has_value());

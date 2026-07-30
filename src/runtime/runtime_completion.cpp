@@ -1,19 +1,19 @@
-#include "snf/server/runtime_completion.hpp"
+#include "snf/runtime/runtime_completion.hpp"
 
 #include <cerrno>
 #include <stdexcept>
 #include <unistd.h>
 
-namespace snf::server
+namespace snf::runtime
 {
     RuntimeCompletionCoordinator::RuntimeCompletionCoordinator(
         const std::uint64_t required_runtime_mask, const int wake_descriptor)
         : _required_runtime_mask(required_runtime_mask)
         , _wake_descriptor(wake_descriptor)
     {
-        if (_required_runtime_mask == 0 || _wake_descriptor < 0)
+        if (_required_runtime_mask != runtimeMask(RuntimeId::Logic) || _wake_descriptor < 0)
         {
-            throw std::invalid_argument{"Invalid runtime completion configuration"};
+            throw std::invalid_argument{"Invalid logic runtime completion configuration"};
         }
     }
 

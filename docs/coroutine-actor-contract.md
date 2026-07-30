@@ -1,7 +1,8 @@
 # Coroutine Actor 계약
 
 > 상태: Phase 4 구현 전 확정 계약
-> 범위: Player ActorRuntime의 suspend, resume, cancel, drain과 외부 비동기 operation 수명
+> 범위: PlayerActor와 ZoneActor를 포함한 Logic ActorRuntime의 suspend, resume, cancel, drain과
+> 외부 비동기 operation 수명
 
 ## 1. 신원
 
@@ -9,7 +10,11 @@
 - `ProvisionalActorId`는 인증 전 임시 routing key다.
 - `PlayerId`는 인증 후 영속 domain identity이며 Phase 5에서 도입한다.
 - 임시 ID는 DB key, 저장 key, idempotency scope 또는 재접속 복원 key로 사용하지 않는다.
-- async task는 `{ActorIdentity, ActorIncarnation, TaskId}`로 식별한다. 같은 Player가 passivation 후
+- `ActorKey`는 `{ActorKind, EntityId}` 또는 동등한 discriminated key로 표현하는 scheduler의
+  논리 Actor identity다. `ActorKind`는 인증 전 Player, 영속 Player, Zone 등의 ID namespace를
+  구분하며 이 문서에서 별도의 `ActorIdentity` 타입은 두지 않는다.
+- `ActorIncarnation`은 하나의 `ActorKey`가 활성화된 세대를 식별한다.
+- async task는 `{ActorKey, ActorIncarnation, TaskId}`로 식별한다. 같은 Actor가 passivation 후
   다시 활성화되면 새로운 `ActorIncarnation`을 받는다.
 
 ## 2. Terminal continuation 보장
@@ -29,9 +34,9 @@
 ## 3. 소유권과 Worker affinity
 
 - coroutine frame과 `ActorSlot`은 owning Actor Worker만 접근·resume·파괴한다.
-- DB, timer 등 외부 executor는 raw `coroutine_handle`, `PlayerActor*`, `ActorSlot*`을 보유하지 않는다.
+- DB, timer 등 외부 executor는 raw `coroutine_handle`, `Actor*`, `ActorSlot*`을 보유하지 않는다.
 - 외부 operation은 ref-counted operation state 또는 completion registry만 공유한다.
-- 외부 결과는 `{ActorIdentity, ActorIncarnation, TaskId, Result}` value로 continuation ingress에
+- 외부 결과는 `{ActorKey, ActorIncarnation, TaskId, Result}` value로 continuation ingress에
   게시한다.
 - late completion은 incarnation과 task를 검증하고, 유효하지 않으면 operation state 정리만 수행한다.
 

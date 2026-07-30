@@ -79,7 +79,7 @@ namespace snf::server
     TcpServer::TcpServer(const TcpServerConfig& config,
                          FrameIngress& frame_ingress,
                          snf::runtime::BoundedQueue<OutboundAction>& outbound_actions,
-                         RuntimeCompletionSource& runtime_completion,
+                         snf::runtime::RuntimeCompletionSource& runtime_completion,
                          const int outbound_event_descriptor)
         : _listener(snf::net::create_tcp_listener(config.port))
         , _epoll(create_epoll_instance())
@@ -132,7 +132,7 @@ namespace snf::server
         {
             retryPendingConnectionCloses();
 
-            if (_is_stopping && _game_runtimes_drained && _sessions.empty())
+            if (_is_stopping && _logic_runtime_drained && _sessions.empty())
             {
                 break;
             }
@@ -465,7 +465,7 @@ namespace snf::server
                 should_update_events = true;
             }
 
-            if (_is_stopping && _game_runtimes_drained &&
+            if (_is_stopping && _logic_runtime_drained &&
                 !session_iterator->second.hasPendingSend())
             {
                 close_cause = ConnectionCloseCause::ServerShutdown;
@@ -550,7 +550,7 @@ namespace snf::server
 
                     ++_stats.protocol_errors;
                     std::cerr << "Closing client FD " << network_action.connection.descriptor
-                              << " because ActorRuntime requested "
+                              << " because Logic runtime requested "
                               << to_string(network_action.reason) << '\n';
                     removeSession(network_action.connection.descriptor,
                                   ConnectionCloseCause::ProtocolError);
@@ -563,16 +563,16 @@ namespace snf::server
     {
         if (_runtime_completion.anyRuntimeFailed())
         {
-            abortShutdownAfterActorRuntimeFailure();
+            abortShutdownAfterLogicRuntimeFailure();
             return;
         }
 
-        if (!_game_runtimes_drained && _runtime_completion.allRequiredRuntimesDrained())
+        if (!_logic_runtime_drained && _runtime_completion.allRequiredRuntimesDrained())
         {
-            _game_runtimes_drained = true;
+            _logic_runtime_drained = true;
             if (_is_stopping)
             {
-                completeShutdownAfterGameRuntimesDrained();
+                completeShutdownAfterLogicRuntimeDrained();
             }
         }
     }
@@ -653,13 +653,13 @@ namespace snf::server
             updateClientEvents(session);
         }
 
-        if (_game_runtimes_drained)
+        if (_logic_runtime_drained)
         {
-            completeShutdownAfterGameRuntimesDrained();
+            completeShutdownAfterLogicRuntimeDrained();
         }
     }
 
-    void TcpServer::completeShutdownAfterGameRuntimesDrained()
+    void TcpServer::completeShutdownAfterLogicRuntimeDrained()
     {
         std::vector<int> sessions_without_pending_send;
         for (const auto& [client_descriptor, session] : _sessions)
@@ -680,9 +680,9 @@ namespace snf::server
         }
     }
 
-    void TcpServer::abortShutdownAfterActorRuntimeFailure()
+    void TcpServer::abortShutdownAfterLogicRuntimeFailure()
     {
-        _game_runtimes_drained = true;
+        _logic_runtime_drained = true;
         beginShutdown();
         cancelQueues();
         closeRemainingSessions();

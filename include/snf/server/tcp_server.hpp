@@ -3,9 +3,9 @@
 #include "snf/net/session.hpp"
 #include "snf/net/unique_file_descriptor.hpp"
 #include "snf/runtime/bounded_queue.hpp"
+#include "snf/runtime/runtime_completion.hpp"
 #include "snf/server/frame_ingress.hpp"
 #include "snf/server/outbound_action.hpp"
-#include "snf/server/runtime_completion.hpp"
 
 #include <chrono>
 #include <cstddef>
@@ -49,7 +49,7 @@ namespace snf::server
         TcpServer(const TcpServerConfig& config,
                   FrameIngress& frame_ingress,
                   snf::runtime::BoundedQueue<OutboundAction>& outbound_actions,
-                  RuntimeCompletionSource& runtime_completion,
+                  snf::runtime::RuntimeCompletionSource& runtime_completion,
                   int outbound_event_descriptor);
 
         TcpServer(const TcpServer&) = delete;
@@ -75,8 +75,8 @@ namespace snf::server
         void handleStopRequest();
         void handleTerminationSignal(int signal_descriptor);
         void beginShutdown();
-        void completeShutdownAfterGameRuntimesDrained();
-        void abortShutdownAfterActorRuntimeFailure();
+        void completeShutdownAfterLogicRuntimeDrained();
+        void abortShutdownAfterLogicRuntimeFailure();
         void cancelQueues();
         [[nodiscard]] bool flushPendingSend(snf::net::Session& session);
         void updateClientEvents(const snf::net::Session& session) const;
@@ -98,12 +98,12 @@ namespace snf::server
         std::size_t _connection_lifecycle_capacity;
         FrameIngress& _frame_ingress;
         snf::runtime::BoundedQueue<OutboundAction>& _outbound_actions;
-        RuntimeCompletionSource& _runtime_completion;
+        snf::runtime::RuntimeCompletionSource& _runtime_completion;
         int _outbound_event_descriptor;
         std::chrono::steady_clock::time_point _shutdown_deadline{};
         std::uint64_t _next_connection_generation{0};
         bool _is_stopping{false};
-        bool _game_runtimes_drained{false};
+        bool _logic_runtime_drained{false};
         std::unordered_map<int, snf::net::Session> _sessions;
         // epoll may return a copied event after its FD has been closed and reused.
         // Generation tokens let the reactor discard that event instead of targeting the new FD.
