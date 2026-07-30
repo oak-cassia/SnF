@@ -1,6 +1,6 @@
 # SnF
 
-SnF는 C++20을 활용해 실시간 게임 콘텐츠의 상태, 규칙과 메시지 흐름을 설계하고 구현하는
+SnF는 C++20을 활용해 MORPG 콘텐츠의 상태, 규칙과 메시지 흐름을 설계하고 구현하는
 프로젝트다. 서버 코어 자체를 계속 확장하는 것보다, Player와 Zone을 비롯한 게임 콘텐츠를
 명확한 상태 소유권과 실행 경계 위에 올리는 것을 주된 목적으로 한다.
 
@@ -51,8 +51,22 @@ Network Runtime
 
 핵심 원칙은 다음과 같다.
 
-- Network thread는 게임 상태를 직접 수정하지 않는다.
-- 각 Actor의 mutable 상태는 하나의 Logic Worker에서만 순차적으로 변경한다.
+- Network Runtime과 Actor-Bound Logic Runtime을 분리하고, Network thread는 게임 상태를
+  직접 수정하지 않는다.
+  - 네트워크 계층과 게임 콘텐츠를 독립적으로 설계하고, Logic Worker Pool이 콘텐츠 로직만
+    전담하게 하기 위한 선택이다.
+  - command 전달을 위한 queue, wake-up과 hand-off 비용은 추가되지만, 콘텐츠 로직이 비동기
+    작업을 기다리는 동안 coroutine을 suspend하고 같은 Worker가 다른 Actor를 처리할 수 있다.
+- Player, Zone과 공유 콘텐츠는 공통 Logic Worker Pool을 사용하고, 각 Actor의 mutable 상태는
+  고정 Worker에서만 FIFO로 처리한다.
+  - 이 프로젝트가 대상으로 하는 MORPG에서 이동 가능한 world 역할을 하는 lobby는 강한
+    실시간 동기화가 필요하지 않다. 그 수준의 동기화가 필요한 game instance는 별도 서버로
+    분리해 scale-out할 수 있으므로, 단일 프로세스에서는 여러 Actor 종류를 같은 Worker
+    Pool에서 처리한다.
+  - 이 구조는 관측 가능한 범위에서 coroutine 기반 cooperative 실행을 활용하면서 Actor 내부
+    mutex를 없애고, 명령 순서와 cache locality를 보장하기 위한 선택이다.
+  - 느린 handler가 같은 Worker의 다른 Actor를 지연시킬 수 있지만, DB 같은 외부 I/O는
+    비동기로 실행해 Logic Worker가 대기하지 않게 한다.
 - protocol Frame을 Actor까지 전달하지 않고 typed command와 effect 경계를 사용한다.
 - queue와 in-flight operation에는 명시적인 상한과 포화 정책을 둔다.
 - 외부 executor는 Actor 객체나 coroutine handle을 보유하지 않는다.
