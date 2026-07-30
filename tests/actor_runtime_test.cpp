@@ -160,6 +160,7 @@ namespace
         {
             std::mutex mutex;
             std::vector<std::pair<ActorKey, int>> dispatched;
+            std::function<void(EntityId)> on_activate;
             std::function<void(const ActorKey&, int)> on_dispatch;
             bool throw_on_dispatch{false};
         };
@@ -180,7 +181,15 @@ namespace
             return makeSubmission(ActorKey{.kind = _kind, .entity = entity},
                                   ActorActivation::ActivateIfMissing,
                                   ActorAccounting::Command,
-                                  Payload{.value = value});
+                                  Payload{.value = value, .evict = false});
+        }
+
+        [[nodiscard]] ActorSubmission control(const EntityId entity, const int value) const
+        {
+            return makeSubmission(ActorKey{.kind = _kind, .entity = entity},
+                                  ActorActivation::ActivateIfMissing,
+                                  ActorAccounting::Control,
+                                  Payload{.value = value, .evict = false});
         }
 
         [[nodiscard]] ActorSubmission evict(const EntityId entity) const
@@ -188,12 +197,21 @@ namespace
             return makeSubmission(ActorKey{.kind = _kind, .entity = entity},
                                   ActorActivation::ExistingOnly,
                                   ActorAccounting::Control,
-                                  Payload{.value = 0});
+                                  Payload{.value = 0, .evict = true});
         }
 
     protected:
-        [[nodiscard]] std::unique_ptr<ActorSlot> activate(const EntityId) override
+        [[nodiscard]] std::unique_ptr<ActorSlot> activate(const EntityId entity) override
         {
+            std::function<void(EntityId)> on_activate;
+            {
+                std::lock_guard lock{_state->mutex};
+                on_activate = _state->on_activate;
+            }
+            if (on_activate)
+            {
+                on_activate(entity);
+            }
             return std::make_unique<Slot>();
         }
 
@@ -202,7 +220,7 @@ namespace
         {
             static_cast<void>(dynamic_cast<Slot&>(slot));
             const Payload& payload = payloadAs<Payload>(submission);
-            if (submission.accounting() == ActorAccounting::Control)
+            if (submission.accounting() == ActorAccounting::Control && payload.evict)
             {
                 return ActorDispatchResult::Evict;
             }
@@ -232,6 +250,7 @@ namespace
         struct Payload
         {
             int value;
+            bool evict;
         };
 
         ActorKind _kind;
@@ -242,8 +261,11 @@ namespace
     {
         const ActorKey provisional{.kind = ActorKind::ProvisionalPlayer, .entity = 17};
         const ActorKey same_provisional{.kind = ActorKind::ProvisionalPlayer, .entity = 17};
+        const ActorKey persistent_player{.kind = ActorKind::Player, .entity = 17};
         const ActorKey zone{.kind = ActorKind::Zone, .entity = 17};
         assert(provisional == same_provisional);
+        assert(provisional != persistent_player);
+        assert(persistent_player != zone);
         assert(provisional != zone);
         assert(snf::runtime::ActorKeyHash{}(provisional) ==
                snf::runtime::ActorKeyHash{}(same_provisional));
@@ -468,20 +490,368 @@ namespace
         RecordingRuntimeCompletion completion_two;
         ActorRuntime cross_kind{player_runtime_config(1, 8), completion_two};
         const auto cross_players = std::make_shared<SyntheticBinding::State>();
+        const auto cross_persistent_players = std::make_shared<SyntheticBinding::State>();
         const auto cross_zones = std::make_shared<SyntheticBinding::State>();
         SyntheticBinding player_binding{ActorKind::ProvisionalPlayer, cross_players};
+        SyntheticBinding persistent_player_binding{ActorKind::Player, cross_persistent_players};
         SyntheticBinding zone_binding{ActorKind::Zone, cross_zones};
         cross_kind.registerBinding(player_binding);
+        cross_kind.registerBinding(persistent_player_binding);
         cross_kind.registerBinding(zone_binding);
         cross_kind.start();
         assert(cross_kind.tryPost(player_binding.post(5, 1)) == PostResult::Accepted);
         assert(cross_kind.tryPost(zone_binding.post(5, 2)) == PostResult::Accepted);
+        assert(cross_kind.tryPost(persistent_player_binding.post(5, 3)) == PostResult::Accepted);
         assert(cross_kind.tryPost(player_binding.evict(5)) == PostResult::Accepted);
-        assert(cross_kind.tryPost(zone_binding.post(5, 3)) == PostResult::Accepted);
+        assert(cross_kind.tryPost(zone_binding.post(5, 4)) == PostResult::Accepted);
+        assert(cross_kind.tryPost(persistent_player_binding.post(5, 5)) == PostResult::Accepted);
         cross_kind.close();
         cross_kind.join();
         assert(cross_zones->dispatched.size() == 2);
+        assert(cross_persistent_players->dispatched.size() == 2);
         assert(completion_two.drained_count.load() == 1);
+    }
+
+    void test_control_submissions_consume_the_turn_budget()
+    {
+        RecordingRuntimeCompletion completion;
+        ActorRuntime runtime{player_runtime_config(1, 64), completion};
+        const auto state = std::make_shared<SyntheticBinding::State>();
+        SyntheticBinding players{ActorKind::ProvisionalPlayer, state};
+        SyntheticBinding zones{ActorKind::Zone, state};
+        runtime.registerBinding(players);
+        runtime.registerBinding(zones);
+
+        struct Gate
+        {
+            std::promise<void> entered;
+            std::shared_future<void> release;
+        };
+        const auto gate = std::make_shared<Gate>();
+        std::promise<void> release;
+        gate->release = release.get_future().share();
+        const auto entered = gate->entered.get_future();
+        state->on_dispatch = [gate](const ActorKey&, const int value)
+        {
+            if (value == 1)
+            {
+                gate->entered.set_value();
+                gate->release.wait();
+            }
+        };
+
+        runtime.start();
+        assert(runtime.tryPost(players.control(9, 1)) == PostResult::Accepted);
+        assert(entered.wait_for(1s) == std::future_status::ready);
+        for (int value = 2; value <= 32; ++value)
+        {
+            assert(runtime.tryPost(players.control(9, value)) == PostResult::Accepted);
+        }
+        assert(runtime.tryPost(zones.post(9, 1000)) == PostResult::Accepted);
+
+        release.set_value();
+        runtime.close();
+        runtime.join();
+
+        const auto zone_dispatch =
+            std::find_if(state->dispatched.begin(),
+                         state->dispatched.end(),
+                         [](const auto& event) { return event.second == 1000; });
+        const auto final_control =
+            std::find_if(state->dispatched.begin(),
+                         state->dispatched.end(),
+                         [](const auto& event) { return event.second == 32; });
+        assert(zone_dispatch != state->dispatched.end());
+        assert(final_control != state->dispatched.end());
+        assert(zone_dispatch < final_control);
+        assert(runtime.getStats().workers.front().budget_yield_turns == 1);
+    }
+
+    void test_binding_activation_can_reenter_the_runtime()
+    {
+        RecordingRuntimeCompletion completion;
+        ActorRuntime runtime{player_runtime_config(1, 4), completion};
+        const auto state = std::make_shared<SyntheticBinding::State>();
+        SyntheticBinding binding{ActorKind::Zone, state};
+        runtime.registerBinding(binding);
+
+        std::promise<void> reentrant_posted;
+        const auto posted = reentrant_posted.get_future();
+        state->on_activate = [&runtime, &binding, &reentrant_posted](const EntityId entity)
+        {
+            assert(runtime.tryPost(binding.post(entity, 2)) == PostResult::Accepted);
+            reentrant_posted.set_value();
+        };
+
+        runtime.start();
+        assert(runtime.tryPost(binding.post(3, 1)) == PostResult::Accepted);
+        assert(posted.wait_for(1s) == std::future_status::ready);
+        runtime.close();
+        runtime.join();
+
+        assert(state->dispatched.size() == 2);
+        assert(state->dispatched[0].second == 1);
+        assert(state->dispatched[1].second == 2);
+    }
+
+    void test_full_shard_does_not_block_another_shard()
+    {
+        RecordingRuntimeCompletion completion;
+        auto config = player_runtime_config(2, 2);
+        ActorRuntime runtime{config, completion};
+        const auto state = std::make_shared<SyntheticBinding::State>();
+        SyntheticBinding binding{ActorKind::Zone, state};
+        runtime.registerBinding(binding);
+
+        ActorKey blocked_key{.kind = ActorKind::Zone, .entity = 0};
+        ActorKey other_key{.kind = ActorKind::Zone, .entity = 1};
+        while (runtime.workerIndexFor(blocked_key) == runtime.workerIndexFor(other_key))
+        {
+            ++other_key.entity;
+        }
+        const std::size_t blocked_worker = runtime.workerIndexFor(blocked_key);
+        const std::size_t other_worker = runtime.workerIndexFor(other_key);
+
+        struct Gate
+        {
+            std::promise<void> blocked_started;
+            std::promise<void> other_processed;
+            std::shared_future<void> release;
+        };
+        const auto gate = std::make_shared<Gate>();
+        std::promise<void> release;
+        gate->release = release.get_future().share();
+        const auto blocked_started = gate->blocked_started.get_future();
+        const auto other_processed = gate->other_processed.get_future();
+        state->on_dispatch = [gate, blocked_key, other_key](const ActorKey& key, const int value)
+        {
+            if (key == blocked_key && value == 1)
+            {
+                gate->blocked_started.set_value();
+                gate->release.wait();
+            }
+            else if (key == other_key)
+            {
+                gate->other_processed.set_value();
+            }
+        };
+
+        runtime.start();
+        assert(runtime.tryPost(binding.post(blocked_key.entity, 1)) == PostResult::Accepted);
+        assert(blocked_started.wait_for(1s) == std::future_status::ready);
+        assert(runtime.tryPost(binding.post(blocked_key.entity, 2)) == PostResult::Accepted);
+        assert(runtime.getStats().workers[blocked_worker].queue_depth == 2);
+        assert(runtime.tryPost(binding.post(blocked_key.entity, 3)) == PostResult::Full);
+        assert(runtime.tryPost(binding.post(other_key.entity, 4)) == PostResult::Accepted);
+        assert(other_processed.wait_for(1s) == std::future_status::ready);
+
+        release.set_value();
+        runtime.close();
+        runtime.join();
+
+        const auto stats = runtime.getStats();
+        assert(stats.workers[blocked_worker].accepted == 2);
+        assert(stats.workers[blocked_worker].rejected_full == 1);
+        assert(stats.workers[blocked_worker].queue_high_water_mark == 2);
+        assert(stats.workers[other_worker].accepted == 1);
+        assert(stats.workers[other_worker].processed == 1);
+    }
+
+    void test_notifies_drain_only_after_every_worker_finishes()
+    {
+        RecordingRuntimeCompletion completion;
+        ActorRuntime runtime{player_runtime_config(2, 4), completion};
+        const auto state = std::make_shared<SyntheticBinding::State>();
+        SyntheticBinding binding{ActorKind::Zone, state};
+        runtime.registerBinding(binding);
+
+        ActorKey first{.kind = ActorKind::Zone, .entity = 0};
+        ActorKey second{.kind = ActorKind::Zone, .entity = 1};
+        while (runtime.workerIndexFor(first) == runtime.workerIndexFor(second))
+        {
+            ++second.entity;
+        }
+
+        struct Gate
+        {
+            std::promise<void> first_started;
+            std::promise<void> second_started;
+            std::promise<void> first_finished;
+            std::shared_future<void> release_first;
+            std::shared_future<void> release_second;
+        };
+        const auto gate = std::make_shared<Gate>();
+        std::promise<void> release_first;
+        std::promise<void> release_second;
+        gate->release_first = release_first.get_future().share();
+        gate->release_second = release_second.get_future().share();
+        const auto first_started = gate->first_started.get_future();
+        const auto second_started = gate->second_started.get_future();
+        const auto first_finished = gate->first_finished.get_future();
+        state->on_dispatch = [gate, first](const ActorKey& key, int)
+        {
+            if (key == first)
+            {
+                gate->first_started.set_value();
+                gate->release_first.wait();
+                gate->first_finished.set_value();
+            }
+            else
+            {
+                gate->second_started.set_value();
+                gate->release_second.wait();
+            }
+        };
+
+        runtime.start();
+        assert(runtime.tryPost(binding.post(first.entity, 1)) == PostResult::Accepted);
+        assert(runtime.tryPost(binding.post(second.entity, 2)) == PostResult::Accepted);
+        assert(first_started.wait_for(1s) == std::future_status::ready);
+        assert(second_started.wait_for(1s) == std::future_status::ready);
+        runtime.close();
+
+        release_first.set_value();
+        assert(first_finished.wait_for(1s) == std::future_status::ready);
+        assert(completion.drained_count.load() == 0);
+        release_second.set_value();
+        runtime.join();
+        assert(completion.drained_count.load() == 1);
+        assert(completion.failed_count.load() == 0);
+    }
+
+    void test_cancel_discards_submissions_already_routed_to_a_mailbox()
+    {
+        RecordingRuntimeCompletion completion;
+        auto config = player_runtime_config(1, 3);
+        std::promise<void> worker_started;
+        std::promise<void> release_worker;
+        const auto release_start = release_worker.get_future().share();
+        const auto started = worker_started.get_future();
+        config.on_worker_start = [&worker_started, release_start](std::size_t)
+        {
+            worker_started.set_value();
+            release_start.wait();
+        };
+
+        ActorRuntime runtime{config, completion};
+        const auto state = std::make_shared<SyntheticBinding::State>();
+        SyntheticBinding binding{ActorKind::Zone, state};
+        runtime.registerBinding(binding);
+
+        std::promise<void> first_dispatch_started;
+        std::promise<void> release_dispatch;
+        const auto dispatch_release = release_dispatch.get_future().share();
+        const auto dispatch_started = first_dispatch_started.get_future();
+        state->on_dispatch =
+            [&first_dispatch_started, dispatch_release](const ActorKey&, const int value)
+        {
+            if (value == 1)
+            {
+                first_dispatch_started.set_value();
+                dispatch_release.wait();
+            }
+        };
+
+        runtime.start();
+        assert(started.wait_for(1s) == std::future_status::ready);
+        assert(runtime.tryPost(binding.post(5, 1)) == PostResult::Accepted);
+        assert(runtime.tryPost(binding.post(5, 2)) == PostResult::Accepted);
+        release_worker.set_value();
+        assert(dispatch_started.wait_for(1s) == std::future_status::ready);
+        assert(runtime.getStats().workers.front().mailbox_depth == 1);
+
+        runtime.cancel();
+        release_dispatch.set_value();
+        runtime.join();
+
+        assert(state->dispatched.size() == 1);
+        const auto stats = runtime.getStats().workers.front();
+        assert(stats.mailbox_depth == 0);
+        assert(stats.queue_depth == 0);
+        assert(completion.drained_count.load() == 0);
+    }
+
+    void test_aggregates_queue_wait_and_high_water_marks()
+    {
+        RecordingRuntimeCompletion completion;
+        auto config = player_runtime_config(1, 4);
+        std::promise<void> worker_started;
+        std::promise<void> release_worker;
+        const auto release = release_worker.get_future().share();
+        const auto started = worker_started.get_future();
+        config.on_worker_start = [&worker_started, release](std::size_t)
+        {
+            worker_started.set_value();
+            release.wait();
+        };
+
+        ActorRuntime runtime{config, completion};
+        const auto state = std::make_shared<SyntheticBinding::State>();
+        SyntheticBinding binding{ActorKind::Zone, state};
+        runtime.registerBinding(binding);
+        runtime.start();
+        assert(started.wait_for(1s) == std::future_status::ready);
+
+        assert(runtime.tryPost(binding.post(7, 1)) == PostResult::Accepted);
+        assert(runtime.tryPost(binding.post(7, 2)) == PostResult::Accepted);
+        assert(runtime.tryPost(binding.post(7, 3)) == PostResult::Accepted);
+        std::this_thread::sleep_for(2ms);
+        runtime.close();
+        release_worker.set_value();
+        runtime.join();
+
+        const auto stats = runtime.getStats().workers.front();
+        assert(stats.accepted == 3);
+        assert(stats.processed == 3);
+        assert(stats.queue_depth == 0);
+        assert(stats.queue_high_water_mark == 3);
+        assert(stats.mailbox_high_water_mark == 3);
+        assert(stats.average_queue_wait > 0ns);
+        assert(stats.max_queue_wait >= stats.average_queue_wait);
+    }
+
+    void test_player_close_follows_commands_and_preserves_command_metrics()
+    {
+        RuntimeDependencies dependencies{8};
+        auto config = player_runtime_config(1, 8);
+        std::promise<void> worker_started;
+        std::promise<void> release_worker;
+        const auto release = release_worker.get_future().share();
+        const auto started = worker_started.get_future();
+        config.on_worker_start = [&worker_started, release](std::size_t)
+        {
+            worker_started.set_value();
+            release.wait();
+        };
+
+        PlayerRuntime player{dependencies, std::move(config)};
+        player.runtime.start();
+        assert(started.wait_for(1s) == std::future_status::ready);
+        assert(player.ingress.tryPost(make_command(3, 1)) == PostResult::Accepted);
+        assert(player.ingress.tryPost(make_command(3, 2)) == PostResult::Accepted);
+        assert(player.ingress.tryPost(make_command(3, 3)) == PostResult::Accepted);
+        assert(player.ingress.tryPostConnectionClosed(snf::server::ProvisionalActorId{.value = 3},
+                                                      make_closed(3)) == PostResult::Accepted);
+        player.runtime.close();
+        release_worker.set_value();
+        player.runtime.join();
+
+        for (std::uint32_t request_id = 1; request_id <= 3; ++request_id)
+        {
+            const auto action = dependencies.outbound.tryPop();
+            assert(action.has_value());
+            const auto* send = std::get_if<snf::server::SendFrame>(&*action);
+            assert(send != nullptr);
+            assert(send->frame.request_id == request_id);
+        }
+        assert(!dependencies.outbound.tryPop().has_value());
+
+        const auto stats = player.runtime.getStats().workers.front();
+        assert(stats.accepted == 3);
+        assert(stats.processed == 3);
+        assert(stats.rejected_full == 0);
+        assert(stats.evicted_actors == 1);
+        assert(stats.queue_depth == 0);
     }
 
     void test_capacity_and_lifecycle_control_accounting()
@@ -614,6 +984,13 @@ void run_actor_runtime_tests()
     test_player_binding_preserves_ping_pong_fifo_and_effect_order();
     test_same_actor_is_serial_and_different_shards_run_in_parallel();
     test_synthetic_bindings_share_capacity_fairness_and_cross_kind_slots();
+    test_control_submissions_consume_the_turn_budget();
+    test_binding_activation_can_reenter_the_runtime();
+    test_full_shard_does_not_block_another_shard();
+    test_notifies_drain_only_after_every_worker_finishes();
+    test_cancel_discards_submissions_already_routed_to_a_mailbox();
+    test_aggregates_queue_wait_and_high_water_marks();
+    test_player_close_follows_commands_and_preserves_command_metrics();
     test_capacity_and_lifecycle_control_accounting();
     test_cancel_and_failure_terminal_paths();
     test_cancel_interrupts_player_effect_backpressure_without_canceling_outbound();

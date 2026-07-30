@@ -4,8 +4,8 @@ SnF는 C++20을 활용해 MORPG 콘텐츠의 상태, 규칙과 메시지 흐름�
 프로젝트다. 서버 코어 자체를 계속 확장하는 것보다, Player와 Zone을 비롯한 게임 콘텐츠를
 명확한 상태 소유권과 실행 경계 위에 올리는 것을 주된 목적으로 한다.
 
-현재는 Linux `epoll` 네트워크 런타임과 sharded Actor Runtime 위에서 PING/PONG vertical
-slice를 실행한다. 이 기반을 일반화한 뒤 인증·영속성, Zone과 timer event, 공유 콘텐츠를
+현재는 Linux `epoll` 네트워크 런타임과 일반화된 sharded Actor Runtime 위에서 PING/PONG
+vertical slice를 실행한다. 이 기반 위에 인증·영속성, Zone과 timer event, 공유 콘텐츠를
 차례로 구현한다.
 
 ## 프로젝트 목적
@@ -55,16 +55,18 @@ Network Runtime
   직접 수정하지 않는다.
   - 네트워크 계층과 게임 콘텐츠를 독립적으로 설계하고, Logic Worker Pool이 콘텐츠 로직만
     전담하게 하기 위한 선택이다.
-  - command 전달을 위한 queue, wake-up과 hand-off 비용은 추가되지만, 콘텐츠 로직이 비동기
-    작업을 기다리는 동안 coroutine을 suspend하고 같은 Worker가 다른 Actor를 처리할 수 있다.
+  - command 전달을 위한 queue, wake-up과 hand-off 비용은 추가되지만, Phase 4 이후에는 콘텐츠
+    로직이 비동기 작업을 기다리는 동안 coroutine을 suspend하고 같은 Worker가 다른 Actor를
+    처리할 수 있다.
 - Player, Zone과 공유 콘텐츠는 공통 Logic Worker Pool을 사용하고, 각 Actor의 mutable 상태는
   고정 Worker에서만 FIFO로 처리한다.
   - 이 프로젝트가 대상으로 하는 MORPG에서 이동 가능한 world 역할을 하는 lobby는 강한
     실시간 동기화가 필요하지 않다. 그 수준의 동기화가 필요한 game instance는 별도 서버로
     분리해 scale-out할 수 있으므로, 단일 프로세스에서는 여러 Actor 종류를 같은 Worker
     Pool에서 처리한다.
-  - 이 구조는 관측 가능한 범위에서 coroutine 기반 cooperative 실행을 활용하면서 Actor 내부
-    mutex를 없애고, 명령 순서와 cache locality를 보장하기 위한 선택이다.
+  - 현재는 Actor turn budget으로 cooperative fairness를 제공하며, Phase 4에서 coroutine
+    suspend까지 확장한다. Actor 내부 mutex를 없애고 명령 순서와 cache locality를 보장하기 위한
+    선택이다.
   - 느린 handler가 같은 Worker의 다른 Actor를 지연시킬 수 있지만, DB 같은 외부 I/O는
     비동기로 실행해 Logic Worker가 대기하지 않게 한다.
 - protocol Frame을 Actor까지 전달하지 않고 typed command와 effect 경계를 사용한다.

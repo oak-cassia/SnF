@@ -11,7 +11,7 @@
 namespace
 {
     constexpr std::size_t INGRESS_BATCH_SIZE = 64;
-    constexpr std::size_t ACTOR_TURN_COMMAND_BUDGET = 16;
+    constexpr std::size_t ACTOR_TURN_BUDGET = 16;
 }
 
 namespace snf::runtime
@@ -427,11 +427,51 @@ namespace snf::runtime
             releaseOutstanding(worker);
             throw std::logic_error{"ActorRuntime binding registry changed while running"};
         }
+        ActorBinding* const binding = binding_iterator->second;
 
         bool discarded = false;
         bool consumed_without_slot = false;
+        bool activation_required = false;
+        {
+            std::lock_guard lock{worker.scheduling_mutex};
+            if (worker.ingress.isCancelled())
+            {
+                discarded = true;
+            }
+            else if (worker.actors.find(key) == worker.actors.end())
+            {
+                if (submission.submission.activation() == ActorActivation::ExistingOnly)
+                {
+                    consumed_without_slot = true;
+                }
+                else
+                {
+                    activation_required = true;
+                }
+            }
+        }
+
+        if (discarded || consumed_without_slot)
+        {
+            releaseOutstanding(worker);
+            return !discarded;
+        }
+
+        // Binding activation is external domain code. It must not run while the
+        // scheduler mutex is held: an activation hook may post more work or
+        // request cancellation through the runtime.
+        std::unique_ptr<ActorSlot> activated_actor;
         try
         {
+            if (activation_required)
+            {
+                activated_actor = binding->activate(key.entity);
+                if (!activated_actor)
+                {
+                    throw std::logic_error{"ActorBinding::activate returned no slot"};
+                }
+            }
+
             std::lock_guard lock{worker.scheduling_mutex};
             if (worker.ingress.isCancelled())
             {
@@ -442,51 +482,46 @@ namespace snf::runtime
                 auto actor_iterator = worker.actors.find(key);
                 if (actor_iterator == worker.actors.end())
                 {
-                    if (submission.submission.activation() == ActorActivation::ExistingOnly)
+                    if (!activated_actor)
                     {
-                        consumed_without_slot = true;
+                        throw std::logic_error{"ActorRuntime lost an existing slot while routing"};
                     }
-                    else
-                    {
-                        auto actor = binding_iterator->second->activate(key.entity);
-                        if (!actor)
-                        {
-                            throw std::logic_error{"ActorBinding::activate returned no slot"};
-                        }
-                        actor_iterator = worker.actors
-                                             .emplace(key,
-                                                      ActorSlotEntry{
-                                                          .binding = binding_iterator->second,
-                                                          .actor = std::move(actor),
-                                                          .mailbox = {},
-                                                          .state = ActorExecutionState::Idle,
-                                                      })
-                                             .first;
-                    }
+
+                    actor_iterator = worker.actors
+                                         .emplace(key,
+                                                  ActorSlotEntry{
+                                                      .binding = binding,
+                                                      .actor = std::move(activated_actor),
+                                                      .mailbox = {},
+                                                      .state = ActorExecutionState::Idle,
+                                                  })
+                                         .first;
                 }
 
-                if (!consumed_without_slot)
+                ActorSlotEntry& slot = actor_iterator->second;
+                if (slot.binding != binding)
                 {
-                    ActorSlotEntry& slot = actor_iterator->second;
-                    slot.mailbox.push_back(std::move(submission));
-                    try
-                    {
-                        if (slot.state == ActorExecutionState::Idle)
-                        {
-                            worker.ready_actors.push_back(actor_iterator->first);
-                            slot.state = ActorExecutionState::Ready;
-                        }
-                    }
-                    catch (...)
-                    {
-                        slot.mailbox.pop_back();
-                        throw;
-                    }
-
-                    const std::uint64_t mailbox_depth =
-                        worker.counters.mailbox_depth.fetch_add(1, std::memory_order_relaxed) + 1;
-                    updateMaximum(worker.counters.mailbox_high_water_mark, mailbox_depth);
+                    throw std::logic_error{"ActorRuntime slot binding invariant violated"};
                 }
+
+                slot.mailbox.push_back(std::move(submission));
+                try
+                {
+                    if (slot.state == ActorExecutionState::Idle)
+                    {
+                        worker.ready_actors.push_back(actor_iterator->first);
+                        slot.state = ActorExecutionState::Ready;
+                    }
+                }
+                catch (...)
+                {
+                    slot.mailbox.pop_back();
+                    throw;
+                }
+
+                const std::uint64_t mailbox_depth =
+                    worker.counters.mailbox_depth.fetch_add(1, std::memory_order_relaxed) + 1;
+                updateMaximum(worker.counters.mailbox_high_water_mark, mailbox_depth);
             }
         }
         catch (...)
@@ -495,10 +530,10 @@ namespace snf::runtime
             throw;
         }
 
-        if (discarded || consumed_without_slot)
+        if (discarded)
         {
             releaseOutstanding(worker);
-            return !discarded;
+            return false;
         }
 
         return true;
@@ -534,8 +569,8 @@ namespace snf::runtime
             slot->state = ActorExecutionState::Running;
         }
 
-        std::size_t handled_commands = 0;
-        while (handled_commands < ACTOR_TURN_COMMAND_BUDGET)
+        std::size_t handled_submissions = 0;
+        while (handled_submissions < ACTOR_TURN_BUDGET)
         {
             std::optional<QueuedSubmission> queued;
             {
@@ -597,15 +632,16 @@ namespace snf::runtime
             }
 
             releaseOutstanding(worker);
+            ++handled_submissions;
             if (is_command)
             {
                 worker.counters.processed.fetch_add(1, std::memory_order_relaxed);
-                ++handled_commands;
             }
 
             if (result == ActorDispatchResult::Evict)
             {
                 std::size_t discarded_mailbox_submissions = 0;
+                std::unique_ptr<ActorSlot> actor_to_destroy;
                 {
                     std::lock_guard lock{worker.scheduling_mutex};
                     discarded_mailbox_submissions = slot->mailbox.size();
@@ -622,9 +658,11 @@ namespace snf::runtime
                     {
                         throw std::logic_error{"ActorRuntime actor eviction invariant violated"};
                     }
+                    actor_to_destroy = std::move(actor_iterator->second.actor);
                     worker.actors.erase(actor_iterator);
                     worker.counters.evicted_actors.fetch_add(1, std::memory_order_relaxed);
                 }
+                actor_to_destroy.reset();
                 return true;
             }
         }
@@ -688,9 +726,13 @@ namespace snf::runtime
     {
         try
         {
-            std::lock_guard lock{worker.scheduling_mutex};
-            worker.ready_actors.clear();
-            worker.actors.clear();
+            decltype(worker.actors) actors_to_destroy;
+            {
+                std::lock_guard lock{worker.scheduling_mutex};
+                worker.ready_actors.clear();
+                actors_to_destroy.swap(worker.actors);
+            }
+            actors_to_destroy.clear();
         }
         catch (...)
         {
