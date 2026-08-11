@@ -31,7 +31,8 @@ namespace
                   << counters.protocol_errors << " protocol errors, "
                   << counters.actor_queue_overflows << " actor queue overflows, "
                   << counters.stale_outbound_actions << " stale outbound actions, "
-                  << counters.connection_lifecycle_rejections << " connection lifecycle rejections, "
+                  << counters.connection_lifecycle_rejections
+                  << " connection lifecycle rejections, "
                   << counters.pending_connection_closes_high_water_mark
                   << " pending connection closes high-water\n";
 
@@ -61,6 +62,18 @@ namespace
                       << worker.mailbox_depth << "/" << worker.mailbox_high_water_mark
                       << ", budget yields " << worker.budget_yield_turns << ", queue wait ns "
                       << format_distribution(worker.queue_wait_nanoseconds) << '\n';
+            std::cout << "Actor worker " << worker_index
+                      << " coroutine: " << worker.suspended_commands
+                      << " suspended commands, in-flight " << worker.in_flight_operations << "/"
+                      << worker.in_flight_high_water_mark << ", suspended now "
+                      << worker.suspended_task_count << ", continuations "
+                      << worker.continuation_queue_depth << ", passivatable "
+                      << worker.scheduler_passivatable_actor_count << ", cancelled "
+                      << worker.cancelled_operations << ", reservation rejections "
+                      << worker.reservation_rejections << ", double completions "
+                      << worker.double_completions << ", discarded late completions "
+                      << worker.discarded_late_completions << ", suspend duration ns "
+                      << format_distribution(worker.suspend_duration_nanoseconds) << '\n';
         }
     }
 }

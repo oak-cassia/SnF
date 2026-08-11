@@ -132,6 +132,7 @@ if(BUILD_TESTING)
         tests/runtime_boundaries_test.cpp
         tests/player_actor_test.cpp
         tests/actor_runtime_test.cpp
+        tests/actor_coroutine_test.cpp
         tests/message_dispatcher_test.cpp
         tests/session_test.cpp
         tests/socket_options_test.cpp

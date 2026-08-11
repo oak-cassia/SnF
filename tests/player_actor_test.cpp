@@ -14,13 +14,26 @@ namespace
         };
     }
 
+    // The command has to outlive the task, so it is always a named local here.
+    // Handing handle() a temporary would leave the lazy body reading a destroyed
+    // command on its first resume.
+    snf::server::PlayerResult run_handler(snf::server::PlayerActor& actor,
+                                          const snf::server::PlayerCommand& command)
+    {
+        auto task = actor.handle(command);
+        assert(task.resume() == snf::runtime::ActorTaskStatus::Completed);
+        return task.takeResult();
+    }
+
     void test_player_actor_owns_state_and_dispatches_ping()
     {
         snf::server::PlayerActor actor;
         assert(actor.state().handledCommandCount() == 0);
 
-        const auto first = actor.handle(make_ping(100));
-        const auto second = actor.handle(make_ping(101));
+        const auto first_command = make_ping(100);
+        const auto second_command = make_ping(101);
+        const auto first = run_handler(actor, first_command);
+        const auto second = run_handler(actor, second_command);
 
         assert(first.effects.size() == 1);
         assert(second.effects.size() == 1);
@@ -36,9 +49,25 @@ namespace
         assert(second_pong->request_id == 101);
         assert(actor.state().handledCommandCount() == 2);
     }
+
+    // A lazy task is what lets the scheduler own the first resume. Without it a
+    // handler would start running on whichever thread happened to create the task.
+    void test_handler_body_does_not_run_before_the_first_resume()
+    {
+        snf::server::PlayerActor actor;
+        const auto command = make_ping(1);
+
+        auto task = actor.handle(command);
+        assert(task.valid());
+        assert(actor.state().handledCommandCount() == 0);
+
+        assert(task.resume() == snf::runtime::ActorTaskStatus::Completed);
+        assert(actor.state().handledCommandCount() == 1);
+    }
 }
 
 void run_player_actor_tests()
 {
     test_player_actor_owns_state_and_dispatches_ping();
+    test_handler_body_does_not_run_before_the_first_resume();
 }

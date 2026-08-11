@@ -35,12 +35,21 @@ namespace snf::server
         [[nodiscard]] snf::runtime::ActorDispatchResult
         dispatch(snf::runtime::ActorSlot& slot,
                  const snf::runtime::ActorSubmission& submission,
+                 snf::runtime::ActorContext& context,
                  std::stop_token stop_token) override;
+        [[nodiscard]] snf::runtime::ActorDispatchResult resume(snf::runtime::ActorSlot& slot,
+                                                               snf::runtime::ActorContext& context,
+                                                               std::stop_token stop_token) override;
 
     private:
         struct PlayerActorSlot;
         struct CommandPayload;
         struct ConnectionClosedPayload;
+
+        // Shared tail of dispatch and resume: drive the handler's task and, once
+        // it completes, apply its effects in order.
+        [[nodiscard]] snf::runtime::ActorDispatchResult advance(PlayerActorSlot& slot,
+                                                                std::stop_token stop_token);
 
         PlayerEffectSink& _effects;
         std::function<void(ProvisionalActorId, const PlayerCommand&)> _on_before_command;

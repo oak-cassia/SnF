@@ -4,9 +4,10 @@ SnF는 C++20을 활용해 MORPG 콘텐츠의 상태, 규칙과 메시지 흐름�
 프로젝트다. 서버 코어 자체를 계속 확장하는 것보다, Player와 Zone을 비롯한 게임 콘텐츠를
 명확한 상태 소유권과 실행 경계 위에 올리는 것을 주된 목적으로 한다.
 
-현재는 Linux `epoll` 네트워크 런타임과 일반화된 sharded Actor Runtime 위에서 PING/PONG
-vertical slice를 실행한다. 먼저 backpressure 계약, Actor coroutine과 UnifiedRuntime으로 실행 모델을
-완성하고, 그 위에 인증·영속성, Zone과 timer event, 공유 콘텐츠를 차례로 구현한다.
+현재는 Linux `epoll` 네트워크 런타임과 coroutine suspend/resume을 지원하는 일반화된 sharded Actor
+Runtime 위에서 PING/PONG vertical slice를 실행한다. 다음으로 non-blocking outbound와
+UnifiedRuntime으로 실행 모델을 완성하고, 그 위에 인증·영속성, Zone과 timer event, 공유 콘텐츠를
+차례로 구현한다.
 
 ## 프로젝트 목적
 
@@ -62,9 +63,9 @@ Network Runtime
     실시간 동기화가 필요하지 않다. 그 수준의 동기화가 필요한 game instance는 별도 서버로
     분리해 scale-out할 수 있으므로, 단일 프로세스에서는 여러 Actor 종류를 같은 Worker
     Pool에서 처리한다.
-  - 현재는 Actor turn budget으로 cooperative fairness를 제공하며, Phase 4에서 coroutine
-    suspend까지 확장한다. Actor 내부 mutex를 없애고 명령 순서와 cache locality를 보장하기 위한
-    선택이다.
+  - Actor turn budget으로 cooperative fairness를 제공하며, 외부 operation을 기다리는 Actor coroutine은
+    suspend되어 같은 Worker의 다른 Actor가 진행한다. Actor 내부 mutex를 없애고 명령 순서와 cache
+    locality를 보장하기 위한 선택이다.
   - 느린 handler가 같은 Worker의 다른 Actor를 지연시킬 수 있지만, DB 같은 외부 I/O는
     비동기로 실행해 Logic Worker가 대기하지 않게 한다.
 - protocol Frame을 Actor까지 전달하지 않고 typed command와 effect 경계를 사용한다.
@@ -83,17 +84,24 @@ Network Runtime
 - connection generation을 통한 stale response 차단
 - bounded ingress/outbound queue와 Session별 send backpressure
 - connection lifecycle 전달, runtime drain/failure와 graceful shutdown
+- lazy `ActorTask`, bounded continuation reservation과 owning-Worker 전용 coroutine resume/cancel/frame 파괴
+- suspend 중 같은 Actor의 FIFO를 보존하면서 같은 Worker의 다른 Actor를 진행시키는 scheduler
+- in-flight, suspension duration, reservation/cancel/late completion과 passivation 후보 metric
 - reactor turn 지연, Actor queue wait, pending send, outbound depth와 outbound hand-off 시간의
   `p50/p95/p99/max` 계측과 운영 중 주기 노출
 - 단위·TCP 통합·부하 테스트 및 ASan·UBSan·TSan preset
 
 Phase 3.8에서 scheduler의 Player 전용 의존을 제거하고, 모든 Worker를
 `ActorKeyHash(key) % worker_count`로 선택하는 Actor-Bound Logic Runtime으로 일반화했다.
-현재 production binding은 Player 하나이며 ZoneActor, timer와 coroutine은 이후 단계의 범위다.
+현재 production binding은 Player 하나이며 ZoneActor와 timer는 이후 단계의 범위다.
 
 Phase 3.9에서는 포화 정책의 현재 동작과 목표 동작을 계약으로 고정하고 baseline metric을 확보했다.
 포화 동작 자체는 바꾸지 않았으며, in-flight credit과 non-blocking outbound는 각각 단계 4.5와 4.1에서
 구현한다.
+
+Phase 4.0에서는 `PlayerActor` handler를 lazy coroutine으로 전환하고 domain-agnostic async operation,
+continuation, cancel과 drain 기계를 구현했다. PING에는 await할 작업이 없어 production 경로는 동기
+완료하며, 첫 production suspension point는 Phase 4.1의 outbound reservation이다.
 
 ## 로드맵
 

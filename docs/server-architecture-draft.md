@@ -109,8 +109,11 @@ CPU 작업만 별도 executor로 분리한다.
 Stateless Job Pool은 게임 상태를 직접 수정하지 않는다. immutable snapshot을 입력으로 받고
 결과를 원래 상태 소유자에게 메시지로 반환한다.
 
-Logic Pool의 fairness는 완료된 Actor turn 사이의 cooperative fairness다. handler나 effect
-적용이 blocking하면 그 Worker에 배치된 Player, Zone 등이 함께 지연될 수 있다.
+Logic Pool의 fairness는 Actor turn 사이의 cooperative fairness다. Phase 4.0부터 handler가 외부
+operation을 await하면 해당 Actor만 suspend되고 같은 Worker의 다른 Actor는 계속 실행한다. continuation은
+원래 owning Worker에 게시되고, suspend된 Actor의 다음 command보다 먼저 coroutine을 재개한다. 반면
+handler가 suspend하지 않는 CPU 작업이나 effect 적용이 blocking하면 그 Worker에 배치된 Player, Zone
+등이 함께 지연될 수 있다.
 
 현재 outbound 포화는 Logic Worker가 `BoundedQueue::push`에서 stop token으로만 중단 가능한 blocking
 대기를 하는 형태다. 단계 4.1에서 이를 `co_await outbound.reserve()` 형태의 reservation awaiter로
@@ -626,8 +629,8 @@ ZoneActor의 주기 갱신은 별도 tick 실행 스레드가 상태를 수정�
 
 | 상태 | 토폴로지 | 시점 |
 | --- | --- | --- |
-| 현재 | Network Reactor 1(main thread) + Actor-Bound Logic Pool 2 | 3.8까지 |
-| 전환 | Reactor thread가 최소 Executor와 ready queue를 실행하고, Actor는 coroutine + non-blocking outbound를 사용한다 | 4.0~4.5 |
+| 현재 | Network Reactor 1(main thread) + coroutine Actor-Bound Logic Pool 2 | 4.0 |
+| 전환 | Reactor thread가 최소 Executor와 ready queue를 실행하고, Actor는 non-blocking outbound를 사용한다 | 4.1~4.5 |
 | 목표 | UnifiedRuntime N + 별도 Blocking DB Pool + Logger | 4.6 이후 |
 
 전환 근거는 [UnifiedRuntime 전환 개요](../study/10-unified-runtime-overview.md)에 있다. 영역별 초기 Worker 수와

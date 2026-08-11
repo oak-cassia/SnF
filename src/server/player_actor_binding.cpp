@@ -10,6 +10,13 @@ namespace snf::server
     struct PlayerActorBinding::PlayerActorSlot final : snf::runtime::ActorSlot
     {
         PlayerActor actor;
+        // Holds the handler's task while it runs, including across a suspension.
+        // Keeping the frame in the slot is what confines resume and destruction to
+        // the owning Worker.
+        snf::runtime::ActorTask<PlayerResult> task;
+        // Captured at dispatch because resume() does not carry the submission, and
+        // effects still have to reach the connection that issued the command.
+        snf::net::ConnectionId connection{};
     };
 
     struct PlayerActorBinding::CommandPayload
@@ -76,8 +83,13 @@ namespace snf::server
     snf::runtime::ActorDispatchResult
     PlayerActorBinding::dispatch(snf::runtime::ActorSlot& slot,
                                  const snf::runtime::ActorSubmission& submission,
+                                 snf::runtime::ActorContext& context,
                                  const std::stop_token stop_token)
     {
+        // PlayerActor awaits nothing yet, so it needs no context. The parameter is
+        // the seam a persistence await will use without touching the scheduler.
+        static_cast<void>(context);
+
         auto& player_slot = dynamic_cast<PlayerActorSlot&>(slot);
         if (submission.accounting() == snf::runtime::ActorAccounting::Control)
         {
@@ -91,8 +103,37 @@ namespace snf::server
             _on_before_command(payload.command.actor, payload.command.command);
         }
 
-        PlayerResult result = player_slot.actor.handle(payload.command.command);
-        if (_effects.apply(payload.command.connection, std::move(result), stop_token))
+        player_slot.connection = payload.command.connection;
+        player_slot.task = player_slot.actor.handle(payload.command.command);
+        return advance(player_slot, stop_token);
+    }
+
+    snf::runtime::ActorDispatchResult
+    PlayerActorBinding::resume(snf::runtime::ActorSlot& slot,
+                               snf::runtime::ActorContext& context,
+                               const std::stop_token stop_token)
+    {
+        static_cast<void>(context);
+
+        return advance(dynamic_cast<PlayerActorSlot&>(slot), stop_token);
+    }
+
+    snf::runtime::ActorDispatchResult PlayerActorBinding::advance(PlayerActorSlot& slot,
+                                                                  const std::stop_token stop_token)
+    {
+        if (slot.task.resume() == snf::runtime::ActorTaskStatus::Suspended)
+        {
+            return snf::runtime::ActorDispatchResult::Suspended;
+        }
+
+        // Effects are applied only after the handler has returned normally, which
+        // is the same ordering the synchronous handler had. takeResult rethrows a
+        // handler exception, and the frame is then destroyed with the slot on this
+        // same Worker.
+        PlayerResult result = slot.task.takeResult();
+        slot.task = {};
+
+        if (_effects.apply(slot.connection, std::move(result), stop_token))
         {
             return snf::runtime::ActorDispatchResult::KeepActive;
         }

@@ -33,6 +33,7 @@ namespace
     using snf::runtime::ActorAccounting;
     using snf::runtime::ActorActivation;
     using snf::runtime::ActorBinding;
+    using snf::runtime::ActorContext;
     using snf::runtime::ActorDispatchResult;
     using snf::runtime::ActorKey;
     using snf::runtime::ActorKind;
@@ -46,8 +47,7 @@ namespace
     class QueueOutboundSink final : public snf::server::OutboundSink
     {
     public:
-        explicit QueueOutboundSink(
-            snf::server::OutboundActionQueue& actions) noexcept
+        explicit QueueOutboundSink(snf::server::OutboundActionQueue& actions) noexcept
             : _actions(actions)
         {
         }
@@ -220,8 +220,10 @@ namespace
             return std::make_unique<Slot>();
         }
 
-        [[nodiscard]] ActorDispatchResult
-        dispatch(ActorSlot& slot, const ActorSubmission& submission, std::stop_token) override
+        [[nodiscard]] ActorDispatchResult dispatch(ActorSlot& slot,
+                                                   const ActorSubmission& submission,
+                                                   ActorContext&,
+                                                   std::stop_token) override
         {
             static_cast<void>(dynamic_cast<Slot&>(slot));
             const Payload& payload = payloadAs<Payload>(submission);
@@ -245,6 +247,13 @@ namespace
                 on_dispatch(submission.target(), payload.value);
             }
             return ActorDispatchResult::KeepActive;
+        }
+
+        // This binding never suspends, so the scheduler never resumes it.
+        [[nodiscard]] ActorDispatchResult
+        resume(ActorSlot&, ActorContext&, std::stop_token) override
+        {
+            throw std::logic_error{"SyntheticBinding does not suspend"};
         }
 
     private:

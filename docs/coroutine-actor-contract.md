@@ -1,6 +1,6 @@
 # Coroutine Actor 계약
 
-> 상태: Phase 4.0~4.1 구현 전 확정 계약
+> 상태: Phase 4.0 구현 반영, Phase 4.1 production awaiter 확장 전
 > 범위: PlayerActor와 ZoneActor를 포함한 Logic ActorRuntime의 suspend, resume, cancel,
 > `ActorRuntimeDrained`와 외부 비동기 operation 수명
 >
@@ -34,14 +34,39 @@
 - immediate completion은 awaiter handshake를 거치며 coroutine을 외부 thread에서 inline resume하지
   않는다.
 
+terminal claim과 continuation publish 사이는 다음 순서를 지킨다.
+
+```text
+result 계산
+→ complete() 진입
+→ Pending → Completed CAS로 terminal claim
+→ result 저장
+→ 예약된 continuation endpoint에 publish
+→ complete() 반환
+```
+
+- `complete()`와 `fail()`은 `noexcept`다. claim 이후에는 blocking, allocation, throw 또는 중간 반환을
+  허용하지 않는다. 예약된 queue slot에 enqueue하기 위해 continuation queue mutex 하나만 잠근다.
+- `Completed`를 먼저 관측한 cancel 경로는 직접 resume하지 않고 claimer가 반드시 게시할 continuation을
+  기다린다.
+- continuation queue는 cancel하지 않는다. Worker가 모든 in-flight operation을 terminal 처리하고 join한
+  뒤에만 endpoint를 비활성화하고 queue storage의 수명을 끝낸다.
+- in-flight reservation은 Worker가 continuation을 소비하거나 `Pending → Cancelled` claim에 성공한
+  시점에만 해제한다. 따라서 drain 판정이 claim과 publish 사이 operation을 앞지를 수 없다.
+- claimer thread가 claim 뒤 publish 전에 영구 정지하면 Worker도 진행하지 못하는 잔여 위험을 받아들인다.
+  이 좁은 구간의 non-blocking/no-allocation 전제가 깨지면 `Completing → Published` 2단 상태로 확장한다.
+
 ## 3. 소유권과 Worker affinity
 
 - coroutine frame과 `ActorSlot`은 owning Actor Worker만 접근·resume·파괴한다.
 - DB, timer 등 외부 executor는 raw `coroutine_handle`, `Actor*`, `ActorSlot*`을 보유하지 않는다.
 - 외부 operation은 ref-counted operation state 또는 completion registry만 공유한다.
-- 외부 결과는 `{ActorKey, ActorIncarnation, TaskId, Result}` value로 continuation ingress에
-  게시한다.
+- 외부 executor는 ref-counted operation state에 `Result`를 기록하고 continuation ingress에는
+  `{ActorKey, ActorIncarnation, TaskId}` identity value만 게시한다. 둘 다 Actor나 coroutine handle을
+  포함하지 않는다.
 - late completion은 incarnation과 task를 검증하고, 유효하지 않으면 operation state 정리만 수행한다.
+- completion endpoint는 ref-counted다. 외부 operation이 runtime보다 오래 살아도 비활성 endpoint가
+  publish를 조용히 거부하며 runtime 또는 coroutine frame을 역참조하지 않는다.
 
 ## 4. 상태 전이
 
@@ -61,16 +86,25 @@ Idle + mailbox command
   continuation은 command 앞의 priority 규율을 사용하므로 두 입력을 하나의 queue 규칙으로 섞지 않는다.
 - ready queue에는 Actor당 최대 하나의 token만 존재한다.
 - suspended command는 완료 또는 취소 전까지 outstanding capacity를 점유한다.
+- Actor 하나는 동시에 하나의 operation만 await한다. 한 command의 순차적인 여러 await는 허용하지만
+  `when_all` 같은 다중 outstanding operation은 Phase 4.0 범위가 아니다.
+- command queue wait는 최초 dispatch에서 한 번만 기록하고 resume에서는 다시 기록하지 않는다.
+  outstanding은 terminal 성공·실패·취소에서 정확히 한 번 해제하며, processed는 최종 성공에서만
+  증가한다. resume은 새 Actor turn이지만 같은 command의 turn budget을 다시 소비하지 않는다.
 
 ## 5. 취소와 late completion
 
 - graceful close는 외부 command ingress만 닫고 이미 승인된 operation의 continuation 경로는 유지한다.
 - deadline 초과나 explicit cancel은 owning Worker에 terminal cancellation을 전달한다.
+- 외부 cancel은 atomic request flag만 설정하고 Worker를 깨운다. `Pending → Cancelled` claim,
+  coroutine resume와 frame 파괴는 owning Worker만 수행한다.
 - blocking operation은 cancel 요청 뒤에도 끝나지 않을 수 있으므로 coroutine frame과 operation
   state를 분리한다.
 - coroutine frame 파괴 후 도착한 외부 결과는 frame을 resume하지 않고 operation state와 외부
   resource만 정리한다.
 - Worker failure는 모든 Actor task를 cancel 상태로 전환하고 새 completion 적용을 차단한다.
+  실패한 Worker는 pump로 돌아오지 않으므로 자신의 suspended task를 failure 경로에서 직접 terminal
+  cancel하고 frame을 파괴한다.
 
 ## 6. Drain과 passivation 조건
 
@@ -103,8 +137,8 @@ state == Idle
 && no lifecycle resource requiring retention
 ```
 
-Phase 4에서는 passivation을 실행하지 않아도 되지만 이 조건을 metric/snapshot으로 관찰할 수 있어야
-한다.
+Phase 4.0은 passivation을 실행하지 않는다. runtime이 판단할 수 있는 scheduler 조건만
+`scheduler_passivatable_actor_count`로 관찰하며, lifecycle resource retention까지 판정하지 않는다.
 
 ## 7. 필수 경합 테스트
 
@@ -119,3 +153,7 @@ Phase 4에서는 passivation을 실행하지 않아도 되지만 이 조건을 m
 - 마지막 continuation과 drain 완료 판정 경합
 
 Debug와 ASan·UBSan 외에 별도 TSan 구성을 Phase 4 완료 gate로 사용한다.
+
+Phase 4.0의 synthetic async binding이 위 경합을 검증한다. production `PlayerActor`는
+`ActorTask<PlayerResult>`를 반환하지만 아직 await할 외부 operation이 없어 첫 resume에서 동기 완료한다.
+첫 production suspension point는 Phase 4.1의 outbound reservation이다.

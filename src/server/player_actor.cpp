@@ -14,12 +14,12 @@ namespace snf::server
         return _state;
     }
 
-    PlayerResult PlayerActor::handle(const PlayerCommand& command)
+    snf::runtime::ActorTask<PlayerResult> PlayerActor::handle(const PlayerCommand& command)
     {
         PlayerResult result =
             std::visit([this](const auto& value) { return handleCommand(value); }, command);
         ++_state._handled_command_count;
-        return result;
+        co_return result;
     }
 
     PlayerResult PlayerActor::handleCommand(const PingCommand& command)

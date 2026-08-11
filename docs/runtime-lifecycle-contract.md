@@ -21,7 +21,9 @@ ServerDrained =
 ```
 
 `ActorRuntimeDrained`의 구성 요소는 [Coroutine Actor 계약](./coroutine-actor-contract.md) §6이
-소유한다.
+소유한다. Phase 4.0 구현은 external ingress close/empty, 모든 Actor mailbox와 ready queue empty,
+in-flight operation 0, continuation queue empty와 suspended/pending-resume 부재를 각각 명시적으로
+검사한다. 이 판정은 Worker turn 사이에서 실행되므로 running task는 존재하지 않는다.
 
 ```text
 NetworkRuntimeDrained =
@@ -62,6 +64,9 @@ UnifiedRuntimeDrained =
 - runtime 완료 상태는 outbound queue와 분리한다. outbound action의 흐름이 완료 판정을 대신하지
   않는다.
 - 현재 `RuntimeId`에는 `Logic` 하나만 있고 network 쪽 종료는 reactor loop 자신이 관측한다.
+- Logic Runtime의 continuation queue는 hard cancel로 폐기하지 않는다. owning Worker가 suspended operation을
+  terminal 처리해 in-flight가 0이 되고 모든 Worker가 join한 뒤 endpoint를 비활성화한다. 따라서
+  completion claim과 publish 사이에 drain이나 runtime 파괴가 끼어들지 않는다.
 
 `ConnectionScope` 종료는 lifecycle coordinator가 추적한다. 다만 별도 `RuntimeId::Net`을 추가할지는
 단계 4.5 구현 시 결정한다. 논리적인 drain predicate와 `RuntimeId` enum은 같은 결정이 아니며, 한 단계만

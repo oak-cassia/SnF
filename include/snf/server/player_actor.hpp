@@ -1,5 +1,6 @@
 #pragma once
 
+#include "snf/runtime/actor_task.hpp"
 #include "snf/server/player_command.hpp"
 #include "snf/server/player_result.hpp"
 
@@ -34,7 +35,18 @@ namespace snf::server
         // owning Worker. Cross-thread queries must use an immutable snapshot or a
         // command; const does not provide synchronization.
         [[nodiscard]] const PlayerState& state() const noexcept;
-        [[nodiscard]] PlayerResult handle(const PlayerCommand& command);
+
+        // The caller must keep the command alive until the returned task
+        // completes, not merely until this call returns: the task is lazy, so the
+        // body has not run yet, and it may later suspend. Passing a temporary
+        // therefore dangles. In the server the runtime owns the submission for
+        // exactly that long, which is why this takes a reference instead of
+        // copying the payload on every command.
+        //
+        // PING has nothing to await, so this task always completes on its first
+        // resume. The first handler that actually suspends arrives with the
+        // outbound reservation awaiter.
+        [[nodiscard]] snf::runtime::ActorTask<PlayerResult> handle(const PlayerCommand& command);
 
     private:
         [[nodiscard]] PlayerResult handleCommand(const PingCommand& command);

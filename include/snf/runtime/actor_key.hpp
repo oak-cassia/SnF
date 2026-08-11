@@ -18,6 +18,26 @@ namespace snf::runtime
 
     using EntityId = std::uint64_t;
 
+    // A slot's activation generation. An evicted key that is activated again gets
+    // a new incarnation, which is what lets a completion for a dead activation be
+    // told apart from one for the current activation.
+    struct ActorIncarnation
+    {
+        std::uint64_t value{0};
+
+        [[nodiscard]] bool operator==(const ActorIncarnation&) const noexcept = default;
+    };
+
+    // Identifies one awaited operation, not one coroutine task. A command that
+    // awaits twice in sequence gets two ids, so a late completion from the first
+    // await can be rejected while the second is still outstanding.
+    struct TaskId
+    {
+        std::uint64_t value{0};
+
+        [[nodiscard]] bool operator==(const TaskId&) const noexcept = default;
+    };
+
     struct ActorKey
     {
         ActorKind kind;

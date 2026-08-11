@@ -183,7 +183,7 @@ blocking outbound는 4.6 UnifiedRuntime 통합의 blocker다. 통합 후에는 o
 - baseline metric을 부하 테스트에서 수집할 수 있고 통합 전후 비교의 기준선이 된다.
 - 포화 동작, FIFO, fairness, lifecycle retry와 drain/cancel/failure 의미가 변하지 않는다.
 
-## 4.0. Actor Coroutine: Suspend와 Resume
+## 4.0. Actor Coroutine: Suspend와 Resume (완료)
 
 - 일반화된 Actor binding의 첫 적용으로 `PlayerActor` handler 반환형을
   `ActorTask<PlayerResult>`로 바꾼다.
@@ -194,7 +194,13 @@ blocking outbound는 4.6 UnifiedRuntime 통합의 blocker다. 통합 후에는 o
 - suspend 중 같은 Actor의 일반 command는 mailbox에서 기다리고 다른 Actor는 계속 진행한다.
 - 취소와 late completion은 `ActorIncarnation + TaskId`로 구분한다.
 - graceful drain은 외부 입력, mailbox, ready/running/suspended task와 continuation을 모두 관찰한다.
-- blocking DB adapter는 coroutine scheduler 검증 후 bounded DB Worker Pool로 연결한다.
+- cancel 요청과 coroutine resume/frame 파괴는 owning Worker에서만 실행한다. terminal claim을 먼저 얻은
+  completion은 result 저장과 예약된 continuation publish까지 중단 없이 끝내며, cancel은 그 publish를
+  기다린다.
+- suspended command의 queue wait, outstanding과 processed 회계를 terminal 시점까지 정확히 한 번
+  유지한다.
+- production `PlayerActor`는 coroutine 반환형으로 전환됐지만 PING에는 await할 작업이 없어 첫 resume에서
+  동기 완료한다. 첫 production suspension point는 4.1의 outbound reservation이다.
 
 완료 기준:
 
@@ -204,6 +210,12 @@ blocking outbound는 4.6 UnifiedRuntime 통합의 blocker다. 통합 후에는 o
   completion, reservation 포화와 마지막 continuation/drain 경합이 테스트된다.
 - resume과 coroutine frame 파괴가 owning Worker에서만 일어난다.
 - suspend 전·후 예외 전파와 Debug, ASan·UBSan, TSan 검증이 통과한다.
+
+완료 시 release 부하 측정(200 connections, 12s, 20 req/s)에서 48,000/48,000 응답, timeout·queue
+overflow 0을 기록했다. Actor queue wait `p50/p95/p99/max`는 Worker별
+`24575/65535/114687/398125`, `26623/81919/131071/406875` ns였고, client RTT는
+`p50 2.748 ms / p95 3.939 ms / p99 4.689 ms`였다. 3.9 baseline의 queue wait p99
+`360447 ns`, RTT p99 `4.906 ms`보다 악화되지 않아 동기 완료 fast path는 추가하지 않는다.
 
 ## 4.1. Async Outbound Reservation
 
@@ -318,6 +330,8 @@ UnifiedRuntimeDrained =
 - `ConnectionId`, `ProvisionalActorId`, 영속 `PlayerId`를 서로 다른 타입과 용도로 유지한다.
 - 동시 로그인, attach/detach/logout, Actor incarnation과 passivation 정책을 정의한다.
 - at-least-once 재전달 가능성을 idempotency와 transaction으로 흡수해 effect를 한 번만 적용한다.
+- blocking DB adapter를 bounded DB Worker Pool에 연결하고 player load/save가 Actor coroutine을
+  suspend하도록 구현한다. DB queue와 connection 수에는 명시적인 상한과 포화 정책을 둔다.
 - DB Worker는 coroutine이나 Actor 포인터를 보유하지 않는다.
 
 성장·업적·기간제 이벤트는 이 slice 이후 Player module로 추가한다. 랭킹과 시즌 정산은
