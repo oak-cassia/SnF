@@ -23,7 +23,8 @@ namespace
 namespace snf::server
 {
     GameServer::GameServer(const GameServerConfig& config)
-        : _outbound_actions(config.outbound_queue_capacity)
+        : _metrics_reporter(config.metrics_reporter)
+        , _outbound_actions(config.outbound_queue_capacity)
         , _outbound_event(create_outbound_event())
         , _outbound_sink(_outbound_actions, _outbound_event.getDescriptor())
         , _player_effects(_outbound_sink)
@@ -49,6 +50,8 @@ namespace snf::server
                   .max_pending_send_bytes = config.max_pending_send_bytes,
                   .client_send_buffer_size = config.client_send_buffer_size,
                   .connection_lifecycle_capacity = config.connection_lifecycle_capacity,
+                  .metrics_report_interval = config.metrics_report_interval,
+                  .on_metrics_interval = [this] { publishMetrics(); },
               },
               _protocol_gateway,
               _outbound_actions,
@@ -102,6 +105,15 @@ namespace snf::server
         return _logic_runtime.getStats();
     }
 
+    ServerMetricsSnapshot GameServer::getMetricsSnapshot() const
+    {
+        return ServerMetricsSnapshot{
+            .counters = _tcp_server.getStats(),
+            .network = _tcp_server.getMetrics(),
+            .actor_runtime = _logic_runtime.getStats(),
+        };
+    }
+
     void GameServer::run(const int termination_signal_descriptor)
     {
         startActorRuntime();
@@ -153,5 +165,15 @@ namespace snf::server
     {
         _protocol_gateway.cancel();
         _outbound_actions.cancel();
+    }
+
+    void GameServer::publishMetrics() const
+    {
+        if (!_metrics_reporter)
+        {
+            return;
+        }
+
+        _metrics_reporter(getMetricsSnapshot());
     }
 }

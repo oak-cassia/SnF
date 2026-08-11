@@ -34,7 +34,7 @@ namespace
 
     void test_outbound_sink_hides_queue_and_wakeup()
     {
-        snf::runtime::BoundedQueue<snf::server::OutboundAction> actions{2};
+        snf::server::OutboundActionQueue actions{2};
         const auto event = make_eventfd();
         snf::server::EventFdOutboundSink sink{actions, event.getDescriptor()};
 
@@ -51,9 +51,11 @@ namespace
             {}));
 
         assert(read_wakeup_count(event.getDescriptor()) == 1);
-        const auto action = actions.tryPop();
-        assert(action.has_value());
-        const auto* send = std::get_if<snf::server::SendFrame>(&*action);
+        const auto posted = actions.tryPop();
+        assert(posted.has_value());
+        // The sink stamps the publication instant; the game runtime never sees it.
+        assert(posted->posted_at.time_since_epoch().count() != 0);
+        const auto* send = std::get_if<snf::server::SendFrame>(&posted->action);
         assert(send != nullptr);
         assert(send->connection.generation == 7);
         assert(send->frame.request_id == 9);
@@ -69,7 +71,7 @@ namespace
 
     void test_runtime_completion_is_authoritative_and_independent_from_outbound_capacity()
     {
-        snf::runtime::BoundedQueue<snf::server::OutboundAction> full_outbound{1};
+        snf::server::OutboundActionQueue full_outbound{1};
         assert(full_outbound.tryPush(snf::server::CloseConnection{
             .connection = snf::net::ConnectionId{.descriptor = 1, .generation = 1},
             .reason = snf::server::CloseReason::ProtocolError,
@@ -93,7 +95,7 @@ namespace
 
     void test_outbound_sink_wait_is_runtime_cancelable_without_canceling_shared_queue()
     {
-        snf::runtime::BoundedQueue<snf::server::OutboundAction> actions{1};
+        snf::server::OutboundActionQueue actions{1};
         const auto event = make_eventfd();
         snf::server::EventFdOutboundSink sink{actions, event.getDescriptor()};
 
@@ -151,7 +153,7 @@ namespace
 
     void test_rejects_invalid_boundary_configuration()
     {
-        snf::runtime::BoundedQueue<snf::server::OutboundAction> actions{1};
+        snf::server::OutboundActionQueue actions{1};
 
         bool invalid_outbound_descriptor_rejected = false;
         try

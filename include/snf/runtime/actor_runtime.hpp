@@ -1,6 +1,7 @@
 #pragma once
 
 #include "snf/runtime/actor_key.hpp"
+#include "snf/runtime/distribution.hpp"
 #include "snf/runtime/post_result.hpp"
 #include "snf/runtime/runtime_completion.hpp"
 
@@ -187,8 +188,9 @@ namespace snf::runtime
         std::size_t mailbox_depth{0};
         std::size_t mailbox_high_water_mark{0};
         std::uint64_t budget_yield_turns{0};
-        std::chrono::nanoseconds average_queue_wait{0};
-        std::chrono::nanoseconds max_queue_wait{0};
+        // Nanoseconds from a command's acceptance to the start of its dispatch.
+        // Control submissions are excluded, as they are in the counters above.
+        DistributionSnapshot queue_wait_nanoseconds;
     };
 
     struct ActorRuntimeStats

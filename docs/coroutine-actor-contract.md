@@ -1,8 +1,11 @@
 # Coroutine Actor 계약
 
-> 상태: Phase 4 구현 전 확정 계약
-> 범위: PlayerActor와 ZoneActor를 포함한 Logic ActorRuntime의 suspend, resume, cancel, drain과
-> 외부 비동기 operation 수명
+> 상태: Phase 4.0~4.1 구현 전 확정 계약
+> 범위: PlayerActor와 ZoneActor를 포함한 Logic ActorRuntime의 suspend, resume, cancel,
+> `ActorRuntimeDrained`와 외부 비동기 operation 수명
+>
+> 이 문서는 Actor runtime 내부 조건만 소유한다. 서버 전체 종료 판정과 Runtime 사이의 조합은
+> [Runtime Lifecycle 계약](./runtime-lifecycle-contract.md)이 소유한다.
 
 ## 1. 신원
 
@@ -71,19 +74,23 @@ Idle + mailbox command
 
 ## 6. Drain과 passivation 조건
 
-graceful drain은 다음 조건이 모두 참일 때만 완료된다.
+`ActorRuntimeDrained`는 다음 조건이 모두 참일 때만 참이 된다.
 
 ```text
-external ingress closed
-&& external ingress queue empty
-&& lifecycle close events in ingress empty
-&& all actor mailboxes empty
-&& ready queue empty
-&& running task count == 0
-&& suspended/in-flight task count == 0
-&& continuation queue empty
-&& reactor pending connection-close retry queue empty
+ActorRuntimeDrained =
+    external ingress closed
+    && external ingress queue empty
+    && lifecycle close events in ingress empty
+    && all actor mailboxes empty
+    && ready queue empty
+    && running task count == 0
+    && suspended/in-flight task count == 0
+    && continuation queue empty
 ```
+
+network 쪽 조건(listener 정지, pending lifecycle 재시도, outbound와 pending send)은 이 목록에 넣지
+않는다. `NetworkRuntimeDrained`와 두 predicate의 조합은
+[Runtime Lifecycle 계약](./runtime-lifecycle-contract.md)이 소유한다.
 
 Actor는 다음 조건에서만 passivation 가능하다.
 

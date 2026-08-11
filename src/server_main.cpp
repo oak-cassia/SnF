@@ -1,44 +1,94 @@
 #include "snf/net/termination_signal.hpp"
 #include "snf/server/game_server.hpp"
 
+#include <chrono>
+#include <cstddef>
 #include <exception>
 #include <iostream>
+#include <sstream>
+#include <string>
+#include <utility>
 
-int main()
+namespace
 {
-    try
-    {
-        const auto termination_signal = snf::net::create_termination_signal_listener();
-        snf::server::GameServer server{7777};
-        std::cout << "Listening on port 7777\n";
-        server.run(termination_signal.getDescriptor());
+    constexpr std::chrono::seconds METRICS_REPORT_INTERVAL{5};
 
-        const auto& stats = server.getStats();
-        std::cout << "Server summary: " << stats.accepted_connections << " accepted, "
-                  << stats.closed_connections << " closed, " << stats.received_frames
-                  << " frames received, " << stats.sent_frames << " frames sent, "
-                  << stats.protocol_errors << " protocol errors, " << stats.actor_queue_overflows
-                  << " actor queue overflows, " << stats.stale_outbound_actions
-                  << " stale outbound actions, " << stats.connection_lifecycle_rejections
-                  << " connection lifecycle rejections, "
-                  << stats.pending_connection_closes_high_water_mark
+    std::string format_distribution(const snf::runtime::DistributionSnapshot& distribution)
+    {
+        std::ostringstream formatted;
+        formatted << "p50/p95/p99/max " << distribution.p50 << '/' << distribution.p95 << '/'
+                  << distribution.p99 << '/' << distribution.max << " ("
+                  << distribution.sample_count << " samples)";
+        return std::move(formatted).str();
+    }
+
+    void print_metrics(const snf::server::ServerMetricsSnapshot& metrics)
+    {
+        const auto& counters = metrics.counters;
+        std::cout << "Counters: " << counters.accepted_connections << " accepted, "
+                  << counters.closed_connections << " closed, " << counters.received_frames
+                  << " frames received, " << counters.sent_frames << " frames sent, "
+                  << counters.protocol_errors << " protocol errors, "
+                  << counters.actor_queue_overflows << " actor queue overflows, "
+                  << counters.stale_outbound_actions << " stale outbound actions, "
+                  << counters.connection_lifecycle_rejections << " connection lifecycle rejections, "
+                  << counters.pending_connection_closes_high_water_mark
                   << " pending connection closes high-water\n";
 
-        const auto actor_runtime_stats = server.getActorRuntimeStats();
-        for (std::size_t worker_index = 0; worker_index < actor_runtime_stats.workers.size();
-             ++worker_index)
+        const auto& network = metrics.network;
+        std::cout << "Reactor turn ns: " << format_distribution(network.reactor_turn_nanoseconds)
+                  << '\n'
+                  << "Connections: " << network.session_count << " active, "
+                  << network.sessions_with_pending_send << " with pending send, "
+                  << network.total_pending_send_bytes << " pending bytes\n"
+                  << "Session pending send bytes: "
+                  << format_distribution(network.session_pending_send_bytes) << '\n'
+                  << "Outbound queue depth: " << network.current_outbound_queue_depth << " now, "
+                  << network.outbound_queue_high_water_mark << " high-water, "
+                  << format_distribution(network.outbound_queue_depth) << '\n'
+                  << "Outbound hand-off wait ns: "
+                  << format_distribution(network.outbound_queue_wait_nanoseconds) << '\n';
+
+        const auto& workers = metrics.actor_runtime.workers;
+        for (std::size_t worker_index = 0; worker_index < workers.size(); ++worker_index)
         {
-            const auto& worker = actor_runtime_stats.workers[worker_index];
+            const auto& worker = workers[worker_index];
             std::cout << "Actor worker " << worker_index << ": " << worker.accepted << " accepted, "
                       << worker.processed << " processed, " << worker.rejected_full
                       << " rejected-full, depth " << worker.queue_depth << ", high-water "
                       << worker.queue_high_water_mark << ", actors " << worker.actor_count
                       << ", ready " << worker.ready_actor_count << ", mailbox depth/high-water "
                       << worker.mailbox_depth << "/" << worker.mailbox_high_water_mark
-                      << ", budget yields " << worker.budget_yield_turns << ", queue wait avg/max "
-                      << worker.average_queue_wait.count() << "/" << worker.max_queue_wait.count()
-                      << " ns\n";
+                      << ", budget yields " << worker.budget_yield_turns << ", queue wait ns "
+                      << format_distribution(worker.queue_wait_nanoseconds) << '\n';
         }
+    }
+}
+
+int main()
+{
+    try
+    {
+        const auto termination_signal = snf::net::create_termination_signal_listener();
+        snf::server::GameServer server{snf::server::GameServerConfig{
+            .port = 7777,
+            .metrics_report_interval = METRICS_REPORT_INTERVAL,
+            // Runs on the reactor thread. Writing to a terminal is acceptable for
+            // a development binary; a deployment that ships metrics elsewhere must
+            // post to a bounded logger queue instead of doing the I/O here.
+            .metrics_reporter =
+                [](const snf::server::ServerMetricsSnapshot& metrics)
+            {
+                std::cout << "--- metrics ---\n";
+                print_metrics(metrics);
+            },
+        }};
+
+        std::cout << "Listening on port 7777\n";
+        server.run(termination_signal.getDescriptor());
+
+        std::cout << "--- server summary ---\n";
+        print_metrics(server.getMetricsSnapshot());
     }
     catch (const std::exception& error)
     {

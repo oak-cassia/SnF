@@ -78,7 +78,7 @@ namespace snf::server
 {
     TcpServer::TcpServer(const TcpServerConfig& config,
                          FrameIngress& frame_ingress,
-                         snf::runtime::BoundedQueue<OutboundAction>& outbound_actions,
+                         OutboundActionQueue& outbound_actions,
                          snf::runtime::RuntimeCompletionSource& runtime_completion,
                          const int outbound_event_descriptor)
         : _listener(snf::net::create_tcp_listener(config.port))
@@ -89,12 +89,15 @@ namespace snf::server
         , _max_pending_send_bytes(config.max_pending_send_bytes)
         , _client_send_buffer_size(config.client_send_buffer_size)
         , _connection_lifecycle_capacity(config.connection_lifecycle_capacity)
+        , _metrics_report_interval(config.metrics_report_interval)
+        , _on_metrics_interval(config.on_metrics_interval)
         , _frame_ingress(frame_ingress)
         , _outbound_actions(outbound_actions)
         , _runtime_completion(runtime_completion)
         , _outbound_event_descriptor(outbound_event_descriptor)
     {
         if (_shutdown_grace_period < std::chrono::milliseconds::zero() ||
+            _metrics_report_interval < std::chrono::milliseconds::zero() ||
             _max_pending_send_bytes == 0 ||
             (_client_send_buffer_size && *_client_send_buffer_size <= 0) ||
             _connection_lifecycle_capacity == 0 ||
@@ -118,6 +121,34 @@ namespace snf::server
         return _stats;
     }
 
+    TcpServerMetrics TcpServer::getMetrics() const
+    {
+        TcpServerMetrics metrics{
+            .reactor_turn_nanoseconds = _reactor_turn_nanoseconds.snapshot(),
+            .session_pending_send_bytes = _session_pending_send_bytes.snapshot(),
+            .outbound_queue_depth = _outbound_queue_depth.snapshot(),
+            .outbound_queue_wait_nanoseconds = _outbound_queue_wait_nanoseconds.snapshot(),
+            .session_count = _sessions.size(),
+            .sessions_with_pending_send = 0,
+            .total_pending_send_bytes = 0,
+            .current_outbound_queue_depth = _outbound_actions.size(),
+            .outbound_queue_high_water_mark = _outbound_actions.highWaterMark(),
+        };
+
+        for (const auto& [client_descriptor, session] : _sessions)
+        {
+            static_cast<void>(client_descriptor);
+            const std::size_t pending_send_byte_count = session.getPendingSendByteCount();
+            metrics.total_pending_send_bytes += pending_send_byte_count;
+            if (pending_send_byte_count != 0)
+            {
+                ++metrics.sessions_with_pending_send;
+            }
+        }
+
+        return metrics;
+    }
+
     void TcpServer::run(const int termination_signal_descriptor)
     {
         if (termination_signal_descriptor != snf::net::UniqueFileDescriptor::INVALID_FD)
@@ -127,6 +158,10 @@ namespace snf::server
         }
 
         std::array<epoll_event, MAX_READY_EVENTS> events{};
+        if (hasMetricsReporting())
+        {
+            _next_metrics_report = std::chrono::steady_clock::now() + _metrics_report_interval;
+        }
 
         while (true)
         {
@@ -137,8 +172,7 @@ namespace snf::server
                 break;
             }
 
-            const int wait_timeout = getEpollWaitTimeout();
-            if (_is_stopping && wait_timeout == 0)
+            if (_is_stopping && hasShutdownDeadlineExpired())
             {
                 cancelQueues();
                 break;
@@ -147,7 +181,7 @@ namespace snf::server
             const int ready_event_count = ::epoll_wait(_epoll.getDescriptor(),
                                                        events.data(),
                                                        static_cast<int>(events.size()),
-                                                       wait_timeout);
+                                                       getEpollWaitTimeout());
 
             if (ready_event_count == -1)
             {
@@ -158,6 +192,8 @@ namespace snf::server
 
                 snf::net::throw_system_error("epoll_wait");
             }
+
+            const auto turn_started_at = std::chrono::steady_clock::now();
 
             for (int event_index = 0; event_index < ready_event_count; ++event_index)
             {
@@ -209,6 +245,17 @@ namespace snf::server
                 const int client_descriptor = descriptor_iterator->second;
                 handleClientEvent(client_descriptor, event.events);
             }
+
+            if (ready_event_count > 0)
+            {
+                _reactor_turn_nanoseconds.record(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - turn_started_at));
+            }
+
+            // Reported after the turn is measured so that the report itself does
+            // not inflate the reactor turn distribution.
+            reportMetricsIfDue();
         }
 
         closeRemainingSessions();
@@ -490,6 +537,8 @@ namespace snf::server
 
     void TcpServer::handleOutboundActions()
     {
+        _outbound_queue_depth.record(static_cast<std::uint64_t>(_outbound_actions.size()));
+
         std::uint64_t wakeup_count = 0;
         while (::read(_outbound_event_descriptor, &wakeup_count, sizeof(wakeup_count)) == -1)
         {
@@ -506,9 +555,12 @@ namespace snf::server
             snf::net::throw_system_error("read(outbound eventfd)");
         }
 
-        while (auto action = _outbound_actions.tryPop())
+        while (auto posted = _outbound_actions.tryPop())
         {
-            handleOutboundAction(std::move(*action));
+            _outbound_queue_wait_nanoseconds.record(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - posted->posted_at));
+            handleOutboundAction(std::move(posted->action));
         }
 
         handleRuntimeCompletion();
@@ -539,6 +591,8 @@ namespace snf::server
                         return;
                     }
 
+                    _session_pending_send_bytes.record(
+                        static_cast<std::uint64_t>(session->getPendingSendByteCount()));
                     updateClientEvents(*session);
                 }
                 else
@@ -832,6 +886,23 @@ namespace snf::server
         }
     }
 
+    void TcpServer::reportMetricsIfDue()
+    {
+        if (!hasMetricsReporting())
+        {
+            return;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now < _next_metrics_report)
+        {
+            return;
+        }
+
+        _next_metrics_report = now + _metrics_report_interval;
+        _on_metrics_interval();
+    }
+
     bool TcpServer::hasAvailableConnectionLifecycleSlot() const noexcept
     {
         return _sessions.size() < _connection_lifecycle_capacity &&
@@ -839,32 +910,44 @@ namespace snf::server
                    _connection_lifecycle_capacity - _sessions.size();
     }
 
+    bool TcpServer::hasMetricsReporting() const noexcept
+    {
+        return _on_metrics_interval != nullptr &&
+               _metrics_report_interval > std::chrono::milliseconds::zero();
+    }
+
+    bool TcpServer::hasShutdownDeadlineExpired() const noexcept
+    {
+        return std::chrono::steady_clock::now() >= _shutdown_deadline;
+    }
+
     int TcpServer::getEpollWaitTimeout() const
     {
         int timeout = -1;
         if (_is_stopping)
         {
-            const auto now = std::chrono::steady_clock::now();
-            if (now >= _shutdown_deadline)
-            {
-                timeout = 0;
-            }
-            else
-            {
-                const auto remaining =
-                    std::chrono::ceil<std::chrono::milliseconds>(_shutdown_deadline - now);
-                timeout = static_cast<int>(
-                    std::min<std::int64_t>(remaining.count(), std::numeric_limits<int>::max()));
-            }
+            const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
+                _shutdown_deadline - std::chrono::steady_clock::now());
+            timeout = static_cast<int>(std::clamp<std::int64_t>(
+                remaining.count(), 0, std::numeric_limits<int>::max()));
         }
 
-        if (_pending_connection_closes.empty())
+        if (!_pending_connection_closes.empty())
         {
-            return timeout;
+            const int retry_timeout = static_cast<int>(CONNECTION_CLOSE_RETRY_INTERVAL.count());
+            timeout = timeout == -1 ? retry_timeout : std::min(timeout, retry_timeout);
         }
 
-        const int retry_timeout = static_cast<int>(CONNECTION_CLOSE_RETRY_INTERVAL.count());
-        return timeout == -1 ? retry_timeout : std::min(timeout, retry_timeout);
+        if (hasMetricsReporting())
+        {
+            const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
+                _next_metrics_report - std::chrono::steady_clock::now());
+            const int report_timeout = static_cast<int>(std::clamp<std::int64_t>(
+                remaining.count(), 0, std::numeric_limits<int>::max()));
+            timeout = timeout == -1 ? report_timeout : std::min(timeout, report_timeout);
+        }
+
+        return timeout;
     }
 
     snf::net::Session* TcpServer::findCurrentSession(const snf::net::ConnectionId connection)

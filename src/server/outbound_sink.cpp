@@ -1,6 +1,7 @@
 #include "snf/server/outbound_sink.hpp"
 
 #include <cerrno>
+#include <chrono>
 #include <stdexcept>
 #include <sys/eventfd.h>
 #include <unistd.h>
@@ -8,7 +9,7 @@
 
 namespace snf::server
 {
-    EventFdOutboundSink::EventFdOutboundSink(snf::runtime::BoundedQueue<OutboundAction>& actions,
+    EventFdOutboundSink::EventFdOutboundSink(OutboundActionQueue& actions,
                                              const int wake_descriptor)
         : _actions(actions)
         , _wake_descriptor(wake_descriptor)
@@ -21,7 +22,13 @@ namespace snf::server
 
     bool EventFdOutboundSink::publish(OutboundAction action, const std::stop_token stop_token)
     {
-        if (!_actions.push(std::move(action), stop_token))
+        // Stamped before the push so a wait on a full queue counts as hand-off
+        // wait rather than disappearing from the measurement.
+        const auto posted_at = std::chrono::steady_clock::now();
+
+        if (!_actions.push(
+                PostedOutboundAction{.action = std::move(action), .posted_at = posted_at},
+                stop_token))
         {
             return false;
         }

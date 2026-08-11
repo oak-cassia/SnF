@@ -136,6 +136,13 @@ namespace
             return _server.getActorRuntimeStats();
         }
 
+        // Reads reactor state, so tests may only call it once the reactor thread
+        // has been joined.
+        [[nodiscard]] snf::server::ServerMetricsSnapshot getMetricsSnapshot() const
+        {
+            return _server.getMetricsSnapshot();
+        }
+
         void stop()
         {
             _server.requestStop();
@@ -352,6 +359,100 @@ namespace
             std::uint64_t{0},
             [](const std::uint64_t total, const snf::runtime::ActorRuntimeWorkerStats& worker)
             { return total + worker.evicted_actors; });
+    }
+
+    std::uint64_t queue_wait_sample_count(const snf::runtime::ActorRuntimeStats& stats)
+    {
+        return std::accumulate(
+            stats.workers.begin(),
+            stats.workers.end(),
+            std::uint64_t{0},
+            [](const std::uint64_t total, const snf::runtime::ActorRuntimeWorkerStats& worker)
+            { return total + worker.queue_wait_nanoseconds.sample_count; });
+    }
+
+    void test_collects_baseline_saturation_metrics_for_a_round_trip()
+    {
+        RunningServer server;
+        const auto client = connect_client(server.getPort());
+
+        const snf::protocol::Frame request{
+            .type = snf::protocol::MessageType::Ping,
+            .request_id = 1,
+            .payload = {std::byte{0x01}},
+        };
+
+        const auto encoded_request = snf::protocol::encode_frame(request);
+        send_all(client.getDescriptor(), encoded_request);
+        assert_pong(receive_exact(client.getDescriptor(), encoded_request.size()), request);
+
+        server.stop();
+
+        const auto metrics = server.getMetricsSnapshot();
+        assert(metrics.counters.received_frames == 1);
+        assert(metrics.network.reactor_turn_nanoseconds.sample_count > 0);
+        assert(metrics.network.reactor_turn_nanoseconds.max >=
+               metrics.network.reactor_turn_nanoseconds.p99);
+        // One drain observation for the PONG hand-off and one pending send sample
+        // for the frame it enqueued.
+        assert(metrics.network.outbound_queue_depth.sample_count > 0);
+        assert(metrics.network.session_pending_send_bytes.sample_count == 1);
+        // The single hand-off from the Logic Worker to the reactor.
+        assert(metrics.network.outbound_queue_wait_nanoseconds.sample_count == 1);
+        assert(metrics.network.outbound_queue_wait_nanoseconds.max > 0);
+        assert(metrics.network.session_pending_send_bytes.max == encoded_request.size());
+        assert(metrics.network.outbound_queue_high_water_mark >= 1);
+        // Every session is closed before the reactor loop returns.
+        assert(metrics.network.session_count == 0);
+        assert(metrics.network.sessions_with_pending_send == 0);
+        assert(metrics.network.total_pending_send_bytes == 0);
+        assert(queue_wait_sample_count(metrics.actor_runtime) == 1);
+    }
+
+    void test_reports_metrics_periodically_while_running()
+    {
+        std::atomic<std::size_t> report_count{0};
+        std::atomic<std::uint64_t> reported_reactor_turns{0};
+        std::atomic<std::size_t> reported_sessions{0};
+
+        RunningServer server{snf::server::GameServerConfig{
+            .port = 0,
+            .shutdown_grace_period = 200ms,
+            .metrics_report_interval = 5ms,
+            .metrics_reporter =
+                [&](const snf::server::ServerMetricsSnapshot& metrics)
+            {
+                reported_reactor_turns.store(metrics.network.reactor_turn_nanoseconds.sample_count);
+                reported_sessions.store(metrics.network.session_count);
+                report_count.fetch_add(1);
+            },
+        }};
+
+        const auto client = connect_client(server.getPort());
+
+        const snf::protocol::Frame request{
+            .type = snf::protocol::MessageType::Ping,
+            .request_id = 7,
+            .payload = {std::byte{0x02}},
+        };
+
+        const auto encoded_request = snf::protocol::encode_frame(request);
+        send_all(client.getDescriptor(), encoded_request);
+        assert_pong(receive_exact(client.getDescriptor(), encoded_request.size()), request);
+
+        // An idle reactor must still reach its report deadline, so this waits on
+        // the interval rather than on further traffic.
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        while (report_count.load() < 3 && std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::sleep_for(1ms);
+        }
+
+        assert(report_count.load() >= 3);
+        assert(reported_reactor_turns.load() > 0);
+        assert(reported_sessions.load() == 1);
+
+        server.stop();
     }
 
     void test_returns_pong_for_ping()
@@ -709,7 +810,7 @@ namespace
     void test_actor_runtime_failure_aborts_without_waiting_for_grace_period()
     {
         RecordingFrameIngress ingress;
-        snf::runtime::BoundedQueue<snf::server::OutboundAction> outbound{8};
+        snf::server::OutboundActionQueue outbound{8};
         const auto outbound_event = make_eventfd();
         snf::runtime::RuntimeCompletionCoordinator runtime_completion{
             snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
@@ -759,7 +860,7 @@ namespace
             snf::server::PostResult::Full,
             snf::server::PostResult::Accepted,
         };
-        snf::runtime::BoundedQueue<snf::server::OutboundAction> outbound{8};
+        snf::server::OutboundActionQueue outbound{8};
         const auto outbound_event = make_eventfd();
         snf::runtime::RuntimeCompletionCoordinator runtime_completion{
             snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
@@ -818,7 +919,7 @@ namespace
     {
         RecordingFrameIngress ingress;
         ingress.lifecycle_fallback = snf::server::PostResult::Full;
-        snf::runtime::BoundedQueue<snf::server::OutboundAction> outbound{8};
+        snf::server::OutboundActionQueue outbound{8};
         const auto outbound_event = make_eventfd();
         snf::runtime::RuntimeCompletionCoordinator runtime_completion{
             snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
@@ -882,6 +983,8 @@ namespace
 int main()
 {
     test_returns_pong_for_ping();
+    test_collects_baseline_saturation_metrics_for_a_round_trip();
+    test_reports_metrics_periodically_while_running();
     test_peer_disconnect_evicts_the_player_actor();
     test_decodes_ping_sent_one_byte_at_a_time();
     test_decodes_multiple_pings_from_one_send();

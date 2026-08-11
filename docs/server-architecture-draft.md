@@ -2,8 +2,14 @@
 
 > 상태: Draft  
 > 대상: C++20, Linux, `epoll` 기반 실시간 게임 서버  
-> 목표: 모든 게임 로직 Actor가 고정 Worker를 공유하는 실행 모델과 상태 소유권 정의
-> 구현 순서는 [개발 로드맵](./development-roadmap.md)을 단일 기준으로 사용한다.
+> 목표: 여러 종류의 게임 로직 Actor가 공통 Worker Pool을 공유하는 실행 모델과 상태 소유권 정의
+>
+> 이 문서는 **목표 구조와 불변식**을 기술한다. 현재 구현 상태와 구현 순서는
+> [개발 로드맵](./development-roadmap.md), 실행 모델 전환의 근거는
+> [UnifiedRuntime 전환 개요](../study/10-unified-runtime-overview.md), Actor coroutine 경합·수명 규약은
+> [Coroutine Actor 계약](./coroutine-actor-contract.md), 전체 종료 판정은
+> [Runtime Lifecycle 계약](./runtime-lifecycle-contract.md)이 소유한다. 현재 동작과 목표 동작이
+> 섞이는 절은 표에 `현재 동작` 열을 두어 구분한다.
 
 ## 1. 문서 목적
 
@@ -93,21 +99,26 @@ ZoneActor는 여러 Entity를 함께 소유하는 aggregate Actor다. 내부 hot
 게임 상태를 변경하는 로직은 Actor-Bound Logic Pool에서 실행한다. 느린 I/O와 상태를 소유하지 않는
 CPU 작업만 별도 executor로 분리한다.
 
-| Executor | 용도 | 대표 객체 |
-| --- | --- | --- |
-| Reactor | 네트워크 readiness 처리 | Session |
-| Actor-Bound Logic Pool | 순차 상태 변경과 timer event 처리 | Player, Zone, Party, Guild |
-| Blocking I/O Pool | 느린 외부 I/O | DB query, file operation |
-| Stateless Job Pool | 선택적인 CPU 작업 | 경로 탐색, 압축 |
+| Executor | 용도 | 대표 객체 | 4.6 이후 |
+| --- | --- | --- | --- |
+| Reactor | 네트워크 readiness 처리 | Session, ConnectionScope | UnifiedRuntime에 흡수 |
+| Actor-Bound Logic Pool | 순차 상태 변경과 timer event 처리 | Player, Zone, Party, Guild | UnifiedRuntime에 흡수 |
+| Blocking I/O Pool | 느린 외부 I/O | DB query, file operation | 별도 유지 |
+| Stateless Job Pool | 선택적인 CPU 작업 | 경로 탐색, 압축 | 별도 유지 |
 
 Stateless Job Pool은 게임 상태를 직접 수정하지 않는다. immutable snapshot을 입력으로 받고
 결과를 원래 상태 소유자에게 메시지로 반환한다.
 
 Logic Pool의 fairness는 완료된 Actor turn 사이의 cooperative fairness다. handler나 effect
-적용이 blocking하면 그 Worker에 배치된 Player, Zone 등이 함께 지연될 수 있다. 단계 3.8은
-현재 outbound backpressure 의미를 유지하되, effect 적용 정책을 scheduler에서 분리해 향후
-non-blocking reservation 또는 Pool 분리를 재검토할 수 있게 한다. ZoneActor를 올리는 단계 6에서
-tick 지연과 shard 편향을 측정해 최종 정책을 결정한다.
+적용이 blocking하면 그 Worker에 배치된 Player, Zone 등이 함께 지연될 수 있다.
+
+현재 outbound 포화는 Logic Worker가 `BoundedQueue::push`에서 stop token으로만 중단 가능한 blocking
+대기를 하는 형태다. 단계 4.1에서 이를 `co_await outbound.reserve()` 형태의 reservation awaiter로
+교체한다. 이 전환은 4.6 UnifiedRuntime 통합의 선행 조건이다. 통합 후에는 outbound를 비우는 주체와
+대기하는 주체가 같은 pool에 있으므로 blocking 대기가 남아 있으면 pool 전체가 진행하지 못한다.
+
+ZoneActor를 올리는 단계 6에서 tick 지연과 shard 편향을 측정해 통합 후의 worker 수, affinity와
+fairness를 조정한다.
 
 ### 2.5 Scheduler와 typed Actor binding
 
@@ -128,6 +139,30 @@ type-erased 실행 계약 등으로 scheduler와 만날 수 있지만, domain Ac
 유지한다. public `post(ActorKey, AnyMessage)`처럼 target-message의 잘못된 조합을 표현할 수
 있는 경계는 만들지 않는다.
 
+### 2.6 UnifiedRuntime
+
+목표는 Connection, I/O continuation, Actor turn과 runtime deadline을 하나의 Worker Pool에서 실행하는
+것이다. Reactor와 Logic Pool을 분리한 현재 구조는 이 목표에 이르는 중간 단계이며 단계 4.6에서
+통합한다. 전환 근거와 트레이드오프는 [UnifiedRuntime 전환 개요](../study/10-unified-runtime-overview.md), 선행
+조건과 완료 기준은 [개발 로드맵](./development-roadmap.md) 4.6이 소유한다.
+
+이 절이 고정하는 것은 통합 후에도 유지되는 불변식이다.
+
+**통합하는 것은 실행 pool이며 게임 상태가 아니다.** 하나의 Worker Pool을 쓰더라도 게임 상태는 소유
+Actor만 수정하고, 같은 `ActorKey`의 command는 동시에 실행되지 않는다(§2.2, §2.3). 따라서 §15가
+배제하는 "여러 Runtime이 같은 게임 상태를 mutex로 공동 수정하는 구조"는 통합 후에도 배제 대상으로
+남는다. 두 항목은 서로 다른 축의 결정이다.
+
+- 실행 pool 통합: 어떤 Worker가 어떤 종류의 작업을 실행하는가 → 목표
+- 상태 공유: 하나의 mutable 게임 상태를 여러 실행 주체가 수정하는가 → 배제
+
+blocking 작업은 통합 대상이 아니다. DB query, 파일 I/O와 장시간 CPU 작업은 별도 bounded executor에
+남긴다. 공통 pool의 Worker가 blocking 작업에 점유되면 전체 서버가 멈추기 때문이다.
+
+통합 후 Actor 배치는 고정 shard(`hash(ActorKey) % worker_count`)에서 Actor별 직렬화 규칙으로 바뀔 수
+있다. 이때도 §2.3의 단일 실행 불변식은 유지하며, worker 수·affinity·fairness는 단계 6의 측정으로
+조정한다(§16).
+
 ## 3. 전체 구조
 
 ```mermaid
@@ -146,7 +181,7 @@ flowchart LR
     Player --> Async["Async Services"]
     Content --> Async
     Async --> DB["DB Worker Pool"]
-    Timer["Timer Scheduler"] -->|"timer event · ZoneTick"| Logic
+    Timer["Timer Scheduler"] -->|"timer event · ZoneSimulationTick"| Logic
 
     Player --> Network
     World --> Network
@@ -322,7 +357,7 @@ worker_index = hash(ActorKey{ActorKind::Zone, zone_id}) % logic_worker_count;
 동등한 key가 아니므로 항상 서로 다른 ActorSlot과 mailbox를 갖는다.
 
 이동 입력, 관리 명령과 주기 갱신은 모두 같은 mailbox로 들어간다. Timer Scheduler는 시간이 되면
-`ZoneTick{scheduled_at, sequence}` 메시지만 게시하며 Zone 상태를 직접 실행하거나 수정하지 않는다.
+`ZoneSimulationTick{scheduled_at, sequence}` 메시지만 게시하며 Zone 상태를 직접 실행하거나 수정하지 않는다.
 ZoneActor가 tick message를 처리하는 권장 순서는 다음과 같다.
 
 ```text
@@ -393,17 +428,29 @@ PlayerActor는 완료 메시지를 자신의 mailbox 또는 Worker queue에서 �
 게임 Worker를 무기한 막지 않도록 sampling 또는 drop 정책을 정의한다. 감사나 결제 성격의
 로그는 별도의 신뢰성 정책을 가져야 한다.
 
-최소 측정 항목은 다음과 같다.
+최소 측정 항목은 다음과 같다. 지연 항목은 평균이 아니라 `p50/p95/p99/max`로 노출한다. 평균은 tail을
+가리고, max는 경합과 일시 정지를 찾는 데 필요하다.
 
-- Reactor event loop 지연
-- 연결 수와 Session별 송신 queue 크기
-- Runtime별 queue depth
-- command enqueue부터 실행까지의 p50/p95/p99 대기 시간
-- ZoneActor tick 실행 시간
-- tick budget 초과 횟수
+- Reactor event loop 지연 (`p50/p95/p99/max`)
+- command enqueue부터 실행까지의 대기 시간 (`p50/p95/p99/max`)
+- end-to-end 응답 지연 (`p50/p95/p99/max`)
+- 연결 수와 연결별 pending send 분포
+- Runtime별 queue depth와 high-water mark
+- Runtime 사이 hand-off 시간, 즉 게시부터 상대 Runtime의 소비까지 (`p50/p95/p99/max`)
+- ZoneActor tick 실행 시간과 tick budget 초과 횟수
 - 활성 ZoneActor와 PlayerActor 수
 - DB queue depth와 query latency
 - dropped, rejected, coalesced message 수
+
+단계 3.9에서 reactor turn 지연, Actor command queue wait, 연결별 pending send, outbound queue depth와
+Logic Worker에서 reactor로의 outbound hand-off 시간을 `p50/p95/p99/max`로 노출하고 운영 중 주기 보고
+경로를 만들었다. percentile은 bucket 상한 추정이므로 표현 범위 안에서는 실제 값보다 작아지지 않고,
+그 범위를 넘는 표본은 상한에서 포화하므로 max만 정확하다. end-to-end 응답 지연, tick 실행 시간과 DB
+지표는 해당 기능이 들어오는 단계에서 같은 표면에 추가한다.
+
+보고 경로 자체가 부하가 되지 않아야 한다. 주기 보고 callback은 reactor thread에서 실행되므로 block하면
+안 되고, 파일이나 수집기 전송이 필요하면 위의 로그 정책과 같은 별도 bounded queue에 게시한다. 보고 비용은
+turn 측정 이후에 발생하므로 reactor turn 분포에는 나타나지 않는다.
 
 ## 5. 패킷 처리 흐름
 
@@ -464,7 +511,7 @@ sequenceDiagram
 
     Note over W: 이후 월드 입력은<br/>ZoneActor mailbox로 전달
 
-    W->>W: command와 ZoneTick 순차 처리
+    W->>W: command와 ZoneSimulationTick 순차 처리
     W->>P: ProgressionEvent(eventId, delta)
     P->>P: eventId 기준 멱등 적용
     P->>D: 비동기 저장
@@ -528,14 +575,15 @@ Runtime 사이에서 동기 호출이나 `future.get()`으로 상대 Worker를 �
 모든 비동기 queue는 bounded queue여야 한다. 큐가 가득 찼을 때의 정책을 호출 지점별로
 정의한다.
 
-| 포화 지점 | 권장 정책 |
-| --- | --- |
-| Session inbound | 읽기 일시 중지, rate limit, 심한 경우 연결 종료 |
-| Player command queue | Busy 응답 또는 비핵심 명령 거부 |
-| ZoneActor mailbox | 최신 입력 병합, 오래된 입력 폐기, 악성 세션 종료 |
-| Reactor outbound queue | 상태 갱신 병합 또는 slow client 종료 |
-| DB queue | 제한된 재시도 또는 요청 실패 처리 |
-| 일반 로그 queue | sampling 또는 drop |
+| 포화 지점 | 현재 동작 | 목표 동작 | 예정 단계 |
+| --- | --- | --- | --- |
+| Session inbound | `FramePostResult::Full`이면 그 연결을 `ConnectionCloseCause::Overflow`로 종료한다. frame을 조용히 버리지는 않는다 | in-flight credit 소진 전에 socket 읽기를 중지하고 command terminal에서 credit을 반환한다. admission 실패와 악성 과부하는 명시적 정책으로 종료한다 | 4.5 (계약은 3.9에서 확정) |
+| Actor command ingress | Worker별 bounded capacity. `Full`은 위 inbound 정책으로 귀결된다 | credit이 admission을 앞단에서 제한하므로 `Full` 도달이 예외 경로가 된다 | 4.5 |
+| Outbound queue | Logic Worker가 `BoundedQueue::push`에서 stop token으로만 중단 가능한 blocking 대기를 한다 | `co_await outbound.reserve()`로 예약하고 대상별 상한을 둔다 | 4.1 |
+| Connection lifecycle post | reactor 소유 pending deque가 회차당 제한된 건수를 재시도하고, active session과 pending close가 lifecycle slot 예산을 공유한다 | 의미를 유지하되 `ConnectionScope` 단일 종결 경로로 이전한다 | 4.5 |
+| ZoneActor mailbox | 미구현 | 최신 입력 병합, 오래된 입력 폐기, 악성 세션 종료 | 6 |
+| DB queue | 미구현 | 제한된 재시도 또는 요청 실패 처리 | 5 |
+| 일반 로그 queue | 미구현. 현재는 `std::cerr`로 직접 출력한다 | 전용 bounded queue와 sampling 또는 drop | 미정 |
 
 입력 종류별로 정책이 다를 수 있다. 이동 입력은 최신 값으로 합칠 수 있지만 아이템 구매나
 보상 적용은 임의로 버리면 안 된다.
@@ -555,7 +603,7 @@ idempotency와 transaction으로 흡수해 effectively-once application을 만�
 ## 9. Tick 설계
 
 ZoneActor의 주기 갱신은 별도 tick 실행 스레드가 상태를 수정하는 방식이 아니라 Timer Scheduler가
-`ZoneTick` 메시지를 mailbox에 게시하는 방식이다. 초기 예시는 20Hz지만 실제 값은 게임 규칙과
+`ZoneSimulationTick` 메시지를 mailbox에 게시하는 방식이다. 초기 예시는 20Hz지만 실제 값은 게임 규칙과
 부하 테스트로 결정한다.
 
 고정 tick의 기본 규칙은 다음과 같다.
@@ -574,7 +622,16 @@ ZoneActor의 주기 갱신은 별도 tick 실행 스레드가 상태를 수정�
 
 ## 10. Thread 토폴로지
 
-초기 구현은 다음과 같이 시작한다.
+토폴로지는 단계에 따라 세 상태를 갖는다.
+
+| 상태 | 토폴로지 | 시점 |
+| --- | --- | --- |
+| 현재 | Network Reactor 1(main thread) + Actor-Bound Logic Pool 2 | 3.8까지 |
+| 전환 | Reactor thread가 최소 Executor와 ready queue를 실행하고, Actor는 coroutine + non-blocking outbound를 사용한다 | 4.0~4.5 |
+| 목표 | UnifiedRuntime N + 별도 Blocking DB Pool + Logger | 4.6 이후 |
+
+전환 근거는 [UnifiedRuntime 전환 개요](../study/10-unified-runtime-overview.md)에 있다. 영역별 초기 Worker 수와
+확장 기준은 다음과 같다.
 
 | 영역 | 초기 Worker 수 | 확장 기준 |
 | --- | ---: | --- |
@@ -595,24 +652,13 @@ DB Worker처럼 대부분 대기하는 Thread는 같은 방식으로 단순 합�
 
 ## 11. 종료 순서
 
-graceful shutdown은 다음 순서를 권장한다.
+graceful shutdown 순서, drain predicate와 실패·취소 경로는
+[Runtime Lifecycle 계약](./runtime-lifecycle-contract.md)이 소유한다. 이 문서는 순서를 중복
+기록하지 않는다.
 
-```text
-새 연결 수락 중지
-→ Session의 새 게임 command 수락 중지
-→ Logic Actor Runtime에 종료 경계 전달
-→ 모든 Actor mailbox와 continuation drain
-→ RuntimeCompletionCoordinator가 모든 필수 Runtime drain 확인
-→ 필요한 dirty state 저장 요청
-→ DB queue drain 또는 timeout
-→ outbound queue drain 또는 timeout
-→ Reactor 종료
-→ Logger flush
-```
-
-runtime 완료 상태는 outbound queue와 분리한다. coordinator의 상태가 authoritative하며 wake-up은
-상태 재조회를 촉진하는 hint다. 종료 중에도 다른 Runtime이 이미 파괴된 Session이나 Actor에
-메시지를 보내지 않도록 Runtime 간 수명 순서를 명시해야 한다.
+이 절에서 유지하는 원칙은 두 가지다. runtime 완료 상태는 outbound queue와 분리하며 coordinator의
+상태가 authoritative하다. 그리고 종료 중에도 다른 Runtime이 이미 파괴된 Session이나 Actor에 메시지를
+보내지 않도록 Runtime 간 수명 순서를 명시해야 한다.
 
 ## 12. 목표 소스 구조
 
@@ -653,90 +699,15 @@ include/snf/
 이 구조는 목표 형태이며 파일을 먼저 모두 만들 필요는 없다. 실제 기능을 구현할 때 필요한
 경계를 순서대로 추가한다.
 
-## 13. 현재 구조에서의 발전 단계
+## 13. 구현 단계
 
-실행 순서는 [개발 로드맵](./development-roadmap.md)과 동일하다.
+단계별 범위, 순서와 완료 기준은 [개발 로드맵](./development-roadmap.md)이 단일 기준이다. 실행 모델
+전환의 근거와 단계 개요는 [UnifiedRuntime 전환 개요](../study/10-unified-runtime-overview.md)를 참조한다. 이
+문서는 완료 이력을 중복 기록하지 않는다.
 
-### 단계 1~3: Network 분리, Sharded ActorRuntime, PlayerActor/Mailbox (완료)
-
-```text
-epoll Reactor
-→ FrameIngress
-→ ProtocolGateway(MessageDispatcher)
-→ RoutedCommand
-→ CommandRouter
-→ ActorRuntime shard ingress
-→ PlayerActor mailbox와 ready queue
-→ typed PlayerResult
-→ PlayerEffectSink
-→ ProtocolResponseMapper
-→ OutboundSink
-→ Reactor send
-```
-
-동일 Actor FIFO·단일 실행, shard 병렬성, fairness budget, backpressure, drain/cancel/실패와
-stale `ConnectionId`를 검증했다.
-
-### 단계 3.5~3.7: Coroutine 계약 준비와 경계 강화 (완료)
-
-- `ConnectionId`를 net 계층으로 이동하고 연결 기반 키를 `ProvisionalActorId`로 명확히 했다.
-- ActorRuntime에서 raw outbound queue와 `eventfd`, protocol `Frame` 의존을 제거했다.
-- `PlayerResult → PlayerEffectSink → ProtocolResponseMapper → OutboundSink` pipeline을 만들고
-  handler 예외 전에는 effect가 방출되지 않도록 했다.
-- `ConnectionClosed`를 기존 ingress FIFO로 전달한다. reactor는 `Full` lifecycle post를 별도 pending
-  deque에서 budgeted retry하며, owning worker가 close를 소비한 turn 끝에서 actor를 evict한다. active
-  session과 pending close는 bounded lifecycle slot 예산을 공유하고, 소진 시 새 연결을 Actor 생성 전에
-  거부한다.
-- `OutboundAction`과 runtime completion 제어 경로를 분리했다.
-- `RuntimeCompletionCoordinator`가 required runtime mask의 drain/failure를 authoritative state로
-  추적한다.
-- Coroutine continuation, frame 수명과 shutdown 규약은
-  [Coroutine Actor 계약](./coroutine-actor-contract.md)에 고정했다.
-
-### 단계 3.8: Actor-Bound Logic Runtime 일반화 (완료)
-
-- `ProvisionalPlayer`, `Player`, `Zone` 등의 ID namespace를 보존하는 `ActorKey`를 도입하고
-  Worker 선택을 `ActorKeyHash(key) % worker_count`로 통일했다.
-- mailbox, ready queue, fairness, bounded capacity와 Worker lifecycle을 domain Actor 실행과
-  effect 적용에서 분리했다.
-- scheduler 계층에서 Player 전용 타입 의존을 제거하되 target-command 결합을 보장하는
-  typed route와 binding 경계를 유지한다.
-- synthetic 두 번째 Actor 종류로 하나의 Pool, ActorSlot 분리, cross-kind fairness·capacity와
-  drain/cancel/failure를 검증했다. 실제 ZoneActor와 Timer Scheduler는 단계 6으로 남겨둔다.
-- runtime completion identity를 `RuntimeId::Logic`으로 정리하고 기존 PING/PONG,
-  `ConnectionClosed`, backpressure와 shutdown 의미를 유지한다.
-
-### 단계 4: Coroutine Actor
-
-- 일반화된 binding의 첫 적용으로 `ActorTask<PlayerResult>`, bounded continuation
-  reservation과 Worker-affine resume을 구현한다.
-- continuation을 `{ActorKey, ActorIncarnation, TaskId}`로 원래 Worker에 복귀시킨다.
-- suspend된 Actor의 command는 mailbox에서 기다리고 다른 Actor는 진행한다.
-- cancel, late completion과 drain 경합을 Debug, sanitizer와 deterministic test로 검증한다.
-
-### 단계 5: 인증·영속성 Vertical Slice
-
-- 영속 `PlayerId`, 비동기 load, 멱등한 구매와 transaction 저장을 구현한다.
-- disconnect/passivation/reconnect 복원까지 하나의 흐름으로 검증한다.
-
-### 단계 6: 최소 ZoneActor
-
-- 일반화된 scheduler 위에 ZoneActor와 Zone binding을 구현해 PlayerActor와 같은 mailbox,
-  fairness와 Worker affinity 규칙을 사용한다.
-- Timer Scheduler가 `ZoneTick`을 mailbox에 게시하고 owning Worker가 이동·충돌·AOI를 순차 처리한다.
-- RouteCoordinator, route epoch, PlayerActor↔ZoneActor 메시지와 전체 actor drain을 검증한다.
-
-### 단계 7: Shared Content와 Projection
-
-- Party 또는 Matchmaking 하나를 구현한다.
-- 랭킹과 시즌 정산은 domain event 기반 projection과 재실행 가능한 job으로 분리한다.
-
-### 선택적 인프라 트랙: io_uring과 프로세스 분리
-
-- 안정된 inbound/outbound/lifecycle 계약을 두 번째 network backend로 검증할 때 io_uring을
-  추가한다.
-- 단일 프로세스 경계를 충분히 검증한 뒤에만 Gateway나 WorldNode 분리를 실험한다.
-- 그 전에는 외부 message broker를 hot packet path에 두지 않는다.
+프로세스 분리(Gateway, WorldNode)와 외부 message broker는 단일 프로세스 경계를 충분히 검증한 뒤에만
+실험한다. 그 전에는 hot packet path에 broker를 두지 않는다(§15). 두 번째 network backend인 io_uring도
+inbound/outbound/lifecycle 계약이 안정된 뒤의 선택적 트랙이다.
 
 ## 14. 검증 기준
 
@@ -756,6 +727,14 @@ stale `ConnectionId`를 검증했다.
 - 같은 domain event가 중복 전달되어도 영구 상태에 한 번만 적용된다.
 - shutdown 시 새 작업 차단, queue drain, 저장, 송신 drain이 순서대로 실행된다.
 - 부하 테스트에서 queue depth, command wait, tick time과 end-to-end p99를 확인할 수 있다.
+- inbound frame을 조용히 드롭하지 않는다. credit 소진 전 읽기를 중지하고, admission 실패와 악성
+  과부하는 명시적 정책으로 종료한다.
+- logic worker는 outbound 포화로 무한 대기하지 않는다.
+- 느린 클라이언트의 메모리 사용량과 다른 연결에 미치는 p99 영향이 설정된 상한 안에 머문다.
+- 종료 원인을 누가 먼저 관측하든 `ConnectionClosed`는 정확히 한 번, terminal 전이 전에 승인된 해당
+  연결의 command 뒤에 게시된다.
+- actor key 이관 중 도착한 stale command를 거부한다.
+- 위치를 변경하는 모든 경로에서 spatial index와 AOI가 일관된다.
 
 ## 15. 의도적으로 미루는 항목
 
@@ -772,16 +751,26 @@ stale `ConnectionId`를 검증했다.
 
 ## 16. 미결정 사항
 
-다음 항목은 게임 규칙과 측정 결과에 따라 별도로 결정한다.
+다음 항목은 게임 규칙과 측정 결과에 따라 별도로 결정한다. 결정 시점과 근거 지표가 없는 항목은 영구
+미결정이 되므로 함께 적는다.
 
-- ZoneActor tick rate
-- 한 Worker가 소유할 PlayerActor와 ZoneActor 상한
-- hot Zone의 공간 분할 방식
-- Actor 종류·command별 mailbox coalescing 정책과 turn budget
-- DB 종류, connection pool 크기와 저장 보장 수준
-- snapshot, event journal 또는 outbox 도입 범위
-- 네트워크 패킷 sequence와 재전송 정책
-- 프로세스 분리 시 내부 프로토콜과 Actor Directory 방식
+| 항목 | 결정 시점 | 근거 지표 |
+| --- | --- | --- |
+| UnifiedRuntime worker 수와 Actor affinity | 6 | tick 지연, shard 편향, end-to-end p99 |
+| I/O continuation과 Actor turn 사이 fairness budget | 6 | reactor loop 지연, tick overrun |
+| blocking 작업 외에 별도 pool로 분리할 작업 | 6 | Worker 점유 시간 분포 |
+| ZoneActor tick rate | 6 | tick 실행 시간, overrun |
+| 한 Worker가 소유할 PlayerActor와 ZoneActor 상한 | 6 | queue wait p99, 메모리 사용량 |
+| Actor 종류·command별 mailbox coalescing 정책과 turn budget | 6 | 입력 유실률, tick 지연 |
+| 네트워크 패킷 sequence와 재전송 정책 | 6 | 이동 입력 유실률 |
+| hot Zone의 공간 분할 방식 | 6 이후 | Zone별 entity 수, AOI 계산 비용 |
+| DB 종류, connection pool 크기와 저장 보장 수준 | 5 | DB queue depth, query latency |
+| snapshot, event journal 또는 outbox 도입 범위 | 5 이후 | 저장 실패율과 복구 요구 수준 |
+| 프로세스 분리 시 내부 프로토콜과 Actor Directory 방식 | 미정 | 단일 프로세스 한계 지표 |
+
+UnifiedRuntime **통합 여부는 미결정 항목이 아니다.** §2.6의 목표이며 단계 4.6에서 수행한다. 단계 6의
+측정은 통합 여부를 되묻는 것이 아니라 위 표의 worker 수, affinity, fairness와 pool 분리 범위를
+조정하기 위한 것이다.
 
 ---
 

@@ -17,6 +17,9 @@ namespace snf::server
         // Blocking backpressure must remain interruptible by the publishing
         // runtime. A stopped token rejects the action without cancelling a sink
         // that may be shared by other runtimes.
+        //
+        // An implementation stamps the publication instant when the call begins,
+        // so hand-off wait covers any blocking on a full queue as well.
         [[nodiscard]] virtual bool publish(OutboundAction action, std::stop_token stop_token) = 0;
     };
 
@@ -25,7 +28,7 @@ namespace snf::server
     class EventFdOutboundSink final : public OutboundSink
     {
     public:
-        EventFdOutboundSink(snf::runtime::BoundedQueue<OutboundAction>& actions,
+        EventFdOutboundSink(OutboundActionQueue& actions,
                             int wake_descriptor);
 
         [[nodiscard]] bool publish(OutboundAction action, std::stop_token stop_token) override;
@@ -33,7 +36,7 @@ namespace snf::server
     private:
         void signal() const noexcept;
 
-        snf::runtime::BoundedQueue<OutboundAction>& _actions;
+        OutboundActionQueue& _actions;
         int _wake_descriptor;
     };
 }

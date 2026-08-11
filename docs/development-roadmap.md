@@ -1,8 +1,10 @@
 # SnF 개발 로드맵
 
-> 이 문서가 구현 순서의 기준이다. 상세 구조는
-> [서버 아키텍처 초안](./server-architecture-draft.md), Phase 4 안전 규약은
-> [Coroutine Actor 계약](./coroutine-actor-contract.md)을 참조한다.
+> 이 문서가 구현 순서와 완료 여부의 단일 기준이다. 실행 모델 전환의 근거와 단계 개요는
+> [UnifiedRuntime 전환 개요](../study/10-unified-runtime-overview.md), 목표 구조와 불변식은
+> [서버 아키텍처 초안](./server-architecture-draft.md), Actor coroutine 안전 규약은
+> [Coroutine Actor 계약](./coroutine-actor-contract.md), 전체 종료 판정은
+> [Runtime Lifecycle 계약](./runtime-lifecycle-contract.md)을 참조한다.
 
 ## 목표
 
@@ -10,9 +12,13 @@
 Network Runtime
 → Sharded Player Actor Runtime
 → Actor-Bound Logic Runtime 일반화
-→ Coroutine Actor
+→ Backpressure 계약과 계측
+→ Actor Coroutine
+→ Async Outbound Reservation
+→ ConnectionScope
+→ UnifiedRuntime 통합
 → Auth/Persistence Vertical Slice
-→ Minimal ZoneActor
+→ Minimal ZoneActor와 TimerService
 → Shared Content
 ```
 
@@ -109,7 +115,75 @@ domain policy를 분리했다. `snf::runtime::ActorRuntime`은 binding registry�
 - 기존 FIFO, exactly-once handling, turn yield, Worker 병렬성, queue 포화, close eviction,
   lifecycle retry, drain/cancel/failure 테스트가 통과하고 cross-kind 회귀 테스트가 추가된다.
 
-## 4. Coroutine Suspend와 Resume
+## 3.9. Backpressure 계약과 계측 (완료)
+
+포화 정책의 현재 동작과 목표 동작을 문서에 고정하고 baseline metric을 확보했다. 이 단계의 구현
+산출물은 metric뿐이며 포화 동작 자체는 바꾸지 않았다.
+
+현재 동작:
+
+- inbound: `FrameIngress`가 `FramePostResult::Full`을 반환하면 reactor가 `actor_queue_overflows`를
+  올리고 해당 연결을 `ConnectionCloseCause::Overflow`로 종료한다. frame을 조용히 버리지는 않는다.
+- outbound: Logic Worker가 `BoundedQueue::push`에서 stop token으로만 중단 가능한 blocking 대기를 하며,
+  그 queue를 비우는 주체는 reactor 하나다.
+- lifecycle: `ConnectionClosed` post가 `Full`이면 reactor 소유 pending deque가 회차당 제한된 건수를
+  재시도한다.
+
+목표 동작:
+
+- inbound: 연결별 in-flight credit이 소진되면 socket 읽기를 중지하고, command terminal 시점에 credit을
+  반환해 읽기를 재개한다. admission 실패와 악성 과부하는 여전히 명시적 정책으로 종료한다.
+- outbound: Logic Worker는 blocking 대기 대신 reservation을 await한다.
+
+계약으로 확정할 정의:
+
+- **in-flight credit**: 하나의 연결이 아직 terminal에 도달하지 않은 상태로 ingress에 올릴 수 있는
+  command 수의 상한이다. 연결 수명에 속하며 Actor 활성화와는 별개다.
+- **command terminal**: handler가 반환한 시점이 아니라 필요한 effect가 적용되고 성공, 실패 또는 취소
+  중 하나의 최종 결과가 확정된 시점이다. 이때 credit 점유가 끝난다. 응답 effect가 있는 command와 없는
+  command에 같은 정의를 적용한다. 신호의 생산 경로는 4.1에서, credit 반환은 4.5에서 구현한다.
+
+metric:
+
+- `snf::runtime::Distribution`이 log-linear bucket으로 표본을 집계하고 p50/p95/p99/max를 노출한다.
+  record는 대기하지 않으므로 snapshot을 읽는 쪽이 Worker를 지연시키지 않는다. 표현 범위
+  (`REPRESENTABLE_UPPER_BOUND`, 약 17초) 안에서 percentile은 표본이 속한 bucket의 상한이어서 실제 값보다
+  작아지지 않고 최대 12.5% 크다. 그 범위를 넘는 표본은 percentile이 상한에서 포화하므로 max만 정확하게
+  보고한다. 즉 과도한 지연은 p99가 아니라 p99보다 훨씬 큰 max로 드러난다.
+- 기록이 멈춘 뒤의 snapshot은 sample_count와 max가 정확하다. 기록 중 snapshot은 bucket을 하나씩 읽는
+  lock-free 근사 관측값이며 한 시점의 일관된 사진이 아니다.
+- Actor command queue wait를 Worker별로 `ActorRuntimeWorkerStats::queue_wait_nanoseconds`로 노출한다.
+  평균은 제거하고 max는 유지한다. control submission은 command 계정과 마찬가지로 표본에서 제외한다.
+- reactor turn 지연을 `TcpServerMetrics::reactor_turn_nanoseconds`로 노출한다. 표본은 `epoll_wait`
+  반환부터 그 회차 event 처리 종료까지이며, ready event가 없는 회차는 표본에 넣지 않아 유휴 대기가
+  분포를 희석하지 않는다.
+- 연결별 pending send 분포와 outbound queue depth 분포, 그리고 현재 연결 수, pending send 연결 수와
+  outbound depth gauge를 함께 노출한다.
+- outbound hand-off 시간을 `TcpServerMetrics::outbound_queue_wait_nanoseconds`로 노출한다. Logic
+  Worker가 `OutboundAction`을 게시한 시점부터 reactor가 그것을 소비한 시점까지이며, 포화 시 blocking
+  대기를 포함한다. 게시 시점은 sink가 기록하므로 게시하는 runtime은 이 metric을 알지 않는다.
+  이 수치는 4.1이 outbound 구조를 바꾸기 전의 현재 구조 기준선이다.
+- `GameServerConfig::metrics_report_interval`과 `metrics_reporter`로 운영 중 주기 노출 경로를 갖는다.
+  reactor가 epoll timeout을 이 주기로 제한하므로 유휴 상태에서도 보고가 나온다. 종료 후에는
+  `GameServer::getMetricsSnapshot()`이 같은 표면을 제공한다.
+- `metrics_reporter`는 reactor thread에서 호출되므로 block하면 안 된다. 파일이나 네트워크 전송이
+  필요하면 별도 bounded logger queue에 게시하고 전송은 그 소비자가 담당한다. 보고 비용은 turn 측정
+  이후에 발생하므로 `reactor_turn_nanoseconds`에 포함되지 않는다. 이 metric은 turn당 reactor 작업량이며
+  reactor 점유율 전체가 아니다.
+- baseline은 `snf_load_client` 부하 실행 중의 주기 보고와 종료 요약으로 수집한다. 4.6 통합 전후 비교
+  대상은 reactor turn 지연, Actor queue wait, outbound hand-off 시간과 outbound queue depth다.
+
+blocking outbound는 4.6 UnifiedRuntime 통합의 blocker다. 통합 후에는 outbound를 비우는 주체와 대기하는
+주체가 같은 pool에 있으므로, blocking 대기를 남겨두면 pool 전체가 진행하지 못한다.
+
+완료 기준:
+
+- 현재 포화 동작과 목표 포화 동작이 아키텍처 초안 §8에 현재/목표/예정 단계로 기록된다.
+- in-flight credit과 command terminal 정의가 문서에 고정되고 4.1과 4.5가 이를 참조한다.
+- baseline metric을 부하 테스트에서 수집할 수 있고 통합 전후 비교의 기준선이 된다.
+- 포화 동작, FIFO, fairness, lifecycle retry와 drain/cancel/failure 의미가 변하지 않는다.
+
+## 4.0. Actor Coroutine: Suspend와 Resume
 
 - 일반화된 Actor binding의 첫 적용으로 `PlayerActor` handler 반환형을
   `ActorTask<PlayerResult>`로 바꾼다.
@@ -130,6 +204,102 @@ domain policy를 분리했다. `snf::runtime::ActorRuntime`은 binding registry�
   completion, reservation 포화와 마지막 continuation/drain 경합이 테스트된다.
 - resume과 coroutine frame 파괴가 owning Worker에서만 일어난다.
 - suspend 전·후 예외 전파와 Debug, ASan·UBSan, TSan 검증이 통과한다.
+
+## 4.1. Async Outbound Reservation
+
+Phase 4.0의 첫 production awaiter로 blocking outbound publish를 제거한다.
+
+- `co_await outbound.reserve(effect_count)`로 용량을 예약하고 `outbound.commit(effects)`로 방출한다.
+  Logic Worker는 포화 상태에서 대기하지 않고 Actor coroutine만 suspend되어 같은 Worker의 다른 Actor가
+  진행한다.
+- handler가 정상 반환한 뒤 effect를 순서대로 적용하는 현재 의미를 유지한다. 예약 실패는 effect 방출
+  전에 명시적 결과로 드러난다.
+- 3.9에서 정의한 command terminal 신호의 생산 경로를 만든다. 응답이 있는 command와 없는 command 모두
+  terminal을 관측할 수 있어야 한다. 이 신호는 4.5의 credit 반환이 소비한다.
+- 대상별 outbound 상한을 두어 한 연결의 포화가 공유 용량 전체를 점유하지 않게 한다.
+
+완료 기준:
+
+- Logic Worker가 outbound 포화로 무한 대기하지 않는다.
+- outbound capacity를 1로 강제해도 effect 순서와 handler 원자성이 유지된다.
+- 같은 Actor의 다음 command가 이전 command의 미방출 effect보다 먼저 적용되지 않는다.
+- command terminal이 응답 유무와 무관하게 정확히 한 번 관측된다.
+- 느린 클라이언트의 메모리 사용량과 다른 연결에 미치는 p99 영향이 설정된 상한 안에 머문다.
+
+## 4.5. ConnectionScope
+
+연결 하나의 네트워크 상태와 수명을 장수명 coroutine 쌍으로 표현한다. 게임 상태는 여전히 Actor가
+소유하고 `ConnectionScope`는 네트워크 상태만 소유한다.
+
+현재 `TcpServer::run()`은 coroutine을 재개하는 executor가 아니라 동기 epoll 루프다. 따라서 이 단계의
+산출물에는 최소 Executor가 포함된다.
+
+- 기존 reactor loop에 최소 Executor adapter와 ready queue를 추가한다.
+- I/O readiness는 coroutine을 inline resume하지 않고 ready queue에 게시한다.
+- async read/write awaiter와 runtime deadline primitive를 제공한다.
+- 새 thread pool은 만들지 않으며 기존 reactor thread가 executor를 실행한다.
+- 이 Executor 계약과 ready queue는 4.6 UnifiedRuntime에서 그대로 재사용한다.
+
+그 위에 다음을 올린다.
+
+- read loop과 write loop을 분리하고 Session 상태를 소유권으로 나눈다. read loop은 recv buffer, frame
+  assembler와 in-flight credit을, write loop은 send buffer와 pending send 상태를 소유한다. 공유하는
+  것은 종료 상태 하나로 줄인다.
+- credit이 소진되면 socket 읽기를 중지하고, 4.1의 command terminal 신호로 credit을 반환해 재개한다.
+- read loop, write loop, deadline과 control이 모두 `requestClose(cause)`를 호출할 수 있고,
+  `ConnectionScope`만 단일 terminal 전이를 수행해 `ConnectionClosed`를 정확히 한 번 게시한다.
+- `ConnectionScope`는 새 read admission을 중단하고, read loop이 진행 중인 ingress 게시를 마친 뒤 같은
+  ordered ingress에 `ConnectionClosed`를 게시한다. 따라서 terminal 전이 전에 승인된 그 연결의 command
+  보다 뒤에 위치한다.
+- heartbeat와 idle timeout은 runtime deadline primitive로 표현하며 Phase 6의 domain `TimerService`에
+  의존하지 않는다.
+
+착수 직전 `docs/connection-scope-contract.md`에 Executor 계약, 상태 소유권, 단일 종결, close 순서와
+취소 전파를 고정한다.
+
+완료 기준:
+
+- inbound frame을 조용히 드롭하지 않고 credit 소진 전에 읽기를 중지한다.
+- 종료 원인을 누가 먼저 관측하든 `ConnectionClosed`가 정확히 한 번, terminal 전이 전에 승인된 command
+  뒤에 게시된다.
+- coroutine frame 파괴, socket close와 deadline 만료가 경합해도 use-after-free가 없다.
+- partial send와 `EPOLLOUT` 재무장이 write loop 안에서 처리된다.
+- Debug, ASan·UBSan, TSan에서 연결 폭주와 강제 종료 시나리오가 통과한다.
+
+## 4.6. UnifiedRuntime 통합
+
+Connection, I/O continuation, Actor turn과 timer를 하나의 Worker Pool에서 실행한다. 실행 pool을
+통합하는 것이며 게임 상태를 공유하는 것이 아니다. Actor의 단일 소유권과 순차 실행은 그대로 유지한다.
+
+선행 조건:
+
+- Logic Worker의 blocking outbound 제거 (4.1)
+- continuation capacity 예약 (4.0)
+- task, recv, send와 actor turn budget 정의
+- graceful drain 계약 (`docs/runtime-lifecycle-contract.md`)
+- baseline metric 확보 (3.9)
+
+- Actor 실행은 고정 shard 대신 Actor별 직렬화 규칙 위에서 이루어진다. 같은 `ActorKey`의 command가
+  동시에 실행되지 않는다는 불변식은 유지한다.
+- 전체 종료 판정을 `UnifiedRuntimeDrained`로 재조립한다.
+
+```text
+UnifiedRuntimeDrained =
+    external ingress closed
+    ∧ ready queue empty
+    ∧ no running tasks
+    ∧ no suspended operations
+    ∧ no pending I/O completion
+    ∧ no pending deadline
+```
+
+완료 기준:
+
+- 같은 `ActorKey`의 handler가 동시에 실행되지 않는다.
+- 긴 Actor turn 때문에 네트워크 I/O가 무기한 지연되지 않도록 budget이 동작한다.
+- 3.9 baseline과 비교해 `outbound_queue_wait_nanoseconds` 감소를 수치로 제시하고, reactor turn 지연,
+  Actor queue wait과 end-to-end RTT의 변화를 함께 제시한다.
+- drain, cancel과 failure가 통합 후에도 정의된 순서로 동작한다.
 
 ## 5. 인증·영속성 Vertical Slice
 
@@ -153,18 +323,25 @@ domain policy를 분리했다. `snf::runtime::ActorRuntime`은 binding registry�
 성장·업적·기간제 이벤트는 이 slice 이후 Player module로 추가한다. 랭킹과 시즌 정산은
 Shared Content 또는 projection 단계로 미룬다.
 
-## 6. 최소 ZoneActor
+## 6. 최소 ZoneActor와 TimerService
 
 - 일반화된 scheduler 위에 `ZoneActor`와 Zone binding을 구현해 PlayerActor와 동일한
   mailbox, fairness와 Worker affinity 규칙을 사용한다.
-- 주입 가능한 Clock의 Timer Scheduler가 `ZoneTick`을 mailbox에 게시하고 이동, 기본 충돌과 AOI를
-  owning Worker에서 순차 처리한다.
+- domain `TimerService`를 도입한다. timer identity, 주입 가능한 Clock, cancel과 late completion을
+  정의하고 Actor mailbox에 typed timer event를 게시한다. 이는 4.5의 runtime deadline primitive와 다른
+  층이다. deadline primitive는 I/O await timeout과 취소를 담당하고, `TimerService`는 gameplay 시간
+  이벤트를 담당한다.
+- `ZoneSimulationTick`은 이동, 기본 충돌과 AOI를 하나의 결정적 순서로 유지한다. respawn 같은 장주기
+  콘텐츠는 별도 `TimerEvent`로 분리하고 tick 주기와 독립적으로 설정한다.
+- tick event도 일반 command와 같은 turn budget과 단일 실행 규칙을 따르며 owning Worker에서 순차
+  처리한다.
 - `RouteCoordinator`가 `SessionRoute`와 `route_epoch`의 authoritative owner가 된다.
 - route 변경 protocol이 이전 destination 정지, 새 destination 활성화, 새 route 공개 순서를
   보장한다. epoch은 원자성 구현이 아니라 stale destination 검출 수단이다.
-- `RuntimeCompletionCoordinator`에는 하나의 Logic Runtime으로 남겨두되, Player·Zone mailbox,
-  timer event와 actor task가 모두 빈 후에만 drained를 게시한다.
-- tick 실행 시간, overrun, Actor별 command queue wait와 shard 편향을 측정한다.
+- `ActorRuntimeDrained`는 Player·Zone mailbox, timer event와 actor task가 모두 빈 후에만 참이 된다.
+  전체 종료 판정은 `docs/runtime-lifecycle-contract.md`의 predicate 조합을 따른다.
+- tick 실행 시간, overrun, Actor별 command queue wait와 shard 편향을 측정한다. 이 수치로 4.6 통합 후의
+  worker 수, affinity와 fairness를 조정한다.
 
 ## 7. Shared Content와 Projection
 
@@ -184,7 +361,8 @@ io_uring은 콘텐츠 단계의 선행 조건이 아니다. epoll backend와 첫
 
 ## 공통 원칙
 
-- Network thread는 게임 상태를 수정하지 않는다.
+- 게임 상태는 소유 Actor만 수정한다. network 경로의 task는 어떤 실행 pool에서 실행되든 게임 상태를
+  직접 수정하지 않는다. 4.6 통합은 실행 pool을 합치는 것이며 이 소유권 규칙을 완화하지 않는다.
 - Handler는 물리 thread가 아니라 상태 소유 PlayerActor, ZoneActor 또는 공유 콘텐츠 Actor를 선택한다.
 - 다른 Runtime의 mutable 객체나 coroutine handle을 직접 참조하지 않는다.
 - 모든 비동기 queue와 in-flight operation에는 명시적인 상한이 있다.

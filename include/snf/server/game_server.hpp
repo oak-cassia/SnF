@@ -17,24 +17,43 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <optional>
 #include <thread>
 
 namespace snf::server
 {
+    using GameServerStats = TcpServerStats;
+
+    // The baseline observation surface for the backpressure contract: reactor
+    // saturation, per-connection send buildup and Logic Worker queue wait in one
+    // consistent read.
+    struct ServerMetricsSnapshot
+    {
+        GameServerStats counters;
+        TcpServerMetrics network;
+        snf::runtime::ActorRuntimeStats actor_runtime;
+    };
+
     struct GameServerConfig
     {
         std::uint16_t port{7777};
         std::chrono::milliseconds shutdown_grace_period{5000};
         std::size_t max_pending_send_bytes{snf::net::MAX_PENDING_SEND_BYTES};
-        std::optional<int> client_send_buffer_size;
+        std::optional<int> client_send_buffer_size{};
         std::size_t actor_worker_count{2};
         std::size_t actor_queue_capacity_per_worker{4096};
         std::size_t outbound_queue_capacity{4096};
         std::size_t connection_lifecycle_capacity{4096};
+        // Periodic exposure while the server runs. Zero reports nothing, leaving
+        // only the caller's own snapshot after run() returns.
+        std::chrono::milliseconds metrics_report_interval{0};
+        // Called on the reactor thread, so it must not block. Anything slower than
+        // a local formatting pass belongs on a separate bounded logger queue that
+        // the reporter only posts to. Its cost is not part of
+        // TcpServerMetrics::reactor_turn_nanoseconds.
+        std::function<void(const ServerMetricsSnapshot&)> metrics_reporter{};
     };
-
-    using GameServerStats = TcpServerStats;
 
     // Composes the reactor, Logic ActorRuntime, Player binding, outbound hand-off
     // queue and eventfd wake-up.
@@ -56,6 +75,9 @@ namespace snf::server
         [[nodiscard]] std::uint16_t getPort() const noexcept;
         [[nodiscard]] const GameServerStats& getStats() const noexcept;
         [[nodiscard]] snf::runtime::ActorRuntimeStats getActorRuntimeStats() const;
+        // Reads reactor state, so it belongs to the reactor thread: call it from
+        // metrics_reporter or after run() has returned.
+        [[nodiscard]] ServerMetricsSnapshot getMetricsSnapshot() const;
 
         void run(int termination_signal_descriptor = snf::net::UniqueFileDescriptor::INVALID_FD);
         void requestStop() const noexcept;
@@ -64,8 +86,10 @@ namespace snf::server
         void startActorRuntime();
         void joinActorRuntime();
         void cancelActorRuntime() noexcept;
+        void publishMetrics() const;
 
-        snf::runtime::BoundedQueue<OutboundAction> _outbound_actions;
+        std::function<void(const ServerMetricsSnapshot&)> _metrics_reporter;
+        OutboundActionQueue _outbound_actions;
         snf::net::UniqueFileDescriptor _outbound_event;
         EventFdOutboundSink _outbound_sink;
         ProtocolPlayerEffectSink _player_effects;

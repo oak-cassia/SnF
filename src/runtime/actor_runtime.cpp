@@ -36,9 +36,7 @@ namespace snf::runtime
         std::atomic<std::uint64_t> processed{0};
         std::atomic<std::uint64_t> rejected_full{0};
         std::atomic<std::uint64_t> evicted_actors{0};
-        std::atomic<std::uint64_t> queue_wait_samples{0};
-        std::atomic<std::uint64_t> total_queue_wait_nanoseconds{0};
-        std::atomic<std::uint64_t> max_queue_wait_nanoseconds{0};
+        Distribution queue_wait;
         std::atomic<std::uint64_t> outstanding_high_water_mark{0};
         std::atomic<std::uint64_t> mailbox_depth{0};
         std::atomic<std::uint64_t> mailbox_high_water_mark{0};
@@ -293,11 +291,6 @@ namespace snf::runtime
 
         for (const auto& worker : _workers)
         {
-            const std::uint64_t queue_wait_samples =
-                worker->counters.queue_wait_samples.load(std::memory_order_relaxed);
-            const std::uint64_t total_wait =
-                worker->counters.total_queue_wait_nanoseconds.load(std::memory_order_relaxed);
-
             std::size_t actor_count = 0;
             std::size_t ready_actor_count = 0;
             {
@@ -322,13 +315,7 @@ namespace snf::runtime
                     worker->counters.mailbox_high_water_mark.load(std::memory_order_relaxed)),
                 .budget_yield_turns =
                     worker->counters.budget_yield_turns.load(std::memory_order_relaxed),
-                .average_queue_wait =
-                    queue_wait_samples == 0
-                        ? std::chrono::nanoseconds{0}
-                        : std::chrono::nanoseconds{total_wait / queue_wait_samples},
-                .max_queue_wait =
-                    std::chrono::nanoseconds{worker->counters.max_queue_wait_nanoseconds.load(
-                        std::memory_order_relaxed)},
+                .queue_wait_nanoseconds = worker->counters.queue_wait.snapshot(),
             });
         }
 
@@ -596,13 +583,9 @@ namespace snf::runtime
             const bool is_command = event.submission.accounting() == ActorAccounting::Command;
             if (is_command)
             {
-                const auto waited = std::chrono::steady_clock::now() - event.enqueued_at;
-                const auto wait_nanoseconds = static_cast<std::uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(waited).count());
-                worker.counters.total_queue_wait_nanoseconds.fetch_add(wait_nanoseconds,
-                                                                       std::memory_order_relaxed);
-                worker.counters.queue_wait_samples.fetch_add(1, std::memory_order_relaxed);
-                updateMaximum(worker.counters.max_queue_wait_nanoseconds, wait_nanoseconds);
+                worker.counters.queue_wait.record(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - event.enqueued_at));
             }
 
             ActorDispatchResult result;

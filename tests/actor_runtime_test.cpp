@@ -47,7 +47,7 @@ namespace
     {
     public:
         explicit QueueOutboundSink(
-            snf::runtime::BoundedQueue<snf::server::OutboundAction>& actions) noexcept
+            snf::server::OutboundActionQueue& actions) noexcept
             : _actions(actions)
         {
         }
@@ -55,11 +55,16 @@ namespace
         [[nodiscard]] bool publish(snf::server::OutboundAction action,
                                    const std::stop_token stop_token) override
         {
-            return _actions.push(std::move(action), stop_token);
+            return _actions.push(
+                snf::server::PostedOutboundAction{
+                    .action = std::move(action),
+                    .posted_at = std::chrono::steady_clock::now(),
+                },
+                stop_token);
         }
 
     private:
-        snf::runtime::BoundedQueue<snf::server::OutboundAction>& _actions;
+        snf::server::OutboundActionQueue& _actions;
     };
 
     class RecordingRuntimeCompletion final : public snf::runtime::RuntimeCompletionSink
@@ -90,7 +95,7 @@ namespace
         {
         }
 
-        snf::runtime::BoundedQueue<snf::server::OutboundAction> outbound;
+        snf::server::OutboundActionQueue outbound;
         QueueOutboundSink raw_outbound_sink;
         snf::server::ProtocolPlayerEffectSink outbound_sink;
         RecordingRuntimeCompletion completion;
@@ -330,9 +335,9 @@ namespace
 
         for (std::uint32_t request_id = 100; request_id <= 102; ++request_id)
         {
-            const auto action = dependencies.outbound.tryPop();
-            assert(action.has_value());
-            const auto* send = std::get_if<snf::server::SendFrame>(&*action);
+            const auto posted = dependencies.outbound.tryPop();
+            assert(posted.has_value());
+            const auto* send = std::get_if<snf::server::SendFrame>(&posted->action);
             assert(send != nullptr);
             assert(send->connection.generation == 7);
             assert(send->frame.type == snf::protocol::MessageType::Pong);
@@ -806,8 +811,10 @@ namespace
         assert(stats.queue_depth == 0);
         assert(stats.queue_high_water_mark == 3);
         assert(stats.mailbox_high_water_mark == 3);
-        assert(stats.average_queue_wait > 0ns);
-        assert(stats.max_queue_wait >= stats.average_queue_wait);
+        assert(stats.queue_wait_nanoseconds.sample_count == 3);
+        assert(stats.queue_wait_nanoseconds.p50 > 0);
+        assert(stats.queue_wait_nanoseconds.p99 >= stats.queue_wait_nanoseconds.p50);
+        assert(stats.queue_wait_nanoseconds.max >= stats.queue_wait_nanoseconds.p99);
     }
 
     void test_player_close_follows_commands_and_preserves_command_metrics()
@@ -838,9 +845,9 @@ namespace
 
         for (std::uint32_t request_id = 1; request_id <= 3; ++request_id)
         {
-            const auto action = dependencies.outbound.tryPop();
-            assert(action.has_value());
-            const auto* send = std::get_if<snf::server::SendFrame>(&*action);
+            const auto posted = dependencies.outbound.tryPop();
+            assert(posted.has_value());
+            const auto* send = std::get_if<snf::server::SendFrame>(&posted->action);
             assert(send != nullptr);
             assert(send->frame.request_id == request_id);
         }
