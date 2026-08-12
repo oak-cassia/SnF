@@ -125,7 +125,7 @@ domain policy를 분리했다. `snf::runtime::ActorRuntime`은 binding registry�
 - inbound: `FrameIngress`가 `FramePostResult::Full`을 반환하면 reactor가 `actor_queue_overflows`를
   올리고 해당 연결을 `ConnectionCloseCause::Overflow`로 종료한다. frame을 조용히 버리지는 않는다.
 - outbound: Logic Worker가 `BoundedQueue::push`에서 stop token으로만 중단 가능한 blocking 대기를 하며,
-  그 queue를 비우는 주체는 reactor 하나다.
+  그 queue를 비우는 주체는 reactor 하나다. (이 절은 3.9 시점의 동작이며 4.1이 이 대기를 제거했다.)
 - lifecycle: `ConnectionClosed` post가 `Full`이면 reactor 소유 pending deque가 회차당 제한된 건수를
   재시도한다.
 
@@ -133,7 +133,7 @@ domain policy를 분리했다. `snf::runtime::ActorRuntime`은 binding registry�
 
 - inbound: 연결별 in-flight credit이 소진되면 socket 읽기를 중지하고, command terminal 시점에 credit을
   반환해 읽기를 재개한다. admission 실패와 악성 과부하는 여전히 명시적 정책으로 종료한다.
-- outbound: Logic Worker는 blocking 대기 대신 reservation을 await한다.
+- outbound: Logic Worker는 blocking 대기 대신 reservation을 await한다. (4.1에서 구현했다.)
 
 계약으로 확정할 정의:
 
@@ -162,7 +162,8 @@ metric:
 - outbound hand-off 시간을 `TcpServerMetrics::outbound_queue_wait_nanoseconds`로 노출한다. Logic
   Worker가 `OutboundAction`을 게시한 시점부터 reactor가 그것을 소비한 시점까지이며, 포화 시 blocking
   대기를 포함한다. 게시 시점은 sink가 기록하므로 게시하는 runtime은 이 metric을 알지 않는다.
-  이 수치는 4.1이 outbound 구조를 바꾸기 전의 현재 구조 기준선이다.
+  이 수치는 4.1이 outbound 구조를 바꾸기 전의 현재 구조 기준선이다. 4.1 이후에는 blocking 대기가
+  없으므로 같은 metric이 commit부터 소비까지만 재고, 용량 대기는 Actor의 suspend로 드러난다.
 - `GameServerConfig::metrics_report_interval`과 `metrics_reporter`로 운영 중 주기 노출 경로를 갖는다.
   reactor가 epoll timeout을 이 주기로 제한하므로 유휴 상태에서도 보고가 나온다. 종료 후에는
   `GameServer::getMetricsSnapshot()`이 같은 표면을 제공한다.
@@ -173,8 +174,9 @@ metric:
 - baseline은 `snf_load_client` 부하 실행 중의 주기 보고와 종료 요약으로 수집한다. 4.6 통합 전후 비교
   대상은 reactor turn 지연, Actor queue wait, outbound hand-off 시간과 outbound queue depth다.
 
-blocking outbound는 4.6 UnifiedRuntime 통합의 blocker다. 통합 후에는 outbound를 비우는 주체와 대기하는
-주체가 같은 pool에 있으므로, blocking 대기를 남겨두면 pool 전체가 진행하지 못한다.
+blocking outbound는 4.6 UnifiedRuntime 통합의 blocker였다. 통합 후에는 outbound를 비우는 주체와
+대기하는 주체가 같은 pool에 있으므로, blocking 대기를 남겨두면 pool 전체가 진행하지 못한다. 단계
+4.1에서 제거했다.
 
 완료 기준:
 
@@ -217,26 +219,78 @@ overflow 0을 기록했다. Actor queue wait `p50/p95/p99/max`는 Worker별
 `p50 2.748 ms / p95 3.939 ms / p99 4.689 ms`였다. 3.9 baseline의 queue wait p99
 `360447 ns`, RTT p99 `4.906 ms`보다 악화되지 않아 동기 완료 fast path는 추가하지 않는다.
 
-## 4.1. Async Outbound Reservation
+## 4.1. Async Outbound Reservation (완료)
 
-Phase 4.0의 첫 production awaiter로 blocking outbound publish를 제거한다.
+Phase 4.0의 첫 production awaiter로 blocking outbound publish를 제거했다.
 
-- `co_await outbound.reserve(effect_count)`로 용량을 예약하고 `outbound.commit(effects)`로 방출한다.
-  Logic Worker는 포화 상태에서 대기하지 않고 Actor coroutine만 suspend되어 같은 Worker의 다른 Actor가
-  진행한다.
-- handler가 정상 반환한 뒤 effect를 순서대로 적용하는 현재 의미를 유지한다. 예약 실패는 effect 방출
-  전에 명시적 결과로 드러난다.
-- 3.9에서 정의한 command terminal 신호의 생산 경로를 만든다. 응답이 있는 command와 없는 command 모두
-  terminal을 관측할 수 있어야 한다. 이 신호는 4.5의 credit 반환이 소비한다.
-- 대상별 outbound 상한을 두어 한 연결의 포화가 공유 용량 전체를 점유하지 않게 한다.
+- `OutboundChannel`이 action 저장과 용량 회계(`queued + reserved ≤ capacity`)를 하나의 동기화 경계에
+  둔다. 회계를 별도 객체로 분리하면 pop과 commit 사이에서 두 값이 어긋난다.
+- `OutboundReservation`은 move-only RAII 토큰이며 commit되지 않은 슬롯을 소멸자가 반환한다. 취소에
+  terminal claim을 빼앗긴 grant, 파괴된 coroutine frame, 예약보다 적게 방출한 handler가 모두 별도
+  경로 없이 용량을 되돌린다.
+- Binding은 command를 `Handling → Reserving` 두 단계로 실행한다. handler task가 결정을 끝낸 뒤에야
+  binding이 용량을 얻고 방출하므로, `PlayerActor`와 `PlayerResult`는 outbound 용량이 유한하다는
+  사실을 알지 않으면서도 effect 적용은 handler 정상 반환 이후로 유지된다.
+- 포화가 아니면 `tryReserve`가 성공하고 operation을 아예 시작하지 않는다. in-flight slot,
+  continuation, suspend가 모두 없으므로 비포화 왕복의 비용 구조는 4.0과 같다. 포화일 때만 예약
+  task가 만들어져 그 Actor 하나가 suspend된다.
+- 예약 await는 coroutine frame 안의 guard로 waiter를 회수한다. suspend된 frame을 파괴할 때도 그
+  guard가 실행되므로 per-operation cancel과 runtime 전체 cancel 모두 registry를 비운다.
+- grant는 reactor만 수행한다. 용량을 되돌린 Worker는 grant하지 않고 wake-up만 신호하므로 grant
+  작업량이 reactor 회차당 상한 안에 머문다. 한 회차에 검사·승인하는 waiter 수를 모두 제한하고,
+  대상 상한에 막힌 연결은 뒤로 회전시켜 다른 연결을 막지 않는다.
+- 연결별 상한(`max_outbound_slots_per_connection`)으로 한 연결이 공유 용량 전체를 점유하지 못하게
+  한다. 연결별 회계는 command 단위로 만들고 버리지 않고 연결 수명 동안 유지하며, session이 사라지고
+  보유분이 빠진 뒤 reactor가 정리한다. `tracked_outbound_connections`는 그 회계가 command 발생률이
+  아니라 살아 있는 연결 수를 따라가는지 관측한다.
+- 예약 대기 자체가 불가능한 경우(Worker in-flight 예산 소진)에는 응답을 조용히 버리지 않고 연결을
+  `ConnectionCloseCause::Overflow`로 종료한다. 종료에는 outbound 용량이 필요하지 않으므로 용량이
+  없는 연결에도 적용할 수 있는 정책이다.
+- 3.9에서 정의한 command terminal 신호를 submission payload에 실은 move-only 토큰의 소멸로 생산한다.
+  scheduler가 승인된 submission을 성공·예외·취소·mailbox 폐기·ingress 거부 어느 경로에서도 정확히
+  한 번 파괴하므로, scheduler 변경 없이 응답 유무와 무관하게 exactly-once가 된다. 토큰은 command를
+  승인하는 binding 경계에서 무장하므로, protocol 단계에서 거부된 frame은 terminal을 보고하지 않는다.
+  4.5의 credit 취득도 같은 경계여야 두 수치가 일치한다.
 
-완료 기준:
+완료 기준 결과:
 
-- Logic Worker가 outbound 포화로 무한 대기하지 않는다.
-- outbound capacity를 1로 강제해도 effect 순서와 handler 원자성이 유지된다.
-- 같은 Actor의 다음 command가 이전 command의 미방출 effect보다 먼저 적용되지 않는다.
-- command terminal이 응답 유무와 무관하게 정확히 한 번 관측된다.
-- 느린 클라이언트의 메모리 사용량과 다른 연결에 미치는 p99 영향이 설정된 상한 안에 머문다.
+- Logic Worker는 outbound 포화로 대기하지 않는다. 포화는 Actor suspend로만 나타난다.
+- outbound capacity를 1로 강제한 통합 테스트에서 모든 응답이 순서대로 도착하고 graceful shutdown이
+  완료된다. capacity 1 단위 테스트에서 effect 순서와 handler 원자성이 유지된다.
+- 같은 Actor의 다음 command는 이전 command가 terminal에 도달한 뒤에만 dispatch되므로 미방출 effect를
+  앞지르지 않는다.
+- command terminal이 성공·취소·mailbox 폐기·ingress `Full`·ingress `Closed`에서 각각 정확히 한 번
+  관측된다. 부하 실행에서 48,000 command에 대해 terminal 48,000건이다.
+- 한 연결이 점유할 수 있는 공유 용량은 `max_outbound_slots_per_connection`(기본 64/4096)으로,
+  메모리는 그 위에 session별 `max_pending_send_bytes`로 각각 상한이 있다.
+
+측정 결과. 4.0과 3.9 항목에 기록된 수치는 다른 환경에서 측정했으므로 비교 대상으로 쓰지 않고, 같은
+환경(Docker on macOS)에서 4.0 커밋을 재측정해 함께 적는다. 조건은 동일하게 200 connections, 12s,
+20 req/s이며 각 3~4회 실행 범위다.
+
+| 지표 | 4.0 재측정 | 4.1 |
+| --- | --- | --- |
+| 응답 | 48,000/48,000, timeout 0 | 48,000/48,000, timeout 0 |
+| client RTT p50 | 2.52–2.59 ms | 2.46–2.59 ms |
+| client RTT p99 | 4.28–5.58 ms | 3.81–4.13 ms |
+| Actor queue wait p50 | 18–23 µs | 27–37 µs |
+| Actor queue wait p99 | 106–246 µs | 164–393 µs |
+| outbound hand-off p99 | 983 µs | 918 µs |
+
+4.1 쪽 4회 중 1회는 RTT p99 `12.995 ms`, Actor queue wait max `11.5 ms`를 기록했다. 두 Worker가 같은
+시점에 같은 크기로 튀었고 4.0 재측정에서도 reactor turn max가 `34 ms`까지 나온 실행이 있으므로 이
+환경(가상화된 Docker) 자체의 정지로 보고 위 범위에서 제외했다. 재현되지 않았다.
+
+`outbound_queue_wait_nanoseconds`의 의미가 이 단계에서 바뀐다. 4.0에서는 포화 시 blocking 대기를
+포함했고 4.1에서는 commit부터 소비까지만 재므로, 용량 대기는 Worker별
+`suspend_duration_nanoseconds`로 따로 드러난다. 다만 이 부하는 기본 capacity 4096에서 outbound
+depth 최대 192에 머물러 포화가 발생하지 않았고, 그래서 `suspended_commands`가 0이며 두 수치를 그대로
+비교할 수 있다. 예약 경로 자체의 동작은 capacity 1 테스트가 담당한다.
+
+Actor queue wait p50이 남은 차이는 command당 lock 획득이 하나 늘어난 비용이다. 첫 측정에서는
+연결별 회계를 command마다 만들고 버려 p50이 3배까지 벌어졌고, 회계를 연결 수명으로 옮기고 reactor
+드레인을 batch로 바꿔 대부분을 회수했다. RTT는 동등하므로 fast path를 lock-free로 만드는 작업은
+하지 않았다. 4.6이 이 경로를 다시 구성한다.
 
 ## 4.5. ConnectionScope
 
@@ -258,6 +312,8 @@ Phase 4.0의 첫 production awaiter로 blocking outbound publish를 제거한다
   assembler와 in-flight credit을, write loop은 send buffer와 pending send 상태를 소유한다. 공유하는
   것은 종료 상태 하나로 줄인다.
 - credit이 소진되면 socket 읽기를 중지하고, 4.1의 command terminal 신호로 credit을 반환해 재개한다.
+  4.1은 그 신호를 command를 승인하는 binding 경계에서 생산하므로 credit 취득도 같은 경계여야 한다.
+  protocol 단계에서 거부되는 frame은 command가 된 적이 없으므로 credit을 소비하지 않는다.
 - read loop, write loop, deadline과 control이 모두 `requestClose(cause)`를 호출할 수 있고,
   `ConnectionScope`만 단일 terminal 전이를 수행해 `ConnectionClosed`를 정확히 한 번 게시한다.
 - `ConnectionScope`는 새 read admission을 중단하고, read loop이 진행 중인 ingress 게시를 마친 뒤 같은
@@ -285,7 +341,7 @@ Connection, I/O continuation, Actor turn과 timer를 하나의 Worker Pool에서
 
 선행 조건:
 
-- Logic Worker의 blocking outbound 제거 (4.1)
+- Logic Worker의 blocking outbound 제거 (4.1, 완료)
 - continuation capacity 예약 (4.0)
 - task, recv, send와 actor turn budget 정의
 - graceful drain 계약 (`docs/runtime-lifecycle-contract.md`)

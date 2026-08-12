@@ -5,9 +5,9 @@ SnF는 C++20을 활용해 MORPG 콘텐츠의 상태, 규칙과 메시지 흐름�
 명확한 상태 소유권과 실행 경계 위에 올리는 것을 주된 목적으로 한다.
 
 현재는 Linux `epoll` 네트워크 런타임과 coroutine suspend/resume을 지원하는 일반화된 sharded Actor
-Runtime 위에서 PING/PONG vertical slice를 실행한다. 다음으로 non-blocking outbound와
-UnifiedRuntime으로 실행 모델을 완성하고, 그 위에 인증·영속성, Zone과 timer event, 공유 콘텐츠를
-차례로 구현한다.
+Runtime 위에서 PING/PONG vertical slice를 실행한다. outbound는 non-blocking 예약으로 동작한다. 다음으로
+`ConnectionScope`와 UnifiedRuntime으로 실행 모델을 완성하고, 그 위에 인증·영속성, Zone과 timer event,
+공유 콘텐츠를 차례로 구현한다.
 
 ## 프로젝트 목적
 
@@ -82,13 +82,17 @@ Network Runtime
 - Player 전용 `PlayerActorBinding`/`PlayerActorIngress`와 type-erased binding registry
 - `PlayerActor` PING/PONG 처리와 typed result/effect 경계
 - connection generation을 통한 stale response 차단
-- bounded ingress/outbound queue와 Session별 send backpressure
+- bounded ingress queue와 Session별 send backpressure
+- 용량 예약으로 동작하는 outbound channel: 포화 시 Worker가 아니라 Actor 하나가 suspend되고, 연결별
+  상한과 reactor 회차당 grant 상한이 있으며, 예약 대기조차 승인되지 않으면 그 연결을 종료한다
+- 응답 유무와 무관하게 command마다 정확히 한 번 관측되는 command terminal 신호
 - connection lifecycle 전달, runtime drain/failure와 graceful shutdown
 - lazy `ActorTask`, bounded continuation reservation과 owning-Worker 전용 coroutine resume/cancel/frame 파괴
 - suspend 중 같은 Actor의 FIFO를 보존하면서 같은 Worker의 다른 Actor를 진행시키는 scheduler
 - in-flight, suspension duration, reservation/cancel/late completion과 passivation 후보 metric
 - reactor turn 지연, Actor queue wait, pending send, outbound depth와 outbound hand-off 시간의
   `p50/p95/p99/max` 계측과 운영 중 주기 노출
+- 예약된 슬롯, 용량을 기다리는 Actor 수, 추적 중인 연결 수와 command terminal 수 gauge
 - 단위·TCP 통합·부하 테스트 및 ASan·UBSan·TSan preset
 
 Phase 3.8에서 scheduler의 Player 전용 의존을 제거하고, 모든 Worker를
@@ -100,14 +104,18 @@ Phase 3.9에서는 포화 정책의 현재 동작과 목표 동작을 계약으�
 구현한다.
 
 Phase 4.0에서는 `PlayerActor` handler를 lazy coroutine으로 전환하고 domain-agnostic async operation,
-continuation, cancel과 drain 기계를 구현했다. PING에는 await할 작업이 없어 production 경로는 동기
-완료하며, 첫 production suspension point는 Phase 4.1의 outbound reservation이다.
+continuation, cancel과 drain 기계를 구현했다. PING에는 await할 작업이 없어 handler 자체는 동기 완료한다.
+
+Phase 4.1에서는 그 기계의 첫 production 적용으로 blocking outbound를 제거했다. Binding이 command를
+`Handling → Reserving` 두 단계로 실행해 handler가 결정을 끝낸 뒤에 용량을 얻으므로, `PlayerActor`와
+`PlayerResult`는 outbound 용량이 유한하다는 사실을 알지 않는다. 포화가 아니면 예약이 즉시 성공해
+operation을 시작하지 않고, 포화일 때만 그 Actor 하나가 suspend된다. Actor drain이 outbound 소비에
+의존하게 되므로 종료 순서 제약도 함께 고정했다.
 
 ## 로드맵
 
 ```text
-3.7 Effect / Protocol / Lifecycle 경계 강화
-→ 3.8 Actor-Bound Logic Runtime 일반화
+3.8 Actor-Bound Logic Runtime 일반화
 → 3.9 Backpressure 계약과 계측
 → 4.0 Actor Coroutine (Suspend / Resume)
 → 4.1 Async Outbound Reservation

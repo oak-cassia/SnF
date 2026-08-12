@@ -115,10 +115,15 @@ operation을 await하면 해당 Actor만 suspend되고 같은 Worker의 다른 A
 handler가 suspend하지 않는 CPU 작업이나 effect 적용이 blocking하면 그 Worker에 배치된 Player, Zone
 등이 함께 지연될 수 있다.
 
-현재 outbound 포화는 Logic Worker가 `BoundedQueue::push`에서 stop token으로만 중단 가능한 blocking
-대기를 하는 형태다. 단계 4.1에서 이를 `co_await outbound.reserve()` 형태의 reservation awaiter로
-교체한다. 이 전환은 4.6 UnifiedRuntime 통합의 선행 조건이다. 통합 후에는 outbound를 비우는 주체와
-대기하는 주체가 같은 pool에 있으므로 blocking 대기가 남아 있으면 pool 전체가 진행하지 못한다.
+단계 4.1부터 outbound 포화는 Logic Worker를 세우지 않는다. Binding이 방출 전에 용량을 예약하고,
+포화면 그 Actor만 suspend되어 같은 Worker의 다른 Actor가 계속 실행된다. grant는 reactor만 수행하고
+용량을 되돌린 Worker는 wake-up만 신호하므로, grant 작업량은 reactor 회차당 상한 안에 머문다. 이
+전환은 4.6 UnifiedRuntime 통합의 선행 조건이었다. 통합 후에는 outbound를 비우는 주체와 대기하는
+주체가 같은 pool에 있으므로 blocking 대기가 남아 있으면 pool 전체가 진행하지 못한다.
+
+예약은 Actor 실행 규칙을 바꾸지 않는다. handler는 여전히 자신의 task에서 결정만 하고, 용량 획득과
+effect 방출은 binding이 handler의 정상 반환 이후에 수행한다. 따라서 domain Actor는 outbound 용량이
+유한하다는 사실을 알지 않는다.
 
 ZoneActor를 올리는 단계 6에서 tick 지연과 shard 편향을 측정해 통합 후의 worker 수, affinity와
 fairness를 조정한다.
@@ -582,7 +587,7 @@ Runtime 사이에서 동기 호출이나 `future.get()`으로 상대 Worker를 �
 | --- | --- | --- | --- |
 | Session inbound | `FramePostResult::Full`이면 그 연결을 `ConnectionCloseCause::Overflow`로 종료한다. frame을 조용히 버리지는 않는다 | in-flight credit 소진 전에 socket 읽기를 중지하고 command terminal에서 credit을 반환한다. admission 실패와 악성 과부하는 명시적 정책으로 종료한다 | 4.5 (계약은 3.9에서 확정) |
 | Actor command ingress | Worker별 bounded capacity. `Full`은 위 inbound 정책으로 귀결된다 | credit이 admission을 앞단에서 제한하므로 `Full` 도달이 예외 경로가 된다 | 4.5 |
-| Outbound queue | Logic Worker가 `BoundedQueue::push`에서 stop token으로만 중단 가능한 blocking 대기를 한다 | `co_await outbound.reserve()`로 예약하고 대상별 상한을 둔다 | 4.1 |
+| Outbound queue | Binding이 방출 전에 용량을 예약하고, 실패하면 그 Actor만 suspend된 뒤 reactor의 grant를 기다린다. 연결별 상한이 있고, 예약 대기조차 승인되지 않으면 그 연결을 `Overflow`로 종료한다 | 현재 동작을 유지한다 | 4.1 완료 |
 | Connection lifecycle post | reactor 소유 pending deque가 회차당 제한된 건수를 재시도하고, active session과 pending close가 lifecycle slot 예산을 공유한다 | 의미를 유지하되 `ConnectionScope` 단일 종결 경로로 이전한다 | 4.5 |
 | ZoneActor mailbox | 미구현 | 최신 입력 병합, 오래된 입력 폐기, 악성 세션 종료 | 6 |
 | DB queue | 미구현 | 제한된 재시도 또는 요청 실패 처리 | 5 |

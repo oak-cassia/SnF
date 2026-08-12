@@ -1,6 +1,6 @@
 # Coroutine Actor 계약
 
-> 상태: Phase 4.0 구현 반영, Phase 4.1 production awaiter 확장 전
+> 상태: Phase 4.1 구현 반영. 첫 production awaiter는 outbound 용량 예약이다.
 > 범위: PlayerActor와 ZoneActor를 포함한 Logic ActorRuntime의 suspend, resume, cancel,
 > `ActorRuntimeDrained`와 외부 비동기 operation 수명
 >
@@ -87,7 +87,12 @@ Idle + mailbox command
 - ready queue에는 Actor당 최대 하나의 token만 존재한다.
 - suspended command는 완료 또는 취소 전까지 outstanding capacity를 점유한다.
 - Actor 하나는 동시에 하나의 operation만 await한다. 한 command의 순차적인 여러 await는 허용하지만
-  `when_all` 같은 다중 outstanding operation은 Phase 4.0 범위가 아니다.
+  `when_all` 같은 다중 outstanding operation은 Phase 4.0 범위가 아니다. Phase 4.1의 binding이 이
+  순차 허용에 의존한다. handler task와 예약 task는 서로 다른 task이며, continuation을 소비할 때
+  slot의 operation 등록이 해제되므로 같은 command 안에서 두 번째 await가 성립한다.
+- 외부 자원의 waiter registry에 등록하는 awaiter는 등록 handle을 coroutine frame 안의 guard로
+  보유한다. suspend된 frame을 파괴할 때도 그 guard가 실행되므로, per-operation cancel과 runtime
+  전체 cancel 모두 registry에 waiter를 남기지 않는다. Phase 4.1의 outbound 예약이 이 방식을 쓴다.
 - command queue wait는 최초 dispatch에서 한 번만 기록하고 resume에서는 다시 기록하지 않는다.
   outstanding은 terminal 성공·실패·취소에서 정확히 한 번 해제하며, processed는 최종 성공에서만
   증가한다. resume은 새 Actor turn이지만 같은 command의 turn budget을 다시 소비하지 않는다.
@@ -155,5 +160,11 @@ Phase 4.0은 passivation을 실행하지 않는다. runtime이 판단할 수 있
 Debug와 ASan·UBSan 외에 별도 TSan 구성을 Phase 4 완료 gate로 사용한다.
 
 Phase 4.0의 synthetic async binding이 위 경합을 검증한다. production `PlayerActor`는
-`ActorTask<PlayerResult>`를 반환하지만 아직 await할 외부 operation이 없어 첫 resume에서 동기 완료한다.
-첫 production suspension point는 Phase 4.1의 outbound reservation이다.
+`ActorTask<PlayerResult>`를 반환하지만 await할 외부 operation이 없어 첫 resume에서 동기 완료한다.
+첫 production suspension point는 Phase 4.1의 outbound 용량 예약이며, handler가 아니라 binding이
+그것을 await한다.
+
+Phase 4.1은 포화가 아니면 operation을 시작하지 않는다. 예약이 즉시 성공하면 in-flight slot,
+continuation, suspend가 모두 없으므로, 이 계약의 경합 규약은 포화 상태에서만 적용된다. 예약 대기가
+Worker의 in-flight 예산을 소비하는 것도 포화 상태에서만이며, Phase 5의 DB await와 같은 예산을
+나눠 쓴다.

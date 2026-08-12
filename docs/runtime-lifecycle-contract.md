@@ -92,6 +92,16 @@ graceful shutdown은 다음 순서를 따른다.
 순서의 핵심은 입력 차단이 drain보다 먼저이고, 저장이 outbound drain보다 먼저라는 점이다. 종료 중에도
 이미 파괴된 Session이나 Actor에 메시지를 보내지 않도록 Runtime 간 수명 순서를 지킨다.
 
+단계 4.1부터 이 순서에는 역방향 의존이 하나 있다. Actor가 outbound 용량을 기다리며 suspend될 수
+있으므로 `ActorRuntimeDrained`가 outbound 소비에 의존한다. 따라서 reactor는 Logic Runtime이 drained에
+도달할 때까지 outbound를 계속 소비하고 grant해야 한다. 목록의 "outbound queue drain"은 그 뒤에 남은
+것을 비우는 단계이지 소비를 그때 시작한다는 뜻이 아니다.
+
+reactor가 더 이상 grant할 수 없는 경로(reactor 실패, grace period 만료, 종료 중 queue 취소)에서는
+outbound channel을 반드시 취소한다. 취소는 등록된 모든 waiter에게 취소된 예약을 terminal 결과로
+전달하므로, 그것이 없으면 Worker가 오지 않는 grant를 기다리며 drain 판정이 영구히 성립하지 않는다.
+`TcpServer`의 queue 취소와 `GameServer`의 runtime 취소가 모두 이 취소를 수행한다.
+
 ## 4. 실패와 취소
 
 - graceful close는 외부 ingress만 닫고 이미 승인된 operation의 continuation 경로는 유지한다.
@@ -99,13 +109,17 @@ graceful shutdown은 다음 순서를 따른다.
   결과의 한 종류다.
 - Worker failure는 그 runtime을 failed로 표시하고 새 completion 적용을 차단한다. 첫 failure를 보존해
   상위로 전파한다.
-- 한 Runtime의 취소가 공유 sink 자체를 취소하지 않는다. 포화 대기를 중단하는 것은 그 Runtime의 stop
-  token이며, 다른 Runtime은 같은 sink를 계속 사용한다.
+- 한 Runtime의 취소가 공유 sink 자체를 취소하지 않는다. 단계 4.1부터 포화 대기는 blocking이 아니라
+  Actor suspend이므로, 그 Runtime의 취소는 자신의 suspended task를 terminal cancel하고 frame을
+  파괴하면서 예약 waiter까지 회수한다. 다른 Runtime은 같은 channel을 계속 사용한다.
 - 종료 경로에서 닫힌 ingress에 lifecycle 이벤트를 재주입하지 않는다.
 
 ## 5. 검증
 
 - 입력 차단, drain, 저장, outbound drain이 정의된 순서로 실행된다.
+- outbound가 포화된 상태에서 graceful shutdown이 완료된다. reactor가 소비와 grant를 계속하므로 용량을
+  기다리던 Actor가 진행하고, 그 뒤 Logic Runtime이 drained에 도달한다.
+- reactor가 먼저 멈추는 실패 경로에서도 용량을 기다리던 Worker가 terminal 결과를 받아 join한다.
 - `ServerDrained`가 참인 시점 이후에 어떤 subsystem도 새 작업을 시작하지 않는다.
 - 한 subsystem의 failure가 다른 subsystem의 drain을 무한 대기로 만들지 않는다.
 - cancel과 completion이 동시에 발생해도 terminal 결과는 정확히 하나다.
