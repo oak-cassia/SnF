@@ -28,6 +28,11 @@ namespace
             snf::server::PlayerRecord{
                 .player = player,
                 .handled_command_count = 42,
+                .last_location =
+                    snf::server::PlayerLocation{
+                        .zone = snf::server::ZoneId{.value = 3},
+                        .position = {.x = -4, .y = 5},
+                    },
             },
             [&save](snf::server::PlayerSaveResult result) { save = result; });
         assert(save.has_value());
@@ -41,6 +46,10 @@ namespace
         assert(loaded->record.has_value());
         assert(loaded->record->player == player);
         assert(loaded->record->handled_command_count == 42);
+        assert((loaded->record->last_location == snf::server::PlayerLocation{
+                                                     .zone = snf::server::ZoneId{.value = 3},
+                                                     .position = {.x = -4, .y = 5},
+                                                 }));
         assert(repository.find(player)->handled_command_count == 42);
     }
 
@@ -60,6 +69,7 @@ namespace
             snf::server::PlayerRecord{
                 .player = player,
                 .handled_command_count = 7,
+                .last_location = std::nullopt,
             },
             [&completed_on](snf::server::PlayerSaveResult result)
             {

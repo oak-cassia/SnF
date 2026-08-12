@@ -93,6 +93,11 @@ namespace
         actor.restore(snf::server::PlayerRecord{
             .player = player,
             .handled_command_count = 10,
+            .last_location =
+                snf::server::PlayerLocation{
+                    .zone = snf::server::ZoneId{.value = 5},
+                    .position = {.x = 3, .y = -4},
+                },
         });
 
         const auto command = make_ping(20);
@@ -100,6 +105,19 @@ namespace
         const auto record = actor.snapshot();
         assert(record.player == player);
         assert(record.handled_command_count == 11);
+        assert((record.last_location == snf::server::PlayerLocation{
+                                            .zone = snf::server::ZoneId{.value = 5},
+                                            .position = {.x = 3, .y = -4},
+                                        }));
+
+        actor.setLastLocation(snf::server::PlayerLocation{
+            .zone = snf::server::ZoneId{.value = 6},
+            .position = {.x = 8, .y = 9},
+        });
+        assert((actor.snapshot().last_location == snf::server::PlayerLocation{
+                                                      .zone = snf::server::ZoneId{.value = 6},
+                                                      .position = {.x = 8, .y = 9},
+                                                  }));
     }
 }
 

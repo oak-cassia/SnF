@@ -95,6 +95,8 @@ namespace
                 snf::server::ConnectionClosedRoute{
                     .actor = snf::server::ProvisionalActorId{.value = 77},
                     .cause = snf::server::ConnectionCloseCause::ProtocolError,
+                    .has_location_snapshot = true,
+                    .last_location = std::nullopt,
                 },
         });
 
@@ -106,6 +108,8 @@ namespace
         assert(player_commands.closed_connection->connection.generation == 10);
         assert(player_commands.closed_connection->cause ==
                snf::server::ConnectionCloseCause::ProtocolError);
+        assert(player_commands.closed_connection->has_location_snapshot);
+        assert(!player_commands.closed_connection->last_location.has_value());
     }
 }
 

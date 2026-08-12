@@ -14,6 +14,7 @@ namespace
 
         assert(sessions.tryAttach(FIRST_CONNECTION, PLAYER) ==
                snf::server::PlayerAttachResult::Attached);
+        assert(!sessions.locationSnapshotFor(FIRST_CONNECTION).known);
         assert(sessions.playerFor(FIRST_CONNECTION) == PLAYER);
         assert(sessions.tryAttach(FIRST_CONNECTION, PLAYER) ==
                snf::server::PlayerAttachResult::AlreadyAttached);
@@ -21,6 +22,21 @@ namespace
                snf::server::PlayerAttachResult::PlayerConflict);
         assert(sessions.tryAttach(FIRST_CONNECTION, snf::server::PlayerId{.value = 78}) ==
                snf::server::PlayerAttachResult::ConnectionConflict);
+
+        const snf::server::PlayerLocation location{
+            .zone = snf::server::ZoneId{.value = 5},
+            .position = {.x = -2, .y = 7},
+        };
+        sessions.noteLocation(FIRST_CONNECTION, location);
+        assert(sessions.locationFor(FIRST_CONNECTION) == location);
+        const auto snapshot = sessions.locationSnapshotFor(FIRST_CONNECTION);
+        assert(snapshot.known);
+        assert(snapshot.location == location);
+        sessions.noteLocation(FIRST_CONNECTION, std::nullopt);
+        const auto empty_snapshot = sessions.locationSnapshotFor(FIRST_CONNECTION);
+        assert(empty_snapshot.known);
+        assert(!empty_snapshot.location.has_value());
+        assert(!sessions.locationFor(SECOND_CONNECTION).has_value());
     }
 
     void test_provisional_activity_makes_authentication_first_frame_only()

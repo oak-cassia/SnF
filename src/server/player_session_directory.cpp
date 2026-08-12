@@ -1,5 +1,7 @@
 #include "snf/server/player_session_directory.hpp"
 
+#include <utility>
+
 namespace snf::server
 {
     PlayerAttachResult PlayerSessionDirectory::tryAttach(const snf::net::ConnectionId connection,
@@ -31,7 +33,12 @@ namespace snf::server
         }
 
         _sessions_by_connection.emplace(connection,
-                                        Session{.player = player, .state = State::Active});
+                                        Session{
+                                            .player = player,
+                                            .state = State::Active,
+                                            .location_known = false,
+                                            .last_location = std::nullopt,
+                                        });
         try
         {
             _connections_by_player.emplace(player, connection);
@@ -90,6 +97,42 @@ namespace snf::server
         }
 
         return iterator->second.player;
+    }
+
+    std::optional<PlayerLocation>
+    PlayerSessionDirectory::locationFor(const snf::net::ConnectionId connection) const
+    {
+        std::lock_guard lock{_mutex};
+        const auto iterator = _sessions_by_connection.find(connection);
+        return iterator == _sessions_by_connection.end() ? std::nullopt
+                                                         : iterator->second.last_location;
+    }
+
+    PlayerLocationSnapshot
+    PlayerSessionDirectory::locationSnapshotFor(const snf::net::ConnectionId connection) const
+    {
+        std::lock_guard lock{_mutex};
+        const auto iterator = _sessions_by_connection.find(connection);
+        if (iterator == _sessions_by_connection.end() || !iterator->second.location_known)
+        {
+            return {};
+        }
+        return {
+            .known = true,
+            .location = iterator->second.last_location,
+        };
+    }
+
+    void PlayerSessionDirectory::noteLocation(const snf::net::ConnectionId connection,
+                                              std::optional<PlayerLocation> location) noexcept
+    {
+        std::lock_guard lock{_mutex};
+        const auto iterator = _sessions_by_connection.find(connection);
+        if (iterator != _sessions_by_connection.end())
+        {
+            iterator->second.location_known = true;
+            iterator->second.last_location = std::move(location);
+        }
     }
 
     bool PlayerSessionDirectory::beginClose(const snf::net::ConnectionId connection) noexcept

@@ -539,8 +539,7 @@ UnifiedRuntimeDrained =
 - 단위 테스트는 route 멱등성·epoch·rollback, wire result와 outbound 포화, Zone binding의 terminal
   회계를 검증한다. TCP 통합 테스트는 authenticate → enter → move → leave 왕복과 epoch/좌표 보존을
   실제 socket으로 검증한다.
-- 5.3의 남은 범위는 tick 실행 시간·overrun 지표, 빈 Zone passivation, 이동 최신값 coalescing과
-  위치 save/reconnect restore다.
+- 5.3의 남은 범위는 tick 실행 시간·overrun 지표, 빈 Zone passivation과 이동 최신값 coalescing이다.
 
 #### 5.3c Domain Zone TimerService (완료)
 
@@ -560,6 +559,25 @@ UnifiedRuntimeDrained =
 - 결정적 clock 테스트는 idempotent 등록, capacity, no-catch-up, cancel retry, disable과 failure 전파를
   검증한다. TCP 통합 테스트는 실제 timer thread가 enter 뒤 tick을 게시하고 마지막 leave 뒤 timer를
   취소하는지 검증한다.
+
+#### 5.3d Zone 위치 save/reconnect restore (완료)
+
+- `PlayerRecord`가 선택적 `PlayerLocation{ZoneId, ZonePosition}`을 저장한다. PlayerActor는 repository
+  load에서 이를 복원하고 disconnect close payload의 location을 적용한 뒤 기존 async save/passivation
+  경로로 함께 저장한다. 명시적 `LeaveZone`은 location을 지워 다음 입장의 client 좌표를 사용한다.
+- reactor의 session directory는 ZoneActor 상태를 읽지 않고 **Actor ingress가 승인한** enter/move의
+  마지막 위치만 기록한다. 같은 route의 Zone command는 한 mailbox에서 FIFO이므로 disconnect가 leave를
+  승인하기 직전에 캡처한 값은 그 leave 앞에서 최종 적용될 위치다. 이 value snapshot을 Player close에
+  실어 서로 다른 Zone/Player Worker 사이 동기 대기나 mutable 상태 참조를 만들지 않는다.
+- repository load callback은 owning Player Worker에서 immutable location value만 session directory로
+  돌려준다. 인증 응답은 callback 뒤에 방출되므로 client가 응답을 받은 뒤 보내는 `EnterZone`은 같은
+  Zone이면 저장 위치를 사용하고, 다른 Zone이면 요청 위치를 사용한다.
+- close snapshot은 `unknown`과 authoritative `none`을 구분한다. DB load가 끝나기 전 disconnect는
+  `unknown`으로 Player mailbox에 들어가 load가 복원한 위치를 유지하고, load 완료나 명시적 leave 뒤의
+  `none`은 실제로 Zone 밖이라는 값으로 저장한다.
+- 단위 테스트는 repository round-trip, Player snapshot, session location, explicit leave clear와 close
+  value routing을 검증한다. TCP 통합 테스트는 authenticate → enter → move → disconnect/save → 같은
+  PlayerId reconnect/load → enter가 client의 새 좌표 대신 저장된 좌표를 반환하는 전체 흐름을 검증한다.
 
 완료 기준:
 

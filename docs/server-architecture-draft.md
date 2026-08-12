@@ -539,6 +539,17 @@ sequenceDiagram
 진행도를 소유한다. ZoneActor가 영구 진행도를 직접 수정하지 않고 typed domain event를 PlayerActor에
 보내며, PlayerActor는 중복 event가 와도 한 번만 적용한다.
 
+재접속 복원을 위한 마지막 위치는 실시간 Entity 상태의 두 번째 owner가 아니다. reactor session은
+해당 route mailbox가 **승인한** enter/move value의 마지막 값을 journal하고 disconnect close에 immutable
+snapshot으로 실어 Player 저장 경로로 전달한다. ZoneActor의 collision/simulation 결과가 입력 위치와
+달라지는 콘텐츠를 추가할 때는 Zone result가 같은 journal을 갱신하는 typed event로 계약을 확장해야
+하며, reactor가 ZoneActor 내부 상태를 직접 읽어서는 안 된다.
+
+disconnect snapshot은 3상태다. 아직 repository load가 끝나지 않은 `unknown`은 PlayerActor가 방금
+복원한 위치를 덮지 않고, `known + none`은 명시적 leave로 Zone 밖임을 뜻하며, `known + location`은
+마지막 승인 위치를 뜻한다. `optional` 하나로 앞의 두 상태를 합치면 인증 중 disconnect가 저장 위치를
+지우므로 둘을 구분해야 한다.
+
 구현 시 route 변경은 `RouteCoordinator`가 직렬화한다.
 
 ```text

@@ -136,6 +136,15 @@ namespace snf::server
 
             const std::span<const std::byte> payload{envelope.frame.payload};
             const ZoneId zone{.value = read_u64(payload, 0)};
+            ZonePosition position{
+                .x = static_cast<std::int32_t>(read_u32(payload, 8)),
+                .y = static_cast<std::int32_t>(read_u32(payload, 12)),
+            };
+            if (const auto restored = _sessions.locationFor(envelope.connection);
+                restored && restored->zone == zone)
+            {
+                position = restored->position;
+            }
             const auto admission = _routes.tryEnter(envelope.connection, *player, zone);
             if (!admission)
             {
@@ -166,11 +175,7 @@ namespace snf::server
                         EnterZoneCommand{
                             .player = *player,
                             .route_epoch = admission->route.route_epoch,
-                            .position =
-                                ZonePosition{
-                                    .x = static_cast<std::int32_t>(read_u32(payload, 8)),
-                                    .y = static_cast<std::int32_t>(read_u32(payload, 12)),
-                                },
+                            .position = position,
                         },
                     .reply_kind = ZoneReplyKind::Entered,
                     .request_id = envelope.frame.request_id,
@@ -200,6 +205,11 @@ namespace snf::server
                     static_cast<void>(_zone_timers->tryCancelTimer(zone));
                 }
             }
+            else if (admission->created)
+            {
+                _sessions.noteLocation(envelope.connection,
+                                       PlayerLocation{.zone = zone, .position = position});
+            }
             return result;
         }
 
@@ -213,21 +223,27 @@ namespace snf::server
             }
 
             const std::span<const std::byte> payload{envelope.frame.payload};
-            return post_zone(ZoneCommandRoute{
+            const ZonePosition position{
+                .x = static_cast<std::int32_t>(read_u32(payload, 0)),
+                .y = static_cast<std::int32_t>(read_u32(payload, 4)),
+            };
+            const FramePostResult result = post_zone(ZoneCommandRoute{
                 .zone = route->zone,
                 .command =
                     MoveInZoneCommand{
                         .player = route->player,
                         .route_epoch = route->route_epoch,
-                        .position =
-                            ZonePosition{
-                                .x = static_cast<std::int32_t>(read_u32(payload, 0)),
-                                .y = static_cast<std::int32_t>(read_u32(payload, 4)),
-                            },
+                        .position = position,
                     },
                 .reply_kind = ZoneReplyKind::Moved,
                 .request_id = envelope.frame.request_id,
             });
+            if (result == FramePostResult::Accepted)
+            {
+                _sessions.noteLocation(envelope.connection,
+                                       PlayerLocation{.zone = route->zone, .position = position});
+            }
+            return result;
         }
 
         if (envelope.frame.type == snf::protocol::MessageType::LeaveZone)
@@ -251,6 +267,7 @@ namespace snf::server
             if (result != FramePostResult::Full)
             {
                 _routes.completeLeave(*route);
+                _sessions.noteLocation(envelope.connection, std::nullopt);
                 if (_zone_timers != nullptr && _routes.routeCountFor(route->zone) == 0)
                 {
                     static_cast<void>(_zone_timers->tryCancelTimer(route->zone));
@@ -336,6 +353,13 @@ namespace snf::server
 
     PostResult ProtocolGateway::tryPostConnectionClosed(ConnectionClosed closed)
     {
+        if (!closed.has_location_snapshot)
+        {
+            const PlayerLocationSnapshot snapshot =
+                _sessions.locationSnapshotFor(closed.connection);
+            closed.has_location_snapshot = snapshot.known;
+            closed.last_location = snapshot.location;
+        }
         if (const auto route = _routes.routeFor(closed.connection))
         {
             const PostResult zone_result = _commands.tryPost(RoutedCommand{
@@ -378,6 +402,8 @@ namespace snf::server
                     ConnectionClosedRoute{
                         .actor = actor,
                         .cause = closed.cause,
+                        .has_location_snapshot = closed.has_location_snapshot,
+                        .last_location = closed.last_location,
                     },
             });
         }

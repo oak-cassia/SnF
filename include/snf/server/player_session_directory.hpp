@@ -2,6 +2,7 @@
 
 #include "snf/net/connection_id.hpp"
 #include "snf/server/player_id.hpp"
+#include "snf/server/player_location.hpp"
 
 #include <mutex>
 #include <optional>
@@ -20,6 +21,12 @@ namespace snf::server
         Closing,
     };
 
+    struct PlayerLocationSnapshot
+    {
+        bool known{false};
+        std::optional<PlayerLocation> location;
+    };
+
     // Owns the one-live-session policy for persistent players. Gateway methods
     // normally run on the reactor thread; the mutex is needed because an Actor
     // slot reports actual passivation from its owning Worker.
@@ -34,6 +41,12 @@ namespace snf::server
         void clearProvisionalActivity(snf::net::ConnectionId connection) noexcept;
 
         [[nodiscard]] std::optional<PlayerId> playerFor(snf::net::ConnectionId connection) const;
+        [[nodiscard]] std::optional<PlayerLocation>
+        locationFor(snf::net::ConnectionId connection) const;
+        [[nodiscard]] PlayerLocationSnapshot
+        locationSnapshotFor(snf::net::ConnectionId connection) const;
+        void noteLocation(snf::net::ConnectionId connection,
+                          std::optional<PlayerLocation> location) noexcept;
 
         // Closing retains both indexes until the owning Worker has removed and
         // destroyed the Actor slot. This prevents a reconnect command from being
@@ -54,6 +67,8 @@ namespace snf::server
         {
             PlayerId player;
             State state{State::Active};
+            bool location_known{false};
+            std::optional<PlayerLocation> last_location;
         };
 
         mutable std::mutex _mutex;

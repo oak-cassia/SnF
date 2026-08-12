@@ -7,6 +7,7 @@
 #include "snf/server/player_result.hpp"
 
 #include <cstdint>
+#include <optional>
 
 namespace snf::server
 {
@@ -17,12 +18,14 @@ namespace snf::server
     public:
         [[nodiscard]] PlayerActorId identity() const noexcept;
         [[nodiscard]] std::uint64_t handledCommandCount() const noexcept;
+        [[nodiscard]] std::optional<PlayerLocation> lastLocation() const noexcept;
 
     private:
         friend class PlayerActor;
 
         PlayerActorId _identity;
         std::uint64_t _handled_command_count{0};
+        std::optional<PlayerLocation> _last_location;
     };
 
     class PlayerActor
@@ -41,6 +44,7 @@ namespace snf::server
         // command; const does not provide synchronization.
         [[nodiscard]] const PlayerState& state() const noexcept;
         void restore(const PlayerRecord& record);
+        void setLastLocation(std::optional<PlayerLocation> location) noexcept;
         [[nodiscard]] PlayerRecord snapshot() const;
 
         // The caller must keep the command alive until the returned task

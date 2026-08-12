@@ -828,6 +828,96 @@ namespace
         server.stop();
     }
 
+    void test_zone_position_survives_disconnect_save_and_reconnect()
+    {
+        RunningServer server;
+        constexpr std::uint64_t player_id = 91;
+        constexpr std::uint64_t zone_id = 7;
+
+        {
+            auto client = connect_client(server.getPort());
+            const auto auth = authentication_frame(300, player_id);
+            const auto auth_bytes = snf::protocol::encode_frame(auth);
+            send_all(client.getDescriptor(), auth_bytes);
+            assert_authenticated(receive_exact(client.getDescriptor(), auth_bytes.size()),
+                                 auth.request_id,
+                                 player_id);
+
+            std::vector<std::byte> enter_payload = player_id_payload(zone_id);
+            append_u32(enter_payload, 1);
+            append_u32(enter_payload, 2);
+            send_all(client.getDescriptor(),
+                     snf::protocol::encode_frame(snf::protocol::Frame{
+                         .type = snf::protocol::MessageType::EnterZone,
+                         .request_id = 301,
+                         .payload = std::move(enter_payload),
+                     }));
+            static_cast<void>(receive_zone_response(client.getDescriptor()));
+
+            std::vector<std::byte> move_payload;
+            append_u32(move_payload, static_cast<std::uint32_t>(-30));
+            append_u32(move_payload, 45);
+            send_all(client.getDescriptor(),
+                     snf::protocol::encode_frame(snf::protocol::Frame{
+                         .type = snf::protocol::MessageType::Move,
+                         .request_id = 302,
+                         .payload = std::move(move_payload),
+                     }));
+            static_cast<void>(receive_zone_response(client.getDescriptor()));
+            client.init();
+        }
+
+        const snf::server::PlayerId player{.value = player_id};
+        const auto save_deadline = std::chrono::steady_clock::now() + 1s;
+        std::optional<snf::server::PlayerRecord> saved;
+        while (std::chrono::steady_clock::now() < save_deadline)
+        {
+            saved = server.getPlayerRecord(player);
+            if (saved && saved->last_location)
+            {
+                break;
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+        assert(saved.has_value());
+        assert((saved->last_location == snf::server::PlayerLocation{
+                                            .zone = snf::server::ZoneId{.value = zone_id},
+                                            .position = {.x = -30, .y = 45},
+                                        }));
+
+        const auto passivation_deadline = std::chrono::steady_clock::now() + 1s;
+        while (actor_count(server.getActorRuntimeStats()) != 1 &&
+               std::chrono::steady_clock::now() < passivation_deadline)
+        {
+            std::this_thread::sleep_for(1ms);
+        }
+        assert(actor_count(server.getActorRuntimeStats()) == 1);
+
+        const auto reconnected = connect_client(server.getPort());
+        const auto auth = authentication_frame(303, player_id);
+        const auto auth_bytes = snf::protocol::encode_frame(auth);
+        send_all(reconnected.getDescriptor(), auth_bytes);
+        assert_authenticated(receive_exact(reconnected.getDescriptor(), auth_bytes.size()),
+                             auth.request_id,
+                             player_id);
+
+        std::vector<std::byte> enter_payload = player_id_payload(zone_id);
+        append_u32(enter_payload, 999);
+        append_u32(enter_payload, 999);
+        send_all(reconnected.getDescriptor(),
+                 snf::protocol::encode_frame(snf::protocol::Frame{
+                     .type = snf::protocol::MessageType::EnterZone,
+                     .request_id = 304,
+                     .payload = std::move(enter_payload),
+                 }));
+        const auto restored = receive_zone_response(reconnected.getDescriptor());
+        assert(restored.type == snf::protocol::MessageType::ZoneEntered);
+        assert(static_cast<std::int32_t>(read_u32(restored.payload, 17)) == -30);
+        assert(static_cast<std::int32_t>(read_u32(restored.payload, 21)) == 45);
+
+        server.stop();
+    }
+
     void test_decodes_ping_sent_one_byte_at_a_time()
     {
         RunningServer server;
@@ -1309,6 +1399,7 @@ int main()
     test_returns_pong_for_ping();
     test_authenticates_one_session_and_allows_reconnect_after_passivation();
     test_authenticated_player_enters_moves_and_leaves_a_zone();
+    test_zone_position_survives_disconnect_save_and_reconnect();
     test_collects_baseline_saturation_metrics_for_a_round_trip();
     test_saturated_outbound_answers_every_request_and_still_drains();
     test_reports_metrics_periodically_while_running();

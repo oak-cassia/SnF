@@ -93,23 +93,26 @@ namespace snf::server
         , _runtime_completion(snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
                               _outbound_event.getDescriptor())
         , _player_actor_binding(_player_effects, _outbound_channel, _command_lifecycle)
-        , _persistent_player_actor_binding(_player_effects,
-                                           _outbound_channel,
-                                           _command_lifecycle,
-                                           PlayerActorBindingConfig{
-                                               .actor_kind = snf::runtime::ActorKind::Player,
-                                               .repository = &_player_repository,
-                                               .on_before_command = {},
-                                               .on_actor_deactivated =
-                                                   [this](const PlayerActorId actor)
-                                               {
-                                                   if (const auto player = actor.playerId())
-                                                   {
-                                                       _player_sessions.completePassivation(
-                                                           *player);
-                                                   }
-                                               },
-                                           })
+        , _persistent_player_actor_binding(
+              _player_effects,
+              _outbound_channel,
+              _command_lifecycle,
+              PlayerActorBindingConfig{
+                  .actor_kind = snf::runtime::ActorKind::Player,
+                  .repository = &_player_repository,
+                  .on_before_command = {},
+                  .on_actor_deactivated =
+                      [this](const PlayerActorId actor)
+                  {
+                      if (const auto player = actor.playerId())
+                      {
+                          _player_sessions.completePassivation(*player);
+                      }
+                  },
+                  .on_record_loaded = [this](const snf::net::ConnectionId connection,
+                                             std::optional<PlayerLocation> location)
+                  { _player_sessions.noteLocation(connection, std::move(location)); },
+              })
         , _zone_actor_binding(
               ZoneActorBindingConfig{
                   .actor = ZoneActorConfig{.aoi_radius = config.zone_aoi_radius},

@@ -196,6 +196,8 @@ namespace
         const snf::server::ConnectionClosed closed{
             .connection = snf::net::ConnectionId{.descriptor = 8, .generation = 12},
             .cause = snf::server::ConnectionCloseCause::Overflow,
+            .has_location_snapshot = false,
+            .last_location = std::nullopt,
         };
 
         assert(gateway.tryPostConnectionClosed(closed) == snf::server::PostResult::Full);
@@ -275,6 +277,8 @@ namespace
         const snf::server::ConnectionClosed closed{
             .connection = second,
             .cause = snf::server::ConnectionCloseCause::PeerClosed,
+            .has_location_snapshot = false,
+            .last_location = std::nullopt,
         };
         assert(gateway.tryPostConnectionClosed(closed) == snf::server::PostResult::Full);
         auto* close_route =
@@ -292,7 +296,9 @@ namespace
     void test_routes_authenticated_zone_enter_move_leave_with_one_epoch()
     {
         RecordingRoutedIngress commands;
-        snf::server::ProtocolGateway gateway{commands};
+        snf::server::PlayerSessionDirectory sessions;
+        snf::server::RouteCoordinator routes;
+        snf::server::ProtocolGateway gateway{commands, sessions, routes};
         const snf::net::ConnectionId connection{.descriptor = 60, .generation = 30};
         const snf::server::PlayerId player{.value = 101};
 
@@ -300,6 +306,11 @@ namespace
                snf::server::FramePostResult::InvalidPayload);
         assert(gateway.tryPost(make_auth_frame(connection, player)) ==
                snf::server::FramePostResult::Accepted);
+        sessions.noteLocation(connection,
+                              snf::server::PlayerLocation{
+                                  .zone = snf::server::ZoneId{.value = 5},
+                                  .position = {.x = 8, .y = 9},
+                              });
 
         commands.result = snf::server::PostResult::Full;
         assert(gateway.tryPost(make_enter_frame(connection, 5, 1, 2)) ==
@@ -315,7 +326,7 @@ namespace
         assert(enter->player == player);
         assert(enter->route_epoch == 2);
         const std::uint64_t route_epoch = enter->route_epoch;
-        assert((enter->position == snf::server::ZonePosition{.x = 1, .y = 2}));
+        assert((enter->position == snf::server::ZonePosition{.x = 8, .y = 9}));
         assert(zone->reply_kind == snf::server::ZoneReplyKind::Entered);
 
         assert(gateway.tryPost(make_move_frame(connection, -3, 4)) ==
@@ -341,6 +352,7 @@ namespace
         const auto* leave = std::get_if<snf::server::LeaveZoneCommand>(&zone->command);
         assert(leave != nullptr);
         assert(leave->route_epoch == route_epoch);
+        assert(!sessions.locationFor(connection).has_value());
         const int post_count_after_leave = commands.post_count;
         assert(gateway.tryPost(make_move_frame(connection, 0, 0)) ==
                snf::server::FramePostResult::InvalidPayload);
@@ -350,22 +362,35 @@ namespace
     void test_connection_close_leaves_zone_before_player_passivation()
     {
         RecordingRoutedIngress commands;
-        snf::server::ProtocolGateway gateway{commands};
+        snf::server::PlayerSessionDirectory sessions;
+        snf::server::RouteCoordinator routes;
+        snf::server::ProtocolGateway gateway{commands, sessions, routes};
         const snf::net::ConnectionId connection{.descriptor = 61, .generation = 31};
         const snf::server::PlayerId player{.value = 102};
         assert(gateway.tryPost(make_auth_frame(connection, player)) ==
                snf::server::FramePostResult::Accepted);
         assert(gateway.tryPost(make_enter_frame(connection, 6, 0, 0)) ==
                snf::server::FramePostResult::Accepted);
+        assert(gateway.tryPost(make_move_frame(connection, -7, 12)) ==
+               snf::server::FramePostResult::Accepted);
 
         const std::size_t before = commands.route_indices.size();
         assert(gateway.tryPostConnectionClosed(snf::server::ConnectionClosed{
                    .connection = connection,
                    .cause = snf::server::ConnectionCloseCause::PeerClosed,
+                   .has_location_snapshot = false,
+                   .last_location = std::nullopt,
                }) == snf::server::PostResult::Accepted);
         assert(commands.route_indices.size() == before + 2);
         assert(commands.route_indices[before] == 2);
         assert(commands.route_indices[before + 1] == 1);
+        const auto* close =
+            std::get_if<snf::server::ConnectionClosedRoute>(&commands.posted->route);
+        assert(close != nullptr);
+        assert((close->last_location == snf::server::PlayerLocation{
+                                            .zone = snf::server::ZoneId{.value = 6},
+                                            .position = {.x = -7, .y = 12},
+                                        }));
     }
 }
 

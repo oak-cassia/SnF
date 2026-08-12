@@ -186,6 +186,7 @@ namespace snf::server
         , _repository(config.repository)
         , _on_before_command(std::move(config.on_before_command))
         , _on_actor_deactivated(std::move(config.on_actor_deactivated))
+        , _on_record_loaded(std::move(config.on_record_loaded))
     {
         if (_kind != snf::runtime::ActorKind::ProvisionalPlayer &&
             _kind != snf::runtime::ActorKind::Player)
@@ -269,7 +270,7 @@ namespace snf::server
         auto& player_slot = dynamic_cast<PlayerActorSlot&>(slot);
         if (submission.accounting() == snf::runtime::ActorAccounting::Control)
         {
-            static_cast<void>(payloadAs<ConnectionClosedPayload>(submission));
+            const ConnectionClosedPayload& payload = payloadAs<ConnectionClosedPayload>(submission);
             if (kind() == snf::runtime::ActorKind::ProvisionalPlayer)
             {
                 return snf::runtime::ActorDispatchResult::Evict;
@@ -283,6 +284,11 @@ namespace snf::server
             if (!player_slot.loaded)
             {
                 return snf::runtime::ActorDispatchResult::Evict;
+            }
+
+            if (payload.closed.has_location_snapshot)
+            {
+                player_slot.actor.setLastLocation(payload.closed.last_location);
             }
 
             player_slot.stage = PlayerActorSlot::Stage::Saving;
@@ -359,6 +365,12 @@ namespace snf::server
                 slot.actor.restore(*loaded.record);
             }
             slot.loaded = true;
+
+            if (_on_record_loaded)
+            {
+                _on_record_loaded(slot.connection,
+                                  loaded.record ? loaded.record->last_location : std::nullopt);
+            }
 
             if (!slot.pending_command)
             {

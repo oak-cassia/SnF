@@ -135,7 +135,7 @@ namespace
             });
         }
 
-        void completeMissingLoad()
+        void completeLoad(snf::server::PlayerRecord record)
         {
             snf::server::PlayerLoadCompletion completion;
             {
@@ -145,7 +145,7 @@ namespace
             assert(completion);
             completion(snf::server::PlayerLoadResult{
                 .status = snf::server::PlayerRepositoryStatus::Success,
-                .record = std::nullopt,
+                .record = std::move(record),
             });
         }
 
@@ -184,6 +184,8 @@ namespace
                     .generation = actor_id,
                 },
             .cause = snf::server::ConnectionCloseCause::PeerClosed,
+            .has_location_snapshot = false,
+            .last_location = std::nullopt,
         };
     }
 
@@ -428,6 +430,7 @@ namespace
                 state->active.fetch_sub(1);
             },
             .on_actor_deactivated = {},
+            .on_record_loaded = {},
         };
         PlayerRuntime player{dependencies, player_runtime_config(), std::move(binding_config)};
 
@@ -977,6 +980,7 @@ namespace
                 }
             },
             .on_actor_deactivated = {},
+            .on_record_loaded = {},
         };
         PlayerRuntime player{dependencies, player_runtime_config(1, 2), std::move(binding_config)};
         player.runtime.start();
@@ -1295,6 +1299,7 @@ namespace
                                                        .repository = &repository,
                                                        .on_before_command = {},
                                                        .on_actor_deactivated = {},
+                                                       .on_record_loaded = {},
                                                    }};
         ActorRuntime runtime{player_runtime_config(1, 8), dependencies.completion};
         runtime.registerBinding(provisional);
@@ -1340,7 +1345,25 @@ namespace
         assert(pong.has_value());
         assert(std::get<snf::server::SendFrame>(pong->action).frame.request_id == 2);
 
-        repository.completeMissingLoad();
+        // The close snapshot is deliberately unknown because the disconnect raced
+        // the repository load. The binding must retain the location the load restores.
+        assert(ingress.tryPostConnectionClosed(
+                   player,
+                   snf::server::ConnectionClosed{
+                       .connection = player_connection,
+                       .cause = snf::server::ConnectionCloseCause::PeerClosed,
+                       .has_location_snapshot = false,
+                       .last_location = std::nullopt,
+                   }) == PostResult::Accepted);
+        repository.completeLoad(snf::server::PlayerRecord{
+            .player = player,
+            .handled_command_count = 0,
+            .last_location =
+                snf::server::PlayerLocation{
+                    .zone = snf::server::ZoneId{.value = 9},
+                    .position = {.x = 17, .y = -19},
+                },
+        });
         std::optional<snf::server::PostedOutboundAction> authenticated;
         const auto auth_deadline = std::chrono::steady_clock::now() + 1s;
         while (!authenticated && std::chrono::steady_clock::now() < auth_deadline)
@@ -1357,16 +1380,12 @@ namespace
         assert(auth_frame.request_id == 1);
 
         assert(ingress.tryPostConnectionClosed(
-                   player,
-                   snf::server::ConnectionClosed{
-                       .connection = player_connection,
-                       .cause = snf::server::ConnectionCloseCause::PeerClosed,
-                   }) == PostResult::Accepted);
-        assert(ingress.tryPostConnectionClosed(
                    snf::server::ProvisionalActorId{.value = 701},
                    snf::server::ConnectionClosed{
                        .connection = provisional_connection,
                        .cause = snf::server::ConnectionCloseCause::PeerClosed,
+                       .has_location_snapshot = false,
+                       .last_location = std::nullopt,
                    }) == PostResult::Accepted);
         runtime.close();
         runtime.join();
@@ -1374,6 +1393,10 @@ namespace
         assert(repository.saved.has_value());
         assert(repository.saved->player == player);
         assert(repository.saved->handled_command_count == 1);
+        assert((repository.saved->last_location == snf::server::PlayerLocation{
+                                                       .zone = snf::server::ZoneId{.value = 9},
+                                                       .position = {.x = 17, .y = -19},
+                                                   }));
         const auto stats = runtime.getStats().workers.front();
         assert(stats.suspended_commands >= 2);
         assert(stats.in_flight_operations == 0);

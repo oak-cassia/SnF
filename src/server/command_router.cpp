@@ -39,11 +39,14 @@ namespace snf::server
                 }
                 else if constexpr (std::is_same_v<Route, ConnectionClosedRoute>)
                 {
-                    return _player_commands.tryPostConnectionClosed(route.actor,
-                                                                    ConnectionClosed{
-                                                                        .connection = connection,
-                                                                        .cause = route.cause,
-                                                                    });
+                    return _player_commands.tryPostConnectionClosed(
+                        route.actor,
+                        ConnectionClosed{
+                            .connection = connection,
+                            .cause = route.cause,
+                            .has_location_snapshot = route.has_location_snapshot,
+                            .last_location = route.last_location,
+                        });
                 }
                 else if constexpr (std::is_same_v<Route, ZoneCommandRoute>)
                 {

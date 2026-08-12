@@ -26,6 +26,8 @@ namespace snf::server
     {
         PlayerActorId actor;
         ConnectionCloseCause cause;
+        bool has_location_snapshot{false};
+        std::optional<PlayerLocation> last_location;
     };
 
     struct ZoneCommandRoute

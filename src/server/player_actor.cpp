@@ -15,6 +15,11 @@ namespace snf::server
         return _handled_command_count;
     }
 
+    std::optional<PlayerLocation> PlayerState::lastLocation() const noexcept
+    {
+        return _last_location;
+    }
+
     const PlayerState& PlayerActor::state() const noexcept
     {
         return _state;
@@ -28,6 +33,12 @@ namespace snf::server
         }
 
         _state._handled_command_count = record.handled_command_count;
+        _state._last_location = record.last_location;
+    }
+
+    void PlayerActor::setLastLocation(std::optional<PlayerLocation> location) noexcept
+    {
+        _state._last_location = location;
     }
 
     PlayerRecord PlayerActor::snapshot() const
@@ -41,6 +52,7 @@ namespace snf::server
         return PlayerRecord{
             .player = *player,
             .handled_command_count = _state._handled_command_count,
+            .last_location = _state._last_location,
         };
     }
 

@@ -902,6 +902,8 @@ namespace snf::server
             notifyConnectionClosed(ConnectionClosed{
                 .connection = connection,
                 .cause = cause,
+                .has_location_snapshot = false,
+                .last_location = std::nullopt,
             });
         }
     }

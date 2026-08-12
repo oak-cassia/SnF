@@ -81,6 +81,7 @@ Network Runtime
 - `ActorKey{ActorKind, EntityId}`로 sharding하는 2-Worker Actor-Bound Logic Runtime과 Actor별 FIFO mailbox
 - Player·Zone typed binding/ingress와 type-erased binding registry
 - 주입 가능한 clock과 stale `TimerId` 폐기를 갖춘 bounded Zone timer scheduler
+- disconnect/save/reconnect 뒤 복원되는 Player의 마지막 Zone 위치
 - `PlayerActor` PING/PONG 처리와 typed result/effect 경계
 - connection generation을 통한 stale response 차단
 - bounded ingress queue와 Session별 send backpressure
@@ -100,8 +101,8 @@ Network Runtime
 Phase 3.8에서 scheduler의 Player 전용 의존을 제거하고, 모든 Worker를
 `ActorKeyHash(key) % worker_count`로 선택하는 Actor-Bound Logic Runtime으로 일반화했다.
 현재 production path는 Player와 Zone binding, 인증 session route, Zone enter/move/leave wire 왕복과
-Zone별 periodic timer를 포함한다. 위치 영속화, 빈 Zone passivation과 hot Zone 입력 coalescing은 이후
-단계의 범위다.
+Zone별 periodic timer, 위치 영속 복원을 포함한다. 빈 Zone passivation과 hot Zone 입력 coalescing은
+이후 단계의 범위다.
 
 Phase 3.9에서는 포화 정책의 현재 동작과 목표 동작을 계약으로 고정하고 baseline metric을 확보했다.
 non-blocking outbound는 4.1에서 구현했다. in-flight credit은 실제로 느린 Player command가 등장하는

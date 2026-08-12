@@ -10,6 +10,7 @@
 #include "snf/server/player_repository.hpp"
 
 #include <functional>
+#include <optional>
 
 namespace snf::server
 {
@@ -23,6 +24,10 @@ namespace snf::server
         // Runs after the scheduler has removed and destroyed a persistent Player
         // slot. GameServer uses it to finish the Closing -> detached transition.
         std::function<void(PlayerActorId)> on_actor_deactivated;
+        // Runs on the owning Worker after a persistent record has loaded and before
+        // its first response is emitted. Session routing uses the immutable location
+        // value to restore a Zone entry without reading Actor state cross-thread.
+        std::function<void(snf::net::ConnectionId, std::optional<PlayerLocation>)> on_record_loaded;
     };
 
     // Owns Player-specific type erasure at the edge of the generic scheduler.
@@ -84,5 +89,7 @@ namespace snf::server
         PlayerRepository* _repository;
         std::function<void(PlayerActorId, const PlayerCommand&)> _on_before_command;
         std::function<void(PlayerActorId)> _on_actor_deactivated;
+        std::function<void(snf::net::ConnectionId, std::optional<PlayerLocation>)>
+            _on_record_loaded;
     };
 }
