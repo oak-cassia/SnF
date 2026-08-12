@@ -27,21 +27,40 @@ namespace snf::server
 
     ZoneActorBinding::ZoneActorBinding(ZoneActorBindingConfig config)
         : _actor_config(config.actor)
+        , _tick_budget(config.tick_budget)
         , _on_result(std::move(config.on_result))
     {
+        if (_tick_budget < std::chrono::nanoseconds::zero())
+        {
+            throw std::invalid_argument{"Zone tick budget cannot be negative"};
+        }
     }
 
     ZoneActorBinding::ZoneActorBinding(ZoneActorBindingConfig config,
                                        CommandLifecycleSink& lifecycle)
         : _actor_config(config.actor)
+        , _tick_budget(config.tick_budget)
         , _on_result(std::move(config.on_result))
         , _lifecycle(&lifecycle)
     {
+        if (_tick_budget < std::chrono::nanoseconds::zero())
+        {
+            throw std::invalid_argument{"Zone tick budget cannot be negative"};
+        }
     }
 
     snf::runtime::ActorKind ZoneActorBinding::kind() const noexcept
     {
         return snf::runtime::ActorKind::Zone;
+    }
+
+    ZoneActorBindingStats ZoneActorBinding::stats() const noexcept
+    {
+        return ZoneActorBindingStats{
+            .command_execution_nanoseconds = _command_execution_nanoseconds.snapshot(),
+            .tick_execution_nanoseconds = _tick_execution_nanoseconds.snapshot(),
+            .tick_overruns = _tick_overruns.load(std::memory_order_relaxed),
+        };
     }
 
     snf::runtime::ActorSubmission ZoneActorBinding::makeCommand(ZoneInboundCommand command) const
@@ -113,7 +132,19 @@ namespace snf::server
 
         auto& zone_slot = dynamic_cast<ZoneActorSlot&>(slot);
         const CommandPayload& payload = payloadAs<CommandPayload>(submission);
+        const auto started_at = std::chrono::steady_clock::now();
         const ZoneResult result = zone_slot.actor.handle(payload.command.command);
+        const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - started_at);
+        _command_execution_nanoseconds.record(elapsed);
+        if (std::holds_alternative<ZoneSimulationTick>(payload.command.command))
+        {
+            _tick_execution_nanoseconds.record(elapsed);
+            if (elapsed >= _tick_budget)
+            {
+                _tick_overruns.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
         if (_on_result)
         {
             _on_result(payload.command, result);

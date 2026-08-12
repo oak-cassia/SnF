@@ -46,6 +46,7 @@ namespace
         snf::server::ZoneActorBinding binding{
             snf::server::ZoneActorBindingConfig{
                 .actor = snf::server::ZoneActorConfig{.aoi_radius = 100},
+                .tick_budget = std::chrono::milliseconds{5},
                 .on_result =
                     [&recorded](const snf::server::ZoneInboundCommand&,
                                 const snf::server::ZoneResult& result)
@@ -272,6 +273,49 @@ namespace
         assert(completion.drained.load() == 1);
         assert(completion.failed.load() == 0);
     }
+
+    void test_zone_binding_records_tick_execution_and_budget_overrun()
+    {
+        snf::server::ZoneActorBinding binding{snf::server::ZoneActorBindingConfig{
+            .actor = {},
+            .tick_budget = std::chrono::nanoseconds::zero(),
+            .on_result = {},
+        }};
+        RecordingCompletion completion;
+        snf::runtime::ActorRuntime runtime{snf::runtime::ActorRuntimeConfig{
+                                               .worker_count = 1,
+                                               .queue_capacity_per_worker = 4,
+                                               .max_in_flight_operations_per_worker = 1,
+                                               .on_worker_start = {},
+                                               .on_before_dispatch = {},
+                                               .on_worker_failure = {},
+                                           },
+                                           completion};
+        runtime.registerBinding(binding);
+        snf::server::ZoneActorIngress ingress{runtime, binding};
+        runtime.start();
+
+        const snf::server::ZoneId zone{.value = 14};
+        const snf::server::TimerId timer{.value = 35};
+        assert(ingress.tryPostTimerCommand(zone,
+                                           snf::server::ArmZoneSimulationTimer{.timer = timer}) ==
+               snf::runtime::PostResult::Accepted);
+        assert(ingress.tryPostTimerCommand(zone,
+                                           snf::server::ZoneSimulationTick{
+                                               .timer = timer,
+                                               .tick = 1,
+                                           }) == snf::runtime::PostResult::Accepted);
+        assert(ingress.tryPostTimerCommand(
+                   zone, snf::server::CancelZoneSimulationTimer{.timer = timer}) ==
+               snf::runtime::PostResult::Accepted);
+        runtime.close();
+        runtime.join();
+
+        const auto stats = binding.stats();
+        assert(stats.command_execution_nanoseconds.sample_count == 3);
+        assert(stats.tick_execution_nanoseconds.sample_count == 1);
+        assert(stats.tick_overruns == 1);
+    }
 }
 
 void run_zone_actor_binding_tests()
@@ -279,4 +323,5 @@ void run_zone_actor_binding_tests()
     test_zone_binding_runs_typed_commands_on_its_owning_worker();
     test_empty_zone_passivates_after_its_timer_is_cancelled();
     test_passivation_never_discards_an_already_accepted_reentry();
+    test_zone_binding_records_tick_execution_and_budget_overrun();
 }

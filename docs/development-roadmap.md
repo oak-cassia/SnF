@@ -592,6 +592,18 @@ UnifiedRuntimeDrained =
   한 번 evict되는지를 검증한다. disconnect/save/reconnect TCP 테스트도 Player와 Zone slot이 모두
   제거된 뒤 재접속한다.
 
+#### 5.3f Zone execution metric (완료)
+
+- `ZoneActorBinding`은 모든 Zone command와 `ZoneSimulationTick` handler 실행 시간을 기존 lock-free
+  fixed-bucket distribution에 기록해 `p50/p95/p99/max`로 노출한다. 설정 가능한 `zone_tick_budget`
+  이상 걸린 tick은 `tick_overruns`에 별도 집계한다.
+- metric은 binding 단위 atomic surface라 여러 Zone Worker가 동시에 기록해도 Worker를 block하지 않는다.
+  기존 Worker별 accepted/processed, actor count와 queue wait 분포를 함께 보면 shard 편향과 실행 비용을
+  구분할 수 있고, TimerService의 `skipped_intervals`/`dropped_full`과 결합하면 scheduler 지연과 handler
+  비용도 구분할 수 있다.
+- zero-budget 결정적 테스트는 command 3개, tick 1개와 overrun 1회를 정확히 검증한다. TCP Zone
+  통합 테스트도 production timer가 게시한 tick 표본이 binding metric에 나타나는지 확인한다.
+
 완료 기준:
 
 - 인증·load·attach·Zone 입장·이동·disconnect/save·reconnect/restore가 하나의 통합 테스트로

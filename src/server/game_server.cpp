@@ -116,6 +116,7 @@ namespace snf::server
         , _zone_actor_binding(
               ZoneActorBindingConfig{
                   .actor = ZoneActorConfig{.aoi_radius = config.zone_aoi_radius},
+                  .tick_budget = config.zone_tick_budget,
                   .on_result = [this](const ZoneInboundCommand& command, const ZoneResult& result)
                   { _zone_results.accept(command, result); },
               },
@@ -229,6 +230,11 @@ namespace snf::server
         return _zone_timers.stats();
     }
 
+    ZoneActorBindingStats GameServer::getZoneActorStats() const noexcept
+    {
+        return _zone_actor_binding.stats();
+    }
+
     ServerMetricsSnapshot GameServer::getMetricsSnapshot() const
     {
         return ServerMetricsSnapshot{
@@ -237,6 +243,7 @@ namespace snf::server
             .actor_runtime = _logic_runtime.getStats(),
             .player_repository = _player_repository.stats(),
             .zone_timers = _zone_timers.stats(),
+            .zone_actors = _zone_actor_binding.stats(),
             .command_terminals = _command_lifecycle.terminalCount(),
             .command_admission_rejections = _command_lifecycle.admissionRejectionCount(),
         };

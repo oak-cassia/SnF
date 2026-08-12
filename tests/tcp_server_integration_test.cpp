@@ -147,6 +147,11 @@ namespace
             return _server.getZoneTimerStats();
         }
 
+        [[nodiscard]] snf::server::ZoneActorBindingStats getZoneActorStats() const noexcept
+        {
+            return _server.getZoneActorStats();
+        }
+
         // Reads reactor state, so tests may only call it once the reactor thread
         // has been joined.
         [[nodiscard]] snf::server::ServerMetricsSnapshot getMetricsSnapshot() const
@@ -760,6 +765,7 @@ namespace
         }
         assert(server.getZoneTimerStats().scheduled == 1);
         assert(server.getZoneTimerStats().fired >= 1);
+        assert(server.getZoneActorStats().tick_execution_nanoseconds.sample_count >= 1);
 
         std::vector<std::byte> move_payload;
         append_u32(move_payload, static_cast<std::uint32_t>(-3));

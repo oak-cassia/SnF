@@ -42,6 +42,7 @@ namespace snf::server
         snf::runtime::ActorRuntimeStats actor_runtime;
         ThreadedPlayerRepositoryStats player_repository;
         ZoneTimerServiceStats zone_timers;
+        ZoneActorBindingStats zone_actors;
         // Commands that were admitted and reached a final result, counted once each
         // whether or not they answered. If playable slow-command measurements justify
         // per-connection credit, its owner consumes this same terminal signal.
@@ -67,6 +68,7 @@ namespace snf::server
         std::size_t player_repository_queue_capacity{4096};
         std::int32_t zone_aoi_radius{1000};
         std::chrono::milliseconds zone_tick_interval{50};
+        std::chrono::nanoseconds zone_tick_budget{std::chrono::milliseconds{5}};
         std::size_t max_zone_timers{4096};
         std::size_t outbound_queue_capacity{4096};
         // Bounds the shared outbound capacity one connection may hold at once.
@@ -106,6 +108,7 @@ namespace snf::server
         [[nodiscard]] snf::runtime::ActorRuntimeStats getActorRuntimeStats() const;
         [[nodiscard]] std::optional<PlayerRecord> getPlayerRecord(PlayerId player) const;
         [[nodiscard]] ZoneTimerServiceStats getZoneTimerStats() const;
+        [[nodiscard]] ZoneActorBindingStats getZoneActorStats() const noexcept;
         // Reads reactor state, so it belongs to the reactor thread: call it from
         // metrics_reporter or after run() has returned.
         [[nodiscard]] ServerMetricsSnapshot getMetricsSnapshot() const;

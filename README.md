@@ -82,6 +82,7 @@ Network Runtime
 - Player·Zone typed binding/ingress와 type-erased binding registry
 - 주입 가능한 clock과 stale `TimerId` 폐기를 갖춘 bounded Zone timer scheduler
 - disconnect/save/reconnect 뒤 복원되는 Player의 마지막 Zone 위치
+- Zone command/tick 실행 `p50/p95/p99/max`와 tick budget overrun metric
 - `PlayerActor` PING/PONG 처리와 typed result/effect 경계
 - connection generation을 통한 stale response 차단
 - bounded ingress queue와 Session별 send backpressure

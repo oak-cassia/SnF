@@ -463,8 +463,9 @@ PlayerActor는 완료 메시지를 자신의 mailbox 또는 Worker queue에서 �
 단계 3.9에서 reactor turn 지연, Actor command queue wait, 연결별 pending send, outbound queue depth와
 Logic Worker에서 reactor로의 outbound hand-off 시간을 `p50/p95/p99/max`로 노출하고 운영 중 주기 보고
 경로를 만들었다. percentile은 bucket 상한 추정이므로 표현 범위 안에서는 실제 값보다 작아지지 않고,
-그 범위를 넘는 표본은 상한에서 포화하므로 max만 정확하다. end-to-end 응답 지연, tick 실행 시간과 DB
-지표는 해당 기능이 들어오는 단계에서 같은 표면에 추가한다.
+그 범위를 넘는 표본은 상한에서 포화하므로 max만 정확하다. 5.3f에서 Zone command/tick 실행 시간과
+tick budget overrun을 같은 표면에 추가했다. end-to-end 응답 지연은 load client가 수집하며 실제 DB
+query latency는 DB adapter를 고르는 transaction 단계에서 추가한다.
 
 보고 경로 자체가 부하가 되지 않아야 한다. 주기 보고 callback은 reactor thread에서 실행되므로 block하면
 안 되고, 파일이나 수집기 전송이 필요하면 위의 로그 정책과 같은 별도 bounded queue에 게시한다. 보고 비용은
@@ -789,8 +790,8 @@ inbound/outbound/lifecycle 계약이 안정된 뒤의 선택적 트랙이다.
 | UnifiedRuntime 통합 여부, worker 수와 Actor affinity | Playable Session 이후 | tick 지연, shard 편향, hand-off, end-to-end p99 |
 | I/O continuation과 Actor turn 사이 fairness budget | 선택적 Runtime 최적화 검토 시 | reactor loop 지연, tick overrun |
 | blocking 작업 외에 별도 pool로 분리할 작업 | 5.2 이후 | Worker 점유 시간 분포 |
-| ZoneActor tick rate | 5.3 | tick 실행 시간, overrun |
-| 한 Worker가 소유할 PlayerActor와 ZoneActor 상한 | 5.3 | queue wait p99, 메모리 사용량 |
+| ZoneActor tick rate | 콘텐츠 부하 측정 후 | tick 실행 시간, overrun, skipped interval |
+| 한 Worker가 소유할 PlayerActor와 ZoneActor 상한 | 콘텐츠 부하 측정 후 | Worker별 queue wait p99, actor 수, 메모리 사용량 |
 | Actor 종류·command별 mailbox coalescing 정책과 turn budget | 5.3 | 입력 유실률, tick 지연 |
 | 네트워크 패킷 sequence와 재전송 정책 | 5.3 | 이동 입력 유실률 |
 | hot Zone의 공간 분할 방식 | 5.3 이후 | Zone별 entity 수, AOI 계산 비용 |

@@ -69,6 +69,13 @@ namespace
                   << timers.skipped_intervals << " intervals skipped, " << timers.failures
                   << " failures\n";
 
+        const auto& zones = metrics.zone_actors;
+        std::cout << "Zone command execution ns: "
+                  << format_distribution(zones.command_execution_nanoseconds) << '\n'
+                  << "Zone tick execution ns: "
+                  << format_distribution(zones.tick_execution_nanoseconds) << ", "
+                  << zones.tick_overruns << " budget overruns\n";
+
         const auto& workers = metrics.actor_runtime.workers;
         for (std::size_t worker_index = 0; worker_index < workers.size(); ++worker_index)
         {
