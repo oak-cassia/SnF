@@ -21,8 +21,7 @@ namespace
             , channel(snf::server::OutboundChannelConfig{.capacity = capacity,
                                                          .max_slots_per_connection = capacity},
                       wake.getDescriptor())
-            , outbound(channel)
-            , effects(outbound)
+            , effects(channel)
         {
         }
 
@@ -45,7 +44,6 @@ namespace
 
         snf::net::UniqueFileDescriptor wake;
         snf::server::OutboundChannel channel;
-        snf::server::ChannelOutboundSink outbound;
         snf::server::ProtocolPlayerEffectSink effects;
     };
 

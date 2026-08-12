@@ -43,7 +43,9 @@ namespace
         snf::server::OutboundChannel channel{
             snf::server::OutboundChannelConfig{.capacity = 2, .max_slots_per_connection = 2},
             wake.getDescriptor()};
-        snf::server::ChannelOutboundSink sink{channel};
+        // The domain's view of the same object: reserving and committing are reachable
+        // through it, draining and granting are not.
+        snf::server::OutboundSink& sink = channel;
 
         auto reservation = sink.tryReserve(CONNECTION, 1);
         assert(reservation);
@@ -66,7 +68,7 @@ namespace
         snf::server::OutboundChannel full_outbound{
             snf::server::OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1},
             outbound_wake.getDescriptor()};
-        snf::server::ChannelOutboundSink sink{full_outbound};
+        snf::server::OutboundSink& sink = full_outbound;
         auto reservation = sink.tryReserve(CONNECTION, 1);
         assert(reservation);
         assert(sink.commit(*reservation, pong_action(1)));
@@ -93,7 +95,7 @@ namespace
         snf::server::OutboundChannel channel{
             snf::server::OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1},
             wake.getDescriptor()};
-        snf::server::ChannelOutboundSink sink{channel};
+        snf::server::OutboundSink& sink = channel;
         const auto endpoint = std::make_shared<RecordingEndpoint>();
 
         auto queued = sink.tryReserve(CONNECTION, 1);
@@ -124,7 +126,7 @@ namespace
         snf::server::OutboundChannel channel{
             snf::server::OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1},
             wake.getDescriptor()};
-        snf::server::ChannelOutboundSink sink{channel};
+        snf::server::OutboundSink& sink = channel;
         const auto endpoint = std::make_shared<RecordingEndpoint>();
 
         auto queued = sink.tryReserve(CONNECTION, 1);

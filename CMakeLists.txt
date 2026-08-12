@@ -91,7 +91,6 @@ add_library(snf_server_runtime STATIC
     src/server/player_actor.cpp
     src/server/player_actor_binding.cpp
     src/server/player_actor_ingress.cpp
-    src/server/outbound_sink.cpp
     src/server/outbound_channel.cpp
     src/server/command_terminal.cpp
     src/server/game_server.cpp

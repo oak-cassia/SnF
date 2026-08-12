@@ -77,14 +77,12 @@ namespace
                       .max_slots_per_connection = outbound_capacity,
                   },
                   outbound_event.getDescriptor())
-            , raw_outbound_sink(outbound)
-            , outbound_sink(raw_outbound_sink)
+            , outbound_sink(outbound)
         {
         }
 
         snf::net::UniqueFileDescriptor outbound_event;
         snf::server::OutboundChannel outbound;
-        snf::server::ChannelOutboundSink raw_outbound_sink;
         snf::server::ProtocolPlayerEffectSink outbound_sink;
         snf::server::CountingCommandLifecycleSink lifecycle;
         RecordingRuntimeCompletion completion;
@@ -97,7 +95,7 @@ namespace
                       ActorRuntimeConfig runtime_config,
                       snf::server::PlayerActorBindingConfig binding_config = {})
             : binding(dependencies.outbound_sink,
-                      dependencies.raw_outbound_sink,
+                      dependencies.outbound,
                       dependencies.lifecycle,
                       std::move(binding_config))
             , runtime(runtime_config, dependencies.completion)
@@ -1109,7 +1107,7 @@ namespace
         RuntimeDependencies dependencies{2};
         OversizedEffectSink effects{3};
         snf::server::PlayerActorBinding binding{
-            effects, dependencies.raw_outbound_sink, dependencies.lifecycle};
+            effects, dependencies.outbound, dependencies.lifecycle};
         ActorRuntime runtime{player_runtime_config(1, 8), dependencies.completion};
         runtime.registerBinding(binding);
         snf::server::PlayerActorIngress ingress{runtime, binding, dependencies.lifecycle};

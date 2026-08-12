@@ -7,7 +7,6 @@
 #include "snf/server/command_router.hpp"
 #include "snf/server/command_terminal.hpp"
 #include "snf/server/outbound_channel.hpp"
-#include "snf/server/outbound_sink.hpp"
 #include "snf/server/player_actor_binding.hpp"
 #include "snf/server/player_actor_ingress.hpp"
 #include "snf/server/protocol_gateway.hpp"
@@ -107,8 +106,9 @@ namespace snf::server
         std::function<void(const ServerMetricsSnapshot&)> _metrics_reporter;
         // The channel signals this descriptor, so it has to outlive the channel.
         snf::net::UniqueFileDescriptor _outbound_event;
+        // The domain side takes it as an OutboundSink&, so the binding and the effect
+        // sink still cannot reach the reactor-only half.
         OutboundChannel _outbound_channel;
-        ChannelOutboundSink _outbound_sink;
         ProtocolPlayerEffectSink _player_effects;
         CountingCommandLifecycleSink _command_lifecycle;
         snf::runtime::RuntimeCompletionCoordinator _runtime_completion;

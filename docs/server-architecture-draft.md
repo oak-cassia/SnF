@@ -243,10 +243,14 @@ Network Runtime은 인벤토리, 이동, 충돌 같은 게임 상태를 수정�
 
 Actor handler는 `PlayerResult`에 domain effect를 반환하고, `PlayerEffectSink`가 handler 완료 뒤 이를
 적용한다. 현재 `ProtocolPlayerEffectSink`가 `SendResponse`를 `ProtocolResponseMapper`로 `SendFrame`
-으로 바꿔 `OutboundSink`에 게시한다. `EventFdOutboundSink`가 bounded queue와 `eventfd` wake-up을
-캡슐화하며, 실제 Session 조회, encode와 send는 Reactor가 수행한다. runtime drained/failed는 outbound action과 분리된
-`RuntimeCompletionCoordinator`가 추적한다. outbound queue 포화로 Worker가 대기할 때는 publishing
-Runtime의 stop token이 그 대기만 중단하며, 다른 Runtime이 공유하는 sink와 queue는 유지한다.
+으로 바꿔 `OutboundSink`에 게시한다. 그 인터페이스의 현재 구현인 `OutboundChannel`이 bounded queue,
+예약 회계와 `eventfd` wake-up을 캡슐화하며, 실제 Session 조회, encode와 send는 Reactor가 수행한다.
+runtime drained/failed는 outbound action과 분리된 `RuntimeCompletionCoordinator`가 추적한다.
+outbound가 포화되면 binding이 emit 직전 예약에 실패하고 그 Actor만 suspend한다. Worker는 대기하지 않고
+다른 Actor turn을 계속 처리하며, capacity가 풀리면 Reactor가 grant를 publish해 소유 Worker가 그 Actor를
+resume한다. Worker의 in-flight 예산이 없어 예약을 시작조차 못 하면 응답을 조용히 버리지 않고 backend가
+그 연결을 닫는다. 종료 시에는 채널 cancel이 남은 waiter를 무효 예약으로 해제하므로 도달할 수 없는 grant를
+기다리는 Actor가 남지 않으며, binding은 stop token이 요청된 상태면 그 command를 Stopped로 끝낸다.
 단계 3.8에서 Player binding과 향후 Zone·Shared Content binding은 하나의 Worker Pool을 공유하며
 completion identity는 `RuntimeId::Logic`으로 통합했다. drain과 failure는 ActorKind별 완료가 아니라
 Logic Runtime 전체의 terminal state를 의미한다.

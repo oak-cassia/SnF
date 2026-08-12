@@ -84,11 +84,10 @@ namespace snf::server
                   };
               }(),
               _outbound_event.getDescriptor())
-        , _outbound_sink(_outbound_channel)
-        , _player_effects(_outbound_sink)
+        , _player_effects(_outbound_channel)
         , _runtime_completion(snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
                               _outbound_event.getDescriptor())
-        , _player_actor_binding(_player_effects, _outbound_sink, _command_lifecycle)
+        , _player_actor_binding(_player_effects, _outbound_channel, _command_lifecycle)
         , _logic_runtime(
               [config]
               {

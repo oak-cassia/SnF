@@ -3,7 +3,7 @@
 #include "snf/net/connection_id.hpp"
 #include "snf/runtime/async_operation.hpp"
 #include "snf/server/outbound_action.hpp"
-#include "snf/server/outbound_channel.hpp"
+#include "snf/server/outbound_reservation.hpp"
 
 #include <cstddef>
 #include <optional>
@@ -13,7 +13,12 @@ namespace snf::server
     // The outbound capacity protocol as domain code sees it. Actor bindings reserve
     // before they emit, so a saturated backend suspends one actor instead of blocking
     // the Worker that owns it. Which backend holds the queue, and how that backend is
-    // awakened, stays behind this boundary.
+    // awakened, stays behind this boundary: a second network backend supplies its own
+    // wake-up descriptor to storage of its own without the game runtime seeing either.
+    //
+    // The reactor-facing half of a backend -- draining, granting, cancelling -- is
+    // deliberately absent. Holding this reference is what keeps domain code from
+    // reaching it.
     class OutboundSink
     {
     public:
@@ -51,33 +56,5 @@ namespace snf::server
         // connection collapse, so a connection failing repeatedly cannot crowd out
         // another connection's close.
         virtual void reportAdmissionFailure(snf::net::ConnectionId connection) noexcept = 0;
-    };
-
-    // Current adapter over the reactor's outbound channel. A second network backend
-    // supplies its own wake-up descriptor to a channel of its own without the game
-    // runtime seeing either.
-    class ChannelOutboundSink final : public OutboundSink
-    {
-    public:
-        explicit ChannelOutboundSink(OutboundChannel& channel) noexcept;
-
-        [[nodiscard]] bool canEverReserve(std::size_t slots) const noexcept override;
-
-        [[nodiscard]] std::optional<OutboundReservation>
-        tryReserve(snf::net::ConnectionId connection, std::size_t slots) override;
-
-        [[nodiscard]] ReservationTicket
-        registerWaiter(snf::net::ConnectionId connection,
-                       std::size_t slots,
-                       snf::runtime::AsyncOperationProducer<OutboundReservation> producer) override;
-
-        void withdrawWaiter(const ReservationTicket& ticket) noexcept override;
-
-        [[nodiscard]] bool commit(OutboundReservation& reservation, OutboundAction action) override;
-
-        void reportAdmissionFailure(snf::net::ConnectionId connection) noexcept override;
-
-    private:
-        OutboundChannel& _channel;
     };
 }

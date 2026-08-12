@@ -3,79 +3,20 @@
 #include "snf/net/connection_id.hpp"
 #include "snf/runtime/async_operation.hpp"
 #include "snf/server/outbound_action.hpp"
+#include "snf/server/outbound_reservation.hpp"
+#include "snf/server/outbound_sink.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <mutex>
 #include <optional>
-#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 namespace snf::server
 {
-    class OutboundChannel;
-
-    // A granted slice of outbound capacity. Move-only, and the destructor returns
-    // whatever was never committed. That is what makes every abandoned path -- an
-    // award that lost the terminal claim to a cancellation, a destroyed coroutine
-    // frame, a handler emitting fewer actions than it reserved -- return capacity
-    // without the channel having to observe that path at all.
-    //
-    // An invalid reservation is the cancelled outcome. A waiter released by cancel()
-    // receives one instead of an exception, so an awaiting handler has a single
-    // shape to interpret.
-    class OutboundReservation final
-    {
-    public:
-        OutboundReservation() noexcept = default;
-        ~OutboundReservation();
-
-        OutboundReservation(const OutboundReservation&) = delete;
-        OutboundReservation& operator=(const OutboundReservation&) = delete;
-        OutboundReservation(OutboundReservation&& other) noexcept;
-        OutboundReservation& operator=(OutboundReservation&& other) noexcept;
-
-        // Zero remaining slots is still valid: a fully committed reservation and a
-        // reservation taken for a command with no effect are both legal.
-        [[nodiscard]] bool valid() const noexcept;
-        [[nodiscard]] std::size_t remainingSlots() const noexcept;
-        [[nodiscard]] snf::net::ConnectionId connection() const noexcept;
-
-    private:
-        OutboundReservation(OutboundChannel& channel,
-                            snf::net::ConnectionId connection,
-                            std::size_t slots) noexcept;
-
-        void returnRemainingSlots() noexcept;
-
-        OutboundChannel* _channel{nullptr};
-        snf::net::ConnectionId _connection{};
-        std::size_t _slots{0};
-
-        friend class OutboundChannel;
-    };
-
-    static_assert(std::is_nothrow_move_constructible_v<OutboundReservation>,
-                  "A reservation is an async operation result, so a producer stores it inside a "
-                  "noexcept window that a waiting Worker depends on.");
-
-    // Identifies one registered waiter so its owning Worker can withdraw it. The
-    // value is unique for the channel's lifetime, so a ticket whose waiter was
-    // already granted cannot withdraw a later waiter for the same connection.
-    struct ReservationTicket
-    {
-        std::uint64_t value{0};
-        snf::net::ConnectionId connection{};
-
-        [[nodiscard]] bool valid() const noexcept
-        {
-            return value != 0;
-        }
-    };
-
     struct OutboundChannelConfig
     {
         std::size_t capacity{4096};
@@ -105,7 +46,12 @@ namespace snf::server
     // The reactor is the only granter. A Logic Worker that frees capacity signals
     // the wake-up rather than granting, which keeps grant work bounded per reactor
     // turn and keeps the ordering rules on one thread.
-    class OutboundChannel final
+    //
+    // It is the current OutboundSink, without an adapter in between. The interface is
+    // what narrows the domain's view -- a binding holding OutboundSink& cannot drain or
+    // grant -- so a forwarding class would add a layer and narrow nothing further. A
+    // second backend implements the interface itself.
+    class OutboundChannel final : public OutboundSink
     {
     public:
         OutboundChannel(const OutboundChannelConfig& config, int wake_descriptor);
@@ -117,7 +63,7 @@ namespace snf::server
         // per-connection limit is unsatisfiable no matter how much capacity frees, so a
         // caller has to distinguish it from saturation before it waits for a grant that
         // can never come. Const and lock-free.
-        [[nodiscard]] bool canEverReserve(std::size_t slots) const noexcept;
+        [[nodiscard]] bool canEverReserve(std::size_t slots) const noexcept override;
 
         // Non-blocking. std::nullopt means the caller must register a waiter or give
         // up; it never means "retry in a loop". A request that canEverReserve rejects
@@ -128,7 +74,7 @@ namespace snf::server
         // Outside saturation there are no waiters and this is the only path taken,
         // which is why the common case starts no async operation at all.
         [[nodiscard]] std::optional<OutboundReservation>
-        tryReserve(snf::net::ConnectionId connection, std::size_t slots);
+        tryReserve(snf::net::ConnectionId connection, std::size_t slots) override;
 
         // The producer receives a valid reservation once capacity is granted, and an
         // invalid one if the channel is cancelled first. An invalid ticket means the
@@ -136,17 +82,17 @@ namespace snf::server
         [[nodiscard]] ReservationTicket
         registerWaiter(snf::net::ConnectionId connection,
                        std::size_t slots,
-                       snf::runtime::AsyncOperationProducer<OutboundReservation> producer);
+                       snf::runtime::AsyncOperationProducer<OutboundReservation> producer) override;
 
         // Owning Worker only, and only after it has claimed the operation cancelled:
         // withdrawing destroys the producer, so no completion will ever arrive for
         // that waiter. A ticket whose waiter was already granted withdraws nothing.
-        void withdrawWaiter(const ReservationTicket& ticket) noexcept;
+        void withdrawWaiter(const ReservationTicket& ticket) noexcept override;
 
         // Consumes one reserved slot. false means the channel was cancelled; a
         // reserved slot is otherwise guaranteed to exist, so this never fails for
         // capacity.
-        [[nodiscard]] bool commit(OutboundReservation& reservation, OutboundAction action);
+        [[nodiscard]] bool commit(OutboundReservation& reservation, OutboundAction action) override;
 
         // Reactor only.
         [[nodiscard]] std::optional<PostedOutboundAction> tryPop();
@@ -182,7 +128,7 @@ namespace snf::server
         // failure path and must not throw. If the record budget is nevertheless exceeded,
         // a preallocated flag asks the reactor to close all current sessions rather than
         // dropping this close or failing the Worker.
-        void reportAdmissionFailure(snf::net::ConnectionId connection) noexcept;
+        void reportAdmissionFailure(snf::net::ConnectionId connection) noexcept override;
 
         // Abandons queued actions and releases every waiter with the cancelled
         // outcome. Required whenever the reactor stops consuming, which would

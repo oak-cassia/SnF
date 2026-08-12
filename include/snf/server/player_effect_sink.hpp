@@ -1,7 +1,7 @@
 #pragma once
 
 #include "snf/net/connection_id.hpp"
-#include "snf/server/outbound_channel.hpp"
+#include "snf/server/outbound_reservation.hpp"
 #include "snf/server/player_result.hpp"
 
 #include <cstddef>
