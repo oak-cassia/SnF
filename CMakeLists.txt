@@ -93,6 +93,9 @@ add_library(snf_server_runtime STATIC
     src/server/player_actor_ingress.cpp
     src/server/player_repository.cpp
     src/server/player_session_directory.cpp
+    src/server/zone_actor.cpp
+    src/server/zone_actor_binding.cpp
+    src/server/zone_actor_ingress.cpp
     src/server/outbound_channel.cpp
     src/server/command_terminal.cpp
     src/server/game_server.cpp
@@ -144,6 +147,8 @@ if(BUILD_TESTING)
         tests/socket_options_test.cpp
         tests/tcp_listener_test.cpp
         tests/unique_file_descriptor_test.cpp
+        tests/zone_actor_test.cpp
+        tests/zone_actor_binding_test.cpp
     )
     target_link_libraries(snf_unit_tests PRIVATE snf_server_runtime)
     snf_configure_target(snf_unit_tests)

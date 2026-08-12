@@ -18,6 +18,8 @@ void run_session_tests();
 void run_socket_options_tests();
 void run_tcp_listener_tests();
 void run_unique_file_descriptor_tests();
+void run_zone_actor_tests();
+void run_zone_actor_binding_tests();
 
 int main()
 {
@@ -41,4 +43,6 @@ int main()
     run_socket_options_tests();
     run_tcp_listener_tests();
     run_unique_file_descriptor_tests();
+    run_zone_actor_tests();
+    run_zone_actor_binding_tests();
 }

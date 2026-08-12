@@ -1,0 +1,112 @@
+#include "snf/server/zone_actor_binding.hpp"
+
+#include <stdexcept>
+#include <utility>
+
+namespace snf::server
+{
+    struct ZoneActorBinding::ZoneActorSlot final : snf::runtime::ActorSlot
+    {
+        ZoneActorSlot(const ZoneId zone, const ZoneActorConfig config)
+            : actor(zone, config)
+        {
+        }
+
+        ZoneActor actor;
+    };
+
+    struct ZoneActorBinding::CommandPayload
+    {
+        ZoneInboundCommand command;
+    };
+
+    struct ZoneActorBinding::PassivatePayload
+    {
+    };
+
+    ZoneActorBinding::ZoneActorBinding(ZoneActorBindingConfig config)
+        : _actor_config(config.actor)
+        , _on_result(std::move(config.on_result))
+    {
+    }
+
+    snf::runtime::ActorKind ZoneActorBinding::kind() const noexcept
+    {
+        return snf::runtime::ActorKind::Zone;
+    }
+
+    snf::runtime::ActorSubmission ZoneActorBinding::makeCommand(ZoneInboundCommand command) const
+    {
+        if (command.zone.value == 0)
+        {
+            throw std::invalid_argument{"Zone command target must be non-zero"};
+        }
+
+        const ZoneId zone = command.zone;
+        return makeSubmission(
+            snf::runtime::ActorKey{
+                .kind = kind(),
+                .entity = zone.value,
+            },
+            snf::runtime::ActorActivation::ActivateIfMissing,
+            snf::runtime::ActorAccounting::Command,
+            CommandPayload{.command = std::move(command)});
+    }
+
+    snf::runtime::ActorSubmission ZoneActorBinding::makePassivate(const ZoneId zone) const
+    {
+        if (zone.value == 0)
+        {
+            throw std::invalid_argument{"Zone passivation target must be non-zero"};
+        }
+
+        return makeSubmission(
+            snf::runtime::ActorKey{
+                .kind = kind(),
+                .entity = zone.value,
+            },
+            snf::runtime::ActorActivation::ExistingOnly,
+            snf::runtime::ActorAccounting::Control,
+            PassivatePayload{});
+    }
+
+    std::unique_ptr<snf::runtime::ActorSlot>
+    ZoneActorBinding::activate(const snf::runtime::EntityId entity)
+    {
+        return std::make_unique<ZoneActorSlot>(ZoneId{.value = entity}, _actor_config);
+    }
+
+    snf::runtime::ActorDispatchResult
+    ZoneActorBinding::dispatch(snf::runtime::ActorSlot& slot,
+                               const snf::runtime::ActorSubmission& submission,
+                               snf::runtime::ActorContext& context,
+                               const std::stop_token stop_token)
+    {
+        static_cast<void>(context);
+        static_cast<void>(stop_token);
+        if (submission.accounting() == snf::runtime::ActorAccounting::Control)
+        {
+            static_cast<void>(payloadAs<PassivatePayload>(submission));
+            return snf::runtime::ActorDispatchResult::Evict;
+        }
+
+        auto& zone_slot = dynamic_cast<ZoneActorSlot&>(slot);
+        const CommandPayload& payload = payloadAs<CommandPayload>(submission);
+        const ZoneResult result = zone_slot.actor.handle(payload.command.command);
+        if (_on_result)
+        {
+            _on_result(payload.command.zone, payload.command.command, result);
+        }
+        return snf::runtime::ActorDispatchResult::KeepActive;
+    }
+
+    snf::runtime::ActorDispatchResult ZoneActorBinding::resume(snf::runtime::ActorSlot& slot,
+                                                               snf::runtime::ActorContext& context,
+                                                               const std::stop_token stop_token)
+    {
+        static_cast<void>(slot);
+        static_cast<void>(context);
+        static_cast<void>(stop_token);
+        throw std::logic_error{"ZoneActorBinding has no suspension point"};
+    }
+}

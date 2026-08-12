@@ -509,6 +509,17 @@ UnifiedRuntimeDrained =
 - domain `TimerService`는 주입 가능한 Clock, timer identity, cancel과 late event 폐기를 제공하고
   owning Worker의 mailbox에 typed tick event를 게시한다.
 
+#### 5.3a Deterministic Zone Actor와 binding (완료)
+
+- `ZoneActor`가 enter/leave/move, player별 `route_epoch`, 결정적 simulation tick과 최소 원형 AOI를
+  단독 소유한다. stale route와 stale tick은 상태를 바꾸지 않으며 AOI 결과는 `PlayerId` 오름차순이다.
+- `ZoneActorBinding`과 `ZoneActorIngress`가 typed `ZoneCommand`를 기존 `ActorKind::Zone` shard에
+  올린다. Player binding과 같은 mailbox, turn budget, Worker affinity와 passivation 규칙을 쓴다.
+- 위치 극값에서도 거리 제곱이 overflow하지 않도록 축 범위를 먼저 검사하고, 상태 전이와 AOI 경계를
+  단위 테스트한다. binding 테스트는 enter → move → passivate FIFO와 owning Worker 실행을 검증한다.
+- network route, `RouteCoordinator`, 결과 sink와 `TimerService`는 다음 5.3 하위 단계다. domain Actor는
+  그 단계에서도 `ConnectionId`, wire frame이나 timer thread를 직접 알지 않는다.
+
 완료 기준:
 
 - 인증·load·attach·Zone 입장·이동·disconnect/save·reconnect/restore가 하나의 통합 테스트로

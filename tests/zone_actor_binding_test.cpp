@@ -1,0 +1,114 @@
+#include "snf/runtime/actor_runtime.hpp"
+#include "snf/runtime/runtime_completion.hpp"
+#include "snf/server/zone_actor_binding.hpp"
+#include "snf/server/zone_actor_ingress.hpp"
+
+#include <atomic>
+#include <cassert>
+#include <mutex>
+#include <thread>
+#include <vector>
+
+namespace
+{
+    class RecordingCompletion final : public snf::runtime::RuntimeCompletionSink
+    {
+    public:
+        void notifyDrained(snf::runtime::RuntimeId runtime) noexcept override
+        {
+            assert(runtime == snf::runtime::RuntimeId::Logic);
+            ++drained;
+        }
+
+        void notifyFailed(snf::runtime::RuntimeId runtime) noexcept override
+        {
+            assert(runtime == snf::runtime::RuntimeId::Logic);
+            ++failed;
+        }
+
+        std::atomic<int> drained{0};
+        std::atomic<int> failed{0};
+    };
+
+    void test_zone_binding_runs_typed_commands_on_its_owning_worker()
+    {
+        struct Recorded
+        {
+            std::mutex mutex;
+            std::vector<snf::server::ZoneResult> results;
+            std::vector<std::thread::id> threads;
+        } recorded;
+
+        const std::thread::id caller = std::this_thread::get_id();
+        snf::server::ZoneActorBinding binding{snf::server::ZoneActorBindingConfig{
+            .actor = snf::server::ZoneActorConfig{.aoi_radius = 100},
+            .on_result =
+                [&recorded](snf::server::ZoneId,
+                            const snf::server::ZoneCommand&,
+                            const snf::server::ZoneResult& result)
+            {
+                std::lock_guard lock{recorded.mutex};
+                recorded.results.push_back(result);
+                recorded.threads.push_back(std::this_thread::get_id());
+            },
+        }};
+        RecordingCompletion completion;
+        snf::runtime::ActorRuntime runtime{snf::runtime::ActorRuntimeConfig{
+                                               .worker_count = 1,
+                                               .queue_capacity_per_worker = 8,
+                                               .max_in_flight_operations_per_worker = 2,
+                                               .on_worker_start = {},
+                                               .on_before_dispatch = {},
+                                               .on_worker_failure = {},
+                                           },
+                                           completion};
+        runtime.registerBinding(binding);
+        snf::server::ZoneActorIngress ingress{runtime, binding};
+        runtime.start();
+
+        const snf::server::ZoneId zone{.value = 10};
+        const snf::server::PlayerId player{.value = 20};
+        assert(ingress.tryPost(snf::server::ZoneInboundCommand{
+                   .zone = zone,
+                   .command =
+                       snf::server::EnterZoneCommand{
+                           .player = player,
+                           .route_epoch = 1,
+                           .position = {.x = 1, .y = 2},
+                       },
+               }) == snf::runtime::PostResult::Accepted);
+        assert(ingress.tryPost(snf::server::ZoneInboundCommand{
+                   .zone = zone,
+                   .command =
+                       snf::server::MoveInZoneCommand{
+                           .player = player,
+                           .route_epoch = 1,
+                           .position = {.x = 3, .y = 4},
+                       },
+               }) == snf::runtime::PostResult::Accepted);
+        assert(ingress.tryPassivate(zone) == snf::runtime::PostResult::Accepted);
+        runtime.close();
+        runtime.join();
+
+        {
+            std::lock_guard lock{recorded.mutex};
+            assert(recorded.results.size() == 2);
+            assert((recorded.results[0].position == snf::server::ZonePosition{.x = 1, .y = 2}));
+            assert((recorded.results[1].position == snf::server::ZonePosition{.x = 3, .y = 4}));
+            assert(recorded.threads[0] != caller);
+            assert(recorded.threads[0] == recorded.threads[1]);
+        }
+
+        const auto stats = runtime.getStats().workers.front();
+        assert(stats.accepted == 2);
+        assert(stats.processed == 2);
+        assert(stats.evicted_actors == 1);
+        assert(completion.drained.load() == 1);
+        assert(completion.failed.load() == 0);
+    }
+}
+
+void run_zone_actor_binding_tests()
+{
+    test_zone_binding_runs_typed_commands_on_its_owning_worker();
+}
