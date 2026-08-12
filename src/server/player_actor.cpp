@@ -123,6 +123,51 @@ namespace snf::server
         };
     }
 
+    PlayerResult PlayerActor::completeRankingAward(const AwardRankingScoreCommand& command,
+                                                   RankingAwardTransactionResult result)
+    {
+        const auto player = _state._identity.playerId();
+        if (!player || result.player != *player || result.award_id != command.award_id ||
+            result.score_delta != command.score_delta)
+        {
+            throw std::logic_error{"Ranking award completion does not match the Player command"};
+        }
+        if (result.status != RankingAwardStatus::Committed)
+        {
+            throw std::runtime_error{"Ranking award transaction did not commit"};
+        }
+        if (result.event_sequence == 0 || result.global_offset == 0 ||
+            result.authoritative_sequence < result.event_sequence ||
+            result.authoritative_score < result.event_score ||
+            result.authoritative_sequence < _state._last_domain_event_sequence ||
+            result.authoritative_score < _state._ranking_score)
+        {
+            throw std::logic_error{"Ranking award completion would regress Player state"};
+        }
+        if ((!result.replayed && (result.authoritative_sequence != result.event_sequence ||
+                                  result.authoritative_score != result.event_score)) ||
+            (result.authoritative_sequence == result.event_sequence &&
+             result.authoritative_score != result.event_score))
+        {
+            throw std::logic_error{"Ranking award completion has inconsistent event state"};
+        }
+        if (result.authoritative_sequence == _state._last_domain_event_sequence &&
+            result.authoritative_score != _state._ranking_score)
+        {
+            throw std::logic_error{"Ranking award reused a Player sequence with a new score"};
+        }
+        if (result.authoritative_sequence > _state._last_domain_event_sequence &&
+            result.authoritative_score <= _state._ranking_score)
+        {
+            throw std::logic_error{"Ranking award advanced sequence without advancing score"};
+        }
+
+        _state._ranking_score = result.authoritative_score;
+        _state._last_domain_event_sequence = result.authoritative_sequence;
+        ++_state._handled_command_count;
+        return PlayerResult{};
+    }
+
     PlayerActor::PlayerActor(const PlayerActorId identity) noexcept
     {
         _state._identity = identity;
@@ -180,38 +225,7 @@ namespace snf::server
 
     PlayerResult PlayerActor::handleCommand(const AwardRankingScoreCommand& command)
     {
-        const auto player = _state._identity.playerId();
-        if (!player)
-        {
-            throw std::logic_error{"Ranking score reached a provisional Player actor"};
-        }
-        if (command.score_delta == 0)
-        {
-            throw std::invalid_argument{"Ranking score delta must be positive"};
-        }
-        if (_state._ranking_score > std::numeric_limits<std::uint64_t>::max() - command.score_delta)
-        {
-            throw std::overflow_error{"Ranking score overflow"};
-        }
-        if (_state._last_domain_event_sequence == std::numeric_limits<std::uint64_t>::max())
-        {
-            throw std::overflow_error{"Player domain event sequence overflow"};
-        }
-
-        _state._ranking_score += command.score_delta;
-        ++_state._last_domain_event_sequence;
-        return PlayerResult{
-            .effects =
-                {
-                    PublishPlayerEvent{
-                        .event =
-                            PlayerScoreChanged{
-                                .player = *player,
-                                .sequence = _state._last_domain_event_sequence,
-                                .score = _state._ranking_score,
-                            },
-                    },
-                },
-        };
+        static_cast<void>(command);
+        throw std::logic_error{"AwardRankingScoreCommand must be completed by PlayerActorBinding"};
     }
 }

@@ -196,23 +196,49 @@ namespace
         });
         const snf::server::PlayerCommand command = snf::server::AwardRankingScoreCommand{
             .request_id = 40,
+            .award_id = snf::server::RankingAwardId{.value = 400},
             .score_delta = 25,
         };
 
-        const auto result = run_handler(actor, command);
-        assert(result.effects.size() == 1);
-        const auto* publish = std::get_if<snf::server::PublishPlayerEvent>(&result.effects.front());
-        assert(publish != nullptr);
-        assert((publish->event == snf::server::PlayerDomainEvent{snf::server::PlayerScoreChanged{
-                                      .player = player,
-                                      .sequence = 3,
-                                      .score = 125,
-                                  }}));
+        const auto& award = std::get<snf::server::AwardRankingScoreCommand>(command);
+        const auto result =
+            actor.completeRankingAward(award,
+                                       snf::server::RankingAwardTransactionResult{
+                                           .status = snf::server::RankingAwardStatus::Committed,
+                                           .player = player,
+                                           .award_id = award.award_id,
+                                           .score_delta = award.score_delta,
+                                           .event_sequence = 3,
+                                           .event_score = 125,
+                                           .global_offset = 9,
+                                           .authoritative_score = 125,
+                                           .authoritative_sequence = 3,
+                                           .replayed = false,
+                                       });
+        assert(result.effects.empty());
         assert(actor.state().rankingScore() == 125);
         assert(actor.state().lastDomainEventSequence() == 3);
         assert(actor.state().handledCommandCount() == 5);
         assert(actor.snapshot().ranking_score == 125);
         assert(actor.snapshot().last_domain_event_sequence == 3);
+
+        const auto old_replay =
+            actor.completeRankingAward(award,
+                                       snf::server::RankingAwardTransactionResult{
+                                           .status = snf::server::RankingAwardStatus::Committed,
+                                           .player = player,
+                                           .award_id = award.award_id,
+                                           .score_delta = award.score_delta,
+                                           .event_sequence = 3,
+                                           .event_score = 125,
+                                           .global_offset = 9,
+                                           .authoritative_score = 140,
+                                           .authoritative_sequence = 4,
+                                           .replayed = true,
+                                       });
+        assert(old_replay.effects.empty());
+        assert(actor.state().rankingScore() == 140);
+        assert(actor.state().lastDomainEventSequence() == 4);
     }
 }
 

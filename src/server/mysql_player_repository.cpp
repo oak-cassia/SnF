@@ -442,6 +442,160 @@ namespace
             return result(request, status, currency, items);
         }
 
+        [[nodiscard]] snf::server::RankingAwardTransactionResult
+        awardRankingScore(const snf::server::RankingAwardRequest& request)
+        {
+            if (request.score_delta == 0)
+            {
+                throw std::invalid_argument{"Ranking award delta must be non-zero"};
+            }
+
+            Transaction transaction{_connection};
+            _connection.execute(
+                "INSERT IGNORE INTO snf_players (player_id, handled_command_count, zone_id, "
+                "position_x, position_y, currency_balance, purchased_item_count, ranking_score, "
+                "last_domain_event_sequence) VALUES (" +
+                std::to_string(request.player.value) + ",0,NULL,NULL,NULL," +
+                std::to_string(snf::server::INITIAL_CURRENCY_BALANCE) + ",0,0,0)");
+
+            auto player_result = _connection.query(player_select(request.player, true));
+            if (::mysql_num_rows(player_result.get()) != 1)
+            {
+                throw std::runtime_error{"Ranking award could not lock its Player row"};
+            }
+            const snf::server::PlayerRecord player =
+                decode_player(request.player, ::mysql_fetch_row(player_result.get()));
+
+            auto existing = _connection.query(
+                "SELECT player_sequence, award_id, score_delta, absolute_score, global_offset "
+                "FROM snf_player_events WHERE player_id=" +
+                std::to_string(request.player.value) +
+                " AND award_id=" + std::to_string(request.award_id.value));
+            if (::mysql_num_rows(existing.get()) != 0)
+            {
+                if (::mysql_num_rows(existing.get()) != 1)
+                {
+                    throw std::runtime_error{"Ranking award identity returned more than one row"};
+                }
+                MYSQL_ROW row = ::mysql_fetch_row(existing.get());
+                const std::uint64_t stored_delta =
+                    parse_integer<std::uint64_t>(row[2], "ranking score_delta");
+                transaction.commit();
+                return snf::server::RankingAwardTransactionResult{
+                    .status = stored_delta == request.score_delta
+                                  ? snf::server::RankingAwardStatus::Committed
+                                  : snf::server::RankingAwardStatus::IdempotencyConflict,
+                    .player = request.player,
+                    .award_id = request.award_id,
+                    .score_delta = request.score_delta,
+                    .event_sequence =
+                        parse_integer<std::uint64_t>(row[0], "ranking player_sequence"),
+                    .event_score = parse_integer<std::uint64_t>(row[3], "ranking absolute_score"),
+                    .global_offset = parse_integer<std::uint64_t>(row[4], "ranking global_offset"),
+                    .authoritative_score = player.ranking_score,
+                    .authoritative_sequence = player.last_domain_event_sequence,
+                    .replayed = stored_delta == request.score_delta,
+                };
+            }
+
+            if (player.ranking_score >
+                std::numeric_limits<std::uint64_t>::max() - request.score_delta)
+            {
+                transaction.commit();
+                return rankingFailure(
+                    request, snf::server::RankingAwardStatus::ScoreOverflow, player);
+            }
+            if (player.last_domain_event_sequence == std::numeric_limits<std::uint64_t>::max())
+            {
+                transaction.commit();
+                return rankingFailure(
+                    request, snf::server::RankingAwardStatus::SequenceOverflow, player);
+            }
+
+            auto stream = _connection.query(
+                "SELECT last_offset FROM snf_event_stream WHERE stream_name='ranking' FOR UPDATE");
+            if (::mysql_num_rows(stream.get()) != 1)
+            {
+                throw std::runtime_error{"Ranking event stream cursor is missing"};
+            }
+            const std::uint64_t last_offset = parse_integer<std::uint64_t>(
+                ::mysql_fetch_row(stream.get())[0], "ranking last_offset");
+            if (last_offset == std::numeric_limits<std::uint64_t>::max())
+            {
+                transaction.commit();
+                return rankingFailure(
+                    request, snf::server::RankingAwardStatus::EventOffsetOverflow, player);
+            }
+
+            const std::uint64_t offset = last_offset + 1;
+            const std::uint64_t sequence = player.last_domain_event_sequence + 1;
+            const std::uint64_t score = player.ranking_score + request.score_delta;
+            _connection.execute("UPDATE snf_players SET ranking_score=" + std::to_string(score) +
+                                ", last_domain_event_sequence=" + std::to_string(sequence) +
+                                " WHERE player_id=" + std::to_string(request.player.value));
+            _connection.execute(
+                "INSERT INTO snf_player_events (global_offset, player_id, player_sequence, "
+                "award_id, score_delta, absolute_score) VALUES (" +
+                std::to_string(offset) + "," + std::to_string(request.player.value) + "," +
+                std::to_string(sequence) + "," + std::to_string(request.award_id.value) + "," +
+                std::to_string(request.score_delta) + "," + std::to_string(score) + ")");
+            _connection.execute("UPDATE snf_event_stream SET last_offset=" +
+                                std::to_string(offset) + " WHERE stream_name='ranking'");
+            if (_config.ranking_award_fault_injector)
+            {
+                _config.ranking_award_fault_injector(
+                    snf::server::MySqlRankingAwardFaultPoint::BeforeCommit);
+            }
+            transaction.commit();
+            if (_config.ranking_award_fault_injector)
+            {
+                _config.ranking_award_fault_injector(
+                    snf::server::MySqlRankingAwardFaultPoint::AfterCommitBeforeCompletion);
+            }
+            return snf::server::RankingAwardTransactionResult{
+                .status = snf::server::RankingAwardStatus::Committed,
+                .player = request.player,
+                .award_id = request.award_id,
+                .score_delta = request.score_delta,
+                .event_sequence = sequence,
+                .event_score = score,
+                .global_offset = offset,
+                .authoritative_score = score,
+                .authoritative_sequence = sequence,
+                .replayed = false,
+            };
+        }
+
+        [[nodiscard]] std::vector<snf::server::PlayerEventRecord>
+        rankingEventsAfter(const std::uint64_t offset, const std::size_t limit)
+        {
+            if (limit == 0)
+            {
+                throw std::invalid_argument{"Ranking event read limit must be positive"};
+            }
+            auto rows = _connection.query(
+                "SELECT global_offset, player_id, player_sequence, absolute_score "
+                "FROM snf_player_events WHERE global_offset>" +
+                std::to_string(offset) + " ORDER BY global_offset LIMIT " + std::to_string(limit));
+            std::vector<snf::server::PlayerEventRecord> records;
+            records.reserve(static_cast<std::size_t>(::mysql_num_rows(rows.get())));
+            while (MYSQL_ROW row = ::mysql_fetch_row(rows.get()))
+            {
+                records.push_back(snf::server::PlayerEventRecord{
+                    .offset = parse_integer<std::uint64_t>(row[0], "ranking global_offset"),
+                    .event =
+                        snf::server::PlayerScoreChanged{
+                            .player = snf::server::PlayerId{.value = parse_integer<std::uint64_t>(
+                                                                row[1], "ranking player_id")},
+                            .sequence =
+                                parse_integer<std::uint64_t>(row[2], "ranking player_sequence"),
+                            .score = parse_integer<std::uint64_t>(row[3], "ranking absolute_score"),
+                        },
+                });
+            }
+            return records;
+        }
+
     private:
         void ensureSchema()
         {
@@ -451,8 +605,13 @@ namespace
             _connection.execute("INSERT IGNORE INTO snf_schema_version (version) VALUES (1)");
             auto version = _connection.query("SELECT MAX(version) FROM snf_schema_version");
             MYSQL_ROW version_row = ::mysql_fetch_row(version.get());
-            if (version_row == nullptr ||
-                parse_integer<std::uint32_t>(version_row[0], "schema version") != 1)
+            if (version_row == nullptr)
+            {
+                throw std::runtime_error{"MySQL schema version is unsupported"};
+            }
+            const std::uint32_t schema_version =
+                parse_integer<std::uint32_t>(version_row[0], "schema version");
+            if (schema_version == 0 || schema_version > 2)
             {
                 throw std::runtime_error{"MySQL schema version is unsupported"};
             }
@@ -477,6 +636,29 @@ namespace
                 "PRIMARY KEY (player_id, idempotency_key), "
                 "CONSTRAINT snf_purchase_player_fk FOREIGN KEY (player_id) "
                 "REFERENCES snf_players(player_id) ON DELETE CASCADE) ENGINE=InnoDB");
+            _connection.execute(
+                "CREATE TABLE IF NOT EXISTS snf_event_stream ("
+                "stream_name VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL PRIMARY "
+                "KEY, last_offset BIGINT UNSIGNED NOT NULL) ENGINE=InnoDB");
+            _connection.execute("INSERT IGNORE INTO snf_event_stream (stream_name, last_offset) "
+                                "VALUES ('ranking',0)");
+            _connection.execute(
+                "CREATE TABLE IF NOT EXISTS snf_player_events ("
+                "global_offset BIGINT UNSIGNED NOT NULL PRIMARY KEY, "
+                "player_id BIGINT UNSIGNED NOT NULL, "
+                "player_sequence BIGINT UNSIGNED NOT NULL, "
+                "award_id BIGINT UNSIGNED NOT NULL, "
+                "score_delta BIGINT UNSIGNED NOT NULL, "
+                "absolute_score BIGINT UNSIGNED NOT NULL, "
+                "created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6), "
+                "UNIQUE KEY snf_player_event_sequence (player_id, player_sequence), "
+                "UNIQUE KEY snf_player_event_award (player_id, award_id), "
+                "CONSTRAINT snf_player_event_player_fk FOREIGN KEY (player_id) "
+                "REFERENCES snf_players(player_id) ON DELETE CASCADE) ENGINE=InnoDB");
+            if (schema_version == 1)
+            {
+                _connection.execute("INSERT INTO snf_schema_version (version) VALUES (2)");
+            }
         }
 
         [[nodiscard]] static snf::server::PurchaseTransactionResult
@@ -493,6 +675,21 @@ namespace
                 .currency_balance = currency,
                 .purchased_item_count = items,
                 .replayed = false,
+            };
+        }
+
+        [[nodiscard]] static snf::server::RankingAwardTransactionResult
+        rankingFailure(const snf::server::RankingAwardRequest& request,
+                       const snf::server::RankingAwardStatus status,
+                       const snf::server::PlayerRecord& player)
+        {
+            return snf::server::RankingAwardTransactionResult{
+                .status = status,
+                .player = request.player,
+                .award_id = request.award_id,
+                .score_delta = request.score_delta,
+                .authoritative_score = player.ranking_score,
+                .authoritative_sequence = player.last_domain_event_sequence,
             };
         }
 
@@ -524,7 +721,13 @@ namespace snf::server
             PurchaseCompletion completion;
         };
 
-        using Job = std::variant<LoadJob, SaveJob, PurchaseJob>;
+        struct RankingAwardJob
+        {
+            RankingAwardRequest request;
+            RankingAwardCompletion completion;
+        };
+
+        using Job = std::variant<LoadJob, SaveJob, PurchaseJob, RankingAwardJob>;
 
         explicit Impl(MySqlPlayerRepositoryConfig config)
             : _config(std::move(config))
@@ -610,6 +813,25 @@ namespace snf::server
             completion(unavailable(request));
         }
 
+        void asyncAwardRankingScore(const RankingAwardRequest request,
+                                    RankingAwardCompletion completion)
+        {
+            if (!completion)
+            {
+                throw std::invalid_argument{"Ranking award completion must be callable"};
+            }
+            if (request.player.value == 0 || request.award_id.value == 0 ||
+                request.score_delta == 0)
+            {
+                throw std::invalid_argument{"Ranking award identity and delta must be non-zero"};
+            }
+            if (push(Job{RankingAwardJob{.request = request, .completion = completion}}))
+            {
+                return;
+            }
+            completion(rankingUnavailable(request));
+        }
+
         void close() noexcept
         {
             _jobs.close();
@@ -645,9 +867,34 @@ namespace snf::server
                 .purchase_committed = _purchase_committed.load(std::memory_order_relaxed),
                 .purchase_replayed = _purchase_replayed.load(std::memory_order_relaxed),
                 .purchase_rejected = _purchase_rejected.load(std::memory_order_relaxed),
+                .ranking_awards_committed =
+                    _ranking_awards_committed.load(std::memory_order_relaxed),
+                .ranking_awards_replayed = _ranking_awards_replayed.load(std::memory_order_relaxed),
+                .ranking_awards_rejected = _ranking_awards_rejected.load(std::memory_order_relaxed),
                 .operation_failures = _operation_failures.load(std::memory_order_relaxed),
                 .operation_latency_nanoseconds = _operation_latency.snapshot(),
             };
+        }
+
+        [[nodiscard]] std::vector<PlayerEventRecord> rankingEventsAfter(const std::uint64_t offset,
+                                                                        const std::size_t limit)
+        {
+            const auto started_at = std::chrono::steady_clock::now();
+            try
+            {
+                MySqlStore store{_config, false};
+                auto records = store.rankingEventsAfter(offset, limit);
+                _operation_latency.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - started_at));
+                return records;
+            }
+            catch (...)
+            {
+                _operation_failures.fetch_add(1, std::memory_order_relaxed);
+                _operation_latency.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - started_at));
+                throw;
+            }
         }
 
     private:
@@ -719,7 +966,7 @@ namespace snf::server
                             }
                             invoke(value.completion, result);
                         }
-                        else
+                        else if constexpr (std::is_same_v<Value, PurchaseJob>)
                         {
                             PurchaseTransactionResult result;
                             try
@@ -732,6 +979,22 @@ namespace snf::server
                             {
                                 failStore(store);
                                 result = unavailable(value.request);
+                            }
+                            invoke(value.completion, std::move(result));
+                        }
+                        else
+                        {
+                            RankingAwardTransactionResult result;
+                            try
+                            {
+                                ensureStore(store);
+                                result = store->awardRankingScore(value.request);
+                                countRankingAward(result);
+                            }
+                            catch (...)
+                            {
+                                failStore(store);
+                                result = rankingUnavailable(value.request);
                             }
                             invoke(value.completion, std::move(result));
                         }
@@ -774,6 +1037,22 @@ namespace snf::server
             }
         }
 
+        void countRankingAward(const RankingAwardTransactionResult& result) noexcept
+        {
+            if (result.replayed)
+            {
+                _ranking_awards_replayed.fetch_add(1, std::memory_order_relaxed);
+            }
+            else if (result.status == RankingAwardStatus::Committed)
+            {
+                _ranking_awards_committed.fetch_add(1, std::memory_order_relaxed);
+            }
+            else
+            {
+                _ranking_awards_rejected.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+
         template <typename Completion, typename Result>
         void invoke(Completion& completion, Result result) noexcept
         {
@@ -801,6 +1080,17 @@ namespace snf::server
             };
         }
 
+        [[nodiscard]] static RankingAwardTransactionResult
+        rankingUnavailable(const RankingAwardRequest& request) noexcept
+        {
+            return RankingAwardTransactionResult{
+                .status = RankingAwardStatus::Unavailable,
+                .player = request.player,
+                .award_id = request.award_id,
+                .score_delta = request.score_delta,
+            };
+        }
+
         MySqlPlayerRepositoryConfig _config;
         snf::runtime::BoundedQueue<Job> _jobs;
         std::vector<std::thread> _workers;
@@ -809,6 +1099,9 @@ namespace snf::server
         std::atomic<std::uint64_t> _purchase_committed{0};
         std::atomic<std::uint64_t> _purchase_replayed{0};
         std::atomic<std::uint64_t> _purchase_rejected{0};
+        std::atomic<std::uint64_t> _ranking_awards_committed{0};
+        std::atomic<std::uint64_t> _ranking_awards_replayed{0};
+        std::atomic<std::uint64_t> _ranking_awards_rejected{0};
         std::atomic<std::uint64_t> _operation_failures{0};
         snf::runtime::Distribution _operation_latency;
     };
@@ -836,6 +1129,12 @@ namespace snf::server
         _impl->asyncPurchase(request, std::move(completion));
     }
 
+    void MySqlPlayerRepository::asyncAwardRankingScore(RankingAwardRequest request,
+                                                       RankingAwardCompletion completion)
+    {
+        _impl->asyncAwardRankingScore(request, std::move(completion));
+    }
+
     void MySqlPlayerRepository::close() noexcept
     {
         _impl->close();
@@ -849,5 +1148,12 @@ namespace snf::server
     PlayerRepositoryStats MySqlPlayerRepository::stats() const
     {
         return _impl->stats();
+    }
+
+    std::vector<PlayerEventRecord>
+    MySqlPlayerRepository::rankingEventsAfter(const std::uint64_t offset,
+                                              const std::size_t limit) const
+    {
+        return _impl->rankingEventsAfter(offset, limit);
     }
 }

@@ -62,6 +62,7 @@ namespace
             .read_timeout = 5s,
             .write_timeout = 5s,
             .purchase_fault_injector = {},
+            .ranking_award_fault_injector = {},
         };
     }
 
@@ -98,6 +99,9 @@ namespace
         {
             snf::server::MySqlPlayerRepository repository{repository_config};
         }
+        execute_sql(repository_config, "DELETE FROM snf_player_events");
+        execute_sql(repository_config,
+                    "UPDATE snf_event_stream SET last_offset=0 WHERE stream_name='ranking'");
         execute_sql(repository_config, "DELETE FROM snf_purchase_idempotency");
         execute_sql(repository_config, "DELETE FROM snf_players");
     }
@@ -141,6 +145,25 @@ namespace
                 .product = product,
             },
             [&completion](snf::server::PurchaseTransactionResult result)
+            { completion.set_value(std::move(result)); });
+        assert(future.wait_for(5s) == std::future_status::ready);
+        return future.get();
+    }
+
+    snf::server::RankingAwardTransactionResult award(snf::server::PlayerRepository& repository,
+                                                     const snf::server::PlayerId player,
+                                                     const std::uint64_t award_id,
+                                                     const std::uint64_t delta)
+    {
+        std::promise<snf::server::RankingAwardTransactionResult> completion;
+        auto future = completion.get_future();
+        repository.asyncAwardRankingScore(
+            snf::server::RankingAwardRequest{
+                .player = player,
+                .award_id = snf::server::RankingAwardId{.value = award_id},
+                .score_delta = delta,
+            },
+            [&completion](snf::server::RankingAwardTransactionResult result)
             { completion.set_value(std::move(result)); });
         assert(future.wait_for(5s) == std::future_status::ready);
         return future.get();
@@ -282,6 +305,146 @@ namespace
             assert(retry.replayed);
             assert(retry.currency_balance == 900);
             assert(retry.purchased_item_count == 1);
+        }
+    }
+
+    void test_ranking_award_is_durable_ordered_and_idempotent(
+        const snf::server::MySqlPlayerRepositoryConfig& repository_config)
+    {
+        const snf::server::PlayerId first_player{.value = 1101};
+        const snf::server::PlayerId second_player{.value = 1102};
+        snf::server::MySqlPlayerRepository first{repository_config};
+        snf::server::MySqlPlayerRepository second{repository_config};
+
+        std::promise<snf::server::RankingAwardTransactionResult> first_completion;
+        std::promise<snf::server::RankingAwardTransactionResult> second_completion;
+        auto first_result = first_completion.get_future();
+        auto second_result = second_completion.get_future();
+        first.asyncAwardRankingScore(
+            snf::server::RankingAwardRequest{
+                .player = first_player,
+                .award_id = snf::server::RankingAwardId{.value = 1},
+                .score_delta = 25,
+            },
+            [&first_completion](snf::server::RankingAwardTransactionResult result)
+            { first_completion.set_value(std::move(result)); });
+        second.asyncAwardRankingScore(
+            snf::server::RankingAwardRequest{
+                .player = first_player,
+                .award_id = snf::server::RankingAwardId{.value = 1},
+                .score_delta = 25,
+            },
+            [&second_completion](snf::server::RankingAwardTransactionResult result)
+            { second_completion.set_value(std::move(result)); });
+        assert(first_result.wait_for(5s) == std::future_status::ready);
+        assert(second_result.wait_for(5s) == std::future_status::ready);
+        const auto first_value = first_result.get();
+        const auto second_value = second_result.get();
+        assert(first_value.status == snf::server::RankingAwardStatus::Committed);
+        assert(second_value.status == snf::server::RankingAwardStatus::Committed);
+        assert(first_value.replayed != second_value.replayed);
+        assert(first_value.global_offset == second_value.global_offset);
+
+        const auto other_player = award(second, second_player, 1, 40);
+        assert(other_player.status == snf::server::RankingAwardStatus::Committed);
+        assert(!other_player.replayed);
+
+        const auto next = award(first, first_player, 2, 15);
+        assert(next.status == snf::server::RankingAwardStatus::Committed);
+        assert(next.event_sequence == 2);
+        assert(next.event_score == 40);
+
+        const auto replay = award(first, first_player, 1, 25);
+        assert(replay.status == snf::server::RankingAwardStatus::Committed);
+        assert(replay.replayed);
+        assert(replay.event_sequence == 1);
+        assert(replay.event_score == 25);
+        assert(replay.authoritative_sequence == 2);
+        assert(replay.authoritative_score == 40);
+
+        const auto conflict = award(first, first_player, 1, 26);
+        assert(conflict.status == snf::server::RankingAwardStatus::IdempotencyConflict);
+        assert(!conflict.replayed);
+        const auto events = first.rankingEventsAfter(0);
+        assert(events.size() == 3);
+        for (std::size_t index = 0; index < events.size(); ++index)
+        {
+            assert(events[index].offset == index + 1);
+        }
+        assert(first.find(first_player)->ranking_score == 40);
+        assert(first.find(first_player)->last_domain_event_sequence == 2);
+    }
+
+    void crash_ranking_at(const snf::server::MySqlPlayerRepositoryConfig& base_config,
+                          const snf::server::MySqlRankingAwardFaultPoint point,
+                          const snf::server::PlayerId player,
+                          const std::uint64_t award_id,
+                          const int exit_code)
+    {
+        const pid_t child = ::fork();
+        assert(child != -1);
+        if (child == 0)
+        {
+            auto child_config = base_config;
+            child_config.worker_count = 1;
+            child_config.ranking_award_fault_injector =
+                [point, exit_code](const snf::server::MySqlRankingAwardFaultPoint observed)
+            {
+                if (observed == point)
+                {
+                    std::_Exit(exit_code);
+                }
+            };
+            snf::server::MySqlPlayerRepository repository{std::move(child_config)};
+            static_cast<void>(award(repository, player, award_id, 30));
+            std::_Exit(99);
+        }
+
+        int status = 0;
+        assert(::waitpid(child, &status, 0) == child);
+        assert(WIFEXITED(status));
+        assert(WEXITSTATUS(status) == exit_code);
+    }
+
+    void test_ranking_award_crash_boundary_recovers_from_outbox(
+        const snf::server::MySqlPlayerRepositoryConfig& repository_config)
+    {
+        const snf::server::PlayerId before_player{.value = 1103};
+        crash_ranking_at(repository_config,
+                         snf::server::MySqlRankingAwardFaultPoint::BeforeCommit,
+                         before_player,
+                         71,
+                         83);
+        {
+            snf::server::MySqlPlayerRepository recovered{repository_config};
+            const auto retry = award(recovered, before_player, 71, 30);
+            assert(retry.status == snf::server::RankingAwardStatus::Committed);
+            assert(!retry.replayed);
+            assert(retry.event_score == 30);
+        }
+
+        const snf::server::PlayerId after_player{.value = 1104};
+        crash_ranking_at(repository_config,
+                         snf::server::MySqlRankingAwardFaultPoint::AfterCommitBeforeCompletion,
+                         after_player,
+                         72,
+                         84);
+        {
+            snf::server::MySqlPlayerRepository recovered{repository_config};
+            const auto retry = award(recovered, after_player, 72, 30);
+            assert(retry.status == snf::server::RankingAwardStatus::Committed);
+            assert(retry.replayed);
+            assert(retry.event_score == 30);
+            const auto record = recovered.find(after_player);
+            assert(record && record->ranking_score == 30);
+            assert(record->last_domain_event_sequence == 1);
+        }
+
+        snf::server::MySqlPlayerRepository verified{repository_config};
+        const auto events = verified.rankingEventsAfter(0);
+        for (std::size_t index = 0; index < events.size(); ++index)
+        {
+            assert(events[index].offset == index + 1);
         }
     }
 
@@ -485,6 +648,8 @@ int main()
     test_record_survives_repository_restart(repository_config);
     test_concurrent_unique_key_commits_once(repository_config);
     test_crash_before_and_after_commit_is_recoverable(repository_config);
+    test_ranking_award_is_durable_ordered_and_idempotent(repository_config);
+    test_ranking_award_crash_boundary_recovers_from_outbox(repository_config);
     test_failed_outcome_and_capacity_are_durable(repository_config);
     test_mysql_queue_is_bounded_without_blocking_the_caller(repository_config);
     test_game_server_restores_mysql_players_across_restart(repository_config);

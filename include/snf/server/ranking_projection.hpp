@@ -12,14 +12,6 @@
 
 namespace snf::server
 {
-    struct PlayerEventRecord
-    {
-        std::uint64_t offset{0};
-        PlayerDomainEvent event;
-
-        [[nodiscard]] bool operator==(const PlayerEventRecord&) const noexcept = default;
-    };
-
     struct RankingEntry
     {
         PlayerId player;

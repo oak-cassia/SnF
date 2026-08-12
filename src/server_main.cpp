@@ -66,6 +66,7 @@ namespace
             .read_timeout = std::chrono::seconds{5},
             .write_timeout = std::chrono::seconds{5},
             .purchase_fault_injector = {},
+            .ranking_award_fault_injector = {},
         };
     }
 
@@ -147,6 +148,9 @@ namespace
                   << " accepted, " << repository.rejected << " rejected, purchases "
                   << repository.purchase_committed << " committed/" << repository.purchase_replayed
                   << " replayed/" << repository.purchase_rejected << " rejected, "
+                  << "ranking awards " << repository.ranking_awards_committed << " committed/"
+                  << repository.ranking_awards_replayed << " replayed/"
+                  << repository.ranking_awards_rejected << " rejected, "
                   << repository.operation_failures << " operation failures, latency ns "
                   << format_distribution(repository.operation_latency_nanoseconds) << '\n';
 

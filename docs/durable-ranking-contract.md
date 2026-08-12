@@ -58,7 +58,9 @@ struct RankingAwardRequest {
 - 같은 identity와 같은 `score_delta`는 기존 결과를 replay한다.
 - 같은 identity를 다른 delta로 재사용하면 `IdempotencyConflict`다.
 - `score_delta == 0`, score overflow와 sequence overflow는 transaction 전에 명시적 거부다.
-- retry 결과는 최초 commit이 만든 절대 score, Player sequence와 global offset을 그대로 반환한다.
+- retry 결과는 최초 commit이 만든 event score, Player sequence와 global offset을 그대로 반환하고,
+  별도로 현재 authoritative Player score/sequence를 반환한다. Actor는 후자만 적용하므로 오래된 award
+  replay가 이후 award의 상태를 되돌리지 않는다.
 - award producer는 성공 completion을 받지 못하면 같은 identity로 재전달할 수 있다. 새 identity를
   만들면 별도 award로 처리되는 것이 의도된 의미다.
 
@@ -67,7 +69,7 @@ struct RankingAwardRequest {
 schema version 2는 다음 durable state를 추가한다.
 
 ```text
-snf_event_stream(stream='ranking', next_offset)
+snf_event_stream(stream='ranking', last_offset)
 snf_player_events(global_offset PK,
                   player_id,
                   player_sequence,
@@ -81,7 +83,7 @@ snf_player_events(global_offset PK,
 
 `AUTO_INCREMENT`는 rollback된 insert의 값을 재사용하지 않아 strict offset에 gap을 만들 수 있으므로
 사용하지 않는다. transaction이 `snf_event_stream`의 ranking row를 `FOR UPDATE`로 잠그고
-`next_offset`을 할당한다. rollback은 cursor 갱신도 되돌리므로 committed log의 offset은 1부터
+`last_offset + 1`을 할당한다. rollback은 cursor 갱신도 되돌리므로 committed log의 offset은 1부터
 연속이다. 이 row는 award transaction을 직렬화하지만 우선 correctness reference로 채택한다. 측정이
 병목을 증명하면 partitioned stream이나 projection의 gap 허용 계약을 별도 단계에서 비교한다.
 
@@ -111,7 +113,9 @@ completion이 유실돼도 outbox tail과 같은 identity retry가 결과를 복
 `AwardRankingScoreCommand`는 `award_id`와 delta를 가진다. persistent Player binding은 구매와 같은
 별도 stage에서 repository operation을 await한다.
 
-- completion이 `Committed` 또는 `Replayed`면 PlayerActor가 absolute score와 sequence를 적용한다.
+- completion이 `Committed` 또는 `Replayed`면 PlayerActor가 현재 authoritative score와 sequence를
+  적용한다. outbox 원본의 event score/sequence는 projection과 감사에 사용하고 Actor snapshot 적용에는
+  사용하지 않는다.
 - `Unavailable`과 conflict는 Actor state를 바꾸지 않는다.
 - completion의 Player, award identity와 delta가 pending command와 다르면 runtime invariant 위반이다.
 - repository transaction 자체가 event를 durable하게 만들었으므로 Actor completion 순서대로
@@ -195,12 +199,16 @@ checkpoint tail을 재생한다. 따라서 projection drain은 Player transactio
 
 ## 9. 완료 기준과 구현 순서
 
-### 7.3a Durable award/outbox transaction
+### 7.3a Durable award/outbox transaction (완료)
 
 - request/result API와 in-memory reference를 추가한다.
 - MySQL schema version 2와 atomic Player/outbox transaction을 구현한다.
 - duplicate/conflict, 두 repository instance 경합, commit 직전/직후 process crash를 검증한다.
 - Actor가 DB completion 전 score를 바꾸지 않고 authoritative completion만 적용하는지 검증한다.
+
+구현 결과 MySQL schema version 2와 in-memory reference가 같은 identity/replay 의미를 제공한다. 실제
+MySQL에서 동일 award 경합, strict offset, commit 직전 rollback과 commit 직후 replay를 Debug 반복,
+ASan/UBSan 및 TSan으로 검증했다.
 
 ### 7.3b Projector recovery와 checkpoint
 

@@ -770,12 +770,12 @@ UnifiedRuntimeDrained =
 - 별도 `RankingProjection`은 global offset을 연속 적용하고 score 내림차순, 동점 PlayerId
   오름차순으로 결정적 standings를 만든다. checkpoint restore 뒤 tail replay가 live view와
   동일한지, 같은 tail의 재실행이 idempotent한지 자동화 테스트로 검증한다.
-- 현재 event log와 checkpoint는 프로세스 메모리 기반인 의미 참조 구현이다. Player snapshot은
-  6.3 MySQL adapter로 durable하게 만들 수 있지만 event publish와 snapshot 저장은 원자적이지 않다.
-  crash/restart 복구에는 Player 변경과 event/outbox 기록을 묶는 transaction 경계, durable event
-  store와 checkpoint를 결정해야 한다. 그 전에는 시즌 정산 job을 추가하지 않는다.
+- 현재 projection과 checkpoint는 프로세스 메모리 기반인 의미 참조 구현이다. 7.3a에서 Player
+  score/sequence와 outbox 기록의 MySQL transaction은 완료했지만, 서버 projection이 durable tail을
+  startup/live 경로에서 아직 소비하지 않는다. ordered projector와 durable checkpoint가 완료되기
+  전에는 standings를 crash-recovery나 시즌 정산의 근거로 쓰지 않는다.
 
-### 7.3 Durable ranking outbox와 checkpoint (계약 완료, 구현 남음)
+### 7.3 Durable ranking outbox와 checkpoint (7.3a 완료; 7.3b~c 남음)
 
 - 상세 계약은 `docs/durable-ranking-contract.md`를 단일 기준으로 사용한다. Player score·sequence와
   outbox event를 MySQL transaction 하나로 commit하고, Actor는 authoritative completion만 적용한다.
@@ -785,6 +785,23 @@ UnifiedRuntimeDrained =
   stream cursor로 연속 offset을 할당한다. 병목이 측정될 때만 partition/gap 계약을 재검토한다.
 - 구현은 7.3a award/outbox transaction, 7.3b ordered projector/checkpoint, 7.3c 부하·retention 결정으로
   나눈다. cross-zone handoff는 이 correctness gap을 닫은 뒤의 다음 콘텐츠 단계다.
+
+#### 7.3a Durable award/outbox transaction (완료)
+
+- `AwardRankingScoreCommand`는 non-zero `RankingAwardId`를 가지며, repository completion 전에는
+  PlayerActor score를 변경하지 않는다. 동일 `(PlayerId, award_id)`·delta는 replay하고 다른 delta는
+  conflict다. 오래된 replay는 event 원본과 현재 authoritative Player snapshot을 분리해 이후 score를
+  과거 값으로 되돌리지 않는다.
+- MySQL schema version 2는 `snf_event_stream`과 `snf_player_events`를 추가한다. Player score/sequence,
+  outbox row와 strict global offset cursor는 한 InnoDB transaction에서 commit된다. rollback gap이 생기는
+  `AUTO_INCREMENT` 대신 transaction row lock 아래 `last_offset + 1`을 할당한다.
+- in-memory reference와 bounded Threaded adapter도 같은 request/result와 global event capacity를
+  구현한다. award commit/replay/reject metric을 공통 repository snapshot에 추가했다.
+- 실제 MySQL 통합 테스트는 두 repository instance의 동일 award 경합, 다른 delta conflict, 연속 global
+  offset과 event tail을 검증한다. process crash fault injection에서 commit 직전은 rollback 후 신규
+  적용되고 commit 직후 completion 전 crash는 같은 identity retry에서 replay된다.
+- Debug 반복 5회, ASan/UBSan과 TSan의 실제 MySQL 경로가 통과했다. 7.3b 전까지 outbox는 durable하지만
+  `GameServer::getRankingStandings()`는 이 tail을 자동 재생하지 않는다.
 
 ## 선택적 인프라 트랙: io_uring Network Backend
 

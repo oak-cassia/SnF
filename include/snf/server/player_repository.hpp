@@ -2,9 +2,11 @@
 
 #include "snf/runtime/bounded_queue.hpp"
 #include "snf/runtime/distribution.hpp"
+#include "snf/server/player_domain_event.hpp"
 #include "snf/server/player_id.hpp"
 #include "snf/server/player_record.hpp"
 #include "snf/server/purchase.hpp"
+#include "snf/server/ranking_award.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -44,6 +46,7 @@ namespace snf::server
     using PlayerLoadCompletion = std::function<void(PlayerLoadResult)>;
     using PlayerSaveCompletion = std::function<void(PlayerSaveResult)>;
     using PurchaseCompletion = std::function<void(PurchaseTransactionResult)>;
+    using RankingAwardCompletion = std::function<void(RankingAwardTransactionResult)>;
 
     struct PlayerRepositoryStats
     {
@@ -54,6 +57,9 @@ namespace snf::server
         std::uint64_t purchase_committed{0};
         std::uint64_t purchase_replayed{0};
         std::uint64_t purchase_rejected{0};
+        std::uint64_t ranking_awards_committed{0};
+        std::uint64_t ranking_awards_replayed{0};
+        std::uint64_t ranking_awards_rejected{0};
         std::uint64_t operation_failures{0};
         snf::runtime::DistributionSnapshot operation_latency_nanoseconds;
     };
@@ -80,6 +86,8 @@ namespace snf::server
         virtual void asyncLoad(PlayerId player, PlayerLoadCompletion completion) = 0;
         virtual void asyncSave(PlayerRecord record, PlayerSaveCompletion completion) = 0;
         virtual void asyncPurchase(PurchaseRequest request, PurchaseCompletion completion) = 0;
+        virtual void asyncAwardRankingScore(RankingAwardRequest request,
+                                            RankingAwardCompletion completion) = 0;
     };
 
     // Deterministic first adapter for the vertical slice. Completion is immediate,
@@ -89,13 +97,17 @@ namespace snf::server
     class InMemoryPlayerRepository final : public PlayerRepository
     {
     public:
-        explicit InMemoryPlayerRepository(std::size_t max_idempotency_records_per_player = 1024);
+        explicit InMemoryPlayerRepository(std::size_t max_idempotency_records_per_player = 1024,
+                                          std::size_t max_ranking_events = 65536);
 
         void asyncLoad(PlayerId player, PlayerLoadCompletion completion) override;
         void asyncSave(PlayerRecord record, PlayerSaveCompletion completion) override;
         void asyncPurchase(PurchaseRequest request, PurchaseCompletion completion) override;
+        void asyncAwardRankingScore(RankingAwardRequest request,
+                                    RankingAwardCompletion completion) override;
 
         [[nodiscard]] std::optional<PlayerRecord> find(PlayerId player) const;
+        [[nodiscard]] std::vector<PlayerEventRecord> rankingEventsAfter(std::uint64_t offset) const;
 
         struct PurchaseStats
         {
@@ -105,6 +117,14 @@ namespace snf::server
         };
         [[nodiscard]] PurchaseStats purchaseStats() const;
 
+        struct RankingAwardStats
+        {
+            std::uint64_t committed{0};
+            std::uint64_t replayed{0};
+            std::uint64_t rejected{0};
+        };
+        [[nodiscard]] RankingAwardStats rankingAwardStats() const;
+
     private:
         struct StoredPurchase
         {
@@ -112,13 +132,26 @@ namespace snf::server
             PurchaseTransactionResult result;
         };
 
+        struct StoredRankingAward
+        {
+            std::uint64_t score_delta{0};
+            RankingAwardTransactionResult result;
+        };
+
         const std::size_t _max_idempotency_records_per_player;
+        const std::size_t _max_ranking_events;
         mutable std::mutex _mutex;
         std::unordered_map<PlayerId, PlayerRecord, PlayerIdHash> _records;
         std::
             unordered_map<PlayerId, std::unordered_map<std::uint64_t, StoredPurchase>, PlayerIdHash>
                 _purchases;
+        std::unordered_map<PlayerId,
+                           std::unordered_map<std::uint64_t, StoredRankingAward>,
+                           PlayerIdHash>
+            _ranking_awards;
+        std::vector<PlayerEventRecord> _ranking_events;
         PurchaseStats _purchase_stats;
+        RankingAwardStats _ranking_award_stats;
     };
 
     struct ThreadedPlayerRepositoryConfig
@@ -126,6 +159,7 @@ namespace snf::server
         std::size_t worker_count{1};
         std::size_t queue_capacity{4096};
         std::size_t max_idempotency_records_per_player{1024};
+        std::size_t max_ranking_events{65536};
     };
 
     using ThreadedPlayerRepositoryStats = PlayerRepositoryStats;
@@ -147,6 +181,8 @@ namespace snf::server
         void asyncLoad(PlayerId player, PlayerLoadCompletion completion) override;
         void asyncSave(PlayerRecord record, PlayerSaveCompletion completion) override;
         void asyncPurchase(PurchaseRequest request, PurchaseCompletion completion) override;
+        void asyncAwardRankingScore(RankingAwardRequest request,
+                                    RankingAwardCompletion completion) override;
 
         void close() noexcept;
         [[nodiscard]] std::optional<PlayerRecord> find(PlayerId player) const override;
@@ -171,7 +207,13 @@ namespace snf::server
             PurchaseCompletion completion;
         };
 
-        using Job = std::variant<LoadJob, SaveJob, PurchaseJob>;
+        struct RankingAwardJob
+        {
+            RankingAwardRequest request;
+            RankingAwardCompletion completion;
+        };
+
+        using Job = std::variant<LoadJob, SaveJob, PurchaseJob, RankingAwardJob>;
 
         void runWorker();
 

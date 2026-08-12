@@ -55,6 +55,8 @@ namespace snf::server
         void setLastLocation(std::optional<PlayerLocation> location) noexcept;
         [[nodiscard]] PlayerResult completePurchase(const PurchaseCommand& command,
                                                     PurchaseTransactionResult result);
+        [[nodiscard]] PlayerResult completeRankingAward(const AwardRankingScoreCommand& command,
+                                                        RankingAwardTransactionResult result);
         [[nodiscard]] PlayerRecord snapshot() const;
 
         // The caller must keep the command alive until the returned task

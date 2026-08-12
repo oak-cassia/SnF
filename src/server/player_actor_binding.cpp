@@ -128,6 +128,27 @@ namespace
                 });
         co_return std::move(result);
     }
+
+    snf::runtime::ActorTask<snf::server::RankingAwardTransactionResult>
+    awaitRankingAward(snf::server::PlayerRepository& repository,
+                      snf::runtime::ActorContext& context,
+                      snf::server::RankingAwardRequest request)
+    {
+        auto result =
+            co_await snf::runtime::awaitAsyncOperation<snf::server::RankingAwardTransactionResult>(
+                context,
+                [&repository, request](
+                    snf::runtime::AsyncOperationProducer<snf::server::RankingAwardTransactionResult>
+                        producer)
+                {
+                    repository.asyncAwardRankingScore(
+                        request,
+                        [producer = std::move(producer)](
+                            snf::server::RankingAwardTransactionResult result) mutable noexcept
+                        { producer.complete(std::move(result)); });
+                });
+        co_return std::move(result);
+    }
 }
 
 namespace snf::server
@@ -142,6 +163,7 @@ namespace snf::server
             Loading,
             Handling,
             Purchasing,
+            AwardingRankingScore,
             Reserving,
             Saving,
         };
@@ -173,6 +195,7 @@ namespace snf::server
         // the owning Worker.
         snf::runtime::ActorTask<PlayerResult> task;
         snf::runtime::ActorTask<PurchaseTransactionResult> purchase_task;
+        snf::runtime::ActorTask<RankingAwardTransactionResult> ranking_award_task;
         // Started only when capacity was not immediately available, and owned by the
         // slot for the same reason.
         snf::runtime::ActorTask<OutboundReservation> reservation_task;
@@ -361,6 +384,24 @@ namespace snf::server
                               });
             return advance(player_slot, context, stop_token);
         }
+        if (const auto* award = std::get_if<AwardRankingScoreCommand>(&payload.command.command))
+        {
+            if (kind() != snf::runtime::ActorKind::Player)
+            {
+                throw std::logic_error{"Ranking award reached a provisional Player actor"};
+            }
+            player_slot.pending_command = *award;
+            player_slot.stage = PlayerActorSlot::Stage::AwardingRankingScore;
+            player_slot.ranking_award_task =
+                awaitRankingAward(*_repository,
+                                  context,
+                                  RankingAwardRequest{
+                                      .player = *player_slot.identity.playerId(),
+                                      .award_id = award->award_id,
+                                      .score_delta = award->score_delta,
+                                  });
+            return advance(player_slot, context, stop_token);
+        }
 
         player_slot.stage = PlayerActorSlot::Stage::Handling;
         player_slot.task = player_slot.actor.handle(payload.command.command);
@@ -429,6 +470,18 @@ namespace snf::server
                                                        .product = purchase->product,
                                                    });
             }
+            else if (const auto* award =
+                         std::get_if<AwardRankingScoreCommand>(&*slot.pending_command))
+            {
+                slot.stage = PlayerActorSlot::Stage::AwardingRankingScore;
+                slot.ranking_award_task = awaitRankingAward(*_repository,
+                                                            context,
+                                                            RankingAwardRequest{
+                                                                .player = *slot.identity.playerId(),
+                                                                .award_id = award->award_id,
+                                                                .score_delta = award->score_delta,
+                                                            });
+            }
             else
             {
                 slot.stage = PlayerActorSlot::Stage::Handling;
@@ -449,6 +502,27 @@ namespace snf::server
             // same Worker.
             slot.pending_result = slot.task.takeResult();
             slot.task = {};
+            slot.pending_command.reset();
+            slot.stage = PlayerActorSlot::Stage::Reserving;
+        }
+
+        if (slot.stage == PlayerActorSlot::Stage::AwardingRankingScore)
+        {
+            if (slot.ranking_award_task.resume() == snf::runtime::ActorTaskStatus::Suspended)
+            {
+                return snf::runtime::ActorDispatchResult::Suspended;
+            }
+
+            RankingAwardTransactionResult result = slot.ranking_award_task.takeResult();
+            slot.ranking_award_task = {};
+            const auto* award = slot.pending_command
+                                    ? std::get_if<AwardRankingScoreCommand>(&*slot.pending_command)
+                                    : nullptr;
+            if (award == nullptr)
+            {
+                throw std::logic_error{"Ranking award completed without its pending command"};
+            }
+            slot.pending_result = slot.actor.completeRankingAward(*award, std::move(result));
             slot.pending_command.reset();
             slot.stage = PlayerActorSlot::Stage::Reserving;
         }

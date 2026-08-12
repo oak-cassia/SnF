@@ -148,6 +148,17 @@ namespace
             purchase_requested.set_value();
         }
 
+        void asyncAwardRankingScore(snf::server::RankingAwardRequest request,
+                                    snf::server::RankingAwardCompletion completion) override
+        {
+            completion(snf::server::RankingAwardTransactionResult{
+                .status = snf::server::RankingAwardStatus::Unavailable,
+                .player = request.player,
+                .award_id = request.award_id,
+                .score_delta = request.score_delta,
+            });
+        }
+
         void completeLoad(snf::server::PlayerRecord record)
         {
             snf::server::PlayerLoadCompletion completion;
@@ -1579,7 +1590,7 @@ namespace
         assert(stats.in_flight_operations == 0);
     }
 
-    void test_persistent_player_event_advances_projection_and_is_saved()
+    void test_persistent_ranking_award_is_written_to_outbox_and_saved()
     {
         RuntimeDependencies dependencies{8};
         snf::server::InMemoryPlayerRepository repository;
@@ -1606,20 +1617,25 @@ namespace
                    .command =
                        snf::server::AwardRankingScoreCommand{
                            .request_id = 1,
+                           .award_id = snf::server::RankingAwardId{.value = 7001},
                            .score_delta = 35,
                        },
                }) == PostResult::Accepted);
 
-        const auto projection_deadline = std::chrono::steady_clock::now() + 1s;
-        while (dependencies.ranking_events.stats().event_count != 1 &&
-               std::chrono::steady_clock::now() < projection_deadline)
+        const auto award_deadline = std::chrono::steady_clock::now() + 1s;
+        while (repository.rankingEventsAfter(0).empty() &&
+               std::chrono::steady_clock::now() < award_deadline)
         {
             std::this_thread::sleep_for(1ms);
         }
-        assert((dependencies.ranking_events.standings() ==
-                std::vector<snf::server::RankingEntry>{
-                    {.player = player, .score = 35, .last_sequence = 1},
-                }));
+        assert((
+            repository.rankingEventsAfter(0) ==
+            std::vector<snf::server::PlayerEventRecord>{
+                {.offset = 1,
+                 .event =
+                     snf::server::PlayerScoreChanged{.player = player, .sequence = 1, .score = 35}},
+            }));
+        assert(dependencies.ranking_events.stats().event_count == 0);
         assert(dependencies.outbound.size() == 0);
         assert(dependencies.outbound.reservedSlotCount() == 0);
 
@@ -1664,5 +1680,5 @@ void run_actor_runtime_tests()
     test_admitted_commands_and_refused_posts_are_counted_apart();
     test_player_repository_wait_suspends_only_the_loading_actor();
     test_purchase_wait_suspends_only_the_purchasing_actor();
-    test_persistent_player_event_advances_projection_and_is_saved();
+    test_persistent_ranking_award_is_written_to_outbox_and_saved();
 }

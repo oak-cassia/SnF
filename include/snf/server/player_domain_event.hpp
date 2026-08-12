@@ -18,6 +18,14 @@ namespace snf::server
 
     using PlayerDomainEvent = std::variant<PlayerScoreChanged>;
 
+    struct PlayerEventRecord
+    {
+        std::uint64_t offset{0};
+        PlayerDomainEvent event;
+
+        [[nodiscard]] bool operator==(const PlayerEventRecord&) const noexcept = default;
+    };
+
     [[nodiscard]] inline PlayerId eventPlayer(const PlayerDomainEvent& event) noexcept
     {
         return std::visit([](const auto& value) { return value.player; }, event);

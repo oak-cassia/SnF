@@ -2,6 +2,7 @@
 
 #include "snf/server/player_id.hpp"
 #include "snf/server/purchase.hpp"
+#include "snf/server/ranking_award.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -34,6 +35,7 @@ namespace snf::server
     struct AwardRankingScoreCommand
     {
         std::uint32_t request_id{0};
+        RankingAwardId award_id;
         std::uint64_t score_delta{0};
     };
 

@@ -31,6 +31,24 @@ namespace
         return *completed;
     }
 
+    snf::server::RankingAwardTransactionResult award(snf::server::PlayerRepository& repository,
+                                                     const snf::server::PlayerId player,
+                                                     const std::uint64_t award_id,
+                                                     const std::uint64_t score_delta)
+    {
+        std::optional<snf::server::RankingAwardTransactionResult> completed;
+        repository.asyncAwardRankingScore(
+            snf::server::RankingAwardRequest{
+                .player = player,
+                .award_id = snf::server::RankingAwardId{.value = award_id},
+                .score_delta = score_delta,
+            },
+            [&completed](snf::server::RankingAwardTransactionResult result)
+            { completed = std::move(result); });
+        assert(completed.has_value());
+        return *completed;
+    }
+
     void test_in_memory_repository_loads_missing_and_saved_records()
     {
         snf::server::InMemoryPlayerRepository repository;
@@ -279,6 +297,70 @@ namespace
         assert(record->currency_balance == 100);
         assert(record->purchased_item_count == std::numeric_limits<std::uint64_t>::max());
     }
+
+    void test_ranking_award_is_atomic_idempotent_and_keeps_authoritative_state()
+    {
+        snf::server::InMemoryPlayerRepository repository{2, 2};
+        const snf::server::PlayerId player{.value = 103};
+
+        const auto first = award(repository, player, 10, 25);
+        assert(first.status == snf::server::RankingAwardStatus::Committed);
+        assert(!first.replayed);
+        assert(first.event_sequence == 1);
+        assert(first.event_score == 25);
+        assert(first.global_offset == 1);
+        assert(first.authoritative_score == 25);
+
+        const auto second = award(repository, player, 11, 15);
+        assert(second.status == snf::server::RankingAwardStatus::Committed);
+        assert(second.event_sequence == 2);
+        assert(second.event_score == 40);
+        assert(second.global_offset == 2);
+
+        const auto replay = award(repository, player, 10, 25);
+        assert(replay.status == snf::server::RankingAwardStatus::Committed);
+        assert(replay.replayed);
+        assert(replay.event_sequence == 1);
+        assert(replay.event_score == 25);
+        assert(replay.global_offset == 1);
+        assert(replay.authoritative_score == 40);
+        assert(replay.authoritative_sequence == 2);
+
+        const auto conflict = award(repository, player, 10, 26);
+        assert(conflict.status == snf::server::RankingAwardStatus::IdempotencyConflict);
+        assert(!conflict.replayed);
+        assert(conflict.event_score == 25);
+        assert(conflict.authoritative_score == 40);
+
+        const auto full = award(repository, player, 12, 5);
+        assert(full.status == snf::server::RankingAwardStatus::CapacityExceeded);
+        assert(repository.find(player)->ranking_score == 40);
+        assert(repository.find(player)->last_domain_event_sequence == 2);
+        assert((
+            repository.rankingEventsAfter(0) ==
+            std::vector<snf::server::PlayerEventRecord>{
+                {.offset = 1,
+                 .event =
+                     snf::server::PlayerScoreChanged{.player = player, .sequence = 1, .score = 25}},
+                {.offset = 2,
+                 .event =
+                     snf::server::PlayerScoreChanged{.player = player, .sequence = 2, .score = 40}},
+            }));
+
+        const auto stats = repository.rankingAwardStats();
+        assert(stats.committed == 2);
+        assert(stats.replayed == 1);
+        assert(stats.rejected == 2);
+    }
+
+    void test_threaded_ranking_award_reports_unavailable_after_close()
+    {
+        snf::server::ThreadedPlayerRepository repository;
+        repository.close();
+        const auto result = award(repository, snf::server::PlayerId{.value = 104}, 1, 10);
+        assert(result.status == snf::server::RankingAwardStatus::Unavailable);
+        assert(repository.stats().rejected == 1);
+    }
 }
 
 void run_player_repository_tests()
@@ -290,4 +372,6 @@ void run_player_repository_tests()
     test_failed_purchase_result_is_stable_across_balance_changes();
     test_threaded_purchase_reports_unavailable_after_close();
     test_purchase_inventory_overflow_rolls_back_currency_debit();
+    test_ranking_award_is_atomic_idempotent_and_keeps_authoritative_state();
+    test_threaded_ranking_award_reports_unavailable_after_close();
 }

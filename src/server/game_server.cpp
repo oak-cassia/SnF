@@ -25,6 +25,7 @@ namespace
                 .queue_capacity = config.player_repository_queue_capacity,
                 .max_idempotency_records_per_player =
                     config.max_purchase_idempotency_records_per_player,
+                .max_ranking_events = config.max_player_domain_events,
             });
     }
 

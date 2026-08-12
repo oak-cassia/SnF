@@ -145,12 +145,13 @@ Phase 7.2에서는 PlayerActor가 신뢰된 gameplay score command를 적용하�
 sequence의 domain event를 발행한다. bounded in-memory event log와 ranking projection은 duplicate,
 conflict, 순서 오류를 구분하며 checkpoint 뒤 tail replay로 같은 standings를 복원한다. event-only
 effect는 network outbound 용량을 소비하지 않는다. 현재 log와 checkpoint는 의미 참조 구현이므로
-Player snapshot이 MySQL에 저장되더라도 event publish와 원자적이지 않다. 프로세스 crash 복구와
-시즌 정산은 transactional outbox와 durable checkpoint를 정한 뒤의 범위다.
+Phase 7.3a 이전에는 Player snapshot과 event publish가 원자적이지 않았다. 이제 trusted award는
+durable identity를 가지며 Player score/sequence와 outbox event를 schema v2 MySQL transaction 하나로
+commit한다. 다만 서버 projection은 아직 durable tail을 시작·실행 중에 소비하지 않으므로 standings의
+프로세스 crash 복구와 시즌 정산은 ordered projector와 durable checkpoint 뒤의 범위다.
 
-Phase 7.3 계약은 trusted award의 durable identity, Player score와 outbox의 단일 MySQL transaction,
-strict global offset projector와 checkpoint/shutdown 복구 순서를 고정한다. 구현은 award transaction과
-ordered projector 두 단계로 나눈다.
+Phase 7.3 계약은 strict global offset projector와 checkpoint/shutdown 복구 순서까지 고정했다.
+7.3a award transaction은 완료했고 다음 구현 범위는 7.3b ordered projector/checkpoint다.
 
 콘텐츠 부하를 재현하기 위해 load client는 기존 `ping` 외에 `zone` 시나리오를 제공한다. 각 연결이
 고유 Player로 인증하고 Zone에 입장한 뒤 지속 이동하며 bootstrap과 gameplay RTT를 분리한다. 현재

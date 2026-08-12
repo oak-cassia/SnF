@@ -614,10 +614,12 @@ event log는 Player별 sequence와 별개인 global offset을 부여하고, rank
 domain event effect는 network response가 아니므로 outbound queue slot을 소비하지 않지만, publish
 실패를 성공으로 간주해서는 안 된다.
 
-현재 in-memory log와 checkpoint는 이 의미와 bounded failure를 검증하는 reference adapter다.
-Player snapshot만 durable하고 event log가 유실되면 다음 Player sequence를 적용할 수 없으므로,
-운영 adapter는 Player 변경과 event/outbox 기록의 atomicity 및 checkpoint 내구성을 함께 정해야 한다.
-이 경계가 결정되기 전 ranking view는 crash-recovery나 시즌 정산의 근거가 아니다.
+in-memory log와 checkpoint는 이 의미와 bounded failure를 검증하는 reference adapter다. 7.3a의 MySQL
+schema v2는 trusted award identity, Player score/sequence, outbox event와 strict stream offset을 한
+transaction에 묶었다. Actor는 DB completion 전 상태를 미리 변경하지 않고, 오래된 replay에서는 event
+원본이 아니라 현재 authoritative Player 값을 적용한다. 그러나 GameServer projection은 아직 durable
+tail을 startup/live 경로에서 소비하거나 checkpoint하지 않으므로 ranking view는 crash-recovery나 시즌
+정산의 근거가 아니다.
 
 구현 시 route 변경은 `RouteCoordinator`가 직렬화한다.
 
