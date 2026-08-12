@@ -18,6 +18,7 @@ namespace snf::server
     struct ZoneActorBinding::CommandPayload
     {
         ZoneInboundCommand command;
+        CommandReleaseToken release;
     };
 
     struct ZoneActorBinding::PassivatePayload
@@ -27,6 +28,14 @@ namespace snf::server
     ZoneActorBinding::ZoneActorBinding(ZoneActorBindingConfig config)
         : _actor_config(config.actor)
         , _on_result(std::move(config.on_result))
+    {
+    }
+
+    ZoneActorBinding::ZoneActorBinding(ZoneActorBindingConfig config,
+                                       CommandLifecycleSink& lifecycle)
+        : _actor_config(config.actor)
+        , _on_result(std::move(config.on_result))
+        , _lifecycle(&lifecycle)
     {
     }
 
@@ -43,6 +52,15 @@ namespace snf::server
         }
 
         const ZoneId zone = command.zone;
+        CommandReleaseToken release;
+        if (command.reply)
+        {
+            if (_lifecycle == nullptr)
+            {
+                throw std::logic_error{"Replying Zone command requires a lifecycle sink"};
+            }
+            release = CommandReleaseToken{*_lifecycle, command.reply->connection};
+        }
         return makeSubmission(
             snf::runtime::ActorKey{
                 .kind = kind(),
@@ -50,7 +68,10 @@ namespace snf::server
             },
             snf::runtime::ActorActivation::ActivateIfMissing,
             snf::runtime::ActorAccounting::Command,
-            CommandPayload{.command = std::move(command)});
+            CommandPayload{
+                .command = std::move(command),
+                .release = std::move(release),
+            });
     }
 
     snf::runtime::ActorSubmission ZoneActorBinding::makePassivate(const ZoneId zone) const
@@ -95,7 +116,7 @@ namespace snf::server
         const ZoneResult result = zone_slot.actor.handle(payload.command.command);
         if (_on_result)
         {
-            _on_result(payload.command.zone, payload.command.command, result);
+            _on_result(payload.command, result);
         }
         return snf::runtime::ActorDispatchResult::KeepActive;
     }

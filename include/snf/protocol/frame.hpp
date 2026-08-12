@@ -20,6 +20,12 @@ namespace snf::protocol
         Pong = 2,
         Authenticate = 3,
         Authenticated = 4,
+        EnterZone = 5,
+        ZoneEntered = 6,
+        Move = 7,
+        Moved = 8,
+        LeaveZone = 9,
+        ZoneLeft = 10,
     };
 
     struct Frame

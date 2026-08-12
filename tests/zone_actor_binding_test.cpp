@@ -1,5 +1,6 @@
 #include "snf/runtime/actor_runtime.hpp"
 #include "snf/runtime/runtime_completion.hpp"
+#include "snf/server/command_terminal.hpp"
 #include "snf/server/zone_actor_binding.hpp"
 #include "snf/server/zone_actor_ingress.hpp"
 
@@ -40,18 +41,20 @@ namespace
         } recorded;
 
         const std::thread::id caller = std::this_thread::get_id();
-        snf::server::ZoneActorBinding binding{snf::server::ZoneActorBindingConfig{
-            .actor = snf::server::ZoneActorConfig{.aoi_radius = 100},
-            .on_result =
-                [&recorded](snf::server::ZoneId,
-                            const snf::server::ZoneCommand&,
-                            const snf::server::ZoneResult& result)
-            {
-                std::lock_guard lock{recorded.mutex};
-                recorded.results.push_back(result);
-                recorded.threads.push_back(std::this_thread::get_id());
+        snf::server::CountingCommandLifecycleSink lifecycle;
+        snf::server::ZoneActorBinding binding{
+            snf::server::ZoneActorBindingConfig{
+                .actor = snf::server::ZoneActorConfig{.aoi_radius = 100},
+                .on_result =
+                    [&recorded](const snf::server::ZoneInboundCommand&,
+                                const snf::server::ZoneResult& result)
+                {
+                    std::lock_guard lock{recorded.mutex};
+                    recorded.results.push_back(result);
+                    recorded.threads.push_back(std::this_thread::get_id());
+                },
             },
-        }};
+            lifecycle};
         RecordingCompletion completion;
         snf::runtime::ActorRuntime runtime{snf::runtime::ActorRuntimeConfig{
                                                .worker_count = 1,
@@ -63,7 +66,7 @@ namespace
                                            },
                                            completion};
         runtime.registerBinding(binding);
-        snf::server::ZoneActorIngress ingress{runtime, binding};
+        snf::server::ZoneActorIngress ingress{runtime, binding, lifecycle};
         runtime.start();
 
         const snf::server::ZoneId zone{.value = 10};
@@ -76,6 +79,12 @@ namespace
                            .route_epoch = 1,
                            .position = {.x = 1, .y = 2},
                        },
+                   .reply =
+                       snf::server::ZoneReplyContext{
+                           .connection = {.descriptor = 4, .generation = 1},
+                           .request_id = 1,
+                           .kind = snf::server::ZoneReplyKind::Entered,
+                       },
                }) == snf::runtime::PostResult::Accepted);
         assert(ingress.tryPost(snf::server::ZoneInboundCommand{
                    .zone = zone,
@@ -84,6 +93,12 @@ namespace
                            .player = player,
                            .route_epoch = 1,
                            .position = {.x = 3, .y = 4},
+                       },
+                   .reply =
+                       snf::server::ZoneReplyContext{
+                           .connection = {.descriptor = 4, .generation = 1},
+                           .request_id = 2,
+                           .kind = snf::server::ZoneReplyKind::Moved,
                        },
                }) == snf::runtime::PostResult::Accepted);
         assert(ingress.tryPassivate(zone) == snf::runtime::PostResult::Accepted);
@@ -105,6 +120,9 @@ namespace
         assert(stats.evicted_actors == 1);
         assert(completion.drained.load() == 1);
         assert(completion.failed.load() == 0);
+        assert(lifecycle.releaseCount() == 2);
+        assert(lifecycle.terminalCount() == 2);
+        assert(lifecycle.admissionRejectionCount() == 0);
     }
 }
 

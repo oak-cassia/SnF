@@ -85,6 +85,7 @@ namespace snf::server
               }(),
               _outbound_event.getDescriptor())
         , _player_effects(_outbound_channel)
+        , _zone_results(_outbound_channel)
         , _player_repository(ThreadedPlayerRepositoryConfig{
               .worker_count = config.player_repository_worker_count,
               .queue_capacity = config.player_repository_queue_capacity,
@@ -109,6 +110,13 @@ namespace snf::server
                                                    }
                                                },
                                            })
+        , _zone_actor_binding(
+              ZoneActorBindingConfig{
+                  .actor = ZoneActorConfig{.aoi_radius = config.zone_aoi_radius},
+                  .on_result = [this](const ZoneInboundCommand& command, const ZoneResult& result)
+                  { _zone_results.accept(command, result); },
+              },
+              _command_lifecycle)
         , _logic_runtime(
               [config]
               {
@@ -124,8 +132,9 @@ namespace snf::server
                                 _player_actor_binding,
                                 _persistent_player_actor_binding,
                                 _command_lifecycle)
-        , _command_router(_player_actor_ingress)
-        , _protocol_gateway(_command_router, _player_sessions)
+        , _zone_actor_ingress(_logic_runtime, _zone_actor_binding, _command_lifecycle)
+        , _command_router(_player_actor_ingress, _zone_actor_ingress)
+        , _protocol_gateway(_command_router, _player_sessions, _route_coordinator)
         , _tcp_server(
               TcpServerConfig{
                   .port = config.port,
@@ -143,6 +152,7 @@ namespace snf::server
     {
         _logic_runtime.registerBinding(_player_actor_binding);
         _logic_runtime.registerBinding(_persistent_player_actor_binding);
+        _logic_runtime.registerBinding(_zone_actor_binding);
     }
 
     GameServer::GameServer(const std::uint16_t port,

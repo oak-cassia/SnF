@@ -43,6 +43,12 @@ namespace
         case snf::protocol::MessageType::Pong:
         case snf::protocol::MessageType::Authenticate:
         case snf::protocol::MessageType::Authenticated:
+        case snf::protocol::MessageType::EnterZone:
+        case snf::protocol::MessageType::ZoneEntered:
+        case snf::protocol::MessageType::Move:
+        case snf::protocol::MessageType::Moved:
+        case snf::protocol::MessageType::LeaveZone:
+        case snf::protocol::MessageType::ZoneLeft:
             return true;
         }
 

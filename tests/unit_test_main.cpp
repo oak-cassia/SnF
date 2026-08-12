@@ -5,6 +5,8 @@ void run_frame_codec_tests();
 void run_command_router_tests();
 void run_protocol_gateway_tests();
 void run_protocol_response_mapper_tests();
+void run_protocol_zone_result_sink_tests();
+void run_route_coordinator_tests();
 void run_player_effect_sink_tests();
 void run_outbound_channel_tests();
 void run_runtime_boundary_tests();
@@ -30,6 +32,8 @@ int main()
     run_command_router_tests();
     run_protocol_gateway_tests();
     run_protocol_response_mapper_tests();
+    run_protocol_zone_result_sink_tests();
+    run_route_coordinator_tests();
     run_player_effect_sink_tests();
     run_outbound_channel_tests();
     run_runtime_boundary_tests();

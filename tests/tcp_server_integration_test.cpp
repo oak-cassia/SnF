@@ -333,6 +333,28 @@ namespace
         return payload;
     }
 
+    void append_u32(std::vector<std::byte>& payload, const std::uint32_t value)
+    {
+        payload.push_back(static_cast<std::byte>((value >> 24U) & 0xFFU));
+        payload.push_back(static_cast<std::byte>((value >> 16U) & 0xFFU));
+        payload.push_back(static_cast<std::byte>((value >> 8U) & 0xFFU));
+        payload.push_back(static_cast<std::byte>(value & 0xFFU));
+    }
+
+    std::uint32_t read_u32(const std::vector<std::byte>& payload, const std::size_t offset)
+    {
+        return (std::to_integer<std::uint32_t>(payload[offset]) << 24U) |
+               (std::to_integer<std::uint32_t>(payload[offset + 1]) << 16U) |
+               (std::to_integer<std::uint32_t>(payload[offset + 2]) << 8U) |
+               std::to_integer<std::uint32_t>(payload[offset + 3]);
+    }
+
+    std::uint64_t read_u64(const std::vector<std::byte>& payload, const std::size_t offset)
+    {
+        return (static_cast<std::uint64_t>(read_u32(payload, offset)) << 32U) |
+               read_u32(payload, offset + 4);
+    }
+
     snf::protocol::Frame authentication_frame(const std::uint32_t request_id,
                                               const std::uint64_t player_id)
     {
@@ -355,6 +377,20 @@ namespace
         assert(result.frames[0].type == snf::protocol::MessageType::Authenticated);
         assert(result.frames[0].request_id == request_id);
         assert(result.frames[0].payload == player_id_payload(player_id));
+    }
+
+    snf::protocol::Frame receive_zone_response(const int socket_descriptor)
+    {
+        constexpr std::size_t ZONE_RESPONSE_PAYLOAD_SIZE = 27;
+        constexpr std::size_t ZONE_RESPONSE_FRAME_SIZE = snf::protocol::FRAME_LENGTH_FIELD_SIZE +
+                                                         snf::protocol::MIN_BODY_SIZE +
+                                                         ZONE_RESPONSE_PAYLOAD_SIZE;
+        snf::protocol::FrameDecoder decoder;
+        const auto decoded =
+            decoder.append(receive_exact(socket_descriptor, ZONE_RESPONSE_FRAME_SIZE));
+        assert(decoded.ok());
+        assert(decoded.frames.size() == 1);
+        return decoded.frames.front();
     }
 
     void receive_until_closed(const int socket_descriptor)
@@ -669,6 +705,68 @@ namespace
         const auto second_saved = server.getPlayerRecord(snf::server::PlayerId{.value = player_id});
         assert(second_saved.has_value());
         assert(second_saved->handled_command_count == 4);
+
+        server.stop();
+    }
+
+    void test_authenticated_player_enters_moves_and_leaves_a_zone()
+    {
+        RunningServer server;
+        const auto client = connect_client(server.getPort());
+        constexpr std::uint64_t player_id = 90;
+        constexpr std::uint64_t zone_id = 5;
+
+        const auto auth = authentication_frame(200, player_id);
+        const auto auth_bytes = snf::protocol::encode_frame(auth);
+        send_all(client.getDescriptor(), auth_bytes);
+        assert_authenticated(
+            receive_exact(client.getDescriptor(), auth_bytes.size()), auth.request_id, player_id);
+
+        std::vector<std::byte> enter_payload = player_id_payload(zone_id);
+        append_u32(enter_payload, 10);
+        append_u32(enter_payload, 20);
+        const snf::protocol::Frame enter{
+            .type = snf::protocol::MessageType::EnterZone,
+            .request_id = 201,
+            .payload = std::move(enter_payload),
+        };
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(enter));
+        const auto entered = receive_zone_response(client.getDescriptor());
+        assert(entered.type == snf::protocol::MessageType::ZoneEntered);
+        assert(entered.request_id == enter.request_id);
+        assert(entered.payload[0] == std::byte{0});
+        assert(read_u64(entered.payload, 1) == zone_id);
+        const std::uint64_t route_epoch = read_u64(entered.payload, 9);
+        assert(route_epoch == 1);
+        assert(static_cast<std::int32_t>(read_u32(entered.payload, 17)) == 10);
+        assert(static_cast<std::int32_t>(read_u32(entered.payload, 21)) == 20);
+
+        std::vector<std::byte> move_payload;
+        append_u32(move_payload, static_cast<std::uint32_t>(-3));
+        append_u32(move_payload, 40);
+        const snf::protocol::Frame move{
+            .type = snf::protocol::MessageType::Move,
+            .request_id = 202,
+            .payload = std::move(move_payload),
+        };
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(move));
+        const auto moved = receive_zone_response(client.getDescriptor());
+        assert(moved.type == snf::protocol::MessageType::Moved);
+        assert(moved.request_id == move.request_id);
+        assert(read_u64(moved.payload, 9) == route_epoch);
+        assert(static_cast<std::int32_t>(read_u32(moved.payload, 17)) == -3);
+        assert(static_cast<std::int32_t>(read_u32(moved.payload, 21)) == 40);
+
+        const snf::protocol::Frame leave{
+            .type = snf::protocol::MessageType::LeaveZone,
+            .request_id = 203,
+            .payload = {},
+        };
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(leave));
+        const auto left = receive_zone_response(client.getDescriptor());
+        assert(left.type == snf::protocol::MessageType::ZoneLeft);
+        assert(left.request_id == leave.request_id);
+        assert(read_u64(left.payload, 9) == route_epoch);
 
         server.stop();
     }
@@ -1181,6 +1279,7 @@ int main()
 {
     test_returns_pong_for_ping();
     test_authenticates_one_session_and_allows_reconnect_after_passivation();
+    test_authenticated_player_enters_moves_and_leaves_a_zone();
     test_collects_baseline_saturation_metrics_for_a_round_trip();
     test_saturated_outbound_answers_every_request_and_still_drains();
     test_reports_metrics_periodically_while_running();

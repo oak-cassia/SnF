@@ -517,8 +517,30 @@ UnifiedRuntimeDrained =
   올린다. Player binding과 같은 mailbox, turn budget, Worker affinity와 passivation 규칙을 쓴다.
 - 위치 극값에서도 거리 제곱이 overflow하지 않도록 축 범위를 먼저 검사하고, 상태 전이와 AOI 경계를
   단위 테스트한다. binding 테스트는 enter → move → passivate FIFO와 owning Worker 실행을 검증한다.
-- network route, `RouteCoordinator`, 결과 sink와 `TimerService`는 다음 5.3 하위 단계다. domain Actor는
-  그 단계에서도 `ConnectionId`, wire frame이나 timer thread를 직접 알지 않는다.
+- network route, `RouteCoordinator`와 결과 sink는 5.3b에서 연결했다. `TimerService`는 다음 5.3
+  하위 단계다. domain Actor는 어느 단계에서도 `ConnectionId`, wire frame이나 timer thread를 직접
+  알지 않는다.
+
+#### 5.3b Authenticated Zone route와 wire slice (완료)
+
+- 인증된 session만 `EnterZone`을 보낼 수 있고, `Move`와 `LeaveZone`은 reactor 소유
+  `RouteCoordinator`의 현재 `SessionRoute`를 통해 typed Zone command로 변환된다. 같은 Zone 재입장은
+  멱등하고 다른 Zone으로의 즉시 재입장은 거부하며, player별 `route_epoch`은 route를 다시 만들 때마다
+  단조 증가한다.
+- initial enter route는 command ingress 승인 전에 임시 등록하고 `Full`, `Closed` 또는 예외면 rollback한다.
+  명시적 leave와 disconnect는 같은 Zone mailbox에 `LeaveZoneCommand`를 먼저 승인한 뒤 route를
+  제거한다. 여러 Zone 사이 handoff의 이전 destination 정지 → 새 destination 활성화 → route 공개
+  protocol은 아직 구현하지 않았고, 현재 cross-zone enter를 거부해 부분 전환을 만들지 않는다.
+- `ProtocolZoneResultSink`가 Zone 결과를 bounded wire payload로 바꾸고 기존 outbound reservation을
+  사용한다. 즉시 용량을 얻지 못하면 응답을 버리지 않고 해당 연결의 admission failure를 reactor에
+  보고한다. client-originated Zone command도 Player command와 같은 exactly-once terminal signal과
+  별도 admission rejection 회계에 참여하며, disconnect가 만든 내부 leave에는 client credit을 만들지
+  않는다.
+- 단위 테스트는 route 멱등성·epoch·rollback, wire result와 outbound 포화, Zone binding의 terminal
+  회계를 검증한다. TCP 통합 테스트는 authenticate → enter → move → leave 왕복과 epoch/좌표 보존을
+  실제 socket으로 검증한다.
+- 5.3의 남은 범위는 domain `TimerService`, tick scheduling·overrun 지표, 빈 Zone passivation,
+  이동 최신값 coalescing과 위치 save/reconnect restore다.
 
 완료 기준:
 

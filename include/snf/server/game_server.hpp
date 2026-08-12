@@ -13,7 +13,11 @@
 #include "snf/server/player_session_directory.hpp"
 #include "snf/server/protocol_gateway.hpp"
 #include "snf/server/protocol_player_effect_sink.hpp"
+#include "snf/server/protocol_zone_result_sink.hpp"
+#include "snf/server/route_coordinator.hpp"
 #include "snf/server/tcp_server.hpp"
+#include "snf/server/zone_actor_binding.hpp"
+#include "snf/server/zone_actor_ingress.hpp"
 
 #include <chrono>
 #include <cstddef>
@@ -59,6 +63,7 @@ namespace snf::server
         std::size_t actor_max_in_flight_operations_per_worker{1024};
         std::size_t player_repository_worker_count{1};
         std::size_t player_repository_queue_capacity{4096};
+        std::int32_t zone_aoi_radius{1000};
         std::size_t outbound_queue_capacity{4096};
         // Bounds the shared outbound capacity one connection may hold at once.
         std::size_t max_outbound_slots_per_connection{64};
@@ -116,16 +121,20 @@ namespace snf::server
         // sink still cannot reach the reactor-only half.
         OutboundChannel _outbound_channel;
         ProtocolPlayerEffectSink _player_effects;
+        ProtocolZoneResultSink _zone_results;
         CountingCommandLifecycleSink _command_lifecycle;
         PlayerSessionDirectory _player_sessions;
+        RouteCoordinator _route_coordinator;
         ThreadedPlayerRepository _player_repository;
         snf::runtime::RuntimeCompletionCoordinator _runtime_completion;
         // Bindings must outlive the generic runtime: the worker owns the
         // wrapper destruction, while this object owns Player dependencies.
         PlayerActorBinding _player_actor_binding;
         PlayerActorBinding _persistent_player_actor_binding;
+        ZoneActorBinding _zone_actor_binding;
         snf::runtime::ActorRuntime _logic_runtime;
         PlayerActorIngress _player_actor_ingress;
+        ZoneActorIngress _zone_actor_ingress;
         CommandRouter _command_router;
         ProtocolGateway _protocol_gateway;
         TcpServer _tcp_server;

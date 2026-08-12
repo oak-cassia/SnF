@@ -88,6 +88,8 @@ add_library(snf_server_runtime STATIC
     src/server/command_router.cpp
     src/server/protocol_response_mapper.cpp
     src/server/protocol_player_effect_sink.cpp
+    src/server/protocol_zone_result_sink.cpp
+    src/server/route_coordinator.cpp
     src/server/player_actor.cpp
     src/server/player_actor_binding.cpp
     src/server/player_actor_ingress.cpp
@@ -134,6 +136,8 @@ if(BUILD_TESTING)
         tests/command_router_test.cpp
         tests/protocol_gateway_test.cpp
         tests/protocol_response_mapper_test.cpp
+        tests/protocol_zone_result_sink_test.cpp
+        tests/route_coordinator_test.cpp
         tests/player_effect_sink_test.cpp
         tests/outbound_channel_test.cpp
         tests/runtime_boundaries_test.cpp

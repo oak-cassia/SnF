@@ -288,7 +288,7 @@ void test_rejects_an_unknown_message_type()
         std::byte{0x00},
         std::byte{0x06},
         std::byte{0x00},
-        std::byte{0x05},
+        std::byte{0x0B},
         std::byte{0x00},
         std::byte{0x00},
         std::byte{0x00},

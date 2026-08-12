@@ -1,6 +1,7 @@
 #pragma once
 
 #include "snf/runtime/actor_runtime.hpp"
+#include "snf/server/command_terminal.hpp"
 #include "snf/server/zone_actor.hpp"
 #include "snf/server/zone_inbound_command.hpp"
 
@@ -14,13 +15,14 @@ namespace snf::server
         // Result delivery is intentionally a binding concern. Production routing
         // can replace this callback with a typed sink without putting connection
         // or protocol state inside ZoneActor.
-        std::function<void(ZoneId, const ZoneCommand&, const ZoneResult&)> on_result;
+        std::function<void(const ZoneInboundCommand&, const ZoneResult&)> on_result;
     };
 
     class ZoneActorBinding final : public snf::runtime::ActorBinding
     {
     public:
         explicit ZoneActorBinding(ZoneActorBindingConfig config = {});
+        ZoneActorBinding(ZoneActorBindingConfig config, CommandLifecycleSink& lifecycle);
 
         [[nodiscard]] snf::runtime::ActorKind kind() const noexcept override;
         [[nodiscard]] snf::runtime::ActorSubmission makeCommand(ZoneInboundCommand command) const;
@@ -44,6 +46,7 @@ namespace snf::server
         struct PassivatePayload;
 
         ZoneActorConfig _actor_config;
-        std::function<void(ZoneId, const ZoneCommand&, const ZoneResult&)> _on_result;
+        std::function<void(const ZoneInboundCommand&, const ZoneResult&)> _on_result;
+        CommandLifecycleSink* _lifecycle{nullptr};
     };
 }

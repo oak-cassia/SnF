@@ -79,7 +79,7 @@ Network Runtime
 - 길이 기반 binary Frame codec과 부분 수신·송신 처리
 - 공통 `ProtocolGateway`와 typed command routing
 - `ActorKey{ActorKind, EntityId}`로 sharding하는 2-Worker Actor-Bound Logic Runtime과 Actor별 FIFO mailbox
-- Player 전용 `PlayerActorBinding`/`PlayerActorIngress`와 type-erased binding registry
+- Player·Zone typed binding/ingress와 type-erased binding registry
 - `PlayerActor` PING/PONG 처리와 typed result/effect 경계
 - connection generation을 통한 stale response 차단
 - bounded ingress queue와 Session별 send backpressure
@@ -98,7 +98,8 @@ Network Runtime
 
 Phase 3.8에서 scheduler의 Player 전용 의존을 제거하고, 모든 Worker를
 `ActorKeyHash(key) % worker_count`로 선택하는 Actor-Bound Logic Runtime으로 일반화했다.
-현재 production binding은 Player 하나이며 ZoneActor와 timer는 이후 단계의 범위다.
+현재 production path는 Player와 Zone binding, 인증 session route, Zone enter/move/leave wire 왕복을
+포함한다. domain timer, 위치 영속화와 hot Zone 입력 coalescing은 이후 단계의 범위다.
 
 Phase 3.9에서는 포화 정책의 현재 동작과 목표 동작을 계약으로 고정하고 baseline metric을 확보했다.
 non-blocking outbound는 4.1에서 구현했다. in-flight credit은 실제로 느린 Player command가 등장하는

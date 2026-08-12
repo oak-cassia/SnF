@@ -595,8 +595,8 @@ Runtime 사이에서 동기 호출이나 `future.get()`으로 상대 Worker를 �
 | Actor command ingress | Worker별 bounded capacity. `Full`은 위 inbound 정책으로 귀결된다 | credit을 채택하면 admission 앞단에서 연결별 점유를 제한한다 | Playable Session 측정 후 |
 | Outbound queue | Binding이 방출 전에 용량을 예약하고, 실패하면 그 Actor만 suspend된 뒤 reactor의 grant를 기다린다. 연결별 상한이 있고, 예약 대기조차 승인되지 않거나 결과가 연결별 상한보다 크면 그 연결을 `Overflow`로 종료한다. 종료 요청은 연결 단위로 합치며, 기록 상한/할당 실패에는 Worker 예외나 silent drop 대신 현재 session 전체를 닫는 reactor fail-safe를 쓴다 | 현재 동작을 유지한다 | 4.1 완료 |
 | Connection lifecycle post | reactor 소유 pending deque가 회차당 제한된 건수를 재시도하고, active session과 pending close가 lifecycle slot 예산을 공유한다 | 현재 의미를 유지한다. `ConnectionScope`를 선택할 때만 단일 종결 경로로 이전한다 | 선택적 Runtime 최적화 |
-| ZoneActor mailbox | 미구현 | 최신 입력 병합, 오래된 입력 폐기, 악성 세션 종료 | 5.3 |
-| DB queue | 미구현 | 제한된 재시도 또는 요청 실패 처리 | 5.2 |
+| ZoneActor mailbox | Worker별 bounded FIFO. `Full`은 해당 연결 종료로 귀결되며 이동도 현재 FIFO에 누적된다 | 최신 이동 입력 병합, 오래된 입력 폐기, 악성 세션 종료 | 5.3 후속 |
+| DB queue | 전용 Worker의 bounded FIFO. load 거부는 연결 종료, save 거부는 상태 유실을 숨기지 않고 runtime failure로 승격한다 | 실제 DB adapter의 제한된 재시도와 요청 실패 의미를 transaction 경계와 함께 고정한다 | 6 |
 | 일반 로그 queue | 미구현. 현재는 `std::cerr`로 직접 출력한다 | 전용 bounded queue와 sampling 또는 drop | 미정 |
 
 입력 종류별로 정책이 다를 수 있다. 이동 입력은 최신 값으로 합칠 수 있지만 아이템 구매나

@@ -13,6 +13,7 @@ namespace
     public:
         [[nodiscard]] snf::server::PostResult tryPost(snf::server::RoutedCommand command) override
         {
+            route_indices.push_back(command.route.index());
             posted = std::move(command);
             ++post_count;
             return result;
@@ -30,6 +31,7 @@ namespace
 
         snf::server::PostResult result{snf::server::PostResult::Accepted};
         std::optional<snf::server::RoutedCommand> posted;
+        std::vector<std::size_t> route_indices;
         int post_count{0};
         int close_count{0};
         int cancel_count{0};
@@ -58,6 +60,58 @@ namespace
             remaining >>= 8U;
         }
         return payload;
+    }
+
+    void append_u32(std::vector<std::byte>& payload, const std::uint32_t value)
+    {
+        payload.push_back(static_cast<std::byte>((value >> 24U) & 0xFFU));
+        payload.push_back(static_cast<std::byte>((value >> 16U) & 0xFFU));
+        payload.push_back(static_cast<std::byte>((value >> 8U) & 0xFFU));
+        payload.push_back(static_cast<std::byte>(value & 0xFFU));
+    }
+
+    void append_u64(std::vector<std::byte>& payload, const std::uint64_t value)
+    {
+        append_u32(payload, static_cast<std::uint32_t>(value >> 32U));
+        append_u32(payload, static_cast<std::uint32_t>(value));
+    }
+
+    snf::server::FrameEnvelope make_enter_frame(const snf::net::ConnectionId connection,
+                                                const std::uint64_t zone,
+                                                const std::int32_t x,
+                                                const std::int32_t y)
+    {
+        std::vector<std::byte> payload;
+        append_u64(payload, zone);
+        append_u32(payload, static_cast<std::uint32_t>(x));
+        append_u32(payload, static_cast<std::uint32_t>(y));
+        return snf::server::FrameEnvelope{
+            .connection = connection,
+            .frame =
+                snf::protocol::Frame{
+                    .type = snf::protocol::MessageType::EnterZone,
+                    .request_id = 30,
+                    .payload = std::move(payload),
+                },
+        };
+    }
+
+    snf::server::FrameEnvelope make_move_frame(const snf::net::ConnectionId connection,
+                                               const std::int32_t x,
+                                               const std::int32_t y)
+    {
+        std::vector<std::byte> payload;
+        append_u32(payload, static_cast<std::uint32_t>(x));
+        append_u32(payload, static_cast<std::uint32_t>(y));
+        return snf::server::FrameEnvelope{
+            .connection = connection,
+            .frame =
+                snf::protocol::Frame{
+                    .type = snf::protocol::MessageType::Move,
+                    .request_id = 31,
+                    .payload = std::move(payload),
+                },
+        };
     }
 
     snf::server::FrameEnvelope make_auth_frame(const snf::net::ConnectionId connection,
@@ -234,6 +288,85 @@ namespace
         assert(close_route != nullptr);
         assert(close_route->actor == player);
     }
+
+    void test_routes_authenticated_zone_enter_move_leave_with_one_epoch()
+    {
+        RecordingRoutedIngress commands;
+        snf::server::ProtocolGateway gateway{commands};
+        const snf::net::ConnectionId connection{.descriptor = 60, .generation = 30};
+        const snf::server::PlayerId player{.value = 101};
+
+        assert(gateway.tryPost(make_enter_frame(connection, 5, 1, 2)) ==
+               snf::server::FramePostResult::InvalidPayload);
+        assert(gateway.tryPost(make_auth_frame(connection, player)) ==
+               snf::server::FramePostResult::Accepted);
+
+        commands.result = snf::server::PostResult::Full;
+        assert(gateway.tryPost(make_enter_frame(connection, 5, 1, 2)) ==
+               snf::server::FramePostResult::Full);
+        commands.result = snf::server::PostResult::Accepted;
+        assert(gateway.tryPost(make_enter_frame(connection, 5, 1, 2)) ==
+               snf::server::FramePostResult::Accepted);
+        auto* zone = std::get_if<snf::server::ZoneCommandRoute>(&commands.posted->route);
+        assert(zone != nullptr);
+        const auto* enter = std::get_if<snf::server::EnterZoneCommand>(&zone->command);
+        assert(enter != nullptr);
+        assert(zone->zone == snf::server::ZoneId{.value = 5});
+        assert(enter->player == player);
+        assert(enter->route_epoch == 2);
+        const std::uint64_t route_epoch = enter->route_epoch;
+        assert((enter->position == snf::server::ZonePosition{.x = 1, .y = 2}));
+        assert(zone->reply_kind == snf::server::ZoneReplyKind::Entered);
+
+        assert(gateway.tryPost(make_move_frame(connection, -3, 4)) ==
+               snf::server::FramePostResult::Accepted);
+        zone = std::get_if<snf::server::ZoneCommandRoute>(&commands.posted->route);
+        assert(zone != nullptr);
+        const auto* move = std::get_if<snf::server::MoveInZoneCommand>(&zone->command);
+        assert(move != nullptr);
+        assert(move->route_epoch == route_epoch);
+        assert((move->position == snf::server::ZonePosition{.x = -3, .y = 4}));
+
+        assert(gateway.tryPost(snf::server::FrameEnvelope{
+                   .connection = connection,
+                   .frame =
+                       snf::protocol::Frame{
+                           .type = snf::protocol::MessageType::LeaveZone,
+                           .request_id = 32,
+                           .payload = {},
+                       },
+               }) == snf::server::FramePostResult::Accepted);
+        zone = std::get_if<snf::server::ZoneCommandRoute>(&commands.posted->route);
+        assert(zone != nullptr);
+        const auto* leave = std::get_if<snf::server::LeaveZoneCommand>(&zone->command);
+        assert(leave != nullptr);
+        assert(leave->route_epoch == route_epoch);
+        const int post_count_after_leave = commands.post_count;
+        assert(gateway.tryPost(make_move_frame(connection, 0, 0)) ==
+               snf::server::FramePostResult::InvalidPayload);
+        assert(commands.post_count == post_count_after_leave);
+    }
+
+    void test_connection_close_leaves_zone_before_player_passivation()
+    {
+        RecordingRoutedIngress commands;
+        snf::server::ProtocolGateway gateway{commands};
+        const snf::net::ConnectionId connection{.descriptor = 61, .generation = 31};
+        const snf::server::PlayerId player{.value = 102};
+        assert(gateway.tryPost(make_auth_frame(connection, player)) ==
+               snf::server::FramePostResult::Accepted);
+        assert(gateway.tryPost(make_enter_frame(connection, 6, 0, 0)) ==
+               snf::server::FramePostResult::Accepted);
+
+        const std::size_t before = commands.route_indices.size();
+        assert(gateway.tryPostConnectionClosed(snf::server::ConnectionClosed{
+                   .connection = connection,
+                   .cause = snf::server::ConnectionCloseCause::PeerClosed,
+               }) == snf::server::PostResult::Accepted);
+        assert(commands.route_indices.size() == before + 2);
+        assert(commands.route_indices[before] == 2);
+        assert(commands.route_indices[before + 1] == 1);
+    }
 }
 
 void run_protocol_gateway_tests()
@@ -245,4 +378,6 @@ void run_protocol_gateway_tests()
     test_authentication_attaches_and_routes_to_a_persistent_player();
     test_rejects_duplicate_player_and_auth_after_provisional_activity();
     test_rolls_back_refused_auth_and_keeps_close_retry_target();
+    test_routes_authenticated_zone_enter_move_leave_with_one_epoch();
+    test_connection_close_leaves_zone_before_player_passivation();
 }

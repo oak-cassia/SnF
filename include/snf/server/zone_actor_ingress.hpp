@@ -9,6 +9,9 @@ namespace snf::server
     {
     public:
         ZoneActorIngress(snf::runtime::ActorRuntime& runtime, ZoneActorBinding& binding) noexcept;
+        ZoneActorIngress(snf::runtime::ActorRuntime& runtime,
+                         ZoneActorBinding& binding,
+                         CommandLifecycleSink& lifecycle) noexcept;
 
         [[nodiscard]] snf::runtime::PostResult tryPost(ZoneInboundCommand command);
         [[nodiscard]] snf::runtime::PostResult tryPassivate(ZoneId zone);
@@ -16,5 +19,6 @@ namespace snf::server
     private:
         snf::runtime::ActorRuntime& _runtime;
         ZoneActorBinding& _binding;
+        CommandLifecycleSink* _lifecycle{nullptr};
     };
 }
