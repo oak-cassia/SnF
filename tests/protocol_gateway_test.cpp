@@ -1,6 +1,7 @@
 #include "snf/server/protocol_gateway.hpp"
 
 #include <cassert>
+#include <cstdint>
 #include <optional>
 #include <utility>
 #include <variant>
@@ -43,6 +44,32 @@ namespace
                     .type = type,
                     .request_id = 7,
                     .payload = {std::byte{0xAA}},
+                },
+        };
+    }
+
+    std::vector<std::byte> player_id_payload(const std::uint64_t value)
+    {
+        std::vector<std::byte> payload(8);
+        std::uint64_t remaining = value;
+        for (std::size_t index = payload.size(); index > 0; --index)
+        {
+            payload[index - 1] = static_cast<std::byte>(remaining & 0xFFU);
+            remaining >>= 8U;
+        }
+        return payload;
+    }
+
+    snf::server::FrameEnvelope make_auth_frame(const snf::net::ConnectionId connection,
+                                               const snf::server::PlayerId player)
+    {
+        return snf::server::FrameEnvelope{
+            .connection = connection,
+            .frame =
+                snf::protocol::Frame{
+                    .type = snf::protocol::MessageType::Authenticate,
+                    .request_id = 8,
+                    .payload = player_id_payload(player.value),
                 },
         };
     }
@@ -126,6 +153,87 @@ namespace
         assert(route->actor == snf::server::provisionalActorIdFor(closed.connection));
         assert(route->cause == closed.cause);
     }
+
+    void test_authentication_attaches_and_routes_to_a_persistent_player()
+    {
+        RecordingRoutedIngress commands;
+        snf::server::ProtocolGateway gateway{commands};
+        const snf::net::ConnectionId connection{.descriptor = 50, .generation = 20};
+        const snf::server::PlayerId player{.value = 77};
+
+        assert(gateway.tryPost(make_auth_frame(connection, player)) ==
+               snf::server::FramePostResult::Accepted);
+        auto* route = std::get_if<snf::server::PlayerCommandRoute>(&commands.posted->route);
+        assert(route != nullptr);
+        assert(route->actor == player);
+        assert(std::holds_alternative<snf::server::AuthenticateCommand>(route->command));
+
+        auto ping = make_frame(snf::protocol::MessageType::Ping);
+        ping.connection = connection;
+        assert(gateway.tryPost(std::move(ping)) == snf::server::FramePostResult::Accepted);
+        route = std::get_if<snf::server::PlayerCommandRoute>(&commands.posted->route);
+        assert(route != nullptr);
+        assert(route->actor == player);
+
+        assert(gateway.tryPost(make_auth_frame(connection, player)) ==
+               snf::server::FramePostResult::Accepted);
+    }
+
+    void test_rejects_duplicate_player_and_auth_after_provisional_activity()
+    {
+        RecordingRoutedIngress commands;
+        snf::server::ProtocolGateway gateway{commands};
+        const snf::server::PlayerId player{.value = 88};
+        const snf::net::ConnectionId first{.descriptor = 51, .generation = 21};
+        const snf::net::ConnectionId second{.descriptor = 52, .generation = 22};
+
+        assert(gateway.tryPost(make_auth_frame(first, player)) ==
+               snf::server::FramePostResult::Accepted);
+        const int accepted_post_count = commands.post_count;
+        assert(gateway.tryPost(make_auth_frame(second, player)) ==
+               snf::server::FramePostResult::InvalidPayload);
+        assert(commands.post_count == accepted_post_count);
+
+        auto pre_auth_ping = make_frame(snf::protocol::MessageType::Ping);
+        pre_auth_ping.connection = second;
+        assert(gateway.tryPost(std::move(pre_auth_ping)) == snf::server::FramePostResult::Accepted);
+        assert(gateway.tryPost(make_auth_frame(second, snf::server::PlayerId{.value = 89})) ==
+               snf::server::FramePostResult::InvalidPayload);
+    }
+
+    void test_rolls_back_refused_auth_and_keeps_close_retry_target()
+    {
+        RecordingRoutedIngress commands;
+        snf::server::ProtocolGateway gateway{commands};
+        const snf::server::PlayerId player{.value = 99};
+        const snf::net::ConnectionId first{.descriptor = 53, .generation = 23};
+        const snf::net::ConnectionId second{.descriptor = 54, .generation = 24};
+
+        commands.result = snf::server::PostResult::Full;
+        assert(gateway.tryPost(make_auth_frame(first, player)) ==
+               snf::server::FramePostResult::Full);
+
+        commands.result = snf::server::PostResult::Accepted;
+        assert(gateway.tryPost(make_auth_frame(second, player)) ==
+               snf::server::FramePostResult::Accepted);
+
+        commands.result = snf::server::PostResult::Full;
+        const snf::server::ConnectionClosed closed{
+            .connection = second,
+            .cause = snf::server::ConnectionCloseCause::PeerClosed,
+        };
+        assert(gateway.tryPostConnectionClosed(closed) == snf::server::PostResult::Full);
+        auto* close_route =
+            std::get_if<snf::server::ConnectionClosedRoute>(&commands.posted->route);
+        assert(close_route != nullptr);
+        assert(close_route->actor == player);
+
+        commands.result = snf::server::PostResult::Accepted;
+        assert(gateway.tryPostConnectionClosed(closed) == snf::server::PostResult::Accepted);
+        close_route = std::get_if<snf::server::ConnectionClosedRoute>(&commands.posted->route);
+        assert(close_route != nullptr);
+        assert(close_route->actor == player);
+    }
 }
 
 void run_protocol_gateway_tests()
@@ -134,4 +242,7 @@ void run_protocol_gateway_tests()
     test_rejects_unsupported_and_invalid_frames_before_routing();
     test_preserves_downstream_capacity_and_lifecycle_results();
     test_routes_connection_closed_with_the_same_provisional_actor_id();
+    test_authentication_attaches_and_routes_to_a_persistent_player();
+    test_rejects_duplicate_player_and_auth_after_provisional_activity();
+    test_rolls_back_refused_auth_and_keeps_close_retry_target();
 }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "snf/server/player_id.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <variant>
@@ -13,7 +15,13 @@ namespace snf::server
         std::vector<std::byte> payload;
     };
 
-    using PlayerCommand = std::variant<PingCommand>;
+    struct AuthenticateCommand
+    {
+        std::uint32_t request_id{0};
+        PlayerId player;
+    };
+
+    using PlayerCommand = std::variant<PingCommand, AuthenticateCommand>;
 
     [[nodiscard]] inline std::uint32_t requestId(const PlayerCommand& command) noexcept
     {

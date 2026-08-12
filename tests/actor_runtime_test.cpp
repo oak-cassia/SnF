@@ -361,8 +361,9 @@ namespace
 
         RuntimeDependencies dependencies{8};
         auto binding_config = snf::server::PlayerActorBindingConfig{
+            .actor_kind = snf::runtime::ActorKind::ProvisionalPlayer,
             .on_before_command =
-                [state](snf::server::ProvisionalActorId, const snf::server::PlayerCommand&)
+                [state](snf::server::PlayerActorId, const snf::server::PlayerCommand&)
             {
                 const int active = state->active.fetch_add(1) + 1;
                 int maximum = state->maximum_active.load();
@@ -377,6 +378,7 @@ namespace
                 state->release.wait();
                 state->active.fetch_sub(1);
             },
+            .on_actor_deactivated = {},
         };
         PlayerRuntime player{dependencies, player_runtime_config(), std::move(binding_config)};
 
@@ -914,8 +916,9 @@ namespace
 
         RuntimeDependencies dependencies{8};
         auto binding_config = snf::server::PlayerActorBindingConfig{
+            .actor_kind = snf::runtime::ActorKind::ProvisionalPlayer,
             .on_before_command =
-                [gate](snf::server::ProvisionalActorId, const snf::server::PlayerCommand&)
+                [gate](snf::server::PlayerActorId, const snf::server::PlayerCommand&)
             {
                 if (gate->handled.fetch_add(1) == 0)
                 {
@@ -923,6 +926,7 @@ namespace
                     gate->release.wait();
                 }
             },
+            .on_actor_deactivated = {},
         };
         PlayerRuntime player{dependencies, player_runtime_config(1, 2), std::move(binding_config)};
         player.runtime.start();

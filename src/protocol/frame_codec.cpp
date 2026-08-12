@@ -34,13 +34,27 @@ namespace
         return (std::to_integer<std::uint16_t>(bytes[offset]) << 8U) |
                (std::to_integer<std::uint16_t>(bytes[offset + 1]));
     }
+
+    bool is_known_message_type(const snf::protocol::MessageType type) noexcept
+    {
+        switch (type)
+        {
+        case snf::protocol::MessageType::Ping:
+        case snf::protocol::MessageType::Pong:
+        case snf::protocol::MessageType::Authenticate:
+        case snf::protocol::MessageType::Authenticated:
+            return true;
+        }
+
+        return false;
+    }
 }
 
 namespace snf::protocol
 {
     std::vector<std::byte> encode_frame(const Frame& frame)
     {
-        if (frame.type != MessageType::Ping && frame.type != MessageType::Pong)
+        if (!is_known_message_type(frame.type))
         {
             throw std::invalid_argument("Unknown message type");
         }
@@ -91,8 +105,7 @@ namespace snf::protocol
             return fail(DecodeError::BodyTooLarge);
         }
 
-        const auto full_frame_size =
-            static_cast<std::size_t>(FRAME_LENGTH_FIELD_SIZE) + body_size;
+        const auto full_frame_size = static_cast<std::size_t>(FRAME_LENGTH_FIELD_SIZE) + body_size;
 
         if (available_bytes < full_frame_size)
         {
@@ -103,7 +116,7 @@ namespace snf::protocol
         const auto request_type = static_cast<MessageType>(
             read_u16_big_endian(buffer_view, _read_offset + FRAME_LENGTH_FIELD_SIZE));
 
-        if (request_type != MessageType::Ping && request_type != MessageType::Pong)
+        if (!is_known_message_type(request_type))
         {
             return fail(DecodeError::UnknownMessageType);
         }

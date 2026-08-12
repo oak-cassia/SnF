@@ -18,6 +18,8 @@ namespace snf::protocol
     {
         Ping = 1,
         Pong = 2,
+        Authenticate = 3,
+        Authenticated = 4,
     };
 
     struct Frame

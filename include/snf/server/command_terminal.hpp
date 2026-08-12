@@ -17,8 +17,8 @@ namespace snf::server
     // different cause -- a full or closed ingress rather than a command that ran -- so it
     // is reported separately and never folded into the command count.
     //
-    // Phase 4.5's per-connection in-flight credit is the consumer the release exists for.
-    // This stage produces both signals and counts them.
+    // A future measured per-connection in-flight credit is the consumer the release
+    // exists for. This stage produces both signals and counts them.
     class CommandLifecycleSink
     {
     public:

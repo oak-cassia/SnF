@@ -86,7 +86,24 @@ namespace snf::server
             Reserving,
         };
 
+        PlayerActorSlot(PlayerActorId actor_id, std::function<void(PlayerActorId)> on_deactivated)
+            : actor(actor_id)
+            , identity(actor_id)
+            , on_deactivated(std::move(on_deactivated))
+        {
+        }
+
+        ~PlayerActorSlot() override
+        {
+            if (on_deactivated)
+            {
+                on_deactivated(identity);
+            }
+        }
+
         PlayerActor actor;
+        PlayerActorId identity;
+        std::function<void(PlayerActorId)> on_deactivated;
         Stage stage{Stage::Idle};
         // Holds the handler's task while it runs, including across a suspension.
         // Keeping the frame in the slot is what confines resume and destruction to
@@ -123,19 +140,30 @@ namespace snf::server
         : _effects(effects)
         , _outbound(outbound)
         , _lifecycle(lifecycle)
+        , _kind(config.actor_kind)
         , _on_before_command(std::move(config.on_before_command))
+        , _on_actor_deactivated(std::move(config.on_actor_deactivated))
     {
+        if (_kind != snf::runtime::ActorKind::ProvisionalPlayer &&
+            _kind != snf::runtime::ActorKind::Player)
+        {
+            throw std::invalid_argument{"PlayerActorBinding requires a Player actor kind"};
+        }
     }
 
     snf::runtime::ActorKind PlayerActorBinding::kind() const noexcept
     {
-        return snf::runtime::ActorKind::ProvisionalPlayer;
+        return _kind;
     }
 
     snf::runtime::ActorSubmission
     PlayerActorBinding::makeCommand(PlayerInboundCommand command) const
     {
-        const ProvisionalActorId actor = command.actor;
+        const PlayerActorId actor = command.actor;
+        if (actor.kind() != kind())
+        {
+            throw std::invalid_argument{"Player command target does not match its binding"};
+        }
         const snf::net::ConnectionId connection = command.connection;
         return makeSubmission(
             snf::runtime::ActorKey{
@@ -155,9 +183,14 @@ namespace snf::server
     }
 
     snf::runtime::ActorSubmission
-    PlayerActorBinding::makeConnectionClosed(const ProvisionalActorId actor,
+    PlayerActorBinding::makeConnectionClosed(const PlayerActorId actor,
                                              ConnectionClosed closed) const
     {
+        if (actor.kind() != kind())
+        {
+            throw std::invalid_argument{"Player close target does not match its binding"};
+        }
+
         return makeSubmission(
             snf::runtime::ActorKey{
                 .kind = kind(),
@@ -173,8 +206,10 @@ namespace snf::server
     std::unique_ptr<snf::runtime::ActorSlot>
     PlayerActorBinding::activate(const snf::runtime::EntityId entity)
     {
-        static_cast<void>(entity);
-        return std::make_unique<PlayerActorSlot>();
+        const PlayerActorId identity = kind() == snf::runtime::ActorKind::Player
+                                           ? PlayerActorId{PlayerId{.value = entity}}
+                                           : PlayerActorId{ProvisionalActorId{.value = entity}};
+        return std::make_unique<PlayerActorSlot>(identity, _on_actor_deactivated);
     }
 
     snf::runtime::ActorDispatchResult

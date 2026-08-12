@@ -9,6 +9,7 @@
 #include "snf/server/outbound_channel.hpp"
 #include "snf/server/player_actor_binding.hpp"
 #include "snf/server/player_actor_ingress.hpp"
+#include "snf/server/player_session_directory.hpp"
 #include "snf/server/protocol_gateway.hpp"
 #include "snf/server/protocol_player_effect_sink.hpp"
 #include "snf/server/tcp_server.hpp"
@@ -34,8 +35,8 @@ namespace snf::server
         TcpServerMetrics network;
         snf::runtime::ActorRuntimeStats actor_runtime;
         // Commands that were admitted and reached a final result, counted once each
-        // whether or not they answered. Phase 4.5 replaces the counting consumer with
-        // the credit owner.
+        // whether or not they answered. If playable slow-command measurements justify
+        // per-connection credit, its owner consumes this same terminal signal.
         std::uint64_t command_terminals{0};
         // Posts the runtime refused. A different fact with a different cause, so it is
         // never folded into the count above.
@@ -111,10 +112,12 @@ namespace snf::server
         OutboundChannel _outbound_channel;
         ProtocolPlayerEffectSink _player_effects;
         CountingCommandLifecycleSink _command_lifecycle;
+        PlayerSessionDirectory _player_sessions;
         snf::runtime::RuntimeCompletionCoordinator _runtime_completion;
         // Bindings must outlive the generic runtime: the worker owns the
         // wrapper destruction, while this object owns Player dependencies.
         PlayerActorBinding _player_actor_binding;
+        PlayerActorBinding _persistent_player_actor_binding;
         snf::runtime::ActorRuntime _logic_runtime;
         PlayerActorIngress _player_actor_ingress;
         CommandRouter _command_router;

@@ -9,9 +9,27 @@ namespace snf::server
     {
     }
 
+    ProtocolGateway::ProtocolGateway(RoutedCommandIngress& commands,
+                                     PlayerSessionDirectory& sessions)
+        : ProtocolGateway(MessageDispatcher{}, commands, sessions)
+    {
+    }
+
     ProtocolGateway::ProtocolGateway(MessageDispatcher dispatcher, RoutedCommandIngress& commands)
         : _dispatcher(std::move(dispatcher))
         , _commands(commands)
+        , _owned_sessions()
+        , _sessions(_owned_sessions)
+    {
+    }
+
+    ProtocolGateway::ProtocolGateway(MessageDispatcher dispatcher,
+                                     RoutedCommandIngress& commands,
+                                     PlayerSessionDirectory& sessions)
+        : _dispatcher(std::move(dispatcher))
+        , _commands(commands)
+        , _owned_sessions()
+        , _sessions(sessions)
     {
     }
 
@@ -25,14 +43,59 @@ namespace snf::server
                        : FramePostResult::InvalidPayload;
         }
 
-        const PostResult post_result = _commands.tryPost(RoutedCommand{
-            .connection = envelope.connection,
-            .route =
-                PlayerCommandRoute{
-                    .actor = provisionalActorIdFor(envelope.connection),
-                    .command = std::move(*dispatch_result.command),
-                },
-        });
+        PlayerActorId actor = provisionalActorIdFor(envelope.connection);
+        std::optional<PlayerId> new_attachment;
+        if (const auto* authenticate = std::get_if<AuthenticateCommand>(&*dispatch_result.command))
+        {
+            const PlayerAttachResult attach_result =
+                _sessions.tryAttach(envelope.connection, authenticate->player);
+            if (attach_result == PlayerAttachResult::Attached)
+            {
+                new_attachment = authenticate->player;
+            }
+            else if (attach_result != PlayerAttachResult::AlreadyAttached)
+            {
+                return FramePostResult::InvalidPayload;
+            }
+            actor = authenticate->player;
+        }
+        else if (const auto player = _sessions.playerFor(envelope.connection))
+        {
+            actor = *player;
+        }
+
+        PostResult post_result;
+        try
+        {
+            post_result = _commands.tryPost(RoutedCommand{
+                .connection = envelope.connection,
+                .route =
+                    PlayerCommandRoute{
+                        .actor = actor,
+                        .command = std::move(*dispatch_result.command),
+                    },
+            });
+        }
+        catch (...)
+        {
+            if (new_attachment)
+            {
+                _sessions.rollbackAttach(envelope.connection, *new_attachment);
+            }
+            throw;
+        }
+
+        if (post_result == PostResult::Accepted)
+        {
+            if (actor.kind() == snf::runtime::ActorKind::ProvisionalPlayer)
+            {
+                static_cast<void>(_sessions.noteProvisionalActivity(envelope.connection));
+            }
+        }
+        else if (new_attachment)
+        {
+            _sessions.rollbackAttach(envelope.connection, *new_attachment);
+        }
 
         switch (post_result)
         {
@@ -49,14 +112,52 @@ namespace snf::server
 
     PostResult ProtocolGateway::tryPostConnectionClosed(ConnectionClosed closed)
     {
-        return _commands.tryPost(RoutedCommand{
-            .connection = closed.connection,
-            .route =
-                ConnectionClosedRoute{
-                    .actor = provisionalActorIdFor(closed.connection),
-                    .cause = closed.cause,
-                },
-        });
+        const std::optional<PlayerId> player = _sessions.playerFor(closed.connection);
+        const PlayerActorId actor = player
+                                        ? PlayerActorId{*player}
+                                        : PlayerActorId{provisionalActorIdFor(closed.connection)};
+        const bool began_persistent_close = player && _sessions.beginClose(closed.connection);
+
+        PostResult result;
+        try
+        {
+            result = _commands.tryPost(RoutedCommand{
+                .connection = closed.connection,
+                .route =
+                    ConnectionClosedRoute{
+                        .actor = actor,
+                        .cause = closed.cause,
+                    },
+            });
+        }
+        catch (...)
+        {
+            if (began_persistent_close)
+            {
+                _sessions.rollbackClose(closed.connection);
+            }
+            throw;
+        }
+
+        if (result == PostResult::Full)
+        {
+            if (began_persistent_close)
+            {
+                _sessions.rollbackClose(closed.connection);
+            }
+            return result;
+        }
+
+        if (result == PostResult::Closed)
+        {
+            _sessions.abandon(closed.connection);
+        }
+        else if (!player)
+        {
+            _sessions.clearProvisionalActivity(closed.connection);
+        }
+
+        return result;
     }
 
     void ProtocolGateway::close() noexcept

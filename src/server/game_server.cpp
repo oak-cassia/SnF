@@ -88,6 +88,22 @@ namespace snf::server
         , _runtime_completion(snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
                               _outbound_event.getDescriptor())
         , _player_actor_binding(_player_effects, _outbound_channel, _command_lifecycle)
+        , _persistent_player_actor_binding(_player_effects,
+                                           _outbound_channel,
+                                           _command_lifecycle,
+                                           PlayerActorBindingConfig{
+                                               .actor_kind = snf::runtime::ActorKind::Player,
+                                               .on_before_command = {},
+                                               .on_actor_deactivated =
+                                                   [this](const PlayerActorId actor)
+                                               {
+                                                   if (const auto player = actor.playerId())
+                                                   {
+                                                       _player_sessions.completePassivation(
+                                                           *player);
+                                                   }
+                                               },
+                                           })
         , _logic_runtime(
               [config]
               {
@@ -99,9 +115,12 @@ namespace snf::server
                   return runtime_config;
               }(),
               _runtime_completion)
-        , _player_actor_ingress(_logic_runtime, _player_actor_binding, _command_lifecycle)
+        , _player_actor_ingress(_logic_runtime,
+                                _player_actor_binding,
+                                _persistent_player_actor_binding,
+                                _command_lifecycle)
         , _command_router(_player_actor_ingress)
-        , _protocol_gateway(_command_router)
+        , _protocol_gateway(_command_router, _player_sessions)
         , _tcp_server(
               TcpServerConfig{
                   .port = config.port,
@@ -118,6 +137,7 @@ namespace snf::server
               _outbound_event.getDescriptor())
     {
         _logic_runtime.registerBinding(_player_actor_binding);
+        _logic_runtime.registerBinding(_persistent_player_actor_binding);
     }
 
     GameServer::GameServer(const std::uint16_t port,

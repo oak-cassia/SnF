@@ -1,5 +1,7 @@
 #include "snf/server/message_dispatcher.hpp"
 
+#include <cstddef>
+#include <cstdint>
 #include <stdexcept>
 #include <utility>
 
@@ -7,7 +9,7 @@ namespace snf::server
 {
     MessageDispatcher::MessageDispatcher()
     {
-        const bool registered =
+        const bool ping_registered =
             registerHandler(snf::protocol::MessageType::Ping,
                             [](snf::protocol::Frame request) -> std::optional<PlayerCommand>
                             {
@@ -17,9 +19,36 @@ namespace snf::server
                                 }};
                             });
 
-        if (!registered)
+        const bool authenticate_registered =
+            registerHandler(snf::protocol::MessageType::Authenticate,
+                            [](snf::protocol::Frame request) -> std::optional<PlayerCommand>
+                            {
+                                constexpr std::size_t PLAYER_ID_WIRE_SIZE = 8;
+                                if (request.payload.size() != PLAYER_ID_WIRE_SIZE)
+                                {
+                                    return std::nullopt;
+                                }
+
+                                std::uint64_t player_value = 0;
+                                for (const std::byte byte : request.payload)
+                                {
+                                    player_value =
+                                        (player_value << 8U) | std::to_integer<std::uint64_t>(byte);
+                                }
+                                if (player_value == 0)
+                                {
+                                    return std::nullopt;
+                                }
+
+                                return PlayerCommand{AuthenticateCommand{
+                                    .request_id = request.request_id,
+                                    .player = PlayerId{.value = player_value},
+                                }};
+                            });
+
+        if (!ping_registered || !authenticate_registered)
         {
-            throw std::logic_error{"The PING handler is already registered"};
+            throw std::logic_error{"A built-in message handler is already registered"};
         }
     }
 

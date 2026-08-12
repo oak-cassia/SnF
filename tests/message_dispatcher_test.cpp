@@ -8,6 +8,18 @@
 
 namespace
 {
+    std::vector<std::byte> player_id_payload(const std::uint64_t value)
+    {
+        std::vector<std::byte> payload(8);
+        std::uint64_t remaining = value;
+        for (std::size_t index = payload.size(); index > 0; --index)
+        {
+            payload[index - 1] = static_cast<std::byte>(remaining & 0xFFU);
+            remaining >>= 8U;
+        }
+        return payload;
+    }
+
     void test_dispatches_ping_to_the_registered_handler()
     {
         snf::server::MessageDispatcher dispatcher;
@@ -41,6 +53,29 @@ namespace
         assert(!result.handled());
         assert(result.status == snf::server::DispatchStatus::HandlerNotFound);
         assert(!result.command.has_value());
+    }
+
+    void test_dispatches_a_valid_persistent_player_authentication()
+    {
+        const snf::server::MessageDispatcher dispatcher;
+        const auto result = dispatcher.dispatch(snf::protocol::Frame{
+            .type = snf::protocol::MessageType::Authenticate,
+            .request_id = 8,
+            .payload = player_id_payload(77),
+        });
+
+        assert(result.handled());
+        const auto* authenticate = std::get_if<snf::server::AuthenticateCommand>(&*result.command);
+        assert(authenticate != nullptr);
+        assert(authenticate->request_id == 8);
+        assert(authenticate->player == snf::server::PlayerId{.value = 77});
+
+        const auto invalid = dispatcher.dispatch(snf::protocol::Frame{
+            .type = snf::protocol::MessageType::Authenticate,
+            .request_id = 9,
+            .payload = player_id_payload(0),
+        });
+        assert(invalid.status == snf::server::DispatchStatus::InvalidPayload);
     }
 
     void test_registers_an_additional_handler()
@@ -110,6 +145,7 @@ void run_message_dispatcher_tests()
 {
     test_dispatches_ping_to_the_registered_handler();
     test_reports_a_missing_handler();
+    test_dispatches_a_valid_persistent_player_authentication();
     test_registers_an_additional_handler();
     test_rejects_a_duplicate_handler();
     test_reports_invalid_payload_from_a_registered_handler();

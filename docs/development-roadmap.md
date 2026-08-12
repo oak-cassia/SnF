@@ -454,11 +454,28 @@ UnifiedRuntimeDrained =
 하나의 Player가 식별되고, 로드되고, Zone에 들어가 이동한 뒤 저장·복원되는
 최소 플레이 흐름을 end-to-end로 완성한다.
 
-### 5.1 Identity와 Session attach
+### 5.1 Identity와 Session attach (완료)
 
 - 개발용 인증 경계에서 영속 `PlayerId`를 만들고 `ConnectionId`, `ProvisionalActorId`와
   서로 다른 타입과 용도로 유지한다.
 - 동시 로그인, attach/detach/logout, Actor incarnation과 passivation 정책을 고정한다.
+
+완료 결과:
+
+- `Authenticate`는 non-zero `PlayerId`를 8-byte big-endian payload로 받고 `Authenticated`로
+  응답한다. 같은 연결·같은 ID의 재요청은 멱등하고, 한 Player의 동시 연결은 먼저 attach한 연결이
+  이기며 뒤 연결은 protocol rejection으로 닫힌다.
+- PING은 pre-auth health 경로로 유지한다. 다만 provisional Actor에 command를 승인한 연결은 같은
+  연결에서 뒤늦게 인증할 수 없다. 인증을 첫 actor-bound frame으로 제한해 한 연결이 provisional과
+  persistent Player Actor를 동시에 만들지 않는다.
+- persistent route는 `ActorKind::Player`와 `PlayerId`를 사용한다. 연결 close가 ingress에 수락되면
+  Session은 `Closing`으로 남고, owning Worker가 Actor slot을 실제 제거·파괴한 뒤에만 detach된다.
+  따라서 재접속 auth가 이전 close 뒤 mailbox에 들어갔다가 eviction과 함께 버려지지 않는다.
+- 이 slice의 logout은 socket disconnect가 만드는 ordered `ConnectionClosed` lifecycle이다. 응답을
+  보장하는 명시적 logout command는 gameplay 규칙이 필요할 때 별도로 추가한다. disconnect마다 즉시
+  passivate하고, 같은 `PlayerId`의 재접속은 scheduler가 새 `ActorIncarnation`으로 활성화한다.
+- 단위 테스트는 ID wire 변환, attach 충돌·rollback·Closing을 검증하고, 통합 테스트는 auth, persistent
+  PING, 중복 로그인 거부, disconnect/passivation과 같은 PlayerId 재접속을 검증한다.
 
 ### 5.2 Async repository와 reconnect
 

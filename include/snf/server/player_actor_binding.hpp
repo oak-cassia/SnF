@@ -4,6 +4,7 @@
 #include "snf/server/command_terminal.hpp"
 #include "snf/server/connection_lifecycle.hpp"
 #include "snf/server/outbound_sink.hpp"
+#include "snf/server/player_actor_id.hpp"
 #include "snf/server/player_effect_sink.hpp"
 #include "snf/server/player_inbound_command.hpp"
 
@@ -13,9 +14,13 @@ namespace snf::server
 {
     struct PlayerActorBindingConfig
     {
+        snf::runtime::ActorKind actor_kind{snf::runtime::ActorKind::ProvisionalPlayer};
         // Test-only diagnostic hook. It executes on the Player actor's owner
         // Worker immediately before PlayerActor::handle().
-        std::function<void(ProvisionalActorId, const PlayerCommand&)> on_before_command;
+        std::function<void(PlayerActorId, const PlayerCommand&)> on_before_command;
+        // Runs after the scheduler has removed and destroyed a persistent Player
+        // slot. GameServer uses it to finish the Closing -> detached transition.
+        std::function<void(PlayerActorId)> on_actor_deactivated;
     };
 
     // Owns Player-specific type erasure at the edge of the generic scheduler.
@@ -36,7 +41,7 @@ namespace snf::server
         [[nodiscard]] snf::runtime::ActorKind kind() const noexcept override;
         [[nodiscard]] snf::runtime::ActorSubmission makeCommand(PlayerInboundCommand command) const;
         [[nodiscard]] snf::runtime::ActorSubmission
-        makeConnectionClosed(ProvisionalActorId actor, ConnectionClosed closed) const;
+        makeConnectionClosed(PlayerActorId actor, ConnectionClosed closed) const;
 
     protected:
         [[nodiscard]] std::unique_ptr<snf::runtime::ActorSlot>
@@ -73,6 +78,8 @@ namespace snf::server
         PlayerEffectSink& _effects;
         OutboundSink& _outbound;
         CommandLifecycleSink& _lifecycle;
-        std::function<void(ProvisionalActorId, const PlayerCommand&)> _on_before_command;
+        snf::runtime::ActorKind _kind;
+        std::function<void(PlayerActorId, const PlayerCommand&)> _on_before_command;
+        std::function<void(PlayerActorId)> _on_actor_deactivated;
     };
 }

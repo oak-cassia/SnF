@@ -17,7 +17,7 @@ namespace snf::server
         // A lifecycle fact cannot be silently dropped. Full leaves the caller
         // responsible for retrying without changing command-overload metrics.
         [[nodiscard]] virtual snf::runtime::PostResult
-        tryPostConnectionClosed(ProvisionalActorId actor, ConnectionClosed closed) = 0;
+        tryPostConnectionClosed(PlayerActorId actor, ConnectionClosed closed) = 0;
         virtual void close() noexcept = 0;
         virtual void cancel() noexcept = 0;
     };

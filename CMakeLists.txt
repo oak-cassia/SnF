@@ -91,6 +91,7 @@ add_library(snf_server_runtime STATIC
     src/server/player_actor.cpp
     src/server/player_actor_binding.cpp
     src/server/player_actor_ingress.cpp
+    src/server/player_session_directory.cpp
     src/server/outbound_channel.cpp
     src/server/command_terminal.cpp
     src/server/game_server.cpp
@@ -133,6 +134,7 @@ if(BUILD_TESTING)
         tests/outbound_channel_test.cpp
         tests/runtime_boundaries_test.cpp
         tests/player_actor_test.cpp
+        tests/player_session_directory_test.cpp
         tests/actor_runtime_test.cpp
         tests/actor_coroutine_test.cpp
         tests/message_dispatcher_test.cpp

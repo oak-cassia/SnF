@@ -9,6 +9,7 @@ void run_player_effect_sink_tests();
 void run_outbound_channel_tests();
 void run_runtime_boundary_tests();
 void run_player_actor_tests();
+void run_player_session_directory_tests();
 void run_actor_runtime_tests();
 void run_actor_coroutine_tests();
 void run_message_dispatcher_tests();
@@ -30,6 +31,7 @@ int main()
     run_outbound_channel_tests();
     run_runtime_boundary_tests();
     run_player_actor_tests();
+    run_player_session_directory_tests();
     run_actor_runtime_tests();
     run_actor_coroutine_tests();
     run_message_dispatcher_tests();

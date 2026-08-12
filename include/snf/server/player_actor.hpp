@@ -1,6 +1,7 @@
 #pragma once
 
 #include "snf/runtime/actor_task.hpp"
+#include "snf/server/player_actor_id.hpp"
 #include "snf/server/player_command.hpp"
 #include "snf/server/player_result.hpp"
 
@@ -13,11 +14,13 @@ namespace snf::server
     class PlayerState
     {
     public:
+        [[nodiscard]] PlayerActorId identity() const noexcept;
         [[nodiscard]] std::uint64_t handledCommandCount() const noexcept;
 
     private:
         friend class PlayerActor;
 
+        PlayerActorId _identity;
         std::uint64_t _handled_command_count{0};
     };
 
@@ -25,6 +28,7 @@ namespace snf::server
     {
     public:
         PlayerActor() = default;
+        explicit PlayerActor(PlayerActorId identity) noexcept;
 
         PlayerActor(const PlayerActor&) = delete;
         PlayerActor& operator=(const PlayerActor&) = delete;
@@ -50,6 +54,7 @@ namespace snf::server
 
     private:
         [[nodiscard]] PlayerResult handleCommand(const PingCommand& command);
+        [[nodiscard]] PlayerResult handleCommand(const AuthenticateCommand& command);
 
         PlayerState _state;
     };

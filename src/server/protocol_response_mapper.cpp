@@ -1,6 +1,9 @@
 #include "snf/server/protocol_response_mapper.hpp"
 
+#include <cstddef>
+#include <cstdint>
 #include <type_traits>
+#include <utility>
 #include <variant>
 
 namespace
@@ -22,6 +25,23 @@ namespace snf::server
                         .type = snf::protocol::MessageType::Pong,
                         .request_id = value.request_id,
                         .payload = value.payload,
+                    };
+                }
+                else if constexpr (std::is_same_v<Response, AuthenticatedResponse>)
+                {
+                    constexpr std::size_t PLAYER_ID_WIRE_SIZE = 8;
+                    std::vector<std::byte> payload(PLAYER_ID_WIRE_SIZE);
+                    std::uint64_t remaining = value.player.value;
+                    for (std::size_t index = PLAYER_ID_WIRE_SIZE; index > 0; --index)
+                    {
+                        payload[index - 1] = static_cast<std::byte>(remaining & 0xFFU);
+                        remaining >>= 8U;
+                    }
+
+                    return snf::protocol::Frame{
+                        .type = snf::protocol::MessageType::Authenticated,
+                        .request_id = value.request_id,
+                        .payload = std::move(payload),
                     };
                 }
                 else

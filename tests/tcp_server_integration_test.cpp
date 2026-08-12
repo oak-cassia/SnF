@@ -315,6 +315,42 @@ namespace
         assert(result.frames[0].payload == request.payload);
     }
 
+    std::vector<std::byte> player_id_payload(const std::uint64_t value)
+    {
+        std::vector<std::byte> payload(8);
+        std::uint64_t remaining = value;
+        for (std::size_t index = payload.size(); index > 0; --index)
+        {
+            payload[index - 1] = static_cast<std::byte>(remaining & 0xFFU);
+            remaining >>= 8U;
+        }
+        return payload;
+    }
+
+    snf::protocol::Frame authentication_frame(const std::uint32_t request_id,
+                                              const std::uint64_t player_id)
+    {
+        return snf::protocol::Frame{
+            .type = snf::protocol::MessageType::Authenticate,
+            .request_id = request_id,
+            .payload = player_id_payload(player_id),
+        };
+    }
+
+    void assert_authenticated(const std::vector<std::byte>& response,
+                              const std::uint32_t request_id,
+                              const std::uint64_t player_id)
+    {
+        snf::protocol::FrameDecoder decoder;
+        const auto result = decoder.append(response);
+
+        assert(result.ok());
+        assert(result.frames.size() == 1);
+        assert(result.frames[0].type == snf::protocol::MessageType::Authenticated);
+        assert(result.frames[0].request_id == request_id);
+        assert(result.frames[0].payload == player_id_payload(player_id));
+    }
+
     void receive_until_closed(const int socket_descriptor)
     {
         std::array<std::byte, 65536> receive_buffer{};
@@ -557,6 +593,53 @@ namespace
         assert(stats.received_frames == 1);
         assert(stats.sent_frames == 1);
         assert(stats.protocol_errors == 0);
+    }
+
+    void test_authenticates_one_session_and_allows_reconnect_after_passivation()
+    {
+        RunningServer server;
+        constexpr std::uint64_t player_id = 77;
+
+        auto first = connect_client(server.getPort());
+        const auto first_auth = authentication_frame(100, player_id);
+        const auto first_auth_bytes = snf::protocol::encode_frame(first_auth);
+        send_all(first.getDescriptor(), first_auth_bytes);
+        assert_authenticated(receive_exact(first.getDescriptor(), first_auth_bytes.size()),
+                             first_auth.request_id,
+                             player_id);
+
+        const auto ping = snf::protocol::Frame{
+            .type = snf::protocol::MessageType::Ping,
+            .request_id = 101,
+            .payload = {std::byte{0xAA}},
+        };
+        const auto ping_bytes = snf::protocol::encode_frame(ping);
+        send_all(first.getDescriptor(), ping_bytes);
+        assert_pong(receive_exact(first.getDescriptor(), ping_bytes.size()), ping);
+
+        const auto duplicate = connect_client(server.getPort());
+        const auto duplicate_auth = authentication_frame(102, player_id);
+        send_all(duplicate.getDescriptor(), snf::protocol::encode_frame(duplicate_auth));
+        receive_until_closed(duplicate.getDescriptor());
+
+        first.init();
+        const auto passivation_deadline = std::chrono::steady_clock::now() + 1s;
+        while (actor_count(server.getActorRuntimeStats()) != 0 &&
+               std::chrono::steady_clock::now() < passivation_deadline)
+        {
+            std::this_thread::sleep_for(1ms);
+        }
+        assert(actor_count(server.getActorRuntimeStats()) == 0);
+
+        const auto reconnected = connect_client(server.getPort());
+        const auto reconnect_auth = authentication_frame(103, player_id);
+        const auto reconnect_bytes = snf::protocol::encode_frame(reconnect_auth);
+        send_all(reconnected.getDescriptor(), reconnect_bytes);
+        assert_authenticated(receive_exact(reconnected.getDescriptor(), reconnect_bytes.size()),
+                             reconnect_auth.request_id,
+                             player_id);
+
+        server.stop();
     }
 
     void test_peer_disconnect_evicts_the_player_actor()
@@ -1066,6 +1149,7 @@ namespace
 int main()
 {
     test_returns_pong_for_ping();
+    test_authenticates_one_session_and_allows_reconnect_after_passivation();
     test_collects_baseline_saturation_metrics_for_a_round_trip();
     test_saturated_outbound_answers_every_request_and_still_drains();
     test_reports_metrics_periodically_while_running();

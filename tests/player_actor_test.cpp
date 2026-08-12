@@ -64,10 +64,32 @@ namespace
         assert(task.resume() == snf::runtime::ActorTaskStatus::Completed);
         assert(actor.state().handledCommandCount() == 1);
     }
+
+    void test_persistent_player_actor_acknowledges_its_identity()
+    {
+        const snf::server::PlayerId player{.value = 77};
+        snf::server::PlayerActor actor{snf::server::PlayerActorId{player}};
+        const snf::server::PlayerCommand command = snf::server::AuthenticateCommand{
+            .request_id = 9,
+            .player = player,
+        };
+
+        const auto result = run_handler(actor, command);
+        assert(actor.state().identity() == player);
+        assert(result.effects.size() == 1);
+        const auto* send = std::get_if<snf::server::SendResponse>(&result.effects.front());
+        assert(send != nullptr);
+        const auto* authenticated =
+            std::get_if<snf::server::AuthenticatedResponse>(&send->response);
+        assert(authenticated != nullptr);
+        assert(authenticated->request_id == 9);
+        assert(authenticated->player == player);
+    }
 }
 
 void run_player_actor_tests()
 {
     test_player_actor_owns_state_and_dispatches_ping();
     test_handler_body_does_not_run_before_the_first_resume();
+    test_persistent_player_actor_acknowledges_its_identity();
 }

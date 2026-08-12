@@ -2,8 +2,8 @@
 
 #include "snf/net/connection_id.hpp"
 #include "snf/server/connection_lifecycle.hpp"
+#include "snf/server/player_actor_id.hpp"
 #include "snf/server/player_command.hpp"
-#include "snf/server/provisional_actor_id.hpp"
 
 #include <variant>
 
@@ -13,13 +13,13 @@ namespace snf::server
     // invalid pairing such as a PlayerCommand addressed to a future Zone target.
     struct PlayerCommandRoute
     {
-        ProvisionalActorId actor;
+        PlayerActorId actor;
         PlayerCommand command;
     };
 
     struct ConnectionClosedRoute
     {
-        ProvisionalActorId actor;
+        PlayerActorId actor;
         ConnectionCloseCause cause;
     };
 
