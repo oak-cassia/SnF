@@ -96,6 +96,7 @@ add_library(snf_server_runtime STATIC
     src/server/player_actor_binding.cpp
     src/server/player_actor_ingress.cpp
     src/server/player_repository.cpp
+    src/server/ranking_projection.cpp
     src/server/player_session_directory.cpp
     src/server/zone_actor.cpp
     src/server/zone_actor_binding.cpp
@@ -152,6 +153,7 @@ if(BUILD_TESTING)
         tests/player_actor_test.cpp
         tests/player_session_directory_test.cpp
         tests/player_repository_test.cpp
+        tests/ranking_projection_test.cpp
         tests/actor_runtime_test.cpp
         tests/actor_coroutine_test.cpp
         tests/message_dispatcher_test.cpp

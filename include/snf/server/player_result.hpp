@@ -1,5 +1,6 @@
 #pragma once
 
+#include "snf/server/player_domain_event.hpp"
 #include "snf/server/player_id.hpp"
 #include "snf/server/purchase.hpp"
 
@@ -35,7 +36,12 @@ namespace snf::server
         PlayerResponse response;
     };
 
-    using PlayerEffect = std::variant<SendResponse>;
+    struct PublishPlayerEvent
+    {
+        PlayerDomainEvent event;
+    };
+
+    using PlayerEffect = std::variant<SendResponse, PublishPlayerEvent>;
 
     struct PlayerResult
     {

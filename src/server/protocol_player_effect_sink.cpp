@@ -11,16 +11,24 @@ namespace
 
 namespace snf::server
 {
-    ProtocolPlayerEffectSink::ProtocolPlayerEffectSink(OutboundSink& outbound) noexcept
+    ProtocolPlayerEffectSink::ProtocolPlayerEffectSink(OutboundSink& outbound,
+                                                       PlayerDomainEventSink* events) noexcept
         : _outbound(outbound)
+        , _events(events)
     {
     }
 
     std::size_t ProtocolPlayerEffectSink::requiredSlots(const PlayerResult& result) const noexcept
     {
-        // Every effect currently maps onto exactly one outbound action. An effect that
-        // emits more than one has to be priced here, not at the reservation site.
-        return result.effects.size();
+        std::size_t slots = 0;
+        for (const PlayerEffect& effect : result.effects)
+        {
+            if (std::holds_alternative<SendResponse>(effect))
+            {
+                ++slots;
+            }
+        }
+        return slots;
     }
 
     bool ProtocolPlayerEffectSink::commit(const snf::net::ConnectionId connection,
@@ -30,7 +38,7 @@ namespace snf::server
         for (const PlayerEffect& effect : result.effects)
         {
             const bool emitted = std::visit(
-                [this, connection, &reservation](const auto& value) -> bool
+                [this, connection, &reservation](auto value) -> bool
                 {
                     using Effect = std::decay_t<decltype(value)>;
                     if constexpr (std::is_same_v<Effect, SendResponse>)
@@ -40,6 +48,17 @@ namespace snf::server
                                                     .connection = connection,
                                                     .frame = _response_mapper.map(value.response),
                                                 });
+                    }
+                    else if constexpr (std::is_same_v<Effect, PublishPlayerEvent>)
+                    {
+                        if (_events == nullptr)
+                        {
+                            return false;
+                        }
+                        const PlayerEventPublishResult status =
+                            _events->publish(std::move(value.event));
+                        return status == PlayerEventPublishResult::Published ||
+                               status == PlayerEventPublishResult::Duplicate;
                     }
                     else
                     {

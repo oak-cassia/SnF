@@ -100,6 +100,8 @@ namespace
                 },
             .currency_balance = 700,
             .purchased_item_count = 3,
+            .ranking_score = 40,
+            .last_domain_event_sequence = 2,
         });
 
         const auto command = make_ping(20);
@@ -109,6 +111,8 @@ namespace
         assert(record.handled_command_count == 11);
         assert(record.currency_balance == 700);
         assert(record.purchased_item_count == 3);
+        assert(record.ranking_score == 40);
+        assert(record.last_domain_event_sequence == 2);
         assert((record.last_location == snf::server::PlayerLocation{
                                             .zone = snf::server::ZoneId{.value = 5},
                                             .position = {.x = 3, .y = -4},
@@ -176,6 +180,40 @@ namespace
         assert(unavailable_response->result.purchased_item_count == 1);
         assert(actor.state().handledCommandCount() == 2);
     }
+
+    void test_trusted_score_award_updates_state_and_emits_an_absolute_event()
+    {
+        const snf::server::PlayerId player{.value = 91};
+        snf::server::PlayerActor actor{snf::server::PlayerActorId{player}};
+        actor.restore(snf::server::PlayerRecord{
+            .player = player,
+            .handled_command_count = 4,
+            .last_location = std::nullopt,
+            .currency_balance = 800,
+            .purchased_item_count = 2,
+            .ranking_score = 100,
+            .last_domain_event_sequence = 2,
+        });
+        const snf::server::PlayerCommand command = snf::server::AwardRankingScoreCommand{
+            .request_id = 40,
+            .score_delta = 25,
+        };
+
+        const auto result = run_handler(actor, command);
+        assert(result.effects.size() == 1);
+        const auto* publish = std::get_if<snf::server::PublishPlayerEvent>(&result.effects.front());
+        assert(publish != nullptr);
+        assert((publish->event == snf::server::PlayerDomainEvent{snf::server::PlayerScoreChanged{
+                                      .player = player,
+                                      .sequence = 3,
+                                      .score = 125,
+                                  }}));
+        assert(actor.state().rankingScore() == 125);
+        assert(actor.state().lastDomainEventSequence() == 3);
+        assert(actor.state().handledCommandCount() == 5);
+        assert(actor.snapshot().ranking_score == 125);
+        assert(actor.snapshot().last_domain_event_sequence == 3);
+    }
 }
 
 void run_player_actor_tests()
@@ -185,4 +223,5 @@ void run_player_actor_tests()
     test_persistent_player_actor_acknowledges_its_identity();
     test_persistent_player_actor_restores_and_snapshots_state();
     test_purchase_completion_updates_authoritative_state_and_preserves_it_on_unavailable();
+    test_trusted_score_award_updates_state_and_emits_an_absolute_event();
 }

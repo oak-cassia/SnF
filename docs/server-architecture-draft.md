@@ -592,6 +592,24 @@ disconnect snapshot은 3상태다. 아직 repository load가 끝나지 않은 `u
 마지막 승인 위치를 뜻한다. `optional` 하나로 앞의 두 상태를 합치면 인증 중 disconnect가 저장 위치를
 지우므로 둘을 구분해야 한다.
 
+### 6.1 Player domain event와 projection
+
+영구 랭킹 점수도 PlayerActor만 변경한다. 외부 client command가 아니라 검증된 gameplay input이
+점수 delta를 전달하며, PlayerActor는 상태를 갱신한 뒤 `(PlayerId, playerSequence, absoluteScore)`
+event를 발행한다. absolute value와 단조 sequence를 함께 쓰면 같은 event의 재전달은 idempotent하고,
+누락이나 다른 내용으로 재사용된 sequence는 명시적으로 판별할 수 있다.
+
+event log는 Player별 sequence와 별개인 global offset을 부여하고, ranking projection은 그 offset을
+연속 적용한다. standings는 score 내림차순과 PlayerId 오름차순 tie-break로 결정적이다. checkpoint는
+마지막 global offset과 Player별 absolute score/sequence를 저장하며 복구 시 이후 tail만 replay한다.
+domain event effect는 network response가 아니므로 outbound queue slot을 소비하지 않지만, publish
+실패를 성공으로 간주해서는 안 된다.
+
+현재 in-memory log와 checkpoint는 이 의미와 bounded failure를 검증하는 reference adapter다.
+Player snapshot만 durable하고 event log가 유실되면 다음 Player sequence를 적용할 수 없으므로,
+운영 adapter는 Player 변경과 event/outbox 기록의 atomicity 및 checkpoint 내구성을 함께 정해야 한다.
+이 경계가 결정되기 전 ranking view는 crash-recovery나 시즌 정산의 근거가 아니다.
+
 구현 시 route 변경은 `RouteCoordinator`가 직렬화한다.
 
 ```text
@@ -794,6 +812,7 @@ inbound/outbound/lifecycle 계약이 안정된 뒤의 선택적 트랙이다.
 - queue가 포화되었을 때 정의된 backpressure가 동작한다.
 - DB 완료 순서가 바뀌어도 최신 상태가 과거 결과로 덮이지 않는다.
 - 같은 domain event가 중복 전달되어도 영구 상태에 한 번만 적용된다.
+- ranking checkpoint 뒤 event tail을 재실행하면 live projection과 같은 결정적 순위를 만든다.
 - shutdown 시 새 작업 차단, queue drain, 저장, 송신 drain이 순서대로 실행된다.
 - 부하 테스트에서 queue depth, command wait, tick time과 end-to-end p99를 확인할 수 있다.
 - inbound frame을 조용히 드롭하지 않는다. credit 소진 전 읽기를 중지하고, admission 실패와 악성

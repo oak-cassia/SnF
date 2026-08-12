@@ -1,5 +1,6 @@
 #include "snf/server/player_actor.hpp"
 
+#include <limits>
 #include <stdexcept>
 #include <variant>
 
@@ -30,6 +31,16 @@ namespace snf::server
         return _purchased_item_count;
     }
 
+    std::uint64_t PlayerState::rankingScore() const noexcept
+    {
+        return _ranking_score;
+    }
+
+    std::uint64_t PlayerState::lastDomainEventSequence() const noexcept
+    {
+        return _last_domain_event_sequence;
+    }
+
     const PlayerState& PlayerActor::state() const noexcept
     {
         return _state;
@@ -46,6 +57,8 @@ namespace snf::server
         _state._last_location = record.last_location;
         _state._currency_balance = record.currency_balance;
         _state._purchased_item_count = record.purchased_item_count;
+        _state._ranking_score = record.ranking_score;
+        _state._last_domain_event_sequence = record.last_domain_event_sequence;
     }
 
     void PlayerActor::setLastLocation(std::optional<PlayerLocation> location) noexcept
@@ -105,6 +118,8 @@ namespace snf::server
             .last_location = _state._last_location,
             .currency_balance = _state._currency_balance,
             .purchased_item_count = _state._purchased_item_count,
+            .ranking_score = _state._ranking_score,
+            .last_domain_event_sequence = _state._last_domain_event_sequence,
         };
     }
 
@@ -161,5 +176,42 @@ namespace snf::server
     PlayerResult PlayerActor::handleCommand(const PurchaseCommand&)
     {
         throw std::logic_error{"PurchaseCommand must be completed by PlayerActorBinding"};
+    }
+
+    PlayerResult PlayerActor::handleCommand(const AwardRankingScoreCommand& command)
+    {
+        const auto player = _state._identity.playerId();
+        if (!player)
+        {
+            throw std::logic_error{"Ranking score reached a provisional Player actor"};
+        }
+        if (command.score_delta == 0)
+        {
+            throw std::invalid_argument{"Ranking score delta must be positive"};
+        }
+        if (_state._ranking_score > std::numeric_limits<std::uint64_t>::max() - command.score_delta)
+        {
+            throw std::overflow_error{"Ranking score overflow"};
+        }
+        if (_state._last_domain_event_sequence == std::numeric_limits<std::uint64_t>::max())
+        {
+            throw std::overflow_error{"Player domain event sequence overflow"};
+        }
+
+        _state._ranking_score += command.score_delta;
+        ++_state._last_domain_event_sequence;
+        return PlayerResult{
+            .effects =
+                {
+                    PublishPlayerEvent{
+                        .event =
+                            PlayerScoreChanged{
+                                .player = *player,
+                                .sequence = _state._last_domain_event_sequence,
+                                .score = _state._ranking_score,
+                            },
+                    },
+                },
+        };
     }
 }

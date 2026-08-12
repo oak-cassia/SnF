@@ -100,7 +100,8 @@ namespace snf::server
                   };
               }(),
               _outbound_event.getDescriptor())
-        , _player_effects(_outbound_channel)
+        , _ranking_events(config.max_player_domain_events)
+        , _player_effects(_outbound_channel, &_ranking_events)
         , _zone_results(_outbound_channel)
         , _party_results(_outbound_channel)
         , _party_coordinator(checked_party_members(config.max_party_members))
@@ -299,6 +300,16 @@ namespace snf::server
         return _party_actor_binding.stats();
     }
 
+    RankingPipelineStats GameServer::getRankingStats() const
+    {
+        return _ranking_events.stats();
+    }
+
+    std::vector<RankingEntry> GameServer::getRankingStandings() const
+    {
+        return _ranking_events.standings();
+    }
+
     ServerMetricsSnapshot GameServer::getMetricsSnapshot() const
     {
         return ServerMetricsSnapshot{
@@ -309,6 +320,7 @@ namespace snf::server
             .zone_timers = _zone_timers.stats(),
             .zone_actors = _zone_actor_binding.stats(),
             .party_actors = _party_actor_binding.stats(),
+            .ranking_projection = _ranking_events.stats(),
             .command_terminals = _command_lifecycle.terminalCount(),
             .command_admission_rejections = _command_lifecycle.admissionRejectionCount(),
         };

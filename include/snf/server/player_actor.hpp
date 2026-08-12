@@ -21,6 +21,8 @@ namespace snf::server
         [[nodiscard]] std::optional<PlayerLocation> lastLocation() const noexcept;
         [[nodiscard]] std::uint64_t currencyBalance() const noexcept;
         [[nodiscard]] std::uint64_t purchasedItemCount() const noexcept;
+        [[nodiscard]] std::uint64_t rankingScore() const noexcept;
+        [[nodiscard]] std::uint64_t lastDomainEventSequence() const noexcept;
 
     private:
         friend class PlayerActor;
@@ -30,6 +32,8 @@ namespace snf::server
         std::optional<PlayerLocation> _last_location;
         std::uint64_t _currency_balance{INITIAL_CURRENCY_BALANCE};
         std::uint64_t _purchased_item_count{0};
+        std::uint64_t _ranking_score{0};
+        std::uint64_t _last_domain_event_sequence{0};
     };
 
     class PlayerActor
@@ -69,6 +73,7 @@ namespace snf::server
         [[nodiscard]] PlayerResult handleCommand(const PingCommand& command);
         [[nodiscard]] PlayerResult handleCommand(const AuthenticateCommand& command);
         [[nodiscard]] PlayerResult handleCommand(const PurchaseCommand& command);
+        [[nodiscard]] PlayerResult handleCommand(const AwardRankingScoreCommand& command);
 
         PlayerState _state;
     };

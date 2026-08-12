@@ -80,6 +80,11 @@ namespace
         std::cout << "Party actors: " << parties.commands << " commands, " << parties.rejected
                   << " rejected, " << parties.passivation_requests << " passivation requests\n";
 
+        const auto& ranking = metrics.ranking_projection;
+        std::cout << "Ranking projection: " << ranking.event_count << " events, offset "
+                  << ranking.projection_offset << ", " << ranking.published << " published/"
+                  << ranking.duplicates << " duplicate/" << ranking.rejected << " rejected\n";
+
         const auto& repository = metrics.player_repository;
         std::cout << "Player repository: " << repository.queue_depth << " queued, "
                   << repository.queue_high_water_mark << " high-water, " << repository.accepted

@@ -16,5 +16,7 @@ namespace snf::server
         std::optional<PlayerLocation> last_location;
         std::uint64_t currency_balance{INITIAL_CURRENCY_BALANCE};
         std::uint64_t purchased_item_count{0};
+        std::uint64_t ranking_score{0};
+        std::uint64_t last_domain_event_sequence{0};
     };
 }

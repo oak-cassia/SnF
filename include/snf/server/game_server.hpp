@@ -18,6 +18,7 @@
 #include "snf/server/protocol_party_result_sink.hpp"
 #include "snf/server/protocol_player_effect_sink.hpp"
 #include "snf/server/protocol_zone_result_sink.hpp"
+#include "snf/server/ranking_projection.hpp"
 #include "snf/server/route_coordinator.hpp"
 #include "snf/server/tcp_server.hpp"
 #include "snf/server/zone_actor_binding.hpp"
@@ -31,6 +32,7 @@
 #include <functional>
 #include <optional>
 #include <thread>
+#include <vector>
 
 namespace snf::server
 {
@@ -48,6 +50,7 @@ namespace snf::server
         ZoneTimerServiceStats zone_timers;
         ZoneActorBindingStats zone_actors;
         PartyActorBindingStats party_actors;
+        RankingPipelineStats ranking_projection;
         // Commands that were admitted and reached a final result, counted once each
         // whether or not they answered. If playable slow-command measurements justify
         // per-connection credit, its owner consumes this same terminal signal.
@@ -72,6 +75,7 @@ namespace snf::server
         std::size_t player_repository_worker_count{1};
         std::size_t player_repository_queue_capacity{4096};
         std::size_t max_purchase_idempotency_records_per_player{1024};
+        std::size_t max_player_domain_events{65536};
         std::size_t max_party_members{8};
         std::int32_t zone_aoi_radius{1000};
         std::chrono::milliseconds zone_tick_interval{50};
@@ -117,6 +121,8 @@ namespace snf::server
         [[nodiscard]] ZoneTimerServiceStats getZoneTimerStats() const;
         [[nodiscard]] ZoneActorBindingStats getZoneActorStats() const noexcept;
         [[nodiscard]] PartyActorBindingStats getPartyActorStats() const noexcept;
+        [[nodiscard]] RankingPipelineStats getRankingStats() const;
+        [[nodiscard]] std::vector<RankingEntry> getRankingStandings() const;
         // Reads reactor state, so it belongs to the reactor thread: call it from
         // metrics_reporter or after run() has returned.
         [[nodiscard]] ServerMetricsSnapshot getMetricsSnapshot() const;
@@ -136,6 +142,7 @@ namespace snf::server
         // The domain side takes it as an OutboundSink&, so the binding and the effect
         // sink still cannot reach the reactor-only half.
         OutboundChannel _outbound_channel;
+        InMemoryRankingEventPipeline _ranking_events;
         ProtocolPlayerEffectSink _player_effects;
         ProtocolZoneResultSink _zone_results;
         ProtocolPartyResultSink _party_results;

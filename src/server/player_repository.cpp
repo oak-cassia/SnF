@@ -79,6 +79,8 @@ namespace snf::server
                                                 .last_location = std::nullopt,
                                                 .currency_balance = INITIAL_CURRENCY_BALANCE,
                                                 .purchased_item_count = 0,
+                                                .ranking_score = 0,
+                                                .last_domain_event_sequence = 0,
                                             })
                                .first->second;
             auto& purchases = _purchases[request.player];

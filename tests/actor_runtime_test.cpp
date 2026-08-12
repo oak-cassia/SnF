@@ -8,6 +8,7 @@
 #include "snf/server/player_actor_binding.hpp"
 #include "snf/server/player_actor_ingress.hpp"
 #include "snf/server/protocol_player_effect_sink.hpp"
+#include "snf/server/ranking_projection.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -77,12 +78,14 @@ namespace
                       .max_slots_per_connection = outbound_capacity,
                   },
                   outbound_event.getDescriptor())
-            , outbound_sink(outbound)
+            , ranking_events(16)
+            , outbound_sink(outbound, &ranking_events)
         {
         }
 
         snf::net::UniqueFileDescriptor outbound_event;
         snf::server::OutboundChannel outbound;
+        snf::server::InMemoryRankingEventPipeline ranking_events;
         snf::server::ProtocolPlayerEffectSink outbound_sink;
         snf::server::CountingCommandLifecycleSink lifecycle;
         RecordingRuntimeCompletion completion;
@@ -1575,6 +1578,68 @@ namespace
         assert(stats.suspended_commands >= 2);
         assert(stats.in_flight_operations == 0);
     }
+
+    void test_persistent_player_event_advances_projection_and_is_saved()
+    {
+        RuntimeDependencies dependencies{8};
+        snf::server::InMemoryPlayerRepository repository;
+        snf::server::PlayerActorBinding persistent{dependencies.outbound_sink,
+                                                   dependencies.outbound,
+                                                   dependencies.lifecycle,
+                                                   snf::server::PlayerActorBindingConfig{
+                                                       .actor_kind = ActorKind::Player,
+                                                       .repository = &repository,
+                                                       .on_before_command = {},
+                                                       .on_actor_deactivated = {},
+                                                       .on_record_loaded = {},
+                                                   }};
+        ActorRuntime runtime{player_runtime_config(1, 8), dependencies.completion};
+        runtime.registerBinding(persistent);
+        snf::server::PlayerActorIngress ingress{runtime, persistent, dependencies.lifecycle};
+        runtime.start();
+
+        const snf::server::PlayerId player{.value = 79};
+        const snf::net::ConnectionId connection{.descriptor = 74, .generation = 704};
+        assert(ingress.tryPost(snf::server::PlayerInboundCommand{
+                   .actor = player,
+                   .connection = connection,
+                   .command =
+                       snf::server::AwardRankingScoreCommand{
+                           .request_id = 1,
+                           .score_delta = 35,
+                       },
+               }) == PostResult::Accepted);
+
+        const auto projection_deadline = std::chrono::steady_clock::now() + 1s;
+        while (dependencies.ranking_events.stats().event_count != 1 &&
+               std::chrono::steady_clock::now() < projection_deadline)
+        {
+            std::this_thread::sleep_for(1ms);
+        }
+        assert((dependencies.ranking_events.standings() ==
+                std::vector<snf::server::RankingEntry>{
+                    {.player = player, .score = 35, .last_sequence = 1},
+                }));
+        assert(dependencies.outbound.size() == 0);
+        assert(dependencies.outbound.reservedSlotCount() == 0);
+
+        assert(ingress.tryPostConnectionClosed(
+                   player,
+                   snf::server::ConnectionClosed{
+                       .connection = connection,
+                       .cause = snf::server::ConnectionCloseCause::PeerClosed,
+                       .has_location_snapshot = false,
+                       .last_location = std::nullopt,
+                   }) == PostResult::Accepted);
+        runtime.close();
+        runtime.join();
+
+        const auto saved = repository.find(player);
+        assert(saved.has_value());
+        assert(saved->ranking_score == 35);
+        assert(saved->last_domain_event_sequence == 1);
+        assert(saved->handled_command_count == 1);
+    }
 }
 
 void run_actor_runtime_tests()
@@ -1599,4 +1664,5 @@ void run_actor_runtime_tests()
     test_admitted_commands_and_refused_posts_are_counted_apart();
     test_player_repository_wait_suspends_only_the_loading_actor();
     test_purchase_wait_suspends_only_the_purchasing_actor();
+    test_persistent_player_event_advances_projection_and_is_saved();
 }

@@ -29,7 +29,16 @@ namespace snf::server
         ProductId product;
     };
 
-    using PlayerCommand = std::variant<PingCommand, AuthenticateCommand, PurchaseCommand>;
+    // Trusted gameplay input. It is deliberately absent from the client protocol:
+    // clients may observe ranking, but never award their own score.
+    struct AwardRankingScoreCommand
+    {
+        std::uint32_t request_id{0};
+        std::uint64_t score_delta{0};
+    };
+
+    using PlayerCommand =
+        std::variant<PingCommand, AuthenticateCommand, PurchaseCommand, AwardRankingScoreCommand>;
 
     [[nodiscard]] inline std::uint32_t requestId(const PlayerCommand& command) noexcept
     {

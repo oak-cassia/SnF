@@ -705,10 +705,25 @@ UnifiedRuntimeDrained =
   Player가 `PartyFull` 후에도 PING을 주고받는지, 마지막 leave 후 Party가 passivate되는지
   검증한다. command, reject와 passivation request를 계측한다.
 
-### 7.2 Projection slice
+### 7.2 Projection slice (완료: in-memory reference)
 
-- 랭킹 점수는 PlayerActor가 domain event를 발행하고 별도 projection이 집계한다.
-- 재실행, checkpoint, 중복 event와 idempotent 적용을 검증한 뒤에만 시즌 정산 job을 추가한다.
+- 랭킹 점수는 소유 `PlayerActor`만 변경한다. client wire에는 점수 증가 명령을 공개하지 않고,
+  신뢰된 gameplay input인 `AwardRankingScoreCommand`가 절대 score와 Player별 단조 sequence를 담은
+  `PlayerScoreChanged` domain event를 발행한다. score와 마지막 event sequence는 Player snapshot에도
+  함께 저장된다.
+- `ProtocolPlayerEffectSink`는 response와 domain event를 구분해, event-only result에는 유효한
+  0-slot outbound reservation을 사용한다. event publish의 conflict, 순서 오류나 bounded log 포화는
+  성공으로 숨기지 않고 Logic Runtime 실패로 승격한다.
+- `InMemoryPlayerEventLog`는 `(PlayerId, sequence)` identity, 같은 값의 duplicate, 다른 값의
+  conflict, Player별 연속 sequence와 전체 event 수 상한을 강제한다. 거부된 identity는 내부 map을
+  생성하지 않아 잘못된 입력으로 메모리 상한을 우회할 수 없다.
+- 별도 `RankingProjection`은 global offset을 연속 적용하고 score 내림차순, 동점 PlayerId
+  오름차순으로 결정적 standings를 만든다. checkpoint restore 뒤 tail replay가 live view와
+  동일한지, 같은 tail의 재실행이 idempotent한지 자동화 테스트로 검증한다.
+- 현재 event log, checkpoint와 Player repository는 모두 프로세스 메모리 기반인 의미 참조
+  구현이다. 프로세스 crash/restart 복구에는 6.3의 durable transaction adapter와 함께 durable
+  event store/checkpoint 또는 transactional outbox의 원자성 경계를 결정해야 한다. 그 전에는
+  시즌 정산 job을 추가하지 않는다.
 
 ## 선택적 인프라 트랙: io_uring Network Backend
 

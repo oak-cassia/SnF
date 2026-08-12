@@ -137,6 +137,13 @@ FIFO mailbox가 membership을 변경하고, coordinator의 session route와 memb
 stale leave를 차단한다. 용량 초과는 연결 종료가 아닌 typed `PartyFull`로 응답하며,
 마지막 leave 후 빈 Actor를 회수한다.
 
+Phase 7.2에서는 PlayerActor가 신뢰된 gameplay score command를 적용하고 절대 score와 단조
+sequence의 domain event를 발행한다. bounded in-memory event log와 ranking projection은 duplicate,
+conflict, 순서 오류를 구분하며 checkpoint 뒤 tail replay로 같은 standings를 복원한다. event-only
+effect는 network outbound 용량을 소비하지 않는다. 현재 log와 checkpoint는 의미 참조 구현이므로
+프로세스 crash 복구와 시즌 정산은 durable event store/outbox를 6.3 저장 adapter와 함께 정한 뒤의
+범위다.
+
 ## 로드맵
 
 ```text
