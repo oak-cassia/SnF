@@ -6,8 +6,8 @@ SnF는 C++20을 활용해 MORPG 콘텐츠의 상태, 규칙과 메시지 흐름�
 
 현재는 Linux `epoll` 네트워크 런타임과 coroutine suspend/resume을 지원하는 일반화된 sharded Actor
 Runtime 위에서 PING/PONG vertical slice를 실행한다. outbound는 non-blocking 예약으로 동작한다. 다음으로
-`ConnectionScope`와 UnifiedRuntime으로 실행 모델을 완성하고, 그 위에 인증·영속성, Zone과 timer event,
-공유 콘텐츠를 차례로 구현한다.
+network correctness를 정리한 뒤 인증·영속성·Zone 이동을 하나의 playable vertical slice로 구현한다.
+`ConnectionScope`와 UnifiedRuntime은 실제 콘텐츠 부하가 필요를 증명할 때 진행할 선택적 최적화다.
 
 ## 프로젝트 목적
 
@@ -55,10 +55,10 @@ Network Runtime
 - 네트워크 계층과 게임 콘텐츠의 상태 소유권을 분리하고, Connection task는 게임 상태를 직접
   수정하지 않는다.
   - 현재는 Network Reactor와 Actor-Bound Logic Runtime이 별도 실행 영역을 사용한다.
-  - Phase 4.6에서는 Connection, I/O continuation과 Actor turn을 UnifiedRuntime Worker Pool에
-    통합하되, typed command/effect 경계와 Actor별 상태 단일 소유권은 유지한다.
+  - 실제 부하가 필요를 증명하면 Connection, I/O continuation과 Actor turn의 실행 pool을
+    통합할 수 있지만, typed command/effect 경계와 Actor별 상태 단일 소유권은 유지한다.
 - Player, Zone과 공유 콘텐츠는 공통 Actor 실행 규칙을 사용한다. 현재 각 Actor의 mutable 상태는
-  고정 Worker에서 FIFO로 처리하며, UnifiedRuntime에서도 Actor별 비동시 실행을 유지한다.
+  고정 Worker에서 FIFO로 처리하며, 향후 실행 pool을 바꾸더라도 Actor별 비동시 실행을 유지한다.
   - 이 프로젝트가 대상으로 하는 MORPG에서 이동 가능한 world 역할을 하는 lobby는 강한
     실시간 동기화가 필요하지 않다. 그 수준의 동기화가 필요한 game instance는 별도 서버로
     분리해 scale-out할 수 있으므로, 단일 프로세스에서는 여러 Actor 종류를 같은 Worker
@@ -101,8 +101,8 @@ Phase 3.8에서 scheduler의 Player 전용 의존을 제거하고, 모든 Worker
 현재 production binding은 Player 하나이며 ZoneActor와 timer는 이후 단계의 범위다.
 
 Phase 3.9에서는 포화 정책의 현재 동작과 목표 동작을 계약으로 고정하고 baseline metric을 확보했다.
-포화 동작 자체는 바꾸지 않았으며, in-flight credit과 non-blocking outbound는 각각 단계 4.5와 4.1에서
-구현한다.
+non-blocking outbound는 4.1에서 구현했다. in-flight credit은 실제로 느린 Player command가 등장하는
+Playable Session slice에서 연결 간 격리 필요를 측정한 뒤 현재 reactor에 적용한다.
 
 Phase 4.0에서는 `PlayerActor` handler를 lazy coroutine으로 전환하고 domain-agnostic async operation,
 continuation, cancel과 drain 기계를 구현했다. PING에는 await할 작업이 없어 handler 자체는 동기 완료한다.
@@ -120,20 +120,20 @@ operation을 시작하지 않고, 포화일 때만 그 Actor 하나가 suspend�
 → 3.9 Backpressure 계약과 계측
 → 4.0 Actor Coroutine (Suspend / Resume)
 → 4.1 Async Outbound Reservation
-→ 4.5 ConnectionScope
-→ 4.6 UnifiedRuntime 통합
-→ 5 인증·영속성
-→ 6 ZoneActor와 TimerService
+→ 4.2 Network Correctness
+→ 5 Playable Player Session
+→ 6 Transactional Gameplay
 → 7 Shared Content와 Projection
+→ 측정 후 Runtime 최적화 (선택)
 ```
 
 상세 단계와 완료 기준은 [개발 로드맵](docs/development-roadmap.md), 목표 구조와 상태 소유권은
 [서버 아키텍처 초안](docs/server-architecture-draft.md), coroutine 수명 규약은
 [Coroutine Actor 계약](docs/coroutine-actor-contract.md), 전체 종료 판정과 실패·취소 전파는
-[Runtime Lifecycle 계약](docs/runtime-lifecycle-contract.md), 연결 하나의 네트워크 상태 소유권과 수명은
-[ConnectionScope 계약](docs/connection-scope-contract.md)을 기준으로 한다. 현재 구조에서
-UnifiedRuntime으로 전환하는 이유와 단계별 개요는
-[UnifiedRuntime 전환 개요](study/10-unified-runtime-overview.md)에 정리되어 있다.
+[Runtime Lifecycle 계약](docs/runtime-lifecycle-contract.md)을 기준으로 한다.
+[ConnectionScope 계약](docs/connection-scope-contract.md)과
+[UnifiedRuntime 전환 개요](study/10-unified-runtime-overview.md)는 Playable Session과 Zone 부하가 실제
+runtime 병목을 증명할 때 사용할 선택적 최적화 트랙의 설계 입력이다.
 
 ## 빌드와 테스트
 

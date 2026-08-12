@@ -1,15 +1,17 @@
 # ConnectionScope 계약
 
-> 상태: Phase 4.5 착수 전 고정. 구현 반영 전이며, 측정과 §8 포화 표 갱신은 구현 완료 시점에 한다.
+> 상태: 보류된 선택적 Runtime 최적화 설계. 현재 콘텐츠 로드맵의 선행 조건이 아니며,
+> Playable Session과 Zone 부하가 runtime 병목을 증명할 때 다시 검토한다.
 > 범위: 최소 Executor 계약, 연결 하나의 네트워크 상태 소유권, 단일 종결과 close 순서,
 > in-flight credit, runtime deadline과 heartbeat, 취소 전파
 >
 > Actor runtime 내부 조건은 [Coroutine Actor 계약](./coroutine-actor-contract.md)이,
 > 서버 전체 종료 판정과 Runtime 사이의 조합은 [Runtime Lifecycle 계약](./runtime-lifecycle-contract.md)이,
 > 목표 구조와 불변식은 [서버 아키텍처 초안](./server-architecture-draft.md)이,
-> 구현 순서는 [개발 로드맵](./development-roadmap.md) 4.5가 소유한다.
+> 구현 승격 관문과 순서는 [개발 로드맵](./development-roadmap.md)의 선택적 Runtime 최적화 절이 소유한다.
 
-이 문서를 두는 이유는 네트워크 쪽 수명 규칙의 소유권을 한곳에 모으는 것이다. 지금까지 종결 순서와
+이 문서는 즉시 구현 지시가 아니라, 향후 네트워크 coroutine이 필요해졌을 때 수명 규칙을
+다시 발명하지 않기 위한 설계 입력이다. 지금까지 종결 순서와
 포화 정책은 reactor 구현 안에 흩어져 있었고, 장수명 coroutine을 도입하면 "누가 무엇을 파괴할 수 있는가"가
 정확한 답을 요구하는 질문이 된다.
 
@@ -43,8 +45,8 @@ ready queue 최대치 = 2 × max_scopes + 고정 control awaiter 수
 ```
 
 `max_scopes`는 `connection_lifecycle_capacity`이고, scope당 최대치가 2인 것은 read loop과 write loop이
-각각 최대 하나의 suspension point만 가지기 때문이다. Phase 4.5에서 control은 coroutine이 아니라 turn
-앞단에서 직접 처리하므로 고정 control awaiter 수는 0이다. 4.6에서 control이 awaiter가 되면 그 고정 수를
+각각 최대 하나의 suspension point만 가지기 때문이다. 이 설계의 첫 구현에서 control은 coroutine이 아니라 turn
+앞단에서 직접 처리하므로 고정 control awaiter 수는 0이다. 통합 runtime에서 control이 awaiter가 되면 그 고정 수를
 더한다.
 
 이 최대치는 생성 시점에 고정 용량 ring buffer로 잡는다. `reserve()`는 할당을 줄일 뿐 상한이 아니므로
@@ -183,7 +185,7 @@ read loop, write loop, deadline과 control이 모두 `requestClose(cause)`를 �
     Runtime이 drained에 도달하고 send queue가 빈 시점, 또는 grace deadline 중 먼저 오는 쪽까지
     write-side graceful drain을 계속한다.
   - 어느 경우든 취소된 side의 queued ready token은 §1.3의 유효성 술어에서 걸러진다.
-- Phase 4.5에서 `requestClose`는 reactor thread에서만 호출된다. Worker가 관측한 outbound admission
+- 첫 단일-reactor 구현에서 `requestClose`는 reactor thread에서만 호출된다. Worker가 관측한 outbound admission
   실패도 reactor가 기록을 소비해 호출하므로, 단일 종결의 증명은 CAS가 아니라 한 스레드 위의 상태
   기계다.
 
@@ -283,7 +285,7 @@ credit은 네트워크 층의 회계이고, domain Actor가 그것을 아는 순
 
 ## 5. Deadline과 heartbeat
 
-heartbeat와 idle timeout은 이 층의 runtime deadline primitive로 표현하며 Phase 6의 domain
+heartbeat와 idle timeout은 이 층의 runtime deadline primitive로 표현하며 gameplay domain
 `TimerService`에 의존하지 않는다. 둘은 다른 층이다.
 
 - `idle_timeout`과 `heartbeat_interval`은 모두 기본 0(비활성)이다. 기본 경로의 동작은 이 단계 전후로
@@ -377,7 +379,8 @@ heartbeat deadline은 종결 경로가 §3.2의 물리 제거로 회수한다.
 
 별도 `RuntimeId::Net`은 추가하지 않는다. executor가 reactor thread에서 실행되므로 network drain을
 관측해야 하는 다른 스레드가 없고, 한 단계만 쓰이는 identity를 미리 확정하지 않는다는 기존 판단을
-유지한다. 이 결정을 뒤집는 조건은 4.6에서 network drain을 coordinator가 관측해야 할 때다.
+유지한다. 이 결정을 뒤집는 조건은 선택적 통합 runtime에서 network drain을 coordinator가
+관측해야 할 때다.
 
 ## 8. 필수 경합 테스트
 
@@ -403,4 +406,4 @@ heartbeat deadline은 종결 경로가 §3.2의 물리 제거로 회수한다.
 - deadline 재무장 churn이 heap 항목을 쌓지 않음.
 - 연결 폭주와 강제 종료.
 
-Debug와 ASan·UBSan 외에 별도 TSan 구성을 Phase 4 완료 gate로 사용한다.
+Debug와 ASan·UBSan 외에 별도 TSan 구성을 이 선택적 최적화의 완료 gate로 사용한다.

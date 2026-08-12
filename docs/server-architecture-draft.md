@@ -99,9 +99,9 @@ ZoneActor는 여러 Entity를 함께 소유하는 aggregate Actor다. 내부 hot
 게임 상태를 변경하는 로직은 Actor-Bound Logic Pool에서 실행한다. 느린 I/O와 상태를 소유하지 않는
 CPU 작업만 별도 executor로 분리한다.
 
-| Executor | 용도 | 대표 객체 | 4.6 이후 |
+| Executor | 용도 | 대표 객체 | 선택적 통합 시 |
 | --- | --- | --- | --- |
-| Reactor | 네트워크 readiness 처리 | Session, ConnectionScope | UnifiedRuntime에 흡수 |
+| Reactor | 네트워크 readiness 처리 | Session (`ConnectionScope`는 선택안) | UnifiedRuntime에 흡수 |
 | Actor-Bound Logic Pool | 순차 상태 변경과 timer event 처리 | Player, Zone, Party, Guild | UnifiedRuntime에 흡수 |
 | Blocking I/O Pool | 느린 외부 I/O | DB query, file operation | 별도 유지 |
 | Stateless Job Pool | 선택적인 CPU 작업 | 경로 탐색, 압축 | 별도 유지 |
@@ -118,15 +118,16 @@ handler가 suspend하지 않는 CPU 작업이나 effect 적용이 blocking하면
 단계 4.1부터 outbound 포화는 Logic Worker를 세우지 않는다. Binding이 방출 전에 용량을 예약하고,
 포화면 그 Actor만 suspend되어 같은 Worker의 다른 Actor가 계속 실행된다. grant는 reactor만 수행하고
 용량을 되돌린 Worker는 wake-up만 신호하므로, grant 작업량은 reactor 회차당 상한 안에 머문다. 이
-전환은 4.6 UnifiedRuntime 통합의 선행 조건이었다. 통합 후에는 outbound를 비우는 주체와 대기하는
+전환은 현재 구조에서 Worker 격리를 개선하고, 향후 실행 pool을 통합할 경우의 선행
+조건도 만족한다. 통합 후에는 outbound를 비우는 주체와 대기하는
 주체가 같은 pool에 있으므로 blocking 대기가 남아 있으면 pool 전체가 진행하지 못한다.
 
 예약은 Actor 실행 규칙을 바꾸지 않는다. handler는 여전히 자신의 task에서 결정만 하고, 용량 획득과
 effect 방출은 binding이 handler의 정상 반환 이후에 수행한다. 따라서 domain Actor는 outbound 용량이
 유한하다는 사실을 알지 않는다.
 
-ZoneActor를 올리는 단계 6에서 tick 지연과 shard 편향을 측정해 통합 후의 worker 수, affinity와
-fairness를 조정한다.
+ZoneActor를 올리는 Playable Session slice에서 tick 지연과 shard 편향을 측정해 worker 수,
+affinity, fairness와 실행 pool 통합 필요를 판단한다.
 
 ### 2.5 Scheduler와 typed Actor binding
 
@@ -147,12 +148,13 @@ type-erased 실행 계약 등으로 scheduler와 만날 수 있지만, domain Ac
 유지한다. public `post(ActorKey, AnyMessage)`처럼 target-message의 잘못된 조합을 표현할 수
 있는 경계는 만들지 않는다.
 
-### 2.6 UnifiedRuntime
+### 2.6 선택적 UnifiedRuntime
 
-목표는 Connection, I/O continuation, Actor turn과 runtime deadline을 하나의 Worker Pool에서 실행하는
-것이다. Reactor와 Logic Pool을 분리한 현재 구조는 이 목표에 이르는 중간 단계이며 단계 4.6에서
-통합한다. 전환 근거와 트레이드오프는 [UnifiedRuntime 전환 개요](../study/10-unified-runtime-overview.md), 선행
-조건과 완료 기준은 [개발 로드맵](./development-roadmap.md) 4.6이 소유한다.
+현재의 Reactor + Actor Pool 분리 구조는 유효한 최종 구조다. Playable Session과 Zone 부하에서
+cross-runtime hand-off, lifecycle 조정 또는 shard 편향이 실제 병목으로 증명되면 Connection,
+I/O continuation, Actor turn과 runtime deadline을 하나의 Worker Pool에서 실행하는 방식을
+재평가한다. 전환 근거와 트레이드오프는
+[UnifiedRuntime 전환 개요](../study/10-unified-runtime-overview.md)가 보존한다.
 
 이 절이 고정하는 것은 통합 후에도 유지되는 불변식이다.
 
@@ -161,15 +163,15 @@ Actor만 수정하고, 같은 `ActorKey`의 command는 동시에 실행되지 �
 배제하는 "여러 Runtime이 같은 게임 상태를 mutex로 공동 수정하는 구조"는 통합 후에도 배제 대상으로
 남는다. 두 항목은 서로 다른 축의 결정이다.
 
-- 실행 pool 통합: 어떤 Worker가 어떤 종류의 작업을 실행하는가 → 목표
+- 실행 pool 통합: 어떤 Worker가 어떤 종류의 작업을 실행하는가 → 측정 후 선택
 - 상태 공유: 하나의 mutable 게임 상태를 여러 실행 주체가 수정하는가 → 배제
 
 blocking 작업은 통합 대상이 아니다. DB query, 파일 I/O와 장시간 CPU 작업은 별도 bounded executor에
 남긴다. 공통 pool의 Worker가 blocking 작업에 점유되면 전체 서버가 멈추기 때문이다.
 
 통합 후 Actor 배치는 고정 shard(`hash(ActorKey) % worker_count`)에서 Actor별 직렬화 규칙으로 바뀔 수
-있다. 이때도 §2.3의 단일 실행 불변식은 유지하며, worker 수·affinity·fairness는 단계 6의 측정으로
-조정한다(§16).
+있다. 이때도 §2.3의 단일 실행 불변식은 유지하며, worker 수·affinity·fairness는 Playable
+Session의 Zone 측정으로 결정한다(§16).
 
 ## 3. 전체 구조
 
@@ -589,12 +591,12 @@ Runtime 사이에서 동기 호출이나 `future.get()`으로 상대 Worker를 �
 
 | 포화 지점 | 현재 동작 | 목표 동작 | 예정 단계 |
 | --- | --- | --- | --- |
-| Session inbound | `FramePostResult::Full`이면 그 연결을 `ConnectionCloseCause::Overflow`로 종료한다. frame을 조용히 버리지는 않는다 | in-flight credit 소진 전에 socket 읽기를 중지하고 command terminal에서 credit을 반환한다. admission 실패와 악성 과부하는 명시적 정책으로 종료한다 | 4.5 (계약은 3.9에서 확정) |
-| Actor command ingress | Worker별 bounded capacity. `Full`은 위 inbound 정책으로 귀결된다 | credit이 admission을 앞단에서 제한하므로 `Full` 도달이 예외 경로가 된다 | 4.5 |
+| Session inbound | `FramePostResult::Full`이면 그 연결을 `ConnectionCloseCause::Overflow`로 종료한다. frame을 조용히 버리지는 않는다 | 느린 command 부하가 연결 간 격리 문제를 재현하면 in-flight credit 소진 전에 socket 읽기를 중지하고 command terminal에서 credit을 반환한다 | Playable Session 측정 후 |
+| Actor command ingress | Worker별 bounded capacity. `Full`은 위 inbound 정책으로 귀결된다 | credit을 채택하면 admission 앞단에서 연결별 점유를 제한한다 | Playable Session 측정 후 |
 | Outbound queue | Binding이 방출 전에 용량을 예약하고, 실패하면 그 Actor만 suspend된 뒤 reactor의 grant를 기다린다. 연결별 상한이 있고, 예약 대기조차 승인되지 않거나 결과가 연결별 상한보다 크면 그 연결을 `Overflow`로 종료한다. 종료 요청은 연결 단위로 합치며, 기록 상한/할당 실패에는 Worker 예외나 silent drop 대신 현재 session 전체를 닫는 reactor fail-safe를 쓴다 | 현재 동작을 유지한다 | 4.1 완료 |
-| Connection lifecycle post | reactor 소유 pending deque가 회차당 제한된 건수를 재시도하고, active session과 pending close가 lifecycle slot 예산을 공유한다 | 의미를 유지하되 `ConnectionScope` 단일 종결 경로로 이전한다 | 4.5 |
-| ZoneActor mailbox | 미구현 | 최신 입력 병합, 오래된 입력 폐기, 악성 세션 종료 | 6 |
-| DB queue | 미구현 | 제한된 재시도 또는 요청 실패 처리 | 5 |
+| Connection lifecycle post | reactor 소유 pending deque가 회차당 제한된 건수를 재시도하고, active session과 pending close가 lifecycle slot 예산을 공유한다 | 현재 의미를 유지한다. `ConnectionScope`를 선택할 때만 단일 종결 경로로 이전한다 | 선택적 Runtime 최적화 |
+| ZoneActor mailbox | 미구현 | 최신 입력 병합, 오래된 입력 폐기, 악성 세션 종료 | 5.3 |
+| DB queue | 미구현 | 제한된 재시도 또는 요청 실패 처리 | 5.2 |
 | 일반 로그 queue | 미구현. 현재는 `std::cerr`로 직접 출력한다 | 전용 bounded queue와 sampling 또는 drop | 미정 |
 
 입력 종류별로 정책이 다를 수 있다. 이동 입력은 최신 값으로 합칠 수 있지만 아이템 구매나
@@ -639,10 +641,10 @@ ZoneActor의 주기 갱신은 별도 tick 실행 스레드가 상태를 수정�
 | 상태 | 토폴로지 | 시점 |
 | --- | --- | --- |
 | 현재 | Network Reactor 1(main thread) + coroutine Actor-Bound Logic Pool 2 | 4.0 |
-| 전환 | Reactor thread가 최소 Executor와 ready queue를 실행하고, Actor는 non-blocking outbound를 사용한다 | 4.1~4.5 |
-| 목표 | UnifiedRuntime N + 별도 Blocking DB Pool + Logger | 4.6 이후 |
+| 콘텐츠 목표 | Network Reactor + Actor-Bound Logic Pool + 별도 Blocking DB Pool + Logger | Playable Session 이후 |
+| 선택적 최적화 | UnifiedRuntime N + 별도 Blocking DB Pool + Logger | 병목 증명 후 |
 
-전환 근거는 [UnifiedRuntime 전환 개요](../study/10-unified-runtime-overview.md)에 있다. 영역별 초기 Worker 수와
+선택적 전환의 판단 근거는 [UnifiedRuntime 전환 개요](../study/10-unified-runtime-overview.md)에 있다. 영역별 초기 Worker 수와
 확장 기준은 다음과 같다.
 
 | 영역 | 초기 Worker 수 | 확장 기준 |
@@ -713,8 +715,8 @@ include/snf/
 
 ## 13. 구현 단계
 
-단계별 범위, 순서와 완료 기준은 [개발 로드맵](./development-roadmap.md)이 단일 기준이다. 실행 모델
-전환의 근거와 단계 개요는 [UnifiedRuntime 전환 개요](../study/10-unified-runtime-overview.md)를 참조한다. 이
+단계별 범위, 순서와 완료 기준은 [개발 로드맵](./development-roadmap.md)이 단일 기준이다. 선택적 실행
+모델 전환의 근거와 관문은 [UnifiedRuntime 전환 개요](../study/10-unified-runtime-overview.md)를 참조한다. 이
 문서는 완료 이력을 중복 기록하지 않는다.
 
 프로세스 분리(Gateway, WorldNode)와 외부 message broker는 단일 프로세스 경계를 충분히 검증한 뒤에만
@@ -768,21 +770,20 @@ inbound/outbound/lifecycle 계약이 안정된 뒤의 선택적 트랙이다.
 
 | 항목 | 결정 시점 | 근거 지표 |
 | --- | --- | --- |
-| UnifiedRuntime worker 수와 Actor affinity | 6 | tick 지연, shard 편향, end-to-end p99 |
-| I/O continuation과 Actor turn 사이 fairness budget | 6 | reactor loop 지연, tick overrun |
-| blocking 작업 외에 별도 pool로 분리할 작업 | 6 | Worker 점유 시간 분포 |
-| ZoneActor tick rate | 6 | tick 실행 시간, overrun |
-| 한 Worker가 소유할 PlayerActor와 ZoneActor 상한 | 6 | queue wait p99, 메모리 사용량 |
-| Actor 종류·command별 mailbox coalescing 정책과 turn budget | 6 | 입력 유실률, tick 지연 |
-| 네트워크 패킷 sequence와 재전송 정책 | 6 | 이동 입력 유실률 |
-| hot Zone의 공간 분할 방식 | 6 이후 | Zone별 entity 수, AOI 계산 비용 |
-| DB 종류, connection pool 크기와 저장 보장 수준 | 5 | DB queue depth, query latency |
-| snapshot, event journal 또는 outbox 도입 범위 | 5 이후 | 저장 실패율과 복구 요구 수준 |
+| UnifiedRuntime 통합 여부, worker 수와 Actor affinity | Playable Session 이후 | tick 지연, shard 편향, hand-off, end-to-end p99 |
+| I/O continuation과 Actor turn 사이 fairness budget | 선택적 Runtime 최적화 검토 시 | reactor loop 지연, tick overrun |
+| blocking 작업 외에 별도 pool로 분리할 작업 | 5.2 이후 | Worker 점유 시간 분포 |
+| ZoneActor tick rate | 5.3 | tick 실행 시간, overrun |
+| 한 Worker가 소유할 PlayerActor와 ZoneActor 상한 | 5.3 | queue wait p99, 메모리 사용량 |
+| Actor 종류·command별 mailbox coalescing 정책과 turn budget | 5.3 | 입력 유실률, tick 지연 |
+| 네트워크 패킷 sequence와 재전송 정책 | 5.3 | 이동 입력 유실률 |
+| hot Zone의 공간 분할 방식 | 5.3 이후 | Zone별 entity 수, AOI 계산 비용 |
+| DB 종류, connection pool 크기와 저장 보장 수준 | 5.2 | DB queue depth, query latency |
+| snapshot, event journal 또는 outbox 도입 범위 | 5.2 이후 | 저장 실패율과 복구 요구 수준 |
 | 프로세스 분리 시 내부 프로토콜과 Actor Directory 방식 | 미정 | 단일 프로세스 한계 지표 |
 
-UnifiedRuntime **통합 여부는 미결정 항목이 아니다.** §2.6의 목표이며 단계 4.6에서 수행한다. 단계 6의
-측정은 통합 여부를 되묻는 것이 아니라 위 표의 worker 수, affinity, fairness와 pool 분리 범위를
-조정하기 위한 것이다.
+UnifiedRuntime 통합은 실제 콘텐츠 부하가 현재 분리 구조의 병목을 증명한 뒤에만 선택한다.
+병목이 reactor에만 있다면 pool 통합 전에 Reactor Group과 연결 sharding을 비교한다.
 
 ---
 

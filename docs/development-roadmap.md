@@ -15,11 +15,11 @@ Network Runtime
 → Backpressure 계약과 계측
 → Actor Coroutine
 → Async Outbound Reservation
-→ ConnectionScope
-→ UnifiedRuntime 통합
-→ Auth/Persistence Vertical Slice
-→ Minimal ZoneActor와 TimerService
+→ Network Correctness
+→ Playable Player Session Vertical Slice
+→ Transactional Gameplay Slice
 → Shared Content
+→ 측정 후 Runtime 최적화 (선택)
 ```
 
 ## 1. Network와 GameRuntime 분리 (완료)
@@ -138,10 +138,13 @@ domain policy를 분리했다. `snf::runtime::ActorRuntime`은 binding registry�
 계약으로 확정할 정의:
 
 - **in-flight credit**: 하나의 연결이 아직 terminal에 도달하지 않은 상태로 ingress에 올릴 수 있는
-  command 수의 상한이다. 연결 수명에 속하며 Actor 활성화와는 별개다.
+  command 수의 상한이다. 연결 수명에 속하며 Actor 활성화와는 별개다. 실제로 느린
+  command가 등장하는 Playable Session slice에서 연결 간 격리 필요를 측정한 뒤 현재
+  reactor에 적용한다.
 - **command terminal**: handler가 반환한 시점이 아니라 필요한 effect가 적용되고 성공, 실패 또는 취소
   중 하나의 최종 결과가 확정된 시점이다. 이때 credit 점유가 끝난다. 응답 effect가 있는 command와 없는
-  command에 같은 정의를 적용한다. 신호의 생산 경로는 4.1에서, credit 반환은 4.5에서 구현한다.
+  command에 같은 정의를 적용한다. 신호의 생산 경로는 4.1에서 구현했고, 소비자는
+  Playable Session slice의 포화 테스트가 필요를 증명할 때 추가한다.
 
 metric:
 
@@ -171,17 +174,19 @@ metric:
   필요하면 별도 bounded logger queue에 게시하고 전송은 그 소비자가 담당한다. 보고 비용은 turn 측정
   이후에 발생하므로 `reactor_turn_nanoseconds`에 포함되지 않는다. 이 metric은 turn당 reactor 작업량이며
   reactor 점유율 전체가 아니다.
-- baseline은 `snf_load_client` 부하 실행 중의 주기 보고와 종료 요약으로 수집한다. 4.6 통합 전후 비교
-  대상은 reactor turn 지연, Actor queue wait, outbound hand-off 시간과 outbound queue depth다.
+- baseline은 `snf_load_client` 부하 실행 중의 주기 보고와 종료 요약으로 수집한다. 향후 Runtime
+  최적화를 선택하면 reactor turn 지연, Actor queue wait, outbound hand-off 시간과 outbound
+  queue depth를 같은 조건에서 비교한다.
 
-blocking outbound는 4.6 UnifiedRuntime 통합의 blocker였다. 통합 후에는 outbound를 비우는 주체와
+blocking outbound는 실행 pool을 통합할 경우의 blocker였다. 통합 후에는 outbound를 비우는 주체와
 대기하는 주체가 같은 pool에 있으므로, blocking 대기를 남겨두면 pool 전체가 진행하지 못한다. 단계
 4.1에서 제거했다.
 
 완료 기준:
 
 - 현재 포화 동작과 목표 포화 동작이 아키텍처 초안 §8에 현재/목표/예정 단계로 기록된다.
-- in-flight credit과 command terminal 정의가 문서에 고정되고 4.1과 4.5가 이를 참조한다.
+- in-flight credit과 command terminal 정의가 문서에 고정되고 4.1과 Playable Session slice가 이를
+  참조한다.
 - baseline metric을 부하 테스트에서 수집할 수 있고 통합 전후 비교의 기준선이 된다.
 - 포화 동작, FIFO, fairness, lifecycle retry와 drain/cancel/failure 의미가 변하지 않는다.
 
@@ -263,7 +268,7 @@ Phase 4.0의 첫 production awaiter로 blocking outbound publish를 제거했다
   따라서 `command_terminals`는 승인되어 결과에 도달한 command만 세고, 거부는
   `command_admission_rejections`로 따로 노출한다.
 - release 토큰은 command를 승인하는 binding 경계에서 무장하므로, protocol 단계에서 거부된 frame은
-  아무 신호도 내지 않는다. 4.5의 credit 취득도 같은 경계여야 두 수치가 일치한다.
+  아무 신호도 내지 않는다. 향후 credit을 추가하면 취득도 같은 경계여야 두 수치가 일치한다.
 
 완료 기준 결과:
 
@@ -304,9 +309,30 @@ depth 최대 192에 머물러 포화가 발생하지 않았고, 그래서 `suspe
 Actor queue wait p50이 남은 차이는 command당 lock 획득이 하나 늘어난 비용이다. 첫 측정에서는
 연결별 회계를 command마다 만들고 버려 p50이 3배까지 벌어졌고, 회계를 연결 수명으로 옮기고 reactor
 드레인을 batch로 바꿔 대부분을 회수했다. RTT는 동등하므로 fast path를 lock-free로 만드는 작업은
-하지 않았다. 4.6이 이 경로를 다시 구성한다.
+하지 않았다. 향후 측정이 Runtime 최적화를 정당화할 때만 이 경로를 다시 구성한다.
 
-## 4.5. ConnectionScope
+## 4.2. Network Correctness
+
+현재의 단일 `epoll` reactor와 callback 구조를 유지하고 관측된 correctness 문제만 해결한다.
+
+- `FrameDecoder`를 `push(bytes) + tryDecodeNext()` pull API로 바꾸고 `append()`는 호환 wrapper로
+  남긴다. 배치 뒤의 잘못된 frame이 앞의 정상 frame까지 없애는 경로를 제거한다.
+- protocol error 후 buffer 정리, partial frame, 여러 frame 순서와 호환 wrapper를 단위 테스트한다.
+- 현재 inbound `Full → Overflow close`, lifecycle retry, Session send bound와 shutdown 동작은
+  변경하지 않는다.
+- `NetExecutor`, network coroutine, heartbeat와 범용 deadline heap은 이 단계의 범위가 아니다.
+
+완료 기준:
+
+- 오류 앞에 완전히 decode된 frame이 순서대로 반환된다.
+- 오류 후 decoder 상태가 명시적이고 buffer가 무제한 유지되지 않는다.
+- 기존 Debug 단위·통합·부하 테스트가 통과한다.
+
+## 보류된 Runtime 최적화 설계: ConnectionScope
+
+> 현재 콘텐츠 로드맵의 선행 조건이 아니다. Playable Session과 Zone 부하에서
+> cross-runtime hand-off, reactor turn 지연, lifecycle 조정 또는 shard 편향이 실제 병목임이
+> 증명될 때 아래 계약을 실행 계획으로 다시 승격한다.
 
 연결 하나의 네트워크 상태와 수명을 장수명 coroutine 쌍으로 표현한다. 게임 상태는 여전히 Actor가
 소유하고 `ConnectionScope`는 네트워크 상태만 소유한다.
@@ -318,7 +344,7 @@ Actor queue wait p50이 남은 차이는 command당 lock 획득이 하나 늘어
 - I/O readiness는 coroutine을 inline resume하지 않고 ready queue에 게시한다.
 - async read/write awaiter와 runtime deadline primitive를 제공한다.
 - 새 thread pool은 만들지 않으며 기존 reactor thread가 executor를 실행한다.
-- 이 Executor 계약과 ready queue는 4.6 UnifiedRuntime에서 그대로 재사용한다.
+- 이 Executor 계약과 ready queue는 선택적 UnifiedRuntime 통합에서 그대로 재사용한다.
 
 그 위에 다음을 올린다.
 
@@ -334,7 +360,7 @@ Actor queue wait p50이 남은 차이는 command당 lock 획득이 하나 늘어
 - `ConnectionScope`는 새 read admission을 중단하고, read loop이 진행 중인 ingress 게시를 마친 뒤 같은
   ordered ingress에 `ConnectionClosed`를 게시한다. 따라서 terminal 전이 전에 승인된 그 연결의 command
   보다 뒤에 위치한다.
-- heartbeat와 idle timeout은 runtime deadline primitive로 표현하며 Phase 6의 domain `TimerService`에
+- heartbeat와 idle timeout은 runtime deadline primitive로 표현하며 gameplay domain `TimerService`에
   의존하지 않는다.
 
 착수 전 [ConnectionScope 계약](./connection-scope-contract.md)에 Executor 계약, 상태 소유권, 단일 종결,
@@ -381,7 +407,7 @@ close 순서와 취소 전파를 고정했다. 그 문서가 고정한 결정은
 - partial send와 `EPOLLOUT` 재무장이 write loop 안에서 처리된다.
 - Debug, ASan·UBSan, TSan에서 연결 폭주와 강제 종료 시나리오가 통과한다.
 
-## 4.6. UnifiedRuntime 통합
+### UnifiedRuntime 통합
 
 Connection, I/O continuation, Actor turn과 timer를 하나의 Worker Pool에서 실행한다. 실행 pool을
 통합하는 것이며 게임 상태를 공유하는 것이 아니다. Actor의 단일 소유권과 순차 실행은 그대로 유지한다.
@@ -416,38 +442,49 @@ UnifiedRuntimeDrained =
   Actor queue wait과 end-to-end RTT의 변화를 함께 제시한다.
 - drain, cancel과 failure가 통합 후에도 정의된 순서로 동작한다.
 
-## 5. 인증·영속성 Vertical Slice
+## 5. Playable Player Session Vertical Slice
 
-하나의 멱등한 구매 흐름만 end-to-end로 완성한다.
+하나의 Player가 식별되고, 로드되고, Zone에 들어가 이동한 뒤 저장·복원되는
+최소 플레이 흐름을 end-to-end로 완성한다.
 
-```text
-인증된 PlayerId
-→ 비동기 player load
-→ idempotency key가 있는 구매 요청
-→ DB transaction으로 재화 차감과 상품 지급
-→ 비동기 저장
-→ disconnect/passivation
-→ reconnect/복원
-```
+### 5.1 Identity와 Session attach
 
-- `ConnectionId`, `ProvisionalActorId`, 영속 `PlayerId`를 서로 다른 타입과 용도로 유지한다.
-- 동시 로그인, attach/detach/logout, Actor incarnation과 passivation 정책을 정의한다.
-- at-least-once 재전달 가능성을 idempotency와 transaction으로 흡수해 effect를 한 번만 적용한다.
-- blocking DB adapter를 bounded DB Worker Pool에 연결하고 player load/save가 Actor coroutine을
-  suspend하도록 구현한다. DB queue와 connection 수에는 명시적인 상한과 포화 정책을 둔다.
-- DB Worker는 coroutine이나 Actor 포인터를 보유하지 않는다.
+- 개발용 인증 경계에서 영속 `PlayerId`를 만들고 `ConnectionId`, `ProvisionalActorId`와
+  서로 다른 타입과 용도로 유지한다.
+- 동시 로그인, attach/detach/logout, Actor incarnation과 passivation 정책을 고정한다.
 
-성장·업적·기간제 이벤트는 이 slice 이후 Player module로 추가한다. 랭킹과 시즌 정산은
-Shared Content 또는 projection 단계로 미룬다.
+### 5.2 Async repository와 reconnect
 
-## 6. 최소 ZoneActor와 TimerService
+- repository interface와 결정적 fake로 Player load/save 흐름을 먼저 완성한다.
+- blocking DB adapter는 bounded DB Worker Pool에 연결하고 Player Actor coroutine만 suspend한다.
+  DB Worker는 coroutine handle, Actor 포인터나 runtime의 mutable 상태를 보유하지 않는다.
+- disconnect/save/passivation 후 reconnect가 같은 `PlayerId`의 상태를 복원한다.
+- 느린 load/save 중 한 연결이 다른 연결의 mailbox를 압박하는지 측정한다. 재현되면
+  4.1의 terminal 신호를 소비하는 per-connection credit을 **현재 reactor**에 추가한다.
+
+### 5.3 Minimal Zone
+
+- 일반화된 scheduler에 `ZoneActor`와 typed Zone binding을 추가한다.
+- enter/leave/move, 단일 Zone의 결정적 tick과 최소 AOI를 구현한다.
+- `RouteCoordinator`가 `SessionRoute`와 `route_epoch`을 소유하고 stale destination을 거부한다.
+- domain `TimerService`는 주입 가능한 Clock, timer identity, cancel과 late event 폐기를 제공하고
+  owning Worker의 mailbox에 typed tick event를 게시한다.
+
+완료 기준:
+
+- 인증·load·attach·Zone 입장·이동·disconnect/save·reconnect/restore가 하나의 통합 테스트로
+  검증된다.
+- 같은 Player/Zone의 상태는 각 owning Worker에서만 순차적으로 변경된다.
+- DB 대기 중 다른 Actor가 진행하고 tick overrun, shard 편향, queue wait과 end-to-end
+  p99를 수집한다.
+
+#### 5.3 세부 기준
 
 - 일반화된 scheduler 위에 `ZoneActor`와 Zone binding을 구현해 PlayerActor와 동일한
   mailbox, fairness와 Worker affinity 규칙을 사용한다.
 - domain `TimerService`를 도입한다. timer identity, 주입 가능한 Clock, cancel과 late completion을
-  정의하고 Actor mailbox에 typed timer event를 게시한다. 이는 4.5의 runtime deadline primitive와 다른
-  층이다. deadline primitive는 I/O await timeout과 취소를 담당하고, `TimerService`는 gameplay 시간
-  이벤트를 담당한다.
+  정의하고 Actor mailbox에 typed timer event를 게시한다. 이 service는 gameplay 시간 이벤트만
+  소유하고 선택적 network deadline primitive와 분리한다.
 - `ZoneSimulationTick`은 이동, 기본 충돌과 AOI를 하나의 결정적 순서로 유지한다. respawn 같은 장주기
   콘텐츠는 별도 `TimerEvent`로 분리하고 tick 주기와 독립적으로 설정한다.
 - tick event도 일반 command와 같은 turn budget과 단일 실행 규칙을 따르며 owning Worker에서 순차
@@ -457,14 +494,30 @@ Shared Content 또는 projection 단계로 미룬다.
   보장한다. epoch은 원자성 구현이 아니라 stale destination 검출 수단이다.
 - `ActorRuntimeDrained`는 Player·Zone mailbox, timer event와 actor task가 모두 빈 후에만 참이 된다.
   전체 종료 판정은 `docs/runtime-lifecycle-contract.md`의 predicate 조합을 따른다.
-- tick 실행 시간, overrun, Actor별 command queue wait와 shard 편향을 측정한다. 이 수치로 4.6 통합 후의
-  worker 수, affinity와 fairness를 조정한다.
+- tick 실행 시간, overrun, Actor별 command queue wait와 shard 편향을 측정한다. 이 수치로
+  worker 수, affinity, fairness와 선택적 Runtime 최적화 필요를 판단한다.
+
+## 6. Transactional Gameplay Slice
+
+멱등한 구매 흐름 하나로 영속성의 트랜잭션 보장을 검증한다.
+
+- `idempotency key`가 있는 구매 요청을 typed Player command로 추가한다.
+- DB transaction으로 재화 차감과 상품 지급을 함께 commit한다.
+- 중복 요청, commit 성공 후 응답 유실, timeout/retry와 reconnect 후 결과 조회를 검증한다.
+- at-least-once 재전달은 transaction과 idempotency record로 effectively-once application으로
+  바꾸며 exactly-once delivery를 가정하지 않는다.
 
 ## 7. Shared Content와 Projection
 
-- Party 또는 Matchmaking 하나를 공유 Actor의 대표 vertical slice로 구현한다.
+### 7.1 Shared Actor slice
+
+- Party 또는 Matchmaking **하나**를 골라 Player 외 공유 Actor의 수명, mailbox와
+  취소·포화 정책을 end-to-end로 검증한다.
+
+### 7.2 Projection slice
+
 - 랭킹 점수는 PlayerActor가 domain event를 발행하고 별도 projection이 집계한다.
-- 시즌 정산은 재실행 가능한 job과 idempotent 결과 적용으로 구현한다.
+- 재실행, checkpoint, 중복 event와 idempotent 적용을 검증한 뒤에만 시즌 정산 job을 추가한다.
 
 ## 선택적 인프라 트랙: io_uring Network Backend
 
@@ -479,7 +532,7 @@ io_uring은 콘텐츠 단계의 선행 조건이 아니다. epoll backend와 첫
 ## 공통 원칙
 
 - 게임 상태는 소유 Actor만 수정한다. network 경로의 task는 어떤 실행 pool에서 실행되든 게임 상태를
-  직접 수정하지 않는다. 4.6 통합은 실행 pool을 합치는 것이며 이 소유권 규칙을 완화하지 않는다.
+  직접 수정하지 않는다. 향후 실행 pool 통합을 선택해도 이 소유권 규칙을 완화하지 않는다.
 - Handler는 물리 thread가 아니라 상태 소유 PlayerActor, ZoneActor 또는 공유 콘텐츠 Actor를 선택한다.
 - 다른 Runtime의 mutable 객체나 coroutine handle을 직접 참조하지 않는다.
 - 모든 비동기 queue와 in-flight operation에는 명시적인 상한이 있다.
