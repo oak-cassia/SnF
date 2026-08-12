@@ -109,6 +109,54 @@ namespace
         snf::server::PlayerActorIngress ingress;
     };
 
+    class DelayedLoadPlayerRepository final : public snf::server::PlayerRepository
+    {
+    public:
+        DelayedLoadPlayerRepository()
+            : load_requested_future(load_requested.get_future())
+        {
+        }
+
+        void asyncLoad(snf::server::PlayerId player,
+                       snf::server::PlayerLoadCompletion completion) override
+        {
+            std::lock_guard lock{mutex};
+            requested_player = player;
+            pending_load = std::move(completion);
+            load_requested.set_value();
+        }
+
+        void asyncSave(snf::server::PlayerRecord record,
+                       snf::server::PlayerSaveCompletion completion) override
+        {
+            saved = record;
+            completion(snf::server::PlayerSaveResult{
+                .status = snf::server::PlayerRepositoryStatus::Success,
+            });
+        }
+
+        void completeMissingLoad()
+        {
+            snf::server::PlayerLoadCompletion completion;
+            {
+                std::lock_guard lock{mutex};
+                completion = std::move(pending_load);
+            }
+            assert(completion);
+            completion(snf::server::PlayerLoadResult{
+                .status = snf::server::PlayerRepositoryStatus::Success,
+                .record = std::nullopt,
+            });
+        }
+
+        std::promise<void> load_requested;
+        std::future<void> load_requested_future;
+        std::mutex mutex;
+        snf::server::PlayerLoadCompletion pending_load;
+        std::optional<snf::server::PlayerId> requested_player;
+        std::optional<snf::server::PlayerRecord> saved;
+    };
+
     snf::server::PlayerInboundCommand make_command(const std::uint64_t actor_id,
                                                    const std::uint32_t request_id)
     {
@@ -362,6 +410,7 @@ namespace
         RuntimeDependencies dependencies{8};
         auto binding_config = snf::server::PlayerActorBindingConfig{
             .actor_kind = snf::runtime::ActorKind::ProvisionalPlayer,
+            .repository = nullptr,
             .on_before_command =
                 [state](snf::server::PlayerActorId, const snf::server::PlayerCommand&)
             {
@@ -917,6 +966,7 @@ namespace
         RuntimeDependencies dependencies{8};
         auto binding_config = snf::server::PlayerActorBindingConfig{
             .actor_kind = snf::runtime::ActorKind::ProvisionalPlayer,
+            .repository = nullptr,
             .on_before_command =
                 [gate](snf::server::PlayerActorId, const snf::server::PlayerCommand&)
             {
@@ -1230,6 +1280,104 @@ namespace
         assert(dependencies.completion.drained_count.load() == 1);
         assert(dependencies.completion.failed_count.load() == 0);
     }
+
+    void test_player_repository_wait_suspends_only_the_loading_actor()
+    {
+        RuntimeDependencies dependencies{8};
+        DelayedLoadPlayerRepository repository;
+        snf::server::PlayerActorBinding provisional{
+            dependencies.outbound_sink, dependencies.outbound, dependencies.lifecycle};
+        snf::server::PlayerActorBinding persistent{dependencies.outbound_sink,
+                                                   dependencies.outbound,
+                                                   dependencies.lifecycle,
+                                                   snf::server::PlayerActorBindingConfig{
+                                                       .actor_kind = ActorKind::Player,
+                                                       .repository = &repository,
+                                                       .on_before_command = {},
+                                                       .on_actor_deactivated = {},
+                                                   }};
+        ActorRuntime runtime{player_runtime_config(1, 8), dependencies.completion};
+        runtime.registerBinding(provisional);
+        runtime.registerBinding(persistent);
+        snf::server::PlayerActorIngress ingress{
+            runtime, provisional, persistent, dependencies.lifecycle};
+        runtime.start();
+
+        const snf::server::PlayerId player{.value = 77};
+        const snf::net::ConnectionId player_connection{.descriptor = 70, .generation = 700};
+        assert(ingress.tryPost(snf::server::PlayerInboundCommand{
+                   .actor = player,
+                   .connection = player_connection,
+                   .command =
+                       snf::server::AuthenticateCommand{
+                           .request_id = 1,
+                           .player = player,
+                       },
+               }) == PostResult::Accepted);
+        assert(repository.load_requested_future.wait_for(1s) == std::future_status::ready);
+        assert(repository.requested_player == player);
+
+        const snf::net::ConnectionId provisional_connection{
+            .descriptor = 71,
+            .generation = 701,
+        };
+        assert(ingress.tryPost(snf::server::PlayerInboundCommand{
+                   .actor = snf::server::ProvisionalActorId{.value = 701},
+                   .connection = provisional_connection,
+                   .command = snf::server::PingCommand{.request_id = 2, .payload = {}},
+               }) == PostResult::Accepted);
+
+        std::optional<snf::server::PostedOutboundAction> pong;
+        const auto pong_deadline = std::chrono::steady_clock::now() + 1s;
+        while (!pong && std::chrono::steady_clock::now() < pong_deadline)
+        {
+            pong = dependencies.outbound.tryPop();
+            if (!pong)
+            {
+                std::this_thread::sleep_for(1ms);
+            }
+        }
+        assert(pong.has_value());
+        assert(std::get<snf::server::SendFrame>(pong->action).frame.request_id == 2);
+
+        repository.completeMissingLoad();
+        std::optional<snf::server::PostedOutboundAction> authenticated;
+        const auto auth_deadline = std::chrono::steady_clock::now() + 1s;
+        while (!authenticated && std::chrono::steady_clock::now() < auth_deadline)
+        {
+            authenticated = dependencies.outbound.tryPop();
+            if (!authenticated)
+            {
+                std::this_thread::sleep_for(1ms);
+            }
+        }
+        assert(authenticated.has_value());
+        const auto& auth_frame = std::get<snf::server::SendFrame>(authenticated->action).frame;
+        assert(auth_frame.type == snf::protocol::MessageType::Authenticated);
+        assert(auth_frame.request_id == 1);
+
+        assert(ingress.tryPostConnectionClosed(
+                   player,
+                   snf::server::ConnectionClosed{
+                       .connection = player_connection,
+                       .cause = snf::server::ConnectionCloseCause::PeerClosed,
+                   }) == PostResult::Accepted);
+        assert(ingress.tryPostConnectionClosed(
+                   snf::server::ProvisionalActorId{.value = 701},
+                   snf::server::ConnectionClosed{
+                       .connection = provisional_connection,
+                       .cause = snf::server::ConnectionCloseCause::PeerClosed,
+                   }) == PostResult::Accepted);
+        runtime.close();
+        runtime.join();
+
+        assert(repository.saved.has_value());
+        assert(repository.saved->player == player);
+        assert(repository.saved->handled_command_count == 1);
+        const auto stats = runtime.getStats().workers.front();
+        assert(stats.suspended_commands >= 2);
+        assert(stats.in_flight_operations == 0);
+    }
 }
 
 void run_actor_runtime_tests()
@@ -1252,4 +1400,5 @@ void run_actor_runtime_tests()
     test_exhausted_in_flight_budget_closes_the_connection_instead_of_dropping_a_response();
     test_an_unsatisfiable_result_closes_the_connection_instead_of_failing_the_worker();
     test_admitted_commands_and_refused_posts_are_counted_apart();
+    test_player_repository_wait_suspends_only_the_loading_actor();
 }

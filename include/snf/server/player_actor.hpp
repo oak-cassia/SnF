@@ -3,6 +3,7 @@
 #include "snf/runtime/actor_task.hpp"
 #include "snf/server/player_actor_id.hpp"
 #include "snf/server/player_command.hpp"
+#include "snf/server/player_record.hpp"
 #include "snf/server/player_result.hpp"
 
 #include <cstdint>
@@ -39,6 +40,8 @@ namespace snf::server
         // owning Worker. Cross-thread queries must use an immutable snapshot or a
         // command; const does not provide synchronization.
         [[nodiscard]] const PlayerState& state() const noexcept;
+        void restore(const PlayerRecord& record);
+        [[nodiscard]] PlayerRecord snapshot() const;
 
         // The caller must keep the command alive until the returned task
         // completes, not merely until this call returns: the task is lazy, so the

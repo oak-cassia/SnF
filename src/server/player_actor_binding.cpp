@@ -71,6 +71,42 @@ namespace
         guard.disarm();
         co_return std::move(reservation);
     }
+
+    snf::runtime::ActorTask<snf::server::PlayerLoadResult>
+    awaitPlayerLoad(snf::server::PlayerRepository& repository,
+                    snf::runtime::ActorContext& context,
+                    const snf::server::PlayerId player)
+    {
+        auto result = co_await snf::runtime::awaitAsyncOperation<snf::server::PlayerLoadResult>(
+            context,
+            [&repository,
+             player](snf::runtime::AsyncOperationProducer<snf::server::PlayerLoadResult> producer)
+            {
+                repository.asyncLoad(player,
+                                     [producer = std::move(producer)](
+                                         snf::server::PlayerLoadResult result) mutable noexcept
+                                     { producer.complete(std::move(result)); });
+            });
+        co_return std::move(result);
+    }
+
+    snf::runtime::ActorTask<snf::server::PlayerSaveResult>
+    awaitPlayerSave(snf::server::PlayerRepository& repository,
+                    snf::runtime::ActorContext& context,
+                    snf::server::PlayerRecord record)
+    {
+        auto result = co_await snf::runtime::awaitAsyncOperation<snf::server::PlayerSaveResult>(
+            context,
+            [&repository, record = std::move(record)](
+                snf::runtime::AsyncOperationProducer<snf::server::PlayerSaveResult> producer)
+            {
+                repository.asyncSave(record,
+                                     [producer = std::move(producer)](
+                                         snf::server::PlayerSaveResult result) mutable noexcept
+                                     { producer.complete(std::move(result)); });
+            });
+        co_return std::move(result);
+    }
 }
 
 namespace snf::server
@@ -82,8 +118,10 @@ namespace snf::server
         enum class Stage
         {
             Idle,
+            Loading,
             Handling,
             Reserving,
+            Saving,
         };
 
         PlayerActorSlot(PlayerActorId actor_id, std::function<void(PlayerActorId)> on_deactivated)
@@ -104,7 +142,10 @@ namespace snf::server
         PlayerActor actor;
         PlayerActorId identity;
         std::function<void(PlayerActorId)> on_deactivated;
+        bool loaded{false};
         Stage stage{Stage::Idle};
+        std::optional<PlayerCommand> pending_command;
+        snf::runtime::ActorTask<PlayerLoadResult> load_task;
         // Holds the handler's task while it runs, including across a suspension.
         // Keeping the frame in the slot is what confines resume and destruction to
         // the owning Worker.
@@ -112,6 +153,7 @@ namespace snf::server
         // Started only when capacity was not immediately available, and owned by the
         // slot for the same reason.
         snf::runtime::ActorTask<OutboundReservation> reservation_task;
+        snf::runtime::ActorTask<PlayerSaveResult> save_task;
         // The handler's decisions, held between its normal return and the emission
         // whose capacity is still being awaited.
         PlayerResult pending_result;
@@ -141,6 +183,7 @@ namespace snf::server
         , _outbound(outbound)
         , _lifecycle(lifecycle)
         , _kind(config.actor_kind)
+        , _repository(config.repository)
         , _on_before_command(std::move(config.on_before_command))
         , _on_actor_deactivated(std::move(config.on_actor_deactivated))
     {
@@ -148,6 +191,11 @@ namespace snf::server
             _kind != snf::runtime::ActorKind::Player)
         {
             throw std::invalid_argument{"PlayerActorBinding requires a Player actor kind"};
+        }
+
+        if (_kind == snf::runtime::ActorKind::Player && _repository == nullptr)
+        {
+            throw std::invalid_argument{"Persistent PlayerActorBinding requires a repository"};
         }
     }
 
@@ -222,7 +270,25 @@ namespace snf::server
         if (submission.accounting() == snf::runtime::ActorAccounting::Control)
         {
             static_cast<void>(payloadAs<ConnectionClosedPayload>(submission));
-            return snf::runtime::ActorDispatchResult::Evict;
+            if (kind() == snf::runtime::ActorKind::ProvisionalPlayer)
+            {
+                return snf::runtime::ActorDispatchResult::Evict;
+            }
+
+            if (player_slot.stage != PlayerActorSlot::Stage::Idle)
+            {
+                throw std::logic_error{"Persistent Player close arrived before load completed"};
+            }
+
+            if (!player_slot.loaded)
+            {
+                return snf::runtime::ActorDispatchResult::Evict;
+            }
+
+            player_slot.stage = PlayerActorSlot::Stage::Saving;
+            player_slot.save_task =
+                awaitPlayerSave(*_repository, context, player_slot.actor.snapshot());
+            return advance(player_slot, context, stop_token);
         }
 
         if (player_slot.stage != PlayerActorSlot::Stage::Idle)
@@ -238,6 +304,16 @@ namespace snf::server
         }
 
         player_slot.connection = payload.command.connection;
+
+        if (kind() == snf::runtime::ActorKind::Player && !player_slot.loaded)
+        {
+            player_slot.pending_command = payload.command.command;
+            player_slot.stage = PlayerActorSlot::Stage::Loading;
+            player_slot.load_task =
+                awaitPlayerLoad(*_repository, context, *player_slot.identity.playerId());
+            return advance(player_slot, context, stop_token);
+        }
+
         player_slot.stage = PlayerActorSlot::Stage::Handling;
         player_slot.task = player_slot.actor.handle(payload.command.command);
         return advance(player_slot, context, stop_token);
@@ -262,6 +338,36 @@ namespace snf::server
                                 snf::runtime::ActorContext& context,
                                 const std::stop_token stop_token)
     {
+        if (slot.stage == PlayerActorSlot::Stage::Loading)
+        {
+            if (slot.load_task.resume() == snf::runtime::ActorTaskStatus::Suspended)
+            {
+                return snf::runtime::ActorDispatchResult::Suspended;
+            }
+
+            PlayerLoadResult loaded = slot.load_task.takeResult();
+            slot.load_task = {};
+            if (loaded.status != PlayerRepositoryStatus::Success)
+            {
+                slot.pending_command.reset();
+                slot.stage = PlayerActorSlot::Stage::Idle;
+                _outbound.reportAdmissionFailure(slot.connection);
+                return snf::runtime::ActorDispatchResult::KeepActive;
+            }
+            if (loaded.record)
+            {
+                slot.actor.restore(*loaded.record);
+            }
+            slot.loaded = true;
+
+            if (!slot.pending_command)
+            {
+                throw std::logic_error{"Player load completed without a pending command"};
+            }
+            slot.stage = PlayerActorSlot::Stage::Handling;
+            slot.task = slot.actor.handle(*slot.pending_command);
+        }
+
         if (slot.stage == PlayerActorSlot::Stage::Handling)
         {
             if (slot.task.resume() == snf::runtime::ActorTaskStatus::Suspended)
@@ -275,6 +381,7 @@ namespace snf::server
             // same Worker.
             slot.pending_result = slot.task.takeResult();
             slot.task = {};
+            slot.pending_command.reset();
             slot.stage = PlayerActorSlot::Stage::Reserving;
 
             const std::size_t required_slots = _effects.requiredSlots(slot.pending_result);
@@ -295,6 +402,23 @@ namespace snf::server
 
             slot.reservation_task =
                 awaitOutboundReservation(_outbound, context, slot.connection, required_slots);
+        }
+
+        if (slot.stage == PlayerActorSlot::Stage::Saving)
+        {
+            if (slot.save_task.resume() == snf::runtime::ActorTaskStatus::Suspended)
+            {
+                return snf::runtime::ActorDispatchResult::Suspended;
+            }
+
+            const PlayerSaveResult saved = slot.save_task.takeResult();
+            slot.save_task = {};
+            slot.stage = PlayerActorSlot::Stage::Idle;
+            if (!saved.saved())
+            {
+                throw std::runtime_error{"Player repository refused a save"};
+            }
+            return snf::runtime::ActorDispatchResult::Evict;
         }
 
         if (!slot.reservation_task.valid())

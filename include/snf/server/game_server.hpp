@@ -9,6 +9,7 @@
 #include "snf/server/outbound_channel.hpp"
 #include "snf/server/player_actor_binding.hpp"
 #include "snf/server/player_actor_ingress.hpp"
+#include "snf/server/player_repository.hpp"
 #include "snf/server/player_session_directory.hpp"
 #include "snf/server/protocol_gateway.hpp"
 #include "snf/server/protocol_player_effect_sink.hpp"
@@ -34,6 +35,7 @@ namespace snf::server
         GameServerStats counters;
         TcpServerMetrics network;
         snf::runtime::ActorRuntimeStats actor_runtime;
+        ThreadedPlayerRepositoryStats player_repository;
         // Commands that were admitted and reached a final result, counted once each
         // whether or not they answered. If playable slow-command measurements justify
         // per-connection credit, its owner consumes this same terminal signal.
@@ -55,6 +57,8 @@ namespace snf::server
         // waiter registry is sized against: a Worker holds one of these while it waits
         // for capacity, so registration must never be the tighter limit.
         std::size_t actor_max_in_flight_operations_per_worker{1024};
+        std::size_t player_repository_worker_count{1};
+        std::size_t player_repository_queue_capacity{4096};
         std::size_t outbound_queue_capacity{4096};
         // Bounds the shared outbound capacity one connection may hold at once.
         std::size_t max_outbound_slots_per_connection{64};
@@ -91,6 +95,7 @@ namespace snf::server
         [[nodiscard]] std::uint16_t getPort() const noexcept;
         [[nodiscard]] const GameServerStats& getStats() const noexcept;
         [[nodiscard]] snf::runtime::ActorRuntimeStats getActorRuntimeStats() const;
+        [[nodiscard]] std::optional<PlayerRecord> getPlayerRecord(PlayerId player) const;
         // Reads reactor state, so it belongs to the reactor thread: call it from
         // metrics_reporter or after run() has returned.
         [[nodiscard]] ServerMetricsSnapshot getMetricsSnapshot() const;
@@ -113,6 +118,7 @@ namespace snf::server
         ProtocolPlayerEffectSink _player_effects;
         CountingCommandLifecycleSink _command_lifecycle;
         PlayerSessionDirectory _player_sessions;
+        ThreadedPlayerRepository _player_repository;
         snf::runtime::RuntimeCompletionCoordinator _runtime_completion;
         // Bindings must outlive the generic runtime: the worker owns the
         // wrapper destruction, while this object owns Player dependencies.

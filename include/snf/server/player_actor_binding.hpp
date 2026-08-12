@@ -7,6 +7,7 @@
 #include "snf/server/player_actor_id.hpp"
 #include "snf/server/player_effect_sink.hpp"
 #include "snf/server/player_inbound_command.hpp"
+#include "snf/server/player_repository.hpp"
 
 #include <functional>
 
@@ -15,6 +16,7 @@ namespace snf::server
     struct PlayerActorBindingConfig
     {
         snf::runtime::ActorKind actor_kind{snf::runtime::ActorKind::ProvisionalPlayer};
+        PlayerRepository* repository{nullptr};
         // Test-only diagnostic hook. It executes on the Player actor's owner
         // Worker immediately before PlayerActor::handle().
         std::function<void(PlayerActorId, const PlayerCommand&)> on_before_command;
@@ -79,6 +81,7 @@ namespace snf::server
         OutboundSink& _outbound;
         CommandLifecycleSink& _lifecycle;
         snf::runtime::ActorKind _kind;
+        PlayerRepository* _repository;
         std::function<void(PlayerActorId, const PlayerCommand&)> _on_before_command;
         std::function<void(PlayerActorId)> _on_actor_deactivated;
     };

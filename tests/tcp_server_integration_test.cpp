@@ -136,6 +136,12 @@ namespace
             return _server.getActorRuntimeStats();
         }
 
+        [[nodiscard]] std::optional<snf::server::PlayerRecord>
+        getPlayerRecord(const snf::server::PlayerId player) const
+        {
+            return _server.getPlayerRecord(player);
+        }
+
         // Reads reactor state, so tests may only call it once the reactor thread
         // has been joined.
         [[nodiscard]] snf::server::ServerMetricsSnapshot getMetricsSnapshot() const
@@ -630,14 +636,39 @@ namespace
             std::this_thread::sleep_for(1ms);
         }
         assert(actor_count(server.getActorRuntimeStats()) == 0);
+        const auto first_saved = server.getPlayerRecord(snf::server::PlayerId{.value = player_id});
+        assert(first_saved.has_value());
+        assert(first_saved->handled_command_count == 2);
 
-        const auto reconnected = connect_client(server.getPort());
+        auto reconnected = connect_client(server.getPort());
         const auto reconnect_auth = authentication_frame(103, player_id);
         const auto reconnect_bytes = snf::protocol::encode_frame(reconnect_auth);
         send_all(reconnected.getDescriptor(), reconnect_bytes);
         assert_authenticated(receive_exact(reconnected.getDescriptor(), reconnect_bytes.size()),
                              reconnect_auth.request_id,
                              player_id);
+
+        const auto restored_ping = snf::protocol::Frame{
+            .type = snf::protocol::MessageType::Ping,
+            .request_id = 104,
+            .payload = {std::byte{0xBB}},
+        };
+        const auto restored_ping_bytes = snf::protocol::encode_frame(restored_ping);
+        send_all(reconnected.getDescriptor(), restored_ping_bytes);
+        assert_pong(receive_exact(reconnected.getDescriptor(), restored_ping_bytes.size()),
+                    restored_ping);
+
+        reconnected.init();
+        const auto second_passivation_deadline = std::chrono::steady_clock::now() + 1s;
+        while (actor_count(server.getActorRuntimeStats()) != 0 &&
+               std::chrono::steady_clock::now() < second_passivation_deadline)
+        {
+            std::this_thread::sleep_for(1ms);
+        }
+        assert(actor_count(server.getActorRuntimeStats()) == 0);
+        const auto second_saved = server.getPlayerRecord(snf::server::PlayerId{.value = player_id});
+        assert(second_saved.has_value());
+        assert(second_saved->handled_command_count == 4);
 
         server.stop();
     }

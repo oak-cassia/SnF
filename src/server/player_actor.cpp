@@ -20,6 +20,30 @@ namespace snf::server
         return _state;
     }
 
+    void PlayerActor::restore(const PlayerRecord& record)
+    {
+        if (_state._identity != record.player)
+        {
+            throw std::invalid_argument{"Player record identity does not match the Actor"};
+        }
+
+        _state._handled_command_count = record.handled_command_count;
+    }
+
+    PlayerRecord PlayerActor::snapshot() const
+    {
+        const auto player = _state._identity.playerId();
+        if (!player)
+        {
+            throw std::logic_error{"A provisional Player actor has no persistent snapshot"};
+        }
+
+        return PlayerRecord{
+            .player = *player,
+            .handled_command_count = _state._handled_command_count,
+        };
+    }
+
     PlayerActor::PlayerActor(const PlayerActorId identity) noexcept
     {
         _state._identity = identity;

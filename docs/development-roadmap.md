@@ -486,6 +486,21 @@ UnifiedRuntimeDrained =
 - 느린 load/save 중 한 연결이 다른 연결의 mailbox를 압박하는지 측정한다. 재현되면
   4.1의 terminal 신호를 소비하는 per-connection credit을 **현재 reactor**에 추가한다.
 
+#### 5.2a Repository 경계와 reconnect 복원 (완료)
+
+- `PlayerRepository`는 value record와 completion callback만 받으며 Actor, coroutine handle과 runtime
+  mutable state를 받지 않는다. `ThreadedPlayerRepository`는 non-blocking bounded FIFO 뒤의 전용
+  Worker에서 job을 실행하고 queue depth, high-water mark와 admission rejection을 노출한다.
+- 현재 저장 backend는 결정적 in-memory store다. 실제 DB 종류와 transaction adapter는 6의 구매
+  slice에서 고르며, repository queue와 Actor continuation 계약은 그대로 유지한다.
+- 첫 persistent command는 load completion까지 해당 Player만 suspend한다. `ConnectionClosed`는 save
+  completion 뒤에만 evict하고, reconnect activation은 저장된 `handled_command_count`를 복원한다.
+- 느린 load를 고정한 단일 Worker 테스트에서 같은 Worker의 provisional Player가 PING을 먼저 완료한다.
+  두 차례 auth/PING/disconnect 통합 테스트는 저장 값이 `2 → restore → 4`로 이어짐을 검증한다.
+- repository unavailable은 load 결과로 명시되어 연결 종료를 요청하고, save unavailable은 영속 상태
+  유실을 숨기지 않고 runtime failure로 승격한다. 실제 DB adapter의 재시도/idempotency 정책은 6에서
+  transaction 의미와 함께 확정한다.
+
 ### 5.3 Minimal Zone
 
 - 일반화된 scheduler에 `ZoneActor`와 typed Zone binding을 추가한다.

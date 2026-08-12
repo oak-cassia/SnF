@@ -85,6 +85,22 @@ namespace
         assert(authenticated->request_id == 9);
         assert(authenticated->player == player);
     }
+
+    void test_persistent_player_actor_restores_and_snapshots_state()
+    {
+        const snf::server::PlayerId player{.value = 88};
+        snf::server::PlayerActor actor{snf::server::PlayerActorId{player}};
+        actor.restore(snf::server::PlayerRecord{
+            .player = player,
+            .handled_command_count = 10,
+        });
+
+        const auto command = make_ping(20);
+        static_cast<void>(run_handler(actor, command));
+        const auto record = actor.snapshot();
+        assert(record.player == player);
+        assert(record.handled_command_count == 11);
+    }
 }
 
 void run_player_actor_tests()
@@ -92,4 +108,5 @@ void run_player_actor_tests()
     test_player_actor_owns_state_and_dispatches_ping();
     test_handler_body_does_not_run_before_the_first_resume();
     test_persistent_player_actor_acknowledges_its_identity();
+    test_persistent_player_actor_restores_and_snapshots_state();
 }

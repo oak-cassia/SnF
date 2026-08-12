@@ -85,6 +85,10 @@ namespace snf::server
               }(),
               _outbound_event.getDescriptor())
         , _player_effects(_outbound_channel)
+        , _player_repository(ThreadedPlayerRepositoryConfig{
+              .worker_count = config.player_repository_worker_count,
+              .queue_capacity = config.player_repository_queue_capacity,
+          })
         , _runtime_completion(snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
                               _outbound_event.getDescriptor())
         , _player_actor_binding(_player_effects, _outbound_channel, _command_lifecycle)
@@ -93,6 +97,7 @@ namespace snf::server
                                            _command_lifecycle,
                                            PlayerActorBindingConfig{
                                                .actor_kind = snf::runtime::ActorKind::Player,
+                                               .repository = &_player_repository,
                                                .on_before_command = {},
                                                .on_actor_deactivated =
                                                    [this](const PlayerActorId actor)
@@ -184,12 +189,18 @@ namespace snf::server
         return _logic_runtime.getStats();
     }
 
+    std::optional<PlayerRecord> GameServer::getPlayerRecord(const PlayerId player) const
+    {
+        return _player_repository.find(player);
+    }
+
     ServerMetricsSnapshot GameServer::getMetricsSnapshot() const
     {
         return ServerMetricsSnapshot{
             .counters = _tcp_server.getStats(),
             .network = _tcp_server.getMetrics(),
             .actor_runtime = _logic_runtime.getStats(),
+            .player_repository = _player_repository.stats(),
             .command_terminals = _command_lifecycle.terminalCount(),
             .command_admission_rejections = _command_lifecycle.admissionRejectionCount(),
         };
