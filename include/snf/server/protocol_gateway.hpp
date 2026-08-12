@@ -5,6 +5,7 @@
 #include "snf/server/player_session_directory.hpp"
 #include "snf/server/route_coordinator.hpp"
 #include "snf/server/routed_command_ingress.hpp"
+#include "snf/server/zone_timer_service.hpp"
 
 namespace snf::server
 {
@@ -16,6 +17,10 @@ namespace snf::server
         ProtocolGateway(RoutedCommandIngress& commands,
                         PlayerSessionDirectory& sessions,
                         RouteCoordinator& routes);
+        ProtocolGateway(RoutedCommandIngress& commands,
+                        PlayerSessionDirectory& sessions,
+                        RouteCoordinator& routes,
+                        ZoneTimerService& zone_timers);
         ProtocolGateway(MessageDispatcher dispatcher, RoutedCommandIngress& commands);
         ProtocolGateway(MessageDispatcher dispatcher,
                         RoutedCommandIngress& commands,
@@ -24,6 +29,11 @@ namespace snf::server
                         RoutedCommandIngress& commands,
                         PlayerSessionDirectory& sessions,
                         RouteCoordinator& routes);
+        ProtocolGateway(MessageDispatcher dispatcher,
+                        RoutedCommandIngress& commands,
+                        PlayerSessionDirectory& sessions,
+                        RouteCoordinator& routes,
+                        ZoneTimerService& zone_timers);
 
         [[nodiscard]] FramePostResult tryPost(FrameEnvelope envelope) override;
         [[nodiscard]] PostResult tryPostConnectionClosed(ConnectionClosed closed) override;
@@ -37,5 +47,6 @@ namespace snf::server
         PlayerSessionDirectory& _sessions;
         RouteCoordinator _owned_routes;
         RouteCoordinator& _routes;
+        ZoneTimerService* _zone_timers{nullptr};
     };
 }

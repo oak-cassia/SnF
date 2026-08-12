@@ -68,7 +68,11 @@ namespace
         sink.accept(
             snf::server::ZoneInboundCommand{
                 .zone = snf::server::ZoneId{.value = 3},
-                .command = snf::server::ZoneSimulationTick{.tick = 1},
+                .command =
+                    snf::server::ZoneSimulationTick{
+                        .timer = snf::server::TimerId{.value = 1},
+                        .tick = 1,
+                    },
                 .reply = std::nullopt,
             },
             result);
@@ -79,7 +83,11 @@ namespace
         sink.accept(
             snf::server::ZoneInboundCommand{
                 .zone = snf::server::ZoneId{.value = 3},
-                .command = snf::server::ZoneSimulationTick{.tick = 2},
+                .command =
+                    snf::server::ZoneSimulationTick{
+                        .timer = snf::server::TimerId{.value = 1},
+                        .tick = 2,
+                    },
                 .reply =
                     snf::server::ZoneReplyContext{
                         .connection = connection,

@@ -142,6 +142,11 @@ namespace
             return _server.getPlayerRecord(player);
         }
 
+        [[nodiscard]] snf::server::ZoneTimerServiceStats getZoneTimerStats() const
+        {
+            return _server.getZoneTimerStats();
+        }
+
         // Reads reactor state, so tests may only call it once the reactor thread
         // has been joined.
         [[nodiscard]] snf::server::ServerMetricsSnapshot getMetricsSnapshot() const
@@ -711,7 +716,13 @@ namespace
 
     void test_authenticated_player_enters_moves_and_leaves_a_zone()
     {
-        RunningServer server;
+        RunningServer server{snf::server::GameServerConfig{
+            .port = 0,
+            .shutdown_grace_period = 200ms,
+            .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
+            .client_send_buffer_size = std::nullopt,
+            .zone_tick_interval = 5ms,
+        }};
         const auto client = connect_client(server.getPort());
         constexpr std::uint64_t player_id = 90;
         constexpr std::uint64_t zone_id = 5;
@@ -741,6 +752,15 @@ namespace
         assert(static_cast<std::int32_t>(read_u32(entered.payload, 17)) == 10);
         assert(static_cast<std::int32_t>(read_u32(entered.payload, 21)) == 20);
 
+        const auto tick_deadline = std::chrono::steady_clock::now() + 1s;
+        while (server.getZoneTimerStats().fired == 0 &&
+               std::chrono::steady_clock::now() < tick_deadline)
+        {
+            std::this_thread::sleep_for(1ms);
+        }
+        assert(server.getZoneTimerStats().scheduled == 1);
+        assert(server.getZoneTimerStats().fired >= 1);
+
         std::vector<std::byte> move_payload;
         append_u32(move_payload, static_cast<std::uint32_t>(-3));
         append_u32(move_payload, 40);
@@ -767,6 +787,15 @@ namespace
         assert(left.type == snf::protocol::MessageType::ZoneLeft);
         assert(left.request_id == leave.request_id);
         assert(read_u64(left.payload, 9) == route_epoch);
+
+        const auto cancellation_deadline = std::chrono::steady_clock::now() + 1s;
+        while (server.getZoneTimerStats().cancelled == 0 &&
+               std::chrono::steady_clock::now() < cancellation_deadline)
+        {
+            std::this_thread::sleep_for(1ms);
+        }
+        assert(server.getZoneTimerStats().cancelled == 1);
+        assert(server.getZoneTimerStats().active_timers == 0);
 
         server.stop();
     }

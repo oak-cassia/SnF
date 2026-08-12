@@ -98,6 +98,7 @@ add_library(snf_server_runtime STATIC
     src/server/zone_actor.cpp
     src/server/zone_actor_binding.cpp
     src/server/zone_actor_ingress.cpp
+    src/server/zone_timer_service.cpp
     src/server/outbound_channel.cpp
     src/server/command_terminal.cpp
     src/server/game_server.cpp
@@ -153,6 +154,7 @@ if(BUILD_TESTING)
         tests/unique_file_descriptor_test.cpp
         tests/zone_actor_test.cpp
         tests/zone_actor_binding_test.cpp
+        tests/zone_timer_service_test.cpp
     )
     target_link_libraries(snf_unit_tests PRIVATE snf_server_runtime)
     snf_configure_target(snf_unit_tests)

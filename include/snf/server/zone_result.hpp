@@ -15,6 +15,7 @@ namespace snf::server
         AlreadyPresent,
         PlayerMissing,
         StaleRoute,
+        StaleTimer,
         StaleTick,
     };
 

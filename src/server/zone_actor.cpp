@@ -36,6 +36,11 @@ namespace snf::server
         return _last_tick;
     }
 
+    std::optional<TimerId> ZoneActor::activeTimer() const noexcept
+    {
+        return _active_timer;
+    }
+
     std::optional<ZonePosition> ZoneActor::positionOf(const PlayerId player) const
     {
         const auto iterator = _players.find(player);
@@ -196,8 +201,82 @@ namespace snf::server
         };
     }
 
+    ZoneResult ZoneActor::handleCommand(const ArmZoneSimulationTimer& command)
+    {
+        if (command.timer.value == 0)
+        {
+            return ZoneResult{
+                .status = ZoneCommandStatus::StaleTimer,
+                .player = std::nullopt,
+                .position = std::nullopt,
+                .route_epoch = 0,
+                .tick = _last_tick,
+                .visible_players = {},
+            };
+        }
+
+        if (_active_timer == command.timer)
+        {
+            return ZoneResult{
+                .status = ZoneCommandStatus::AlreadyPresent,
+                .player = std::nullopt,
+                .position = std::nullopt,
+                .route_epoch = 0,
+                .tick = _last_tick,
+                .visible_players = {},
+            };
+        }
+
+        _active_timer = command.timer;
+        _last_tick = 0;
+        return ZoneResult{
+            .status = ZoneCommandStatus::Applied,
+            .player = std::nullopt,
+            .position = std::nullopt,
+            .route_epoch = 0,
+            .tick = 0,
+            .visible_players = {},
+        };
+    }
+
+    ZoneResult ZoneActor::handleCommand(const CancelZoneSimulationTimer& command)
+    {
+        if (_active_timer != command.timer)
+        {
+            return ZoneResult{
+                .status = ZoneCommandStatus::StaleTimer,
+                .player = std::nullopt,
+                .position = std::nullopt,
+                .route_epoch = 0,
+                .tick = _last_tick,
+                .visible_players = {},
+            };
+        }
+
+        _active_timer.reset();
+        return ZoneResult{
+            .status = ZoneCommandStatus::Applied,
+            .player = std::nullopt,
+            .position = std::nullopt,
+            .route_epoch = 0,
+            .tick = _last_tick,
+            .visible_players = {},
+        };
+    }
+
     ZoneResult ZoneActor::handleCommand(const ZoneSimulationTick& command)
     {
+        if (_active_timer != command.timer)
+        {
+            return ZoneResult{
+                .status = ZoneCommandStatus::StaleTimer,
+                .player = std::nullopt,
+                .position = std::nullopt,
+                .route_epoch = 0,
+                .tick = _last_tick,
+                .visible_players = {},
+            };
+        }
         if (command.tick <= _last_tick)
         {
             return ZoneResult{

@@ -22,6 +22,7 @@ void run_tcp_listener_tests();
 void run_unique_file_descriptor_tests();
 void run_zone_actor_tests();
 void run_zone_actor_binding_tests();
+void run_zone_timer_service_tests();
 
 int main()
 {
@@ -49,4 +50,5 @@ int main()
     run_unique_file_descriptor_tests();
     run_zone_actor_tests();
     run_zone_actor_binding_tests();
+    run_zone_timer_service_tests();
 }

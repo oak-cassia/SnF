@@ -68,6 +68,21 @@ namespace snf::server
         return iterator->second;
     }
 
+    std::size_t RouteCoordinator::routeCountFor(const ZoneId zone) const
+    {
+        std::lock_guard lock{_mutex};
+        std::size_t count = 0;
+        for (const auto& [connection, route] : _routes)
+        {
+            static_cast<void>(connection);
+            if (route.zone == zone)
+            {
+                ++count;
+            }
+        }
+        return count;
+    }
+
     void RouteCoordinator::completeLeave(const SessionRoute& route) noexcept
     {
         std::lock_guard lock{_mutex};

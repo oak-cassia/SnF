@@ -61,6 +61,14 @@ namespace
                   << "Commands: " << metrics.command_terminals << " reached a result, "
                   << metrics.command_admission_rejections << " refused admission\n";
 
+        const auto& timers = metrics.zone_timers;
+        std::cout << "Zone timers: " << timers.active_timers << " active, "
+                  << timers.pending_cancellations << " cancelling, " << timers.scheduled
+                  << " scheduled, " << timers.cancelled << " cancelled, " << timers.fired
+                  << " ticks posted, " << timers.dropped_full << " dropped-full, "
+                  << timers.skipped_intervals << " intervals skipped, " << timers.failures
+                  << " failures\n";
+
         const auto& workers = metrics.actor_runtime.workers;
         for (std::size_t worker_index = 0; worker_index < workers.size(); ++worker_index)
         {

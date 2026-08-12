@@ -18,6 +18,7 @@
 #include "snf/server/tcp_server.hpp"
 #include "snf/server/zone_actor_binding.hpp"
 #include "snf/server/zone_actor_ingress.hpp"
+#include "snf/server/zone_timer_service.hpp"
 
 #include <chrono>
 #include <cstddef>
@@ -40,6 +41,7 @@ namespace snf::server
         TcpServerMetrics network;
         snf::runtime::ActorRuntimeStats actor_runtime;
         ThreadedPlayerRepositoryStats player_repository;
+        ZoneTimerServiceStats zone_timers;
         // Commands that were admitted and reached a final result, counted once each
         // whether or not they answered. If playable slow-command measurements justify
         // per-connection credit, its owner consumes this same terminal signal.
@@ -64,6 +66,8 @@ namespace snf::server
         std::size_t player_repository_worker_count{1};
         std::size_t player_repository_queue_capacity{4096};
         std::int32_t zone_aoi_radius{1000};
+        std::chrono::milliseconds zone_tick_interval{50};
+        std::size_t max_zone_timers{4096};
         std::size_t outbound_queue_capacity{4096};
         // Bounds the shared outbound capacity one connection may hold at once.
         std::size_t max_outbound_slots_per_connection{64};
@@ -101,6 +105,7 @@ namespace snf::server
         [[nodiscard]] const GameServerStats& getStats() const noexcept;
         [[nodiscard]] snf::runtime::ActorRuntimeStats getActorRuntimeStats() const;
         [[nodiscard]] std::optional<PlayerRecord> getPlayerRecord(PlayerId player) const;
+        [[nodiscard]] ZoneTimerServiceStats getZoneTimerStats() const;
         // Reads reactor state, so it belongs to the reactor thread: call it from
         // metrics_reporter or after run() has returned.
         [[nodiscard]] ServerMetricsSnapshot getMetricsSnapshot() const;
@@ -135,6 +140,8 @@ namespace snf::server
         snf::runtime::ActorRuntime _logic_runtime;
         PlayerActorIngress _player_actor_ingress;
         ZoneActorIngress _zone_actor_ingress;
+        SteadyTimerClock _zone_timer_clock;
+        ZoneTimerService _zone_timers;
         CommandRouter _command_router;
         ProtocolGateway _protocol_gateway;
         TcpServer _tcp_server;

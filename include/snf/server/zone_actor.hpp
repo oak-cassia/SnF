@@ -26,6 +26,7 @@ namespace snf::server
         [[nodiscard]] ZoneId id() const noexcept;
         [[nodiscard]] std::size_t playerCount() const noexcept;
         [[nodiscard]] std::uint64_t lastTick() const noexcept;
+        [[nodiscard]] std::optional<TimerId> activeTimer() const noexcept;
         [[nodiscard]] std::optional<ZonePosition> positionOf(PlayerId player) const;
         [[nodiscard]] std::vector<PlayerId> visiblePlayers(PlayerId player) const;
 
@@ -41,12 +42,15 @@ namespace snf::server
         [[nodiscard]] ZoneResult handleCommand(const EnterZoneCommand& command);
         [[nodiscard]] ZoneResult handleCommand(const LeaveZoneCommand& command);
         [[nodiscard]] ZoneResult handleCommand(const MoveInZoneCommand& command);
+        [[nodiscard]] ZoneResult handleCommand(const ArmZoneSimulationTimer& command);
+        [[nodiscard]] ZoneResult handleCommand(const CancelZoneSimulationTimer& command);
         [[nodiscard]] ZoneResult handleCommand(const ZoneSimulationTick& command);
         [[nodiscard]] bool isVisible(ZonePosition left, ZonePosition right) const noexcept;
 
         ZoneId _zone;
         std::int32_t _aoi_radius;
         std::uint64_t _last_tick{0};
+        std::optional<TimerId> _active_timer;
         std::unordered_map<PlayerId, Entity, PlayerIdHash> _players;
     };
 }

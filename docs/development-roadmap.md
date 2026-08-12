@@ -539,8 +539,27 @@ UnifiedRuntimeDrained =
 - 단위 테스트는 route 멱등성·epoch·rollback, wire result와 outbound 포화, Zone binding의 terminal
   회계를 검증한다. TCP 통합 테스트는 authenticate → enter → move → leave 왕복과 epoch/좌표 보존을
   실제 socket으로 검증한다.
-- 5.3의 남은 범위는 domain `TimerService`, tick scheduling·overrun 지표, 빈 Zone passivation,
-  이동 최신값 coalescing과 위치 save/reconnect restore다.
+- 5.3의 남은 범위는 tick 실행 시간·overrun 지표, 빈 Zone passivation, 이동 최신값 coalescing과
+  위치 save/reconnect restore다.
+
+#### 5.3c Domain Zone TimerService (완료)
+
+- `ZoneTimerService`는 `steady_clock` 기반 production clock과 주입 가능한 `TimerClock`, 단조 증가
+  `TimerId`, Zone별 periodic record와 명시적 cancel을 제공한다. 별도 timer thread는 Zone 상태를
+  만지지 않고 `ZoneActorIngress`에 `ArmZoneSimulationTimer`, `ZoneSimulationTick`,
+  `CancelZoneSimulationTimer` value command만 게시한다.
+- 첫 route가 생기기 전에 Arm을 같은 Zone mailbox에 승인하고 마지막 route의 Leave 승인 뒤 Cancel을
+  게시한다. timer 생성 뒤 Enter가 거부되면 route와 timer를 함께 rollback하며, cancellation command가
+  mailbox 포화로 거부되면 bounded timer record를 유지해 재시도한다.
+- ZoneActor는 현재 `TimerId`를 소유한다. timer 교체·취소 뒤 도착한 이전 id의 tick은 `StaleTimer`로
+  폐기하므로 service record 제거와 Actor 처리 사이에 value command가 남아도 UAF나 상태 변경이 없다.
+- 한 Zone이 여러 interval 늦어져도 회차당 tick 하나만 게시하고 놓친 interval은
+  `skipped_intervals`로 집계한다. mailbox `Full`은 `dropped_full`, 성공은 `fired`, active/cancel-pending
+  수와 lifecycle/failure도 metric으로 노출한다. timer thread 예외는 Logic runtime failure wake-up을
+  일으키고 `GameServer::run()` join에서 원인을 재throw한다.
+- 결정적 clock 테스트는 idempotent 등록, capacity, no-catch-up, cancel retry, disable과 failure 전파를
+  검증한다. TCP 통합 테스트는 실제 timer thread가 enter 뒤 tick을 게시하고 마지막 leave 뒤 timer를
+  취소하는지 검증한다.
 
 완료 기준:
 

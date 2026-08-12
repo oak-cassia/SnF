@@ -640,8 +640,8 @@ ZoneActor의 주기 갱신은 별도 tick 실행 스레드가 상태를 수정�
 
 | 상태 | 토폴로지 | 시점 |
 | --- | --- | --- |
-| 현재 | Network Reactor 1(main thread) + coroutine Actor-Bound Logic Pool 2 | 4.0 |
-| 콘텐츠 목표 | Network Reactor + Actor-Bound Logic Pool + 별도 Blocking DB Pool + Logger | Playable Session 이후 |
+| 현재 | Network Reactor 1(main thread) + coroutine Actor-Bound Logic Pool 2 + bounded Player Repository Worker 1 + Zone Timer Scheduler 1 | 5.3c |
+| 콘텐츠 목표 | Network Reactor + Actor-Bound Logic Pool + 실제 DB adapter를 실행하는 bounded DB Pool + Zone Timer Scheduler + Logger | Playable Session 이후 |
 | 선택적 최적화 | UnifiedRuntime N + 별도 Blocking DB Pool + Logger | 병목 증명 후 |
 
 선택적 전환의 판단 근거는 [UnifiedRuntime 전환 개요](../study/10-unified-runtime-overview.md)에 있다. 영역별 초기 Worker 수와
@@ -651,6 +651,7 @@ ZoneActor의 주기 갱신은 별도 tick 실행 스레드가 상태를 수정�
 | --- | ---: | --- |
 | Network Reactor | 1 | event loop 지연과 네트워크 처리량 |
 | Actor-Bound Logic Pool | 2 | mailbox 대기 시간, tick budget과 shard 편향 |
+| Zone Timer Scheduler | 1 | active timer 수, skipped interval, mailbox full |
 | DB | 2 | DB connection 한도와 queue 지연 |
 | Logger | 1 | 로그 queue 지연 |
 

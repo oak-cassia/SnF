@@ -99,13 +99,32 @@ namespace
         }));
         assert(zone.visiblePlayers(low).empty());
 
-        assert(zone.handle(snf::server::ZoneSimulationTick{.tick = 1}).status ==
+        const snf::server::TimerId timer{.value = 10};
+        assert(zone.handle(snf::server::ZoneSimulationTick{.timer = timer, .tick = 1}).status ==
+               snf::server::ZoneCommandStatus::StaleTimer);
+        assert(zone.handle(snf::server::ArmZoneSimulationTimer{.timer = timer}).status ==
                snf::server::ZoneCommandStatus::Applied);
-        assert(zone.handle(snf::server::ZoneSimulationTick{.tick = 1}).status ==
+        assert(zone.handle(snf::server::ZoneSimulationTick{.timer = timer, .tick = 1}).status ==
+               snf::server::ZoneCommandStatus::Applied);
+        assert(zone.handle(snf::server::ZoneSimulationTick{.timer = timer, .tick = 1}).status ==
                snf::server::ZoneCommandStatus::StaleTick);
-        assert(zone.handle(snf::server::ZoneSimulationTick{.tick = 0}).status ==
+        assert(zone.handle(snf::server::ZoneSimulationTick{.timer = timer, .tick = 0}).status ==
                snf::server::ZoneCommandStatus::StaleTick);
         assert(zone.lastTick() == 1);
+
+        assert(zone.handle(snf::server::CancelZoneSimulationTimer{.timer = timer}).status ==
+               snf::server::ZoneCommandStatus::Applied);
+        assert(zone.handle(snf::server::ZoneSimulationTick{.timer = timer, .tick = 2}).status ==
+               snf::server::ZoneCommandStatus::StaleTimer);
+        const snf::server::TimerId replacement{.value = 11};
+        assert(zone.handle(snf::server::ArmZoneSimulationTimer{.timer = replacement}).status ==
+               snf::server::ZoneCommandStatus::Applied);
+        assert(zone.lastTick() == 0);
+        assert(zone.handle(snf::server::ZoneSimulationTick{.timer = timer, .tick = 3}).status ==
+               snf::server::ZoneCommandStatus::StaleTimer);
+        assert(
+            zone.handle(snf::server::ZoneSimulationTick{.timer = replacement, .tick = 1}).status ==
+            snf::server::ZoneCommandStatus::Applied);
     }
 }
 

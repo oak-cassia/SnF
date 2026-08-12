@@ -91,6 +91,29 @@ namespace snf::server
     {
     }
 
+    ProtocolGateway::ProtocolGateway(RoutedCommandIngress& commands,
+                                     PlayerSessionDirectory& sessions,
+                                     RouteCoordinator& routes,
+                                     ZoneTimerService& zone_timers)
+        : ProtocolGateway(MessageDispatcher{}, commands, sessions, routes, zone_timers)
+    {
+    }
+
+    ProtocolGateway::ProtocolGateway(MessageDispatcher dispatcher,
+                                     RoutedCommandIngress& commands,
+                                     PlayerSessionDirectory& sessions,
+                                     RouteCoordinator& routes,
+                                     ZoneTimerService& zone_timers)
+        : _dispatcher(std::move(dispatcher))
+        , _commands(commands)
+        , _owned_sessions()
+        , _sessions(sessions)
+        , _owned_routes()
+        , _routes(routes)
+        , _zone_timers(&zone_timers)
+    {
+    }
+
     FramePostResult ProtocolGateway::tryPost(FrameEnvelope envelope)
     {
         const auto post_zone =
@@ -119,6 +142,21 @@ namespace snf::server
                 return FramePostResult::InvalidPayload;
             }
 
+            ZoneTimerRegistration timer_registration{
+                .result = snf::runtime::PostResult::Accepted,
+                .timer = std::nullopt,
+                .created = false,
+            };
+            if (_zone_timers != nullptr)
+            {
+                timer_registration = _zone_timers->tryEnsureTimer(zone);
+                if (timer_registration.result != snf::runtime::PostResult::Accepted)
+                {
+                    _routes.rollbackEnter(*admission);
+                    return frame_post_result(timer_registration.result);
+                }
+            }
+
             FramePostResult result;
             try
             {
@@ -141,11 +179,26 @@ namespace snf::server
             catch (...)
             {
                 _routes.rollbackEnter(*admission);
+                if (_zone_timers != nullptr && timer_registration.created)
+                {
+                    try
+                    {
+                        static_cast<void>(_zone_timers->tryCancelTimer(zone));
+                    }
+                    catch (...)
+                    {
+                        // Preserve the command-post failure that started cleanup.
+                    }
+                }
                 throw;
             }
             if (result != FramePostResult::Accepted)
             {
                 _routes.rollbackEnter(*admission);
+                if (_zone_timers != nullptr && timer_registration.created)
+                {
+                    static_cast<void>(_zone_timers->tryCancelTimer(zone));
+                }
             }
             return result;
         }
@@ -198,6 +251,10 @@ namespace snf::server
             if (result != FramePostResult::Full)
             {
                 _routes.completeLeave(*route);
+                if (_zone_timers != nullptr && _routes.routeCountFor(route->zone) == 0)
+                {
+                    static_cast<void>(_zone_timers->tryCancelTimer(route->zone));
+                }
             }
             return result;
         }
@@ -300,6 +357,10 @@ namespace snf::server
                 return PostResult::Full;
             }
             _routes.completeLeave(*route);
+            if (_zone_timers != nullptr && _routes.routeCountFor(route->zone) == 0)
+            {
+                static_cast<void>(_zone_timers->tryCancelTimer(route->zone));
+            }
         }
 
         const std::optional<PlayerId> player = _sessions.playerFor(closed.connection);

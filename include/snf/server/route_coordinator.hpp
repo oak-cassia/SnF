@@ -39,6 +39,7 @@ namespace snf::server
         void rollbackEnter(const RouteAdmission& admission) noexcept;
 
         [[nodiscard]] std::optional<SessionRoute> routeFor(snf::net::ConnectionId connection) const;
+        [[nodiscard]] std::size_t routeCountFor(ZoneId zone) const;
         void completeLeave(const SessionRoute& route) noexcept;
         void abandon(snf::net::ConnectionId connection) noexcept;
 

@@ -18,6 +18,8 @@ namespace
         assert(first->created);
         assert(first->route.route_epoch == 1);
         assert(routes.routeFor(FIRST_CONNECTION) == first->route);
+        assert(routes.routeCountFor(FIRST_ZONE) == 1);
+        assert(routes.routeCountFor(SECOND_ZONE) == 0);
 
         const auto repeated = routes.tryEnter(FIRST_CONNECTION, PLAYER, FIRST_ZONE);
         assert(repeated.has_value());
@@ -27,6 +29,7 @@ namespace
 
         routes.completeLeave(first->route);
         assert(!routes.routeFor(FIRST_CONNECTION).has_value());
+        assert(routes.routeCountFor(FIRST_ZONE) == 0);
         const auto reentered = routes.tryEnter(SECOND_CONNECTION, PLAYER, FIRST_ZONE);
         assert(reentered.has_value());
         assert(reentered->route.route_epoch == 2);

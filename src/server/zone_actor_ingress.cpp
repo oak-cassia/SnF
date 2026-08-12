@@ -41,4 +41,14 @@ namespace snf::server
     {
         return _runtime.tryPost(_binding.makePassivate(zone));
     }
+
+    snf::runtime::PostResult ZoneActorIngress::tryPostTimerCommand(const ZoneId zone,
+                                                                   ZoneCommand command)
+    {
+        return tryPost(ZoneInboundCommand{
+            .zone = zone,
+            .command = std::move(command),
+            .reply = std::nullopt,
+        });
+    }
 }

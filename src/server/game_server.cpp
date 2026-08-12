@@ -133,8 +133,18 @@ namespace snf::server
                                 _persistent_player_actor_binding,
                                 _command_lifecycle)
         , _zone_actor_ingress(_logic_runtime, _zone_actor_binding, _command_lifecycle)
+        , _zone_timer_clock()
+        , _zone_timers(_zone_actor_ingress,
+                       _zone_timer_clock,
+                       ZoneTimerServiceConfig{
+                           .tick_interval = config.zone_tick_interval,
+                           .cancellation_retry_interval = std::chrono::milliseconds{1},
+                           .max_timers = config.max_zone_timers,
+                           .on_failure = [this]
+                           { _runtime_completion.notifyFailed(snf::runtime::RuntimeId::Logic); },
+                       })
         , _command_router(_player_actor_ingress, _zone_actor_ingress)
-        , _protocol_gateway(_command_router, _player_sessions, _route_coordinator)
+        , _protocol_gateway(_command_router, _player_sessions, _route_coordinator, _zone_timers)
         , _tcp_server(
               TcpServerConfig{
                   .port = config.port,
@@ -173,6 +183,13 @@ namespace snf::server
     GameServer::~GameServer()
     {
         requestStop();
+        try
+        {
+            _zone_timers.stop();
+        }
+        catch (...)
+        {
+        }
         cancelActorRuntime();
         try
         {
@@ -204,6 +221,11 @@ namespace snf::server
         return _player_repository.find(player);
     }
 
+    ZoneTimerServiceStats GameServer::getZoneTimerStats() const
+    {
+        return _zone_timers.stats();
+    }
+
     ServerMetricsSnapshot GameServer::getMetricsSnapshot() const
     {
         return ServerMetricsSnapshot{
@@ -211,6 +233,7 @@ namespace snf::server
             .network = _tcp_server.getMetrics(),
             .actor_runtime = _logic_runtime.getStats(),
             .player_repository = _player_repository.stats(),
+            .zone_timers = _zone_timers.stats(),
             .command_terminals = _command_lifecycle.terminalCount(),
             .command_admission_rejections = _command_lifecycle.admissionRejectionCount(),
         };
@@ -256,15 +279,25 @@ namespace snf::server
         _has_run = true;
 
         _logic_runtime.start();
+        _zone_timers.start();
     }
 
     void GameServer::joinActorRuntime()
     {
+        _zone_timers.stop();
         _logic_runtime.join();
+        _zone_timers.rethrowIfFailed();
     }
 
     void GameServer::cancelActorRuntime() noexcept
     {
+        try
+        {
+            _zone_timers.stop();
+        }
+        catch (...)
+        {
+        }
         _protocol_gateway.cancel();
         // Also the path a reactor failure takes, and the reason a Worker suspended on
         // outbound capacity still reaches a terminal outcome when the reactor is gone.
