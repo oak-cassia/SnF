@@ -775,6 +775,17 @@ UnifiedRuntimeDrained =
   crash/restart 복구에는 Player 변경과 event/outbox 기록을 묶는 transaction 경계, durable event
   store와 checkpoint를 결정해야 한다. 그 전에는 시즌 정산 job을 추가하지 않는다.
 
+### 7.3 Durable ranking outbox와 checkpoint (계약 완료, 구현 남음)
+
+- 상세 계약은 `docs/durable-ranking-contract.md`를 단일 기준으로 사용한다. Player score·sequence와
+  outbox event를 MySQL transaction 하나로 commit하고, Actor는 authoritative completion만 적용한다.
+- trusted award는 `(PlayerId, award_id)` durable identity를 가져야 한다. 같은 identity와 delta는
+  replay하고 다른 delta는 conflict다. process-local request ID를 idempotency key로 사용하지 않는다.
+- MySQL `AUTO_INCREMENT` gap은 현재 strict projection offset과 맞지 않으므로 transaction 안에서 잠그는
+  stream cursor로 연속 offset을 할당한다. 병목이 측정될 때만 partition/gap 계약을 재검토한다.
+- 구현은 7.3a award/outbox transaction, 7.3b ordered projector/checkpoint, 7.3c 부하·retention 결정으로
+  나눈다. cross-zone handoff는 이 correctness gap을 닫은 뒤의 다음 콘텐츠 단계다.
+
 ## 선택적 인프라 트랙: io_uring Network Backend
 
 io_uring은 콘텐츠 단계의 선행 조건이 아니다. epoll backend와 첫 영속성 slice로

@@ -8,7 +8,7 @@ SnF는 C++20을 활용해 MORPG 콘텐츠의 상태, 규칙과 메시지 흐름�
 Runtime 위에서 인증, Player 영속성, Zone 이동·tick과 멱등한 구매 vertical slice를
 실행한다. outbound와 repository 대기는 Actor 하나만 suspend하는 non-blocking 경계를
 사용한다. MySQL durable adapter와 Shared Content·Projection의 in-memory reference까지
-완료했으며, 다음 주요 범위는 ranking outbox/checkpoint 내구성과 hot Zone 측정이다.
+완료했으며, 다음 주요 범위는 ranking outbox/checkpoint 내구성이다.
 `ConnectionScope`와 UnifiedRuntime은 실제 콘텐츠 부하가 필요를 증명할 때 진행할 선택적 최적화다.
 
 ## 프로젝트 목적
@@ -148,6 +148,10 @@ effect는 network outbound 용량을 소비하지 않는다. 현재 log와 check
 Player snapshot이 MySQL에 저장되더라도 event publish와 원자적이지 않다. 프로세스 crash 복구와
 시즌 정산은 transactional outbox와 durable checkpoint를 정한 뒤의 범위다.
 
+Phase 7.3 계약은 trusted award의 durable identity, Player score와 outbox의 단일 MySQL transaction,
+strict global offset projector와 checkpoint/shutdown 복구 순서를 고정한다. 구현은 award transaction과
+ordered projector 두 단계로 나눈다.
+
 콘텐츠 부하를 재현하기 위해 load client는 기존 `ping` 외에 `zone` 시나리오를 제공한다. 각 연결이
 고유 Player로 인증하고 Zone에 입장한 뒤 지속 이동하며 bootstrap과 gameplay RTT를 분리한다. 현재
 Release 기준선(200 connections, 8 Zones, 12초, 연결당 20 req/s)은 48,000/48,000 응답,
@@ -181,6 +185,8 @@ p99는 4.719ms, queue high-water는 로그인 burst에서 198이었지만 거부
 [서버 아키텍처 초안](docs/server-architecture-draft.md), coroutine 수명 규약은
 [Coroutine Actor 계약](docs/coroutine-actor-contract.md), 전체 종료 판정과 실패·취소 전파는
 [Runtime Lifecycle 계약](docs/runtime-lifecycle-contract.md)을 기준으로 한다.
+[Durable Ranking 계약](docs/durable-ranking-contract.md)은 Phase 7.3의 transaction, projector와
+checkpoint 복구 기준이다.
 [ConnectionScope 계약](docs/connection-scope-contract.md)과
 [UnifiedRuntime 전환 개요](study/10-unified-runtime-overview.md)는 Playable Session과 Zone 부하가 실제
 runtime 병목을 증명할 때 사용할 선택적 최적화 트랙의 설계 입력이다.
