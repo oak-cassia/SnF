@@ -98,6 +98,8 @@ namespace
                     .zone = snf::server::ZoneId{.value = 5},
                     .position = {.x = 3, .y = -4},
                 },
+            .currency_balance = 700,
+            .purchased_item_count = 3,
         });
 
         const auto command = make_ping(20);
@@ -105,6 +107,8 @@ namespace
         const auto record = actor.snapshot();
         assert(record.player == player);
         assert(record.handled_command_count == 11);
+        assert(record.currency_balance == 700);
+        assert(record.purchased_item_count == 3);
         assert((record.last_location == snf::server::PlayerLocation{
                                             .zone = snf::server::ZoneId{.value = 5},
                                             .position = {.x = 3, .y = -4},

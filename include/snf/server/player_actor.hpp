@@ -19,6 +19,8 @@ namespace snf::server
         [[nodiscard]] PlayerActorId identity() const noexcept;
         [[nodiscard]] std::uint64_t handledCommandCount() const noexcept;
         [[nodiscard]] std::optional<PlayerLocation> lastLocation() const noexcept;
+        [[nodiscard]] std::uint64_t currencyBalance() const noexcept;
+        [[nodiscard]] std::uint64_t purchasedItemCount() const noexcept;
 
     private:
         friend class PlayerActor;
@@ -26,6 +28,8 @@ namespace snf::server
         PlayerActorId _identity;
         std::uint64_t _handled_command_count{0};
         std::optional<PlayerLocation> _last_location;
+        std::uint64_t _currency_balance{INITIAL_CURRENCY_BALANCE};
+        std::uint64_t _purchased_item_count{0};
     };
 
     class PlayerActor

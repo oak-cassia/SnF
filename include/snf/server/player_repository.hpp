@@ -3,6 +3,7 @@
 #include "snf/runtime/bounded_queue.hpp"
 #include "snf/server/player_id.hpp"
 #include "snf/server/player_record.hpp"
+#include "snf/server/purchase.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -41,6 +42,7 @@ namespace snf::server
 
     using PlayerLoadCompletion = std::function<void(PlayerLoadResult)>;
     using PlayerSaveCompletion = std::function<void(PlayerSaveResult)>;
+    using PurchaseCompletion = std::function<void(PurchaseTransactionResult)>;
 
     // The repository receives values and completion callbacks only. An adapter
     // may run blocking storage work elsewhere, but it never receives an Actor,
@@ -52,6 +54,7 @@ namespace snf::server
 
         virtual void asyncLoad(PlayerId player, PlayerLoadCompletion completion) = 0;
         virtual void asyncSave(PlayerRecord record, PlayerSaveCompletion completion) = 0;
+        virtual void asyncPurchase(PurchaseRequest request, PurchaseCompletion completion) = 0;
     };
 
     // Deterministic first adapter for the vertical slice. Completion is immediate,
@@ -61,20 +64,43 @@ namespace snf::server
     class InMemoryPlayerRepository final : public PlayerRepository
     {
     public:
+        explicit InMemoryPlayerRepository(std::size_t max_idempotency_records_per_player = 1024);
+
         void asyncLoad(PlayerId player, PlayerLoadCompletion completion) override;
         void asyncSave(PlayerRecord record, PlayerSaveCompletion completion) override;
+        void asyncPurchase(PurchaseRequest request, PurchaseCompletion completion) override;
 
         [[nodiscard]] std::optional<PlayerRecord> find(PlayerId player) const;
 
+        struct PurchaseStats
+        {
+            std::uint64_t committed{0};
+            std::uint64_t replayed{0};
+            std::uint64_t rejected{0};
+        };
+        [[nodiscard]] PurchaseStats purchaseStats() const;
+
     private:
+        struct StoredPurchase
+        {
+            ProductId product;
+            PurchaseTransactionResult result;
+        };
+
+        const std::size_t _max_idempotency_records_per_player;
         mutable std::mutex _mutex;
         std::unordered_map<PlayerId, PlayerRecord, PlayerIdHash> _records;
+        std::
+            unordered_map<PlayerId, std::unordered_map<std::uint64_t, StoredPurchase>, PlayerIdHash>
+                _purchases;
+        PurchaseStats _purchase_stats;
     };
 
     struct ThreadedPlayerRepositoryConfig
     {
         std::size_t worker_count{1};
         std::size_t queue_capacity{4096};
+        std::size_t max_idempotency_records_per_player{1024};
     };
 
     struct ThreadedPlayerRepositoryStats
@@ -83,6 +109,9 @@ namespace snf::server
         std::uint64_t rejected{0};
         std::size_t queue_depth{0};
         std::size_t queue_high_water_mark{0};
+        std::uint64_t purchase_committed{0};
+        std::uint64_t purchase_replayed{0};
+        std::uint64_t purchase_rejected{0};
     };
 
     // Blocking-adapter boundary. Jobs are admitted non-blockingly into a bounded
@@ -100,6 +129,7 @@ namespace snf::server
 
         void asyncLoad(PlayerId player, PlayerLoadCompletion completion) override;
         void asyncSave(PlayerRecord record, PlayerSaveCompletion completion) override;
+        void asyncPurchase(PurchaseRequest request, PurchaseCompletion completion) override;
 
         void close() noexcept;
         [[nodiscard]] std::optional<PlayerRecord> find(PlayerId player) const;
@@ -118,7 +148,13 @@ namespace snf::server
             PlayerSaveCompletion completion;
         };
 
-        using Job = std::variant<LoadJob, SaveJob>;
+        struct PurchaseJob
+        {
+            PurchaseRequest request;
+            PurchaseCompletion completion;
+        };
+
+        using Job = std::variant<LoadJob, SaveJob, PurchaseJob>;
 
         void runWorker();
 

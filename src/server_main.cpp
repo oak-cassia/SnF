@@ -76,6 +76,13 @@ namespace
                   << format_distribution(zones.tick_execution_nanoseconds) << ", "
                   << zones.tick_overruns << " budget overruns\n";
 
+        const auto& repository = metrics.player_repository;
+        std::cout << "Player repository: " << repository.queue_depth << " queued, "
+                  << repository.queue_high_water_mark << " high-water, " << repository.accepted
+                  << " accepted, " << repository.rejected << " rejected, purchases "
+                  << repository.purchase_committed << " committed/" << repository.purchase_replayed
+                  << " replayed/" << repository.purchase_rejected << " rejected\n";
+
         const auto& workers = metrics.actor_runtime.workers;
         for (std::size_t worker_index = 0; worker_index < workers.size(); ++worker_index)
         {

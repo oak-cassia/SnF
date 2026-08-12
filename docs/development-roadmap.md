@@ -635,6 +635,26 @@ UnifiedRuntimeDrained =
 
 멱등한 구매 흐름 하나로 영속성의 트랜잭션 보장을 검증한다.
 
+### 6.1 Bounded idempotent transaction repository (완료)
+
+- `PurchaseRequest`는 Player, 64-bit idempotency key와 Product ID를 value로 저장소에
+  전달한다. 재화 차감, 상품 지급과 idempotency record 생성은 하나의 임계 구역에서
+  commit되며, 재화 부족과 inventory counter overflow는 어느 상태도 부분 변경하지 않는다.
+- 현재 `InMemoryPlayerRepository`의 mutex 임계 구역은 transaction 의미의 결정적 참조
+  구현이다. 실제 DB adapter는 재화, inventory와 idempotency row를 같은 DB transaction에서
+  commit해 동일한 원자성을 보존해야 한다.
+- 같은 key와 같은 product는 저장된 결과를 replay하고, 같은 key와 다른 product는
+  `IdempotencyConflict`를 반환한다. replay된 성공/실패 outcome은 변하지 않지만,
+  PlayerActor가 나중 변경을 과거 snapshot으로 되돌리지 않도록 절대 balance와 item count는
+  현재 authoritative record 값을 반환한다.
+- Player별 idempotency 기록은 설정된 상한을 갖는다. 증거를 eviction해 effectively-once
+  보장을 깨는 대신 새 key를 명시적으로 `IdempotencyCapacityExceeded`로 거부한다.
+  존재하지 않는 product와 conflict는 idempotency 용량을 소비하지 않는다.
+- bounded repository queue가 포화되거나 종료됐으면 `Unavailable`을 completion으로
+  반환하고 Logic Worker를 block하지 않는다. commit, replay와 reject 건수를 계측한다.
+
+### 6.2 Player command와 wire retry (진행 예정)
+
 - `idempotency key`가 있는 구매 요청을 typed Player command로 추가한다.
 - DB transaction으로 재화 차감과 상품 지급을 함께 commit한다.
 - 중복 요청, commit 성공 후 응답 유실, timeout/retry와 reconnect 후 결과 조회를 검증한다.

@@ -82,6 +82,8 @@ Network Runtime
 - Player·Zone typed binding/ingress와 type-erased binding registry
 - 주입 가능한 clock과 stale `TimerId` 폐기를 갖춘 bounded Zone timer scheduler
 - disconnect/save/reconnect 뒤 복원되는 Player의 마지막 Zone 위치
+- 재화 차감·상품 지급·idempotency 증거를 원자적으로 적용하는 bounded 구매
+  repository (현재 in-memory transaction 참조 구현, wire command는 Phase 6.2 범위)
 - Zone command/tick 실행 `p50/p95/p99/max`와 tick budget overrun metric
 - `PlayerActor` PING/PONG 처리와 typed result/effect 경계
 - connection generation을 통한 stale response 차단

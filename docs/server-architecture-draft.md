@@ -440,6 +440,18 @@ PlayerActor는 완료 메시지를 자신의 mailbox 또는 Worker queue에서 �
 - command id를 이용한 중요 상태 변경의 멱등 처리
 - 재화 같은 중요 변경에 명시적인 실패 및 재시도 정책 적용
 
+Phase 6의 구매 참조 구현은 `PlayerRecord`의 재화·inventory counter와 Player별
+idempotency record를 하나의 in-memory mutex 임계 구역에서 변경한다. 이 임계 구역이
+현재 transaction 경계며, DB Worker의 여러 thread가 동시에 요청해도 debit, grant와
+idempotency 증거가 분리되지 않는다. 이는 운영 DB 선택이 아니라 transaction 의미의
+결정적 adapter다. 향후 SQL/KV adapter는 같은 세 변경을 하나의 DB transaction으로
+commit하고, 중복 key를 유일성 제약 또는 동등한 동시성 기구로 직렬화해야 한다.
+
+같은 key·product의 replay는 원래 outcome을 유지한다. 단 completion이 PlayerActor에 적용될
+때 후속 transaction의 상태를 되돌리지 않도록, 응답의 절대 balance와 inventory count는
+현재 authoritative record에서 읽는다. Player별 idempotency table이 설정 상한에 닿으면
+기존 증거를 지우지 않고 새 transaction을 명시적으로 거부한다.
+
 ### 4.8 Observability
 
 로그 기록은 전용 bounded queue와 Logger Thread에서 처리한다. 일반 로그가 가득 찼을 때

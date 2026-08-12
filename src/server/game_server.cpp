@@ -89,6 +89,8 @@ namespace snf::server
         , _player_repository(ThreadedPlayerRepositoryConfig{
               .worker_count = config.player_repository_worker_count,
               .queue_capacity = config.player_repository_queue_capacity,
+              .max_idempotency_records_per_player =
+                  config.max_purchase_idempotency_records_per_player,
           })
         , _runtime_completion(snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
                               _outbound_event.getDescriptor())

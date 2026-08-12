@@ -135,6 +135,20 @@ namespace
             });
         }
 
+        void asyncPurchase(snf::server::PurchaseRequest request,
+                           snf::server::PurchaseCompletion completion) override
+        {
+            completion(snf::server::PurchaseTransactionResult{
+                .status = snf::server::PurchaseStatus::Unavailable,
+                .player = request.player,
+                .idempotency_key = request.idempotency_key,
+                .product = request.product,
+                .currency_balance = 0,
+                .purchased_item_count = 0,
+                .replayed = false,
+            });
+        }
+
         void completeLoad(snf::server::PlayerRecord record)
         {
             snf::server::PlayerLoadCompletion completion;
@@ -1363,6 +1377,8 @@ namespace
                     .zone = snf::server::ZoneId{.value = 9},
                     .position = {.x = 17, .y = -19},
                 },
+            .currency_balance = snf::server::INITIAL_CURRENCY_BALANCE,
+            .purchased_item_count = 0,
         });
         std::optional<snf::server::PostedOutboundAction> authenticated;
         const auto auth_deadline = std::chrono::steady_clock::now() + 1s;

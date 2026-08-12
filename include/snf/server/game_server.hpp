@@ -66,6 +66,7 @@ namespace snf::server
         std::size_t actor_max_in_flight_operations_per_worker{1024};
         std::size_t player_repository_worker_count{1};
         std::size_t player_repository_queue_capacity{4096};
+        std::size_t max_purchase_idempotency_records_per_player{1024};
         std::int32_t zone_aoi_radius{1000};
         std::chrono::milliseconds zone_tick_interval{50};
         std::chrono::nanoseconds zone_tick_budget{std::chrono::milliseconds{5}};

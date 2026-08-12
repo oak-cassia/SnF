@@ -20,6 +20,16 @@ namespace snf::server
         return _last_location;
     }
 
+    std::uint64_t PlayerState::currencyBalance() const noexcept
+    {
+        return _currency_balance;
+    }
+
+    std::uint64_t PlayerState::purchasedItemCount() const noexcept
+    {
+        return _purchased_item_count;
+    }
+
     const PlayerState& PlayerActor::state() const noexcept
     {
         return _state;
@@ -34,6 +44,8 @@ namespace snf::server
 
         _state._handled_command_count = record.handled_command_count;
         _state._last_location = record.last_location;
+        _state._currency_balance = record.currency_balance;
+        _state._purchased_item_count = record.purchased_item_count;
     }
 
     void PlayerActor::setLastLocation(std::optional<PlayerLocation> location) noexcept
@@ -53,6 +65,8 @@ namespace snf::server
             .player = *player,
             .handled_command_count = _state._handled_command_count,
             .last_location = _state._last_location,
+            .currency_balance = _state._currency_balance,
+            .purchased_item_count = _state._purchased_item_count,
         };
     }
 
