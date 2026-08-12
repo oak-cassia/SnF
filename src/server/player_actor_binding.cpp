@@ -106,6 +106,9 @@ namespace snf::server
     struct PlayerActorBinding::CommandPayload
     {
         PlayerInboundCommand command;
+        // Destroyed with this payload, which is what makes the terminal signal fire
+        // exactly once per command on every path the scheduler has.
+        CommandTerminalToken terminal;
     };
 
     struct PlayerActorBinding::ConnectionClosedPayload
@@ -115,9 +118,11 @@ namespace snf::server
 
     PlayerActorBinding::PlayerActorBinding(PlayerEffectSink& effects,
                                            OutboundSink& outbound,
+                                           CommandTerminalSink& terminals,
                                            PlayerActorBindingConfig config)
         : _effects(effects)
         , _outbound(outbound)
+        , _terminals(terminals)
         , _on_before_command(std::move(config.on_before_command))
     {
     }
@@ -131,6 +136,7 @@ namespace snf::server
     PlayerActorBinding::makeCommand(PlayerInboundCommand command) const
     {
         const ProvisionalActorId actor = command.actor;
+        const snf::net::ConnectionId connection = command.connection;
         return makeSubmission(
             snf::runtime::ActorKey{
                 .kind = kind(),
@@ -140,6 +146,10 @@ namespace snf::server
             snf::runtime::ActorAccounting::Command,
             CommandPayload{
                 .command = std::move(command),
+                // Armed here, at the boundary that admits a command. A frame rejected
+                // earlier by the protocol never became a command, so it consumes no
+                // credit and reports no terminal.
+                .terminal = CommandTerminalToken{_terminals, connection},
             });
     }
 

@@ -86,6 +86,7 @@ namespace
         snf::server::OutboundChannel outbound;
         snf::server::ChannelOutboundSink raw_outbound_sink;
         snf::server::ProtocolPlayerEffectSink outbound_sink;
+        snf::server::CountingCommandTerminalSink terminals;
         RecordingRuntimeCompletion completion;
     };
 
@@ -97,6 +98,7 @@ namespace
                       snf::server::PlayerActorBindingConfig binding_config = {})
             : binding(dependencies.outbound_sink,
                       dependencies.raw_outbound_sink,
+                      dependencies.terminals,
                       std::move(binding_config))
             , runtime(runtime_config, dependencies.completion)
             , ingress(runtime, binding)
@@ -1000,6 +1002,71 @@ namespace
         assert(dependencies.outbound.pendingWaiterCount() == 0);
     }
 
+    void test_every_admitted_command_reports_exactly_one_terminal()
+    {
+        // Success, cancellation and mailbox discard in one run: three commands and a
+        // close for the same actor, with the Worker parked until everything is queued.
+        {
+            RuntimeDependencies dependencies{8};
+            auto config = player_runtime_config(1, 8);
+            std::promise<void> worker_started;
+            std::promise<void> release_worker;
+            const auto release = release_worker.get_future().share();
+            const auto started = worker_started.get_future();
+            config.on_worker_start = [&worker_started, release](std::size_t)
+            {
+                worker_started.set_value();
+                release.wait();
+            };
+
+            PlayerRuntime player{dependencies, std::move(config)};
+            player.runtime.start();
+            assert(started.wait_for(1s) == std::future_status::ready);
+            for (std::uint32_t request_id = 1; request_id <= 3; ++request_id)
+            {
+                assert(player.ingress.tryPost(make_command(9, request_id)) == PostResult::Accepted);
+            }
+
+            player.runtime.cancel();
+            release_worker.set_value();
+            player.runtime.join();
+
+            // Cancelled and discarded commands report their terminal exactly like the
+            // ones that answered.
+            assert(dependencies.terminals.count() == 3);
+        }
+
+        // A command refused before it was admitted still owes its terminal: the credit
+        // 4.5 takes at this boundary has to come back.
+        {
+            RuntimeDependencies dependencies{8};
+            auto config = player_runtime_config(1, 1);
+            std::promise<void> worker_started;
+            std::promise<void> release_worker;
+            const auto release = release_worker.get_future().share();
+            const auto started = worker_started.get_future();
+            config.on_worker_start = [&worker_started, release](std::size_t)
+            {
+                worker_started.set_value();
+                release.wait();
+            };
+
+            PlayerRuntime player{dependencies, std::move(config)};
+            player.runtime.start();
+            assert(started.wait_for(1s) == std::future_status::ready);
+            assert(player.ingress.tryPost(make_command(9, 1)) == PostResult::Accepted);
+            assert(player.ingress.tryPost(make_command(9, 2)) == PostResult::Full);
+
+            player.runtime.close();
+            release_worker.set_value();
+            player.runtime.join();
+
+            // A post refused after the ingress closed owes one too.
+            assert(player.ingress.tryPost(make_command(9, 3)) == PostResult::Closed);
+            assert(dependencies.terminals.count() == 3);
+        }
+    }
+
     void test_exhausted_in_flight_budget_closes_the_connection_instead_of_dropping_a_response()
     {
         RuntimeDependencies dependencies{1};
@@ -1107,4 +1174,5 @@ void run_actor_runtime_tests()
     test_cancel_releases_an_actor_suspended_on_outbound_capacity();
     test_saturated_outbound_preserves_effect_order_and_handler_atomicity();
     test_exhausted_in_flight_budget_closes_the_connection_instead_of_dropping_a_response();
+    test_every_admitted_command_reports_exactly_one_terminal();
 }

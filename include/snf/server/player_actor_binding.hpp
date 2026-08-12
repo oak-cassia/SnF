@@ -1,6 +1,7 @@
 #pragma once
 
 #include "snf/runtime/actor_runtime.hpp"
+#include "snf/server/command_terminal.hpp"
 #include "snf/server/connection_lifecycle.hpp"
 #include "snf/server/outbound_sink.hpp"
 #include "snf/server/player_effect_sink.hpp"
@@ -29,6 +30,7 @@ namespace snf::server
     public:
         PlayerActorBinding(PlayerEffectSink& effects,
                            OutboundSink& outbound,
+                           CommandTerminalSink& terminals,
                            PlayerActorBindingConfig config = {});
 
         [[nodiscard]] snf::runtime::ActorKind kind() const noexcept override;
@@ -68,6 +70,7 @@ namespace snf::server
 
         PlayerEffectSink& _effects;
         OutboundSink& _outbound;
+        CommandTerminalSink& _terminals;
         std::function<void(ProvisionalActorId, const PlayerCommand&)> _on_before_command;
     };
 }

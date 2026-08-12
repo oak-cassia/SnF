@@ -49,7 +49,7 @@ namespace snf::server
         , _player_effects(_outbound_sink)
         , _runtime_completion(snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
                               _outbound_event.getDescriptor())
-        , _player_actor_binding(_player_effects, _outbound_sink)
+        , _player_actor_binding(_player_effects, _outbound_sink, _command_terminals)
         , _logic_runtime(
               [config]
               {
@@ -132,6 +132,7 @@ namespace snf::server
             .counters = _tcp_server.getStats(),
             .network = _tcp_server.getMetrics(),
             .actor_runtime = _logic_runtime.getStats(),
+            .command_terminals = _command_terminals.count(),
         };
     }
 

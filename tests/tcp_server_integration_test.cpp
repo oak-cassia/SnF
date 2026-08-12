@@ -439,6 +439,8 @@ namespace
         assert(metrics.network.current_outbound_queue_depth == 0);
         assert(actor_count(server.getActorRuntimeStats()) == 0);
         assert(suspended_command_count(server.getActorRuntimeStats()) > 0);
+        // One terminal per command, including the ones that had to wait for capacity.
+        assert(metrics.command_terminals == REQUEST_COUNT);
     }
 
     void test_collects_baseline_saturation_metrics_for_a_round_trip()
@@ -477,6 +479,11 @@ namespace
         assert(metrics.network.sessions_with_pending_send == 0);
         assert(metrics.network.total_pending_send_bytes == 0);
         assert(queue_wait_sample_count(metrics.actor_runtime) == 1);
+        assert(metrics.command_terminals == 1);
+        // Nothing waited for capacity, so the round trip started no async operation.
+        assert(suspended_command_count(metrics.actor_runtime) == 0);
+        assert(metrics.network.reserved_outbound_slots == 0);
+        assert(metrics.network.pending_outbound_reservations == 0);
     }
 
     void test_reports_metrics_periodically_while_running()
