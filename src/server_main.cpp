@@ -30,6 +30,7 @@ namespace
                   << " frames received, " << counters.sent_frames << " frames sent, "
                   << counters.protocol_errors << " protocol errors, "
                   << counters.actor_queue_overflows << " actor queue overflows, "
+                  << counters.outbound_admission_failures << " outbound admission failures, "
                   << counters.stale_outbound_actions << " stale outbound actions, "
                   << counters.connection_lifecycle_rejections
                   << " connection lifecycle rejections, "
@@ -47,8 +48,16 @@ namespace
                   << "Outbound queue depth: " << network.current_outbound_queue_depth << " now, "
                   << network.outbound_queue_high_water_mark << " high-water, "
                   << format_distribution(network.outbound_queue_depth) << '\n'
+                  << "Outbound reservations: " << network.reserved_outbound_slots
+                  << " slots reserved, " << network.pending_outbound_reservations
+                  << " actors waiting, " << network.tracked_outbound_connections
+                  << " connections tracked\n"
+                  // Commit to consumption only. The wait for capacity is the actor's
+                  // suspension, reported per Worker below, so the two together are what
+                  // compares against the 3.9 baseline's single blocking figure.
                   << "Outbound hand-off wait ns: "
-                  << format_distribution(network.outbound_queue_wait_nanoseconds) << '\n';
+                  << format_distribution(network.outbound_queue_wait_nanoseconds) << '\n'
+                  << "Command terminals: " << metrics.command_terminals << '\n';
 
         const auto& workers = metrics.actor_runtime.workers;
         for (std::size_t worker_index = 0; worker_index < workers.size(); ++worker_index)

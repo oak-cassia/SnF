@@ -35,6 +35,7 @@ namespace
     constexpr std::uint64_t TERMINATION_SIGNAL_EVENT_TOKEN = OUTBOUND_EVENT_TOKEN - 1;
     constexpr std::uint64_t MAX_CONNECTION_GENERATION = TERMINATION_SIGNAL_EVENT_TOKEN - 1;
     constexpr std::size_t CONNECTION_CLOSE_RETRY_BUDGET = 64;
+    constexpr std::size_t OUTBOUND_DRAIN_BATCH_SIZE = 64;
     constexpr std::chrono::milliseconds CONNECTION_CLOSE_RETRY_INTERVAL{1};
 
     snf::net::UniqueFileDescriptor create_epoll_instance()
@@ -135,6 +136,7 @@ namespace snf::server
             .outbound_queue_high_water_mark = _outbound.highWaterMark(),
             .reserved_outbound_slots = _outbound.reservedSlotCount(),
             .pending_outbound_reservations = _outbound.pendingWaiterCount(),
+            .tracked_outbound_connections = _outbound.trackedConnectionCount(),
         };
 
         for (const auto& [client_descriptor, session] : _sessions)
@@ -557,12 +559,23 @@ namespace snf::server
             snf::net::throw_system_error("read(outbound eventfd)");
         }
 
-        while (auto posted = _outbound.tryPop())
+        while (true)
         {
-            _outbound_queue_wait_nanoseconds.record(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - posted->posted_at));
-            handleOutboundAction(std::move(posted->action));
+            _outbound.drainInto(_drained_outbound_actions, OUTBOUND_DRAIN_BATCH_SIZE);
+            if (_drained_outbound_actions.empty())
+            {
+                break;
+            }
+
+            for (PostedOutboundAction& posted : _drained_outbound_actions)
+            {
+                _outbound_queue_wait_nanoseconds.record(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - posted.posted_at));
+                handleOutboundAction(std::move(posted.action));
+            }
+
+            _drained_outbound_actions.clear();
         }
 
         closeConnectionsWithFailedOutboundAdmission();
@@ -857,6 +870,10 @@ namespace snf::server
         _client_descriptors_by_event_token.erase(connection.generation);
         _sessions.erase(session_iterator);
         ++_stats.closed_connections;
+        // Releases this connection's outbound accounting once whatever it still holds
+        // has drained. Until this point the channel keeps the entry alive so a live
+        // connection's commands do not allocate one each.
+        _outbound.forgetConnection(connection);
         std::cout << "Closed client FD: " << client_descriptor << '\n';
 
         if (!_is_stopping)

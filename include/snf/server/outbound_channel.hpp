@@ -138,7 +138,17 @@ namespace snf::server
 
         // Reactor only.
         [[nodiscard]] std::optional<PostedOutboundAction> tryPop();
+        // One lock for a whole batch. Draining item by item multiplies lock traffic
+        // with the committing Workers exactly when a burst makes that contention
+        // expensive. Actions are appended, so the caller controls the buffer.
+        void drainInto(std::vector<PostedOutboundAction>& actions, std::size_t max_actions);
         std::size_t grantPending();
+        // Reactor only. A connection's accounting outlives its individual commands, so
+        // entries are kept rather than created and destroyed per command: allocating a
+        // map node inside the lock on every command lengthens the critical section for
+        // everyone. The entry is dropped once the session is gone and whatever it still
+        // holds has drained.
+        void forgetConnection(snf::net::ConnectionId connection);
         void takePendingAdmissionFailures(std::vector<snf::net::ConnectionId>& failures);
 
         // Callable from any thread. Records a connection whose outbound admission
@@ -157,6 +167,10 @@ namespace snf::server
         [[nodiscard]] std::size_t highWaterMark() const;
         [[nodiscard]] std::size_t reservedSlotCount() const;
         [[nodiscard]] std::size_t pendingWaiterCount() const;
+        // Connections with live accounting. Entries survive between a connection's
+        // commands, so this is the gauge that shows the bound holding: it must track
+        // live connections and not the command rate.
+        [[nodiscard]] std::size_t trackedConnectionCount() const;
         [[nodiscard]] std::uint64_t droppedAdmissionFailureCount() const;
         [[nodiscard]] bool isCancelled() const;
 
@@ -176,6 +190,10 @@ namespace snf::server
             // Kept in step with waiters being non-empty, so the grant order holds at
             // most one entry per connection.
             bool queued_for_grant{false};
+            // Set when the backend has dropped the connection. Until then the entry
+            // survives an idle moment, because the next command of a live connection
+            // would only have to allocate it again.
+            bool forgotten{false};
         };
 
         // The connection travels with the action so a pop does not have to inspect
@@ -198,6 +216,8 @@ namespace snf::server
         // Called by OutboundReservation's destructor, from any thread.
         void returnSlots(snf::net::ConnectionId connection, std::size_t slots) noexcept;
 
+        // Caller holds the lock.
+        [[nodiscard]] std::optional<PostedOutboundAction> takeFront();
         [[nodiscard]] bool fits(const ConnectionUsage& usage, std::size_t slots) const;
         void markGrantable(snf::net::ConnectionId connection, ConnectionUsage& usage);
         void eraseUsageIfIdle(snf::net::ConnectionId connection);

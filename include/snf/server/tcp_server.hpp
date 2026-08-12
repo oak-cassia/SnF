@@ -89,6 +89,9 @@ namespace snf::server
         // grant. Together with the depth above they account for the whole channel.
         std::size_t reserved_outbound_slots{0};
         std::size_t pending_outbound_reservations{0};
+        // Connections the channel still accounts for. It must follow the live
+        // connection count, not the command rate.
+        std::size_t tracked_outbound_connections{0};
     };
 
     // The epoll reactor. It decodes frames, submits FrameEnvelope values to the shared
@@ -171,7 +174,8 @@ namespace snf::server
         // Generation tokens let the reactor discard that event instead of targeting the new FD.
         std::unordered_map<std::uint64_t, int> _client_descriptors_by_event_token;
         std::deque<ConnectionClosed> _pending_connection_closes;
-        // Reused across turns so draining the channel's failures allocates nothing.
+        // Both reused across turns so a drain allocates nothing per turn.
+        std::vector<PostedOutboundAction> _drained_outbound_actions;
         std::vector<snf::net::ConnectionId> _failed_outbound_admissions;
         TcpServerStats _stats;
         snf::runtime::Distribution _reactor_turn_nanoseconds;

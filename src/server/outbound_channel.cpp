@@ -269,28 +269,36 @@ namespace snf::server
     std::optional<PostedOutboundAction> OutboundChannel::tryPop()
     {
         std::lock_guard lock{_mutex};
-        if (_items.empty())
-        {
-            return std::nullopt;
-        }
+        return takeFront();
+    }
 
-        QueuedAction queued = std::move(_items.front());
-        _items.pop_front();
-
-        const auto usage_iterator = _connections.find(queued.connection);
-        if (usage_iterator != _connections.end())
+    void OutboundChannel::drainInto(std::vector<PostedOutboundAction>& actions,
+                                    const std::size_t max_actions)
+    {
+        std::lock_guard lock{_mutex};
+        for (std::size_t drained = 0; drained < max_actions; ++drained)
         {
-            ConnectionUsage& usage = usage_iterator->second;
-            if (usage.queued != 0)
+            auto posted = takeFront();
+            if (!posted)
             {
-                --usage.queued;
+                return;
             }
 
-            markGrantable(queued.connection, usage);
-            eraseUsageIfIdle(queued.connection);
+            actions.push_back(std::move(*posted));
+        }
+    }
+
+    void OutboundChannel::forgetConnection(const snf::net::ConnectionId connection)
+    {
+        std::lock_guard lock{_mutex};
+        const auto usage_iterator = _connections.find(connection);
+        if (usage_iterator == _connections.end())
+        {
+            return;
         }
 
-        return std::move(queued.posted);
+        usage_iterator->second.forgotten = true;
+        eraseUsageIfIdle(connection);
     }
 
     std::size_t OutboundChannel::grantPending()
@@ -472,6 +480,12 @@ namespace snf::server
         return _waiter_count;
     }
 
+    std::size_t OutboundChannel::trackedConnectionCount() const
+    {
+        std::lock_guard lock{_mutex};
+        return _connections.size();
+    }
+
     std::uint64_t OutboundChannel::droppedAdmissionFailureCount() const
     {
         std::lock_guard lock{_mutex};
@@ -514,6 +528,32 @@ namespace snf::server
         }
     }
 
+    std::optional<PostedOutboundAction> OutboundChannel::takeFront()
+    {
+        if (_items.empty())
+        {
+            return std::nullopt;
+        }
+
+        QueuedAction queued = std::move(_items.front());
+        _items.pop_front();
+
+        const auto usage_iterator = _connections.find(queued.connection);
+        if (usage_iterator != _connections.end())
+        {
+            ConnectionUsage& usage = usage_iterator->second;
+            if (usage.queued != 0)
+            {
+                --usage.queued;
+            }
+
+            markGrantable(queued.connection, usage);
+            eraseUsageIfIdle(queued.connection);
+        }
+
+        return std::move(queued.posted);
+    }
+
     bool OutboundChannel::fits(const ConnectionUsage& usage, const std::size_t slots) const
     {
         return _items.size() + _reserved_slots + slots <= _capacity &&
@@ -541,9 +581,11 @@ namespace snf::server
         }
 
         const ConnectionUsage& usage = usage_iterator->second;
-        // A connection still referenced by the grant order keeps its entry: dropping
-        // it would leave a stale key that a later activation could duplicate.
-        if (usage.queued == 0 && usage.reserved == 0 && usage.waiters.empty() &&
+        // Only a forgotten connection is dropped, and only once it holds nothing. A
+        // live connection keeps its entry between commands, and an entry still
+        // referenced by the grant order keeps it too: dropping that would leave a stale
+        // key a later activation could duplicate.
+        if (usage.forgotten && usage.queued == 0 && usage.reserved == 0 && usage.waiters.empty() &&
             !usage.queued_for_grant)
         {
             _connections.erase(usage_iterator);

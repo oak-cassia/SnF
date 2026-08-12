@@ -107,6 +107,38 @@ namespace
         assert(channel.tryReserve(connection, 2));
     }
 
+    void test_connection_accounting_survives_commands_and_ends_with_the_connection()
+    {
+        const auto wake = make_wake_descriptor();
+        OutboundChannel channel{OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 4},
+                                wake.getDescriptor()};
+        const auto connection = connection_of(4);
+
+        {
+            auto reservation = channel.tryReserve(connection, 1);
+            assert(reservation);
+            assert(channel.commit(*reservation, send_action(connection, 1)));
+        }
+        assert(channel.tryPop());
+
+        // Idle, but still tracked: the next command of a live connection would only
+        // have to allocate the entry again.
+        assert(channel.trackedConnectionCount() == 1);
+
+        channel.forgetConnection(connection);
+        assert(channel.trackedConnectionCount() == 0);
+
+        // Forgotten while it still holds a queued action: the entry has to outlive the
+        // session until that action drains.
+        auto reservation = channel.tryReserve(connection, 1);
+        assert(reservation);
+        assert(channel.commit(*reservation, send_action(connection, 2)));
+        channel.forgetConnection(connection);
+        assert(channel.trackedConnectionCount() == 1);
+        assert(channel.tryPop());
+        assert(channel.trackedConnectionCount() == 0);
+    }
+
     void test_reserve_defers_to_a_registered_waiter()
     {
         const auto wake = make_wake_descriptor();
@@ -355,6 +387,7 @@ void run_outbound_channel_tests()
     test_reserve_then_commit_moves_capacity_from_reserved_to_queued();
     test_zero_slot_reservation_is_valid_and_consumes_no_capacity();
     test_uncommitted_slots_return_when_the_reservation_dies();
+    test_connection_accounting_survives_commands_and_ends_with_the_connection();
     test_reserve_defers_to_a_registered_waiter();
     test_per_connection_limit_does_not_block_another_connection();
     test_global_capacity_blocks_a_waiter_until_a_pop_frees_a_slot();
