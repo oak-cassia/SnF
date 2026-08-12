@@ -56,6 +56,8 @@ namespace snf::server
         , _sessions(_owned_sessions)
         , _owned_routes()
         , _routes(_owned_routes)
+        , _owned_parties()
+        , _parties(_owned_parties)
     {
     }
 
@@ -68,6 +70,8 @@ namespace snf::server
         , _sessions(sessions)
         , _owned_routes()
         , _routes(_owned_routes)
+        , _owned_parties()
+        , _parties(_owned_parties)
     {
     }
 
@@ -88,6 +92,8 @@ namespace snf::server
         , _sessions(sessions)
         , _owned_routes()
         , _routes(routes)
+        , _owned_parties()
+        , _parties(_owned_parties)
     {
     }
 
@@ -110,6 +116,35 @@ namespace snf::server
         , _sessions(sessions)
         , _owned_routes()
         , _routes(routes)
+        , _owned_parties()
+        , _parties(_owned_parties)
+        , _zone_timers(&zone_timers)
+    {
+    }
+
+    ProtocolGateway::ProtocolGateway(RoutedCommandIngress& commands,
+                                     PlayerSessionDirectory& sessions,
+                                     RouteCoordinator& routes,
+                                     ZoneTimerService& zone_timers,
+                                     PartyCoordinator& parties)
+        : ProtocolGateway(MessageDispatcher{}, commands, sessions, routes, zone_timers, parties)
+    {
+    }
+
+    ProtocolGateway::ProtocolGateway(MessageDispatcher dispatcher,
+                                     RoutedCommandIngress& commands,
+                                     PlayerSessionDirectory& sessions,
+                                     RouteCoordinator& routes,
+                                     ZoneTimerService& zone_timers,
+                                     PartyCoordinator& parties)
+        : _dispatcher(std::move(dispatcher))
+        , _commands(commands)
+        , _owned_sessions()
+        , _sessions(sessions)
+        , _owned_routes()
+        , _routes(routes)
+        , _owned_parties()
+        , _parties(parties)
         , _zone_timers(&zone_timers)
     {
     }
@@ -124,6 +159,94 @@ namespace snf::server
                 .route = std::move(route),
             }));
         };
+        const auto post_party =
+            [this, connection = envelope.connection](PartyCommandRoute route) -> FramePostResult
+        {
+            return frame_post_result(_commands.tryPost(RoutedCommand{
+                .connection = connection,
+                .route = std::move(route),
+            }));
+        };
+
+        if (envelope.frame.type == snf::protocol::MessageType::PartyJoin)
+        {
+            constexpr std::size_t PARTY_JOIN_PAYLOAD_SIZE = 8;
+            const auto player = _sessions.playerFor(envelope.connection);
+            if (!player || envelope.frame.payload.size() != PARTY_JOIN_PAYLOAD_SIZE)
+            {
+                return FramePostResult::InvalidPayload;
+            }
+            const PartyId party{
+                .value = read_u64(std::span<const std::byte>{envelope.frame.payload}, 0),
+            };
+            const auto admission = _parties.tryJoin(envelope.connection, *player, party);
+            if (!admission)
+            {
+                return FramePostResult::InvalidPayload;
+            }
+
+            FramePostResult result;
+            try
+            {
+                result = post_party(PartyCommandRoute{
+                    .party = party,
+                    .command =
+                        JoinPartyCommand{
+                            .player = *player,
+                            .membership_epoch = admission->route.membership_epoch,
+                        },
+                    .reply_kind = PartyReplyKind::Joined,
+                    .request_id = envelope.frame.request_id,
+                });
+            }
+            catch (...)
+            {
+                _parties.rollbackJoin(*admission);
+                throw;
+            }
+            if (result != FramePostResult::Accepted)
+            {
+                _parties.rollbackJoin(*admission);
+            }
+            return result;
+        }
+
+        if (envelope.frame.type == snf::protocol::MessageType::PartyLeave)
+        {
+            const auto route = _parties.beginLeave(envelope.connection);
+            if (!route || !envelope.frame.payload.empty())
+            {
+                return FramePostResult::InvalidPayload;
+            }
+            FramePostResult result;
+            try
+            {
+                result = post_party(PartyCommandRoute{
+                    .party = route->party,
+                    .command =
+                        LeavePartyCommand{
+                            .player = route->player,
+                            .membership_epoch = route->membership_epoch,
+                        },
+                    .reply_kind = PartyReplyKind::Left,
+                    .request_id = envelope.frame.request_id,
+                });
+            }
+            catch (...)
+            {
+                _parties.rollbackLeave(*route);
+                throw;
+            }
+            if (result == FramePostResult::Full)
+            {
+                _parties.rollbackLeave(*route);
+            }
+            else if (result == FramePostResult::Closed)
+            {
+                _parties.abandon(route->connection);
+            }
+            return result;
+        }
 
         if (envelope.frame.type == snf::protocol::MessageType::EnterZone)
         {
@@ -365,6 +488,47 @@ namespace snf::server
                 _sessions.locationSnapshotFor(closed.connection);
             closed.has_location_snapshot = snapshot.known;
             closed.last_location = snapshot.location;
+        }
+        if (const auto current_party = _parties.routeFor(closed.connection);
+            current_party && !current_party->leaving)
+        {
+            const auto party = _parties.beginLeave(closed.connection);
+            if (!party)
+            {
+                return PostResult::Full;
+            }
+            PostResult party_result;
+            try
+            {
+                party_result = _commands.tryPost(RoutedCommand{
+                    .connection = closed.connection,
+                    .route =
+                        PartyCommandRoute{
+                            .party = party->party,
+                            .command =
+                                LeavePartyCommand{
+                                    .player = party->player,
+                                    .membership_epoch = party->membership_epoch,
+                                },
+                            .reply_kind = std::nullopt,
+                            .request_id = 0,
+                        },
+                });
+            }
+            catch (...)
+            {
+                _parties.rollbackLeave(*party);
+                throw;
+            }
+            if (party_result == PostResult::Full)
+            {
+                _parties.rollbackLeave(*party);
+                return PostResult::Full;
+            }
+            if (party_result == PostResult::Closed)
+            {
+                _parties.abandon(party->connection);
+            }
         }
         if (const auto route = _routes.routeFor(closed.connection))
         {

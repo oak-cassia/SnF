@@ -28,6 +28,10 @@ namespace snf::protocol
         ZoneLeft = 10,
         Purchase = 11,
         PurchaseResult = 12,
+        PartyJoin = 13,
+        PartyJoined = 14,
+        PartyLeave = 15,
+        PartyLeft = 16,
     };
 
     struct Frame

@@ -44,7 +44,8 @@ ProtocolGateway / CommandRouter
   ↓ typed route
 Actor-Bound Logic Runtime
   ├── PlayerActor
-  └── ZoneActor, Shared Content Actor (예정)
+  ├── ZoneActor
+  └── PartyActor
   ↓ typed effect
 OutboundSink
   ↓
@@ -80,7 +81,7 @@ Network Runtime
 - 길이 기반 binary Frame codec과 부분 수신·송신 처리
 - 공통 `ProtocolGateway`와 typed command routing
 - `ActorKey{ActorKind, EntityId}`로 sharding하는 2-Worker Actor-Bound Logic Runtime과 Actor별 FIFO mailbox
-- Player·Zone typed binding/ingress와 type-erased binding registry
+- Player·Zone·Party typed binding/ingress와 type-erased binding registry
 - 주입 가능한 clock과 stale `TimerId` 폐기를 갖춘 bounded Zone timer scheduler
 - disconnect/save/reconnect 뒤 복원되는 Player의 마지막 Zone 위치
 - 재화 차감·상품 지급·idempotency 증거를 원자적으로 적용하는 bounded 구매
@@ -89,6 +90,8 @@ Network Runtime
 - `PlayerActor` PING/PONG 처리와 typed result/effect 경계
 - 인증된 Player의 typed 구매 command, repository await와 응답 유실·reconnect retry에서
   effectively-once effect를 검증하는 purchase result
+- 두 Player가 공유하는 bounded PartyActor membership, typed `PartyFull`, disconnect leave와
+  mailbox-safe empty Party passivation
 - connection generation을 통한 stale response 차단
 - bounded ingress queue와 Session별 send backpressure
 - 용량 예약으로 동작하는 outbound channel: 포화 시 Worker가 아니라 Actor 하나가 suspend되고, 연결별
@@ -128,6 +131,11 @@ repository transaction으로 묶고, repository 대기 중에도 같은 Worker�
 진행하는 wire vertical slice를 추가했다. 현재 adapter는 프로세스 메모리 기반이므로
 disconnect/reconnect retry까지만 보장하며, 프로세스 crash 후 retry는 durable DB adapter의
 남은 범위다.
+
+Phase 7.1에서는 공유 콘텐츠의 첫 vertical slice로 PartyActor를 추가했다. PartyId별
+FIFO mailbox가 membership을 변경하고, coordinator의 session route와 membership epoch이
+stale leave를 차단한다. 용량 초과는 연결 종료가 아닌 typed `PartyFull`로 응답하며,
+마지막 leave 후 빈 Actor를 회수한다.
 
 ## 로드맵
 
@@ -221,6 +229,8 @@ cmake --build --preset release
 모든 정수는 big-endian이며 body는 최대 64 KiB다. Player 메시지는
 `PING=1`, `PONG=2`, `AUTHENTICATE=3`, `AUTHENTICATED=4`, `PURCHASE=11`,
 `PURCHASE_RESULT=12`를 사용한다. Zone 메시지는 5~10을 사용한다.
+Party 메시지는 `PARTY_JOIN=13`, `PARTY_JOINED=14`, `PARTY_LEAVE=15`,
+`PARTY_LEFT=16`을 사용한다.
 
 ## 디렉터리
 

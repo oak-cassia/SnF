@@ -2,6 +2,9 @@
 
 #include "snf/net/connection_id.hpp"
 #include "snf/server/connection_lifecycle.hpp"
+#include "snf/server/party_command.hpp"
+#include "snf/server/party_id.hpp"
+#include "snf/server/party_inbound_command.hpp"
 #include "snf/server/player_actor_id.hpp"
 #include "snf/server/player_command.hpp"
 #include "snf/server/zone_command.hpp"
@@ -38,7 +41,16 @@ namespace snf::server
         std::uint32_t request_id{0};
     };
 
-    using CommandRoute = std::variant<PlayerCommandRoute, ConnectionClosedRoute, ZoneCommandRoute>;
+    struct PartyCommandRoute
+    {
+        PartyId party;
+        PartyCommand command;
+        std::optional<PartyReplyKind> reply_kind;
+        std::uint32_t request_id{0};
+    };
+
+    using CommandRoute = std::
+        variant<PlayerCommandRoute, ConnectionClosedRoute, ZoneCommandRoute, PartyCommandRoute>;
 
     struct RoutedCommand
     {

@@ -402,6 +402,20 @@ timer 없음이 된 경우 `PassivateIfIdle`을 요청한다. scheduler는 mailb
 - MatchmakingActor: 대기열과 매칭 결과
 - ChatChannelActor: 채널 참가 상태
 
+현재 shared-content vertical slice는 PartyActor다. `PartyCoordinator`가 reactor 경계에서
+connection·Player→Party route와 membership epoch을 소유하고, PartyActor는 member map을
+소유한다. coordinator의 route는 network routing 상태이지 domain member map의 대체물이 아니다.
+join/leave는 PartyId로 shard된 하나의 FIFO mailbox에서 적용되고 response member list는
+PlayerId 오름차순으로 결정적이다.
+
+Party 용량은 두 계층에서 같은 설정값으로 bounded다. coordinator가 용량 초과 route를
+공개하지는 않지만, 거부를 protocol error로 바꾸지 않도록 capacity probe command를 Party
+mailbox에 게시한다. 이 command는 앞서 수락된 join 뒤에서 `PartyFull`을 결정한다.
+connection close는 Party leave를 Player passivation 앞에 게시하며, 마지막 leave는
+`PassivateIfIdle`으로 빈 Party slot을 회수한다. leave route는 Actor 결과까지
+`leaving`으로 남아 다른 Party join과 동시에 공개되지 않으며, post 거부시 active로
+rollback한다.
+
 개인 인벤토리, 퀘스트, 상점 구매처럼 한 유저가 소유하는 기능은 Shared Content Runtime에
 넣지 않고 PlayerActor의 handler 또는 module로 둔다. `ContentRuntime`이 소유자가 불분명한
 기능을 모으는 공간이 되지 않게 한다.
@@ -635,6 +649,7 @@ Runtime 사이에서 동기 호출이나 `future.get()`으로 상대 Worker를 �
 | Outbound queue | Binding이 방출 전에 용량을 예약하고, 실패하면 그 Actor만 suspend된 뒤 reactor의 grant를 기다린다. 연결별 상한이 있고, 예약 대기조차 승인되지 않거나 결과가 연결별 상한보다 크면 그 연결을 `Overflow`로 종료한다. 종료 요청은 연결 단위로 합치며, 기록 상한/할당 실패에는 Worker 예외나 silent drop 대신 현재 session 전체를 닫는 reactor fail-safe를 쓴다 | 현재 동작을 유지한다 | 4.1 완료 |
 | Connection lifecycle post | reactor 소유 pending deque가 회차당 제한된 건수를 재시도하고, active session과 pending close가 lifecycle slot 예산을 공유한다 | 현재 의미를 유지한다. `ConnectionScope`를 선택할 때만 단일 종결 경로로 이전한다 | 선택적 Runtime 최적화 |
 | ZoneActor mailbox | Worker별 bounded FIFO. `Full`은 해당 연결 종료로 귀결되며 이동도 현재 FIFO에 누적된다 | 최신 이동 입력 병합, 오래된 입력 폐기, 악성 세션 종료 | 5.3 후속 |
+| PartyActor mailbox | Worker별 bounded FIFO. runtime queue `Full`은 해당 연결을 종료하지만 domain member 용량 초과는 typed `PartyFull`로 응답한다 | 현재 동작을 유지한다 | 7.1 완료 |
 | DB queue | 전용 Worker의 bounded FIFO. load 거부는 연결 종료, save 거부는 runtime failure, 구매 거부는 `Unavailable` 응답이다 | durable DB adapter의 제한된 재시도와 요청 실패 의미를 transaction 경계와 함께 고정한다 | 6.3 |
 | 일반 로그 queue | 미구현. 현재는 `std::cerr`로 직접 출력한다 | 전용 bounded queue와 sampling 또는 drop | 미정 |
 
@@ -679,7 +694,7 @@ ZoneActor의 주기 갱신은 별도 tick 실행 스레드가 상태를 수정�
 
 | 상태 | 토폴로지 | 시점 |
 | --- | --- | --- |
-| 현재 | Network Reactor 1(main thread) + coroutine Actor-Bound Logic Pool 2 + bounded Player Repository Worker 1 + Zone Timer Scheduler 1 | 5.3c |
+| 현재 | Network Reactor 1(main thread) + Player·Zone·Party Actor-Bound Logic Pool 2 + bounded Player Repository Worker 1 + Zone Timer Scheduler 1 | 7.1 |
 | 콘텐츠 목표 | Network Reactor + Actor-Bound Logic Pool + 실제 DB adapter를 실행하는 bounded DB Pool + Zone Timer Scheduler + Logger | Playable Session 이후 |
 | 선택적 최적화 | UnifiedRuntime N + 별도 Blocking DB Pool + Logger | 병목 증명 후 |
 

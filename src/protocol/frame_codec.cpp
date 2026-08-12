@@ -51,6 +51,10 @@ namespace
         case snf::protocol::MessageType::ZoneLeft:
         case snf::protocol::MessageType::Purchase:
         case snf::protocol::MessageType::PurchaseResult:
+        case snf::protocol::MessageType::PartyJoin:
+        case snf::protocol::MessageType::PartyJoined:
+        case snf::protocol::MessageType::PartyLeave:
+        case snf::protocol::MessageType::PartyLeft:
             return true;
         }
 

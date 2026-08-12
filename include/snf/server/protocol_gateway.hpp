@@ -2,6 +2,7 @@
 
 #include "snf/server/frame_ingress.hpp"
 #include "snf/server/message_dispatcher.hpp"
+#include "snf/server/party_coordinator.hpp"
 #include "snf/server/player_session_directory.hpp"
 #include "snf/server/route_coordinator.hpp"
 #include "snf/server/routed_command_ingress.hpp"
@@ -21,6 +22,11 @@ namespace snf::server
                         PlayerSessionDirectory& sessions,
                         RouteCoordinator& routes,
                         ZoneTimerService& zone_timers);
+        ProtocolGateway(RoutedCommandIngress& commands,
+                        PlayerSessionDirectory& sessions,
+                        RouteCoordinator& routes,
+                        ZoneTimerService& zone_timers,
+                        PartyCoordinator& parties);
         ProtocolGateway(MessageDispatcher dispatcher, RoutedCommandIngress& commands);
         ProtocolGateway(MessageDispatcher dispatcher,
                         RoutedCommandIngress& commands,
@@ -34,6 +40,12 @@ namespace snf::server
                         PlayerSessionDirectory& sessions,
                         RouteCoordinator& routes,
                         ZoneTimerService& zone_timers);
+        ProtocolGateway(MessageDispatcher dispatcher,
+                        RoutedCommandIngress& commands,
+                        PlayerSessionDirectory& sessions,
+                        RouteCoordinator& routes,
+                        ZoneTimerService& zone_timers,
+                        PartyCoordinator& parties);
 
         [[nodiscard]] FramePostResult tryPost(FrameEnvelope envelope) override;
         [[nodiscard]] PostResult tryPostConnectionClosed(ConnectionClosed closed) override;
@@ -47,6 +59,8 @@ namespace snf::server
         PlayerSessionDirectory& _sessions;
         RouteCoordinator _owned_routes;
         RouteCoordinator& _routes;
+        PartyCoordinator _owned_parties;
+        PartyCoordinator& _parties;
         ZoneTimerService* _zone_timers{nullptr};
     };
 }

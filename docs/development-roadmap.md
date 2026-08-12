@@ -683,10 +683,27 @@ UnifiedRuntimeDrained =
 
 ## 7. Shared Content와 Projection
 
-### 7.1 Shared Actor slice
+### 7.1 Party shared Actor slice (완료)
 
-- Party 또는 Matchmaking **하나**를 골라 Player 외 공유 Actor의 수명, mailbox와
-  취소·포화 정책을 end-to-end로 검증한다.
+- `ActorKind::Party`와 typed `PartyActorBinding`/ingress를 같은 Actor-Bound Logic Runtime에
+  등록한다. PartyId가 같은 join/leave는 하나의 owning Worker와 FIFO mailbox에서만
+  membership을 변경하며, Player·Zone과 숫자 ID가 같아도 다른 Actor slot이다.
+- `PartyCoordinator`는 connection·Player의 현재 Party route와 단조 membership epoch을 소유한다.
+  하나의 session은 하나의 Party에만 속하며, post가 거부되면 새 route를 rollback한다.
+- `PARTY_JOIN=13`, `PARTY_JOINED=14`, `PARTY_LEAVE=15`, `PARTY_LEFT=16`은 인증된
+  Player에게만 허용한다. result는 status, PartyId, membership epoch와 PlayerId 오름차순
+  member snapshot을 반환한다.
+- Party 용량은 coordinator와 Actor 모두에서 상한을 갖는다. 상한에 닿은 join은
+  route를 공개하지 않은 capacity probe로 같은 Party mailbox에 도착해 typed `PartyFull`을
+  응답하고, protocol error로 연결을 닫지 않는다.
+- 명시적 leave와 connection close는 membership epoch이 일치하는 leave를 Player passivation
+  앞에 게시한다. coordinator route는 게시 즉시 삭제하지 않고 `leaving`으로
+  유지해, Actor 결과 전에 다른 Party join이 공개되지 않게 한다. 마지막 member가
+  나가면 `PassivateIfIdle`이 이미 수락된 mailbox tail을 폐기하지 않고 빈 Party를
+  회수한다.
+- TCP 통합 테스트는 두 Player가 같은 Party의 공유 member snapshot을 보는지, 세 번째
+  Player가 `PartyFull` 후에도 PING을 주고받는지, 마지막 leave 후 Party가 passivate되는지
+  검증한다. command, reject와 passivation request를 계측한다.
 
 ### 7.2 Projection slice
 

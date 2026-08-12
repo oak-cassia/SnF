@@ -152,6 +152,11 @@ namespace
             return _server.getZoneActorStats();
         }
 
+        [[nodiscard]] snf::server::PartyActorBindingStats getPartyActorStats() const noexcept
+        {
+            return _server.getPartyActorStats();
+        }
+
         // Reads reactor state, so tests may only call it once the reactor thread
         // has been joined.
         [[nodiscard]] snf::server::ServerMetricsSnapshot getMetricsSnapshot() const
@@ -365,6 +370,12 @@ namespace
                std::to_integer<std::uint32_t>(payload[offset + 3]);
     }
 
+    std::uint16_t read_u16(const std::vector<std::byte>& payload, const std::size_t offset)
+    {
+        return static_cast<std::uint16_t>((std::to_integer<std::uint16_t>(payload[offset]) << 8U) |
+                                          std::to_integer<std::uint16_t>(payload[offset + 1]));
+    }
+
     std::uint64_t read_u64(const std::vector<std::byte>& payload, const std::size_t offset)
     {
         return (static_cast<std::uint64_t>(read_u32(payload, offset)) << 32U) |
@@ -392,6 +403,15 @@ namespace
             .type = snf::protocol::MessageType::Purchase,
             .request_id = request_id,
             .payload = std::move(payload),
+        };
+    }
+
+    snf::protocol::Frame party_join_frame(const std::uint32_t request_id, const std::uint64_t party)
+    {
+        return snf::protocol::Frame{
+            .type = snf::protocol::MessageType::PartyJoin,
+            .request_id = request_id,
+            .payload = player_id_payload(party),
         };
     }
 
@@ -435,6 +455,41 @@ namespace
         assert(decoded.ok());
         assert(decoded.frames.size() == 1);
         return decoded.frames.front();
+    }
+
+    snf::protocol::Frame receive_party_response(const int socket_descriptor,
+                                                const std::size_t member_count)
+    {
+        constexpr std::size_t FIXED_PARTY_RESPONSE_PAYLOAD_SIZE = 19;
+        const std::size_t frame_size = snf::protocol::FRAME_LENGTH_FIELD_SIZE +
+                                       snf::protocol::MIN_BODY_SIZE +
+                                       FIXED_PARTY_RESPONSE_PAYLOAD_SIZE + member_count * 8;
+        snf::protocol::FrameDecoder decoder;
+        const auto decoded = decoder.append(receive_exact(socket_descriptor, frame_size));
+        assert(decoded.ok());
+        assert(decoded.frames.size() == 1);
+        return decoded.frames.front();
+    }
+
+    void assert_party_response(const snf::protocol::Frame& response,
+                               const snf::protocol::MessageType type,
+                               const std::uint32_t request_id,
+                               const snf::server::PartyCommandStatus status,
+                               const std::uint64_t party,
+                               const std::uint64_t membership_epoch,
+                               const std::vector<std::uint64_t>& members)
+    {
+        assert(response.type == type);
+        assert(response.request_id == request_id);
+        assert(std::to_integer<std::uint8_t>(response.payload[0]) ==
+               static_cast<std::uint8_t>(status));
+        assert(read_u64(response.payload, 1) == party);
+        assert(read_u64(response.payload, 9) == membership_epoch);
+        assert(read_u16(response.payload, 17) == members.size());
+        for (std::size_t index = 0; index < members.size(); ++index)
+        {
+            assert(read_u64(response.payload, 19 + index * 8) == members[index]);
+        }
     }
 
     void assert_purchase_response(const snf::protocol::Frame& response,
@@ -880,6 +935,127 @@ namespace
         assert(saved.has_value());
         assert(saved->currency_balance == 800);
         assert(saved->purchased_item_count == 2);
+    }
+
+    void test_two_players_share_one_party_actor_and_passivate_it_when_empty()
+    {
+        RunningServer server{snf::server::GameServerConfig{
+            .port = 0,
+            .shutdown_grace_period = 200ms,
+            .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
+            .client_send_buffer_size = std::nullopt,
+            .max_party_members = 2,
+        }};
+        constexpr std::uint64_t party = 50;
+        constexpr std::uint64_t first_player = 202;
+        constexpr std::uint64_t second_player = 101;
+        auto first = connect_client(server.getPort());
+        auto second = connect_client(server.getPort());
+        auto third = connect_client(server.getPort());
+
+        const auto first_auth = authentication_frame(120, first_player);
+        const auto first_auth_bytes = snf::protocol::encode_frame(first_auth);
+        send_all(first.getDescriptor(), first_auth_bytes);
+        assert_authenticated(receive_exact(first.getDescriptor(), first_auth_bytes.size()),
+                             first_auth.request_id,
+                             first_player);
+        const auto second_auth = authentication_frame(121, second_player);
+        const auto second_auth_bytes = snf::protocol::encode_frame(second_auth);
+        send_all(second.getDescriptor(), second_auth_bytes);
+        assert_authenticated(receive_exact(second.getDescriptor(), second_auth_bytes.size()),
+                             second_auth.request_id,
+                             second_player);
+
+        const auto first_join = party_join_frame(122, party);
+        send_all(first.getDescriptor(), snf::protocol::encode_frame(first_join));
+        assert_party_response(receive_party_response(first.getDescriptor(), 1),
+                              snf::protocol::MessageType::PartyJoined,
+                              first_join.request_id,
+                              snf::server::PartyCommandStatus::Applied,
+                              party,
+                              1,
+                              {first_player});
+
+        const auto second_join = party_join_frame(123, party);
+        send_all(second.getDescriptor(), snf::protocol::encode_frame(second_join));
+        assert_party_response(receive_party_response(second.getDescriptor(), 2),
+                              snf::protocol::MessageType::PartyJoined,
+                              second_join.request_id,
+                              snf::server::PartyCommandStatus::Applied,
+                              party,
+                              1,
+                              {second_player, first_player});
+
+        constexpr std::uint64_t third_player = 303;
+        const auto third_auth = authentication_frame(126, third_player);
+        const auto third_auth_bytes = snf::protocol::encode_frame(third_auth);
+        send_all(third.getDescriptor(), third_auth_bytes);
+        assert_authenticated(receive_exact(third.getDescriptor(), third_auth_bytes.size()),
+                             third_auth.request_id,
+                             third_player);
+        const auto full_join = party_join_frame(127, party);
+        send_all(third.getDescriptor(), snf::protocol::encode_frame(full_join));
+        assert_party_response(receive_party_response(third.getDescriptor(), 2),
+                              snf::protocol::MessageType::PartyJoined,
+                              full_join.request_id,
+                              snf::server::PartyCommandStatus::PartyFull,
+                              party,
+                              1,
+                              {second_player, first_player});
+        const snf::protocol::Frame still_connected{
+            .type = snf::protocol::MessageType::Ping,
+            .request_id = 128,
+            .payload = {},
+        };
+        const auto still_connected_bytes = snf::protocol::encode_frame(still_connected);
+        send_all(third.getDescriptor(), still_connected_bytes);
+        assert_pong(receive_exact(third.getDescriptor(), still_connected_bytes.size()),
+                    still_connected);
+
+        const snf::protocol::Frame first_leave{
+            .type = snf::protocol::MessageType::PartyLeave,
+            .request_id = 124,
+            .payload = {},
+        };
+        send_all(first.getDescriptor(), snf::protocol::encode_frame(first_leave));
+        assert_party_response(receive_party_response(first.getDescriptor(), 1),
+                              snf::protocol::MessageType::PartyLeft,
+                              first_leave.request_id,
+                              snf::server::PartyCommandStatus::Applied,
+                              party,
+                              1,
+                              {second_player});
+
+        const snf::protocol::Frame second_leave{
+            .type = snf::protocol::MessageType::PartyLeave,
+            .request_id = 125,
+            .payload = {},
+        };
+        send_all(second.getDescriptor(), snf::protocol::encode_frame(second_leave));
+        assert_party_response(receive_party_response(second.getDescriptor(), 0),
+                              snf::protocol::MessageType::PartyLeft,
+                              second_leave.request_id,
+                              snf::server::PartyCommandStatus::Applied,
+                              party,
+                              1,
+                              {});
+
+        const auto party_stats = server.getPartyActorStats();
+        assert(party_stats.commands == 5);
+        assert(party_stats.rejected == 1);
+        assert(party_stats.passivation_requests == 1);
+
+        first.init();
+        second.init();
+        third.init();
+        const auto passivation_deadline = std::chrono::steady_clock::now() + 1s;
+        while (actor_count(server.getActorRuntimeStats()) != 0 &&
+               std::chrono::steady_clock::now() < passivation_deadline)
+        {
+            std::this_thread::sleep_for(1ms);
+        }
+        assert(actor_count(server.getActorRuntimeStats()) == 0);
+        server.stop();
     }
 
     void test_authenticated_player_enters_moves_and_leaves_a_zone()
@@ -1569,6 +1745,7 @@ int main()
     test_returns_pong_for_ping();
     test_authenticates_one_session_and_allows_reconnect_after_passivation();
     test_purchase_is_effectively_once_after_response_loss_and_reconnect();
+    test_two_players_share_one_party_actor_and_passivate_it_when_empty();
     test_authenticated_player_enters_moves_and_leaves_a_zone();
     test_zone_position_survives_disconnect_save_and_reconnect();
     test_collects_baseline_saturation_metrics_for_a_round_trip();

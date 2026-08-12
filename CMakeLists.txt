@@ -89,7 +89,9 @@ add_library(snf_server_runtime STATIC
     src/server/protocol_response_mapper.cpp
     src/server/protocol_player_effect_sink.cpp
     src/server/protocol_zone_result_sink.cpp
+    src/server/protocol_party_result_sink.cpp
     src/server/route_coordinator.cpp
+    src/server/party_coordinator.cpp
     src/server/player_actor.cpp
     src/server/player_actor_binding.cpp
     src/server/player_actor_ingress.cpp
@@ -99,6 +101,9 @@ add_library(snf_server_runtime STATIC
     src/server/zone_actor_binding.cpp
     src/server/zone_actor_ingress.cpp
     src/server/zone_timer_service.cpp
+    src/server/party_actor.cpp
+    src/server/party_actor_binding.cpp
+    src/server/party_actor_ingress.cpp
     src/server/outbound_channel.cpp
     src/server/command_terminal.cpp
     src/server/game_server.cpp
@@ -138,7 +143,9 @@ if(BUILD_TESTING)
         tests/protocol_gateway_test.cpp
         tests/protocol_response_mapper_test.cpp
         tests/protocol_zone_result_sink_test.cpp
+        tests/protocol_party_result_sink_test.cpp
         tests/route_coordinator_test.cpp
+        tests/party_coordinator_test.cpp
         tests/player_effect_sink_test.cpp
         tests/outbound_channel_test.cpp
         tests/runtime_boundaries_test.cpp
@@ -155,6 +162,8 @@ if(BUILD_TESTING)
         tests/zone_actor_test.cpp
         tests/zone_actor_binding_test.cpp
         tests/zone_timer_service_test.cpp
+        tests/party_actor_test.cpp
+        tests/party_actor_binding_test.cpp
     )
     target_link_libraries(snf_unit_tests PRIVATE snf_server_runtime)
     snf_configure_target(snf_unit_tests)

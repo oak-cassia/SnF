@@ -7,11 +7,15 @@
 #include "snf/server/command_router.hpp"
 #include "snf/server/command_terminal.hpp"
 #include "snf/server/outbound_channel.hpp"
+#include "snf/server/party_actor_binding.hpp"
+#include "snf/server/party_actor_ingress.hpp"
+#include "snf/server/party_coordinator.hpp"
 #include "snf/server/player_actor_binding.hpp"
 #include "snf/server/player_actor_ingress.hpp"
 #include "snf/server/player_repository.hpp"
 #include "snf/server/player_session_directory.hpp"
 #include "snf/server/protocol_gateway.hpp"
+#include "snf/server/protocol_party_result_sink.hpp"
 #include "snf/server/protocol_player_effect_sink.hpp"
 #include "snf/server/protocol_zone_result_sink.hpp"
 #include "snf/server/route_coordinator.hpp"
@@ -43,6 +47,7 @@ namespace snf::server
         ThreadedPlayerRepositoryStats player_repository;
         ZoneTimerServiceStats zone_timers;
         ZoneActorBindingStats zone_actors;
+        PartyActorBindingStats party_actors;
         // Commands that were admitted and reached a final result, counted once each
         // whether or not they answered. If playable slow-command measurements justify
         // per-connection credit, its owner consumes this same terminal signal.
@@ -67,6 +72,7 @@ namespace snf::server
         std::size_t player_repository_worker_count{1};
         std::size_t player_repository_queue_capacity{4096};
         std::size_t max_purchase_idempotency_records_per_player{1024};
+        std::size_t max_party_members{8};
         std::int32_t zone_aoi_radius{1000};
         std::chrono::milliseconds zone_tick_interval{50};
         std::chrono::nanoseconds zone_tick_budget{std::chrono::milliseconds{5}};
@@ -110,6 +116,7 @@ namespace snf::server
         [[nodiscard]] std::optional<PlayerRecord> getPlayerRecord(PlayerId player) const;
         [[nodiscard]] ZoneTimerServiceStats getZoneTimerStats() const;
         [[nodiscard]] ZoneActorBindingStats getZoneActorStats() const noexcept;
+        [[nodiscard]] PartyActorBindingStats getPartyActorStats() const noexcept;
         // Reads reactor state, so it belongs to the reactor thread: call it from
         // metrics_reporter or after run() has returned.
         [[nodiscard]] ServerMetricsSnapshot getMetricsSnapshot() const;
@@ -131,9 +138,11 @@ namespace snf::server
         OutboundChannel _outbound_channel;
         ProtocolPlayerEffectSink _player_effects;
         ProtocolZoneResultSink _zone_results;
+        ProtocolPartyResultSink _party_results;
         CountingCommandLifecycleSink _command_lifecycle;
         PlayerSessionDirectory _player_sessions;
         RouteCoordinator _route_coordinator;
+        PartyCoordinator _party_coordinator;
         ThreadedPlayerRepository _player_repository;
         snf::runtime::RuntimeCompletionCoordinator _runtime_completion;
         // Bindings must outlive the generic runtime: the worker owns the
@@ -141,9 +150,11 @@ namespace snf::server
         PlayerActorBinding _player_actor_binding;
         PlayerActorBinding _persistent_player_actor_binding;
         ZoneActorBinding _zone_actor_binding;
+        PartyActorBinding _party_actor_binding;
         snf::runtime::ActorRuntime _logic_runtime;
         PlayerActorIngress _player_actor_ingress;
         ZoneActorIngress _zone_actor_ingress;
+        PartyActorIngress _party_actor_ingress;
         SteadyTimerClock _zone_timer_clock;
         ZoneTimerService _zone_timers;
         CommandRouter _command_router;
