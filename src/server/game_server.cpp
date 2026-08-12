@@ -2,6 +2,7 @@
 
 #include "snf/net/system_error.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 #include <sys/eventfd.h>
 #include <utility>
@@ -24,19 +25,39 @@ namespace snf::server
 {
     GameServer::GameServer(const GameServerConfig& config)
         : _metrics_reporter(config.metrics_reporter)
-        , _outbound_actions(config.outbound_queue_capacity)
         , _outbound_event(create_outbound_event())
-        , _outbound_sink(_outbound_actions, _outbound_event.getDescriptor())
+        , _outbound_channel(
+              [&config]
+              {
+                  return OutboundChannelConfig{
+                      .capacity = config.outbound_queue_capacity,
+                      // A per-connection cap above the shared capacity is unreachable
+                      // anyway, so it is capped rather than rejected: shrinking the
+                      // channel must not make the server refuse to start.
+                      .max_slots_per_connection = std::min(config.max_outbound_slots_per_connection,
+                                                           config.outbound_queue_capacity),
+                      .max_grants_per_turn = config.outbound_grants_per_turn,
+                      // A Worker reserves an in-flight slot before it registers as a
+                      // waiter, so the registry is sized above the sum of those
+                      // budgets and can never be the tighter of the two bounds.
+                      .max_waiters = config.actor_worker_count *
+                                     config.actor_max_in_flight_operations_per_worker,
+                  };
+              }(),
+              _outbound_event.getDescriptor())
+        , _outbound_sink(_outbound_channel)
         , _player_effects(_outbound_sink)
         , _runtime_completion(snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
                               _outbound_event.getDescriptor())
-        , _player_actor_binding(_player_effects)
+        , _player_actor_binding(_player_effects, _outbound_sink)
         , _logic_runtime(
               [config]
               {
                   snf::runtime::ActorRuntimeConfig runtime_config;
                   runtime_config.worker_count = config.actor_worker_count;
                   runtime_config.queue_capacity_per_worker = config.actor_queue_capacity_per_worker;
+                  runtime_config.max_in_flight_operations_per_worker =
+                      config.actor_max_in_flight_operations_per_worker;
                   return runtime_config;
               }(),
               _runtime_completion)
@@ -54,7 +75,7 @@ namespace snf::server
                   .on_metrics_interval = [this] { publishMetrics(); },
               },
               _protocol_gateway,
-              _outbound_actions,
+              _outbound_channel,
               _runtime_completion,
               _outbound_event.getDescriptor())
     {
@@ -164,7 +185,9 @@ namespace snf::server
     void GameServer::cancelActorRuntime() noexcept
     {
         _protocol_gateway.cancel();
-        _outbound_actions.cancel();
+        // Also the path a reactor failure takes, and the reason a Worker suspended on
+        // outbound capacity still reaches a terminal outcome when the reactor is gone.
+        static_cast<void>(_outbound_channel.cancel());
     }
 
     void GameServer::publishMetrics() const

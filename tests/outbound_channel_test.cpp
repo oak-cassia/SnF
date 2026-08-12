@@ -1,5 +1,4 @@
-#include "snf/net/unique_file_descriptor.hpp"
-#include "snf/server/outbound_channel.hpp"
+#include "outbound_reservation_test_support.hpp"
 
 #include <cassert>
 #include <cstddef>
@@ -7,7 +6,6 @@
 #include <memory>
 #include <optional>
 #include <stdexcept>
-#include <sys/eventfd.h>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -17,16 +15,9 @@ namespace
     using snf::server::OutboundChannel;
     using snf::server::OutboundChannelConfig;
     using snf::server::OutboundReservation;
-
-    using ReservationState = snf::runtime::AsyncOperationState<OutboundReservation>;
-    using ReservationProducer = snf::runtime::AsyncOperationProducer<OutboundReservation>;
-
-    snf::net::UniqueFileDescriptor make_wake_descriptor()
-    {
-        const int descriptor = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-        assert(descriptor != -1);
-        return snf::net::UniqueFileDescriptor{descriptor};
-    }
+    using snf::test::make_wake_descriptor;
+    using RecordingEndpoint = snf::test::RecordingContinuationEndpoint;
+    using TestWaiter = snf::test::ReservationWaiter;
 
     constexpr snf::net::ConnectionId connection_of(const int descriptor)
     {
@@ -51,65 +42,6 @@ namespace
     {
         return std::get<snf::server::SendFrame>(posted.action).frame.request_id;
     }
-
-    // Stands in for the runtime's continuation queue. The channel only ever reaches
-    // an endpoint through a producer, so recording publishes is enough to tell a
-    // granted waiter from a rejected one.
-    class RecordingEndpoint final : public snf::runtime::ContinuationEndpoint
-    {
-    public:
-        [[nodiscard]] bool
-        publish(const snf::runtime::ActorContinuation& continuation) noexcept override
-        {
-            published.push_back(continuation);
-            return true;
-        }
-
-        void reportRejectedCompletion(
-            const snf::runtime::ActorContinuation&,
-            const snf::runtime::ContinuationRejection rejection) noexcept override
-        {
-            ++rejected_count;
-            last_rejection = rejection;
-        }
-
-        std::vector<snf::runtime::ActorContinuation> published;
-        std::size_t rejected_count{0};
-        std::optional<snf::runtime::ContinuationRejection> last_rejection;
-    };
-
-    // One suspended actor's half of a reservation await: the state the owning Worker
-    // would read, plus the producer the channel keeps.
-    struct TestWaiter
-    {
-        explicit TestWaiter(const std::shared_ptr<RecordingEndpoint>& endpoint,
-                            const std::uint64_t task_id)
-            : state(std::make_shared<ReservationState>())
-            , producer(state,
-                       snf::runtime::ActorCompletionHandle{
-                           .endpoint = endpoint,
-                           .continuation =
-                               snf::runtime::ActorContinuation{
-                                   .target =
-                                       snf::runtime::ActorKey{
-                                           .kind = snf::runtime::ActorKind::ProvisionalPlayer,
-                                           .entity = task_id,
-                                       },
-                                   .incarnation = snf::runtime::ActorIncarnation{.value = 1},
-                                   .task = snf::runtime::TaskId{.value = task_id},
-                               },
-                       })
-        {
-        }
-
-        [[nodiscard]] bool isPending() const
-        {
-            return state->outcome() == snf::runtime::AsyncOperationOutcome::Pending;
-        }
-
-        std::shared_ptr<ReservationState> state;
-        ReservationProducer producer;
-    };
 
     void test_reserve_then_commit_moves_capacity_from_reserved_to_queued()
     {

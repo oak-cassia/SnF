@@ -16,24 +16,30 @@ namespace snf::server
     {
     }
 
-    bool ProtocolPlayerEffectSink::apply(const snf::net::ConnectionId connection,
-                                         PlayerResult result,
-                                         const std::stop_token stop_token)
+    std::size_t ProtocolPlayerEffectSink::requiredSlots(const PlayerResult& result) const noexcept
+    {
+        // Every effect currently maps onto exactly one outbound action. An effect that
+        // emits more than one has to be priced here, not at the reservation site.
+        return result.effects.size();
+    }
+
+    bool ProtocolPlayerEffectSink::commit(const snf::net::ConnectionId connection,
+                                          PlayerResult result,
+                                          OutboundReservation& reservation)
     {
         for (const PlayerEffect& effect : result.effects)
         {
-            const bool applied = std::visit(
-                [this, connection, stop_token](const auto& value) -> bool
+            const bool emitted = std::visit(
+                [this, connection, &reservation](const auto& value) -> bool
                 {
                     using Effect = std::decay_t<decltype(value)>;
                     if constexpr (std::is_same_v<Effect, SendResponse>)
                     {
-                        return _outbound.publish(
-                            SendFrame{
-                                .connection = connection,
-                                .frame = _response_mapper.map(value.response),
-                            },
-                            stop_token);
+                        return _outbound.commit(reservation,
+                                                SendFrame{
+                                                    .connection = connection,
+                                                    .frame = _response_mapper.map(value.response),
+                                                });
                     }
                     else
                     {
@@ -42,7 +48,7 @@ namespace snf::server
                 },
                 effect);
 
-            if (!applied)
+            if (!emitted)
             {
                 return false;
             }

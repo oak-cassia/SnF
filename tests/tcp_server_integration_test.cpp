@@ -295,7 +295,9 @@ namespace
                 continue;
             }
 
-            assert(false);
+            // Names itself, because a receive that times out here is otherwise
+            // indistinguishable from any other failed assertion in the suite.
+            assert(false && "receive_exact: recv failed or timed out");
         }
 
         return received_bytes;
@@ -369,6 +371,74 @@ namespace
             std::uint64_t{0},
             [](const std::uint64_t total, const snf::runtime::ActorRuntimeWorkerStats& worker)
             { return total + worker.queue_wait_nanoseconds.sample_count; });
+    }
+
+    std::uint64_t suspended_command_count(const snf::runtime::ActorRuntimeStats& stats)
+    {
+        return std::accumulate(
+            stats.workers.begin(),
+            stats.workers.end(),
+            std::uint64_t{0},
+            [](const std::uint64_t total, const snf::runtime::ActorRuntimeWorkerStats& worker)
+            { return total + worker.suspended_commands; });
+    }
+
+    void test_saturated_outbound_answers_every_request_and_still_drains()
+    {
+        RunningServer server{snf::server::GameServerConfig{
+            .port = 0,
+            .shutdown_grace_period = 2s,
+            .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
+            .client_send_buffer_size = std::nullopt,
+            .actor_worker_count = 1,
+            .actor_queue_capacity_per_worker = 64,
+            .outbound_queue_capacity = 1,
+        }};
+        const auto client = connect_client(server.getPort());
+
+        // Kept small on purpose: every request needs its own reactor turn to be
+        // granted, and the client's receive timeout bounds each wait.
+        constexpr std::uint32_t REQUEST_COUNT = 8;
+        std::vector<std::byte> bundled_requests;
+        for (std::uint32_t request_id = 1; request_id <= REQUEST_COUNT; ++request_id)
+        {
+            const auto encoded = snf::protocol::encode_frame(snf::protocol::Frame{
+                .type = snf::protocol::MessageType::Ping,
+                .request_id = request_id,
+                .payload = {},
+            });
+            bundled_requests.insert(bundled_requests.end(), encoded.begin(), encoded.end());
+        }
+
+        send_all(client.getDescriptor(), bundled_requests);
+
+        // A channel with one slot makes nearly every command wait for capacity. Every
+        // response still arrives, in order: the actor suspends and the reactor grants
+        // as it drains, so no response is dropped and no Worker blocks.
+        for (std::uint32_t request_id = 1; request_id <= REQUEST_COUNT; ++request_id)
+        {
+            const snf::protocol::Frame request{
+                .type = snf::protocol::MessageType::Ping,
+                .request_id = request_id,
+                .payload = {},
+            };
+            assert_pong(
+                receive_exact(client.getDescriptor(), snf::protocol::encode_frame(request).size()),
+                request);
+        }
+
+        server.stop();
+
+        const auto metrics = server.getMetricsSnapshot();
+        assert(metrics.counters.outbound_admission_failures == 0);
+        assert(metrics.counters.actor_queue_overflows == 0);
+        // Graceful shutdown completed even though actor drain depended on the reactor
+        // continuing to consume and grant.
+        assert(metrics.network.pending_outbound_reservations == 0);
+        assert(metrics.network.reserved_outbound_slots == 0);
+        assert(metrics.network.current_outbound_queue_depth == 0);
+        assert(actor_count(server.getActorRuntimeStats()) == 0);
+        assert(suspended_command_count(server.getActorRuntimeStats()) > 0);
     }
 
     void test_collects_baseline_saturation_metrics_for_a_round_trip()
@@ -810,8 +880,10 @@ namespace
     void test_actor_runtime_failure_aborts_without_waiting_for_grace_period()
     {
         RecordingFrameIngress ingress;
-        snf::server::OutboundActionQueue outbound{8};
         const auto outbound_event = make_eventfd();
+        snf::server::OutboundChannel outbound{
+            snf::server::OutboundChannelConfig{.capacity = 8, .max_slots_per_connection = 8},
+            outbound_event.getDescriptor()};
         snf::runtime::RuntimeCompletionCoordinator runtime_completion{
             snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
             outbound_event.getDescriptor()};
@@ -860,8 +932,10 @@ namespace
             snf::server::PostResult::Full,
             snf::server::PostResult::Accepted,
         };
-        snf::server::OutboundActionQueue outbound{8};
         const auto outbound_event = make_eventfd();
+        snf::server::OutboundChannel outbound{
+            snf::server::OutboundChannelConfig{.capacity = 8, .max_slots_per_connection = 8},
+            outbound_event.getDescriptor()};
         snf::runtime::RuntimeCompletionCoordinator runtime_completion{
             snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
             outbound_event.getDescriptor()};
@@ -919,8 +993,10 @@ namespace
     {
         RecordingFrameIngress ingress;
         ingress.lifecycle_fallback = snf::server::PostResult::Full;
-        snf::server::OutboundActionQueue outbound{8};
         const auto outbound_event = make_eventfd();
+        snf::server::OutboundChannel outbound{
+            snf::server::OutboundChannelConfig{.capacity = 8, .max_slots_per_connection = 8},
+            outbound_event.getDescriptor()};
         snf::runtime::RuntimeCompletionCoordinator runtime_completion{
             snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
             outbound_event.getDescriptor()};
@@ -984,6 +1060,7 @@ int main()
 {
     test_returns_pong_for_ping();
     test_collects_baseline_saturation_metrics_for_a_round_trip();
+    test_saturated_outbound_answers_every_request_and_still_drains();
     test_reports_metrics_periodically_while_running();
     test_peer_disconnect_evicts_the_player_actor();
     test_decodes_ping_sent_one_byte_at_a_time();

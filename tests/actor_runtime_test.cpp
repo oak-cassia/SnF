@@ -1,3 +1,4 @@
+#include "outbound_reservation_test_support.hpp"
 #include "snf/runtime/actor_key.hpp"
 #include "snf/runtime/actor_runtime.hpp"
 #include "snf/runtime/bounded_queue.hpp"
@@ -44,29 +45,6 @@ namespace
     using snf::runtime::EntityId;
     using snf::runtime::PostResult;
 
-    class QueueOutboundSink final : public snf::server::OutboundSink
-    {
-    public:
-        explicit QueueOutboundSink(snf::server::OutboundActionQueue& actions) noexcept
-            : _actions(actions)
-        {
-        }
-
-        [[nodiscard]] bool publish(snf::server::OutboundAction action,
-                                   const std::stop_token stop_token) override
-        {
-            return _actions.push(
-                snf::server::PostedOutboundAction{
-                    .action = std::move(action),
-                    .posted_at = std::chrono::steady_clock::now(),
-                },
-                stop_token);
-        }
-
-    private:
-        snf::server::OutboundActionQueue& _actions;
-    };
-
     class RecordingRuntimeCompletion final : public snf::runtime::RuntimeCompletionSink
     {
     public:
@@ -86,17 +64,27 @@ namespace
         std::atomic<int> failed_count{0};
     };
 
+    // The real channel, because the reservation path is part of what these tests
+    // exercise. Without a reactor the test itself has to drain and grant, which is
+    // exactly what a saturated outbound needs from the reactor in production.
     struct RuntimeDependencies
     {
         explicit RuntimeDependencies(const std::size_t outbound_capacity)
-            : outbound(outbound_capacity)
+            : outbound_event(snf::test::make_wake_descriptor())
+            , outbound(
+                  snf::server::OutboundChannelConfig{
+                      .capacity = outbound_capacity,
+                      .max_slots_per_connection = outbound_capacity,
+                  },
+                  outbound_event.getDescriptor())
             , raw_outbound_sink(outbound)
             , outbound_sink(raw_outbound_sink)
         {
         }
 
-        snf::server::OutboundActionQueue outbound;
-        QueueOutboundSink raw_outbound_sink;
+        snf::net::UniqueFileDescriptor outbound_event;
+        snf::server::OutboundChannel outbound;
+        snf::server::ChannelOutboundSink raw_outbound_sink;
         snf::server::ProtocolPlayerEffectSink outbound_sink;
         RecordingRuntimeCompletion completion;
     };
@@ -107,7 +95,9 @@ namespace
         PlayerRuntime(RuntimeDependencies& dependencies,
                       ActorRuntimeConfig runtime_config,
                       snf::server::PlayerActorBindingConfig binding_config = {})
-            : binding(dependencies.outbound_sink, std::move(binding_config))
+            : binding(dependencies.outbound_sink,
+                      dependencies.raw_outbound_sink,
+                      std::move(binding_config))
             , runtime(runtime_config, dependencies.completion)
             , ingress(runtime, binding)
         {
@@ -967,30 +957,135 @@ namespace
         assert(completion.drained_count.load() == 0);
     }
 
-    void test_cancel_interrupts_player_effect_backpressure_without_canceling_outbound()
+    void test_cancel_releases_an_actor_suspended_on_outbound_capacity()
     {
         RuntimeDependencies dependencies{1};
         PlayerRuntime player{dependencies, player_runtime_config(1, 2)};
         player.runtime.start();
         assert(player.ingress.tryPost(make_command(1, 1)) == PostResult::Accepted);
 
-        const auto deadline = std::chrono::steady_clock::now() + 1s;
+        auto deadline = std::chrono::steady_clock::now() + 1s;
         while (dependencies.outbound.size() != 1 && std::chrono::steady_clock::now() < deadline)
         {
             std::this_thread::yield();
         }
         assert(dependencies.outbound.size() == 1);
+
+        // The channel is full, so this command's emission suspends its actor rather
+        // than parking the Worker. A registered waiter is the observable proof.
         assert(player.ingress.tryPost(make_command(1, 2)) == PostResult::Accepted);
+        deadline = std::chrono::steady_clock::now() + 1s;
+        while (dependencies.outbound.pendingWaiterCount() != 1 &&
+               std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::yield();
+        }
+        assert(dependencies.outbound.pendingWaiterCount() == 1);
+
         player.runtime.cancel();
         auto joined = std::async(std::launch::async, [&player] { player.runtime.join(); });
         const bool completed = joined.wait_for(1s) == std::future_status::ready;
         if (!completed)
         {
-            dependencies.outbound.cancel();
+            static_cast<void>(dependencies.outbound.cancel());
         }
         joined.get();
         assert(completed);
+        // Cancelling one runtime never cancels the shared channel: the action already
+        // committed is still waiting for the reactor.
         assert(dependencies.outbound.size() == 1);
+        assert(!dependencies.outbound.isCancelled());
+        // Destroying a suspended frame runs the awaiting scope's destructors, so the
+        // waiter withdraws itself rather than lingering in the registry.
+        assert(dependencies.outbound.pendingWaiterCount() == 0);
+    }
+
+    void test_exhausted_in_flight_budget_closes_the_connection_instead_of_dropping_a_response()
+    {
+        RuntimeDependencies dependencies{1};
+        auto config = player_runtime_config(1, 8);
+        config.max_in_flight_operations_per_worker = 1;
+        PlayerRuntime player{dependencies, config};
+        player.runtime.start();
+
+        // The first command fills the only outbound slot, the second suspends on the
+        // only in-flight slot, and the third has nowhere left to wait.
+        for (std::uint64_t actor_id = 1; actor_id <= 3; ++actor_id)
+        {
+            assert(player.ingress.tryPost(make_command(actor_id, 1)) == PostResult::Accepted);
+        }
+
+        std::vector<snf::net::ConnectionId> failures;
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        while (failures.empty() && std::chrono::steady_clock::now() < deadline)
+        {
+            dependencies.outbound.takePendingAdmissionFailures(failures);
+            std::this_thread::yield();
+        }
+
+        // The response is not dropped in silence: the connection is reported so the
+        // reactor closes it under the overflow policy.
+        assert(failures.size() == 1);
+        assert(dependencies.outbound.pendingWaiterCount() == 1);
+
+        player.runtime.cancel();
+        player.runtime.join();
+        const auto stats = player.runtime.getStats().workers.front();
+        assert(stats.reservation_rejections == 1);
+        assert(stats.in_flight_operations == 0);
+    }
+
+    void test_saturated_outbound_preserves_effect_order_and_handler_atomicity()
+    {
+        RuntimeDependencies dependencies{1};
+        PlayerRuntime player{dependencies, player_runtime_config(1, 8)};
+        player.runtime.start();
+        for (std::uint32_t request_id = 1; request_id <= 3; ++request_id)
+        {
+            assert(player.ingress.tryPost(make_command(5, request_id)) == PostResult::Accepted);
+        }
+
+        std::vector<std::uint32_t> emitted;
+        // Stands in for the reactor: drain, then grant whatever the drain freed. With a
+        // capacity of one, every command after the first has to wait for a grant.
+        const auto pump = [&dependencies, &emitted]
+        {
+            while (auto posted = dependencies.outbound.tryPop())
+            {
+                emitted.push_back(
+                    std::get<snf::server::SendFrame>(posted->action).frame.request_id);
+            }
+
+            static_cast<void>(dependencies.outbound.grantPending());
+        };
+
+        player.runtime.close();
+        auto joined = std::async(std::launch::async, [&player] { player.runtime.join(); });
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (joined.wait_for(1ms) != std::future_status::ready &&
+               std::chrono::steady_clock::now() < deadline)
+        {
+            pump();
+        }
+        pump();
+
+        const bool completed = joined.wait_for(1s) == std::future_status::ready;
+        if (!completed)
+        {
+            static_cast<void>(dependencies.outbound.cancel());
+        }
+        joined.get();
+        assert(completed);
+
+        assert((emitted == std::vector<std::uint32_t>{1, 2, 3}));
+        const auto stats = player.runtime.getStats().workers.front();
+        assert(stats.processed == 3);
+        // At least one command could not emit immediately, which is the only way this
+        // order could have been produced without a Worker ever blocking.
+        assert(stats.suspended_commands >= 1);
+        assert(stats.in_flight_operations == 0);
+        assert(dependencies.completion.drained_count.load() == 1);
+        assert(dependencies.completion.failed_count.load() == 0);
     }
 }
 
@@ -1009,5 +1104,7 @@ void run_actor_runtime_tests()
     test_player_close_follows_commands_and_preserves_command_metrics();
     test_capacity_and_lifecycle_control_accounting();
     test_cancel_and_failure_terminal_paths();
-    test_cancel_interrupts_player_effect_backpressure_without_canceling_outbound();
+    test_cancel_releases_an_actor_suspended_on_outbound_capacity();
+    test_saturated_outbound_preserves_effect_order_and_handler_atomicity();
+    test_exhausted_in_flight_budget_closes_the_connection_instead_of_dropping_a_response();
 }

@@ -3,9 +3,9 @@
 #include "snf/net/session.hpp"
 #include "snf/net/unique_file_descriptor.hpp"
 #include "snf/runtime/actor_runtime.hpp"
-#include "snf/runtime/bounded_queue.hpp"
 #include "snf/runtime/runtime_completion.hpp"
 #include "snf/server/command_router.hpp"
+#include "snf/server/outbound_channel.hpp"
 #include "snf/server/outbound_sink.hpp"
 #include "snf/server/player_actor_binding.hpp"
 #include "snf/server/player_actor_ingress.hpp"
@@ -43,7 +43,15 @@ namespace snf::server
         std::optional<int> client_send_buffer_size{};
         std::size_t actor_worker_count{2};
         std::size_t actor_queue_capacity_per_worker{4096};
+        // Also the continuation queue capacity per Worker, and the bound the outbound
+        // waiter registry is sized against: a Worker holds one of these while it waits
+        // for capacity, so registration must never be the tighter limit.
+        std::size_t actor_max_in_flight_operations_per_worker{1024};
         std::size_t outbound_queue_capacity{4096};
+        // Bounds the shared outbound capacity one connection may hold at once.
+        std::size_t max_outbound_slots_per_connection{64};
+        // Bounds the waiters a single reactor turn examines and grants.
+        std::size_t outbound_grants_per_turn{64};
         std::size_t connection_lifecycle_capacity{4096};
         // Periodic exposure while the server runs. Zero reports nothing, leaving
         // only the caller's own snapshot after run() returns.
@@ -89,9 +97,10 @@ namespace snf::server
         void publishMetrics() const;
 
         std::function<void(const ServerMetricsSnapshot&)> _metrics_reporter;
-        OutboundActionQueue _outbound_actions;
+        // The channel signals this descriptor, so it has to outlive the channel.
         snf::net::UniqueFileDescriptor _outbound_event;
-        EventFdOutboundSink _outbound_sink;
+        OutboundChannel _outbound_channel;
+        ChannelOutboundSink _outbound_sink;
         ProtocolPlayerEffectSink _player_effects;
         snf::runtime::RuntimeCompletionCoordinator _runtime_completion;
         // Bindings must outlive the generic runtime: the worker owns the

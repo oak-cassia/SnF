@@ -2,11 +2,11 @@
 
 #include "snf/net/session.hpp"
 #include "snf/net/unique_file_descriptor.hpp"
-#include "snf/runtime/bounded_queue.hpp"
 #include "snf/runtime/distribution.hpp"
 #include "snf/runtime/runtime_completion.hpp"
 #include "snf/server/frame_ingress.hpp"
 #include "snf/server/outbound_action.hpp"
+#include "snf/server/outbound_channel.hpp"
 
 #include <chrono>
 #include <cstddef>
@@ -15,6 +15,7 @@
 #include <functional>
 #include <optional>
 #include <unordered_map>
+#include <vector>
 
 namespace snf::server
 {
@@ -50,6 +51,10 @@ namespace snf::server
         std::uint64_t sent_frames{0};
         std::uint64_t protocol_errors{0};
         std::uint64_t actor_queue_overflows{0};
+        // Connections closed because a Logic Worker could not even be admitted to
+        // wait for outbound capacity. Counted apart from actor_queue_overflows: the
+        // saturated resource is the outbound channel, not a command queue.
+        std::uint64_t outbound_admission_failures{0};
         std::uint64_t stale_outbound_actions{0};
         std::uint64_t connection_lifecycle_rejections{0};
         std::size_t pending_connection_closes_high_water_mark{0};
@@ -68,16 +73,22 @@ namespace snf::server
         snf::runtime::DistributionSnapshot session_pending_send_bytes;
         // Outbound queue depth observed before each drain.
         snf::runtime::DistributionSnapshot outbound_queue_depth;
-        // Nanoseconds from a Logic Worker publishing an OutboundAction to the
-        // reactor consuming it, including any blocking on a full queue. This is
-        // the hand-off cost that stages 4.1 and 4.6 are expected to reduce, so it
-        // must be collected before the outbound path changes.
+        // Nanoseconds from a Logic Worker committing an OutboundAction to the reactor
+        // consuming it. Since stage 4.1 a Worker no longer blocks on a full queue, so
+        // this covers the hand-off alone; the wait for capacity shows up as the
+        // actor's suspension in ActorRuntimeWorkerStats instead. Comparing it against
+        // the 3.9 baseline therefore compares two different quantities, and both
+        // halves have to be reported together.
         snf::runtime::DistributionSnapshot outbound_queue_wait_nanoseconds;
         std::size_t session_count{0};
         std::size_t sessions_with_pending_send{0};
         std::size_t total_pending_send_bytes{0};
         std::size_t current_outbound_queue_depth{0};
         std::size_t outbound_queue_high_water_mark{0};
+        // Capacity granted but not yet emitted, and actors suspended waiting for a
+        // grant. Together with the depth above they account for the whole channel.
+        std::size_t reserved_outbound_slots{0};
+        std::size_t pending_outbound_reservations{0};
     };
 
     // The epoll reactor. It decodes frames, submits FrameEnvelope values to the shared
@@ -87,7 +98,7 @@ namespace snf::server
     public:
         TcpServer(const TcpServerConfig& config,
                   FrameIngress& frame_ingress,
-                  OutboundActionQueue& outbound_actions,
+                  OutboundChannel& outbound,
                   snf::runtime::RuntimeCompletionSource& runtime_completion,
                   int outbound_event_descriptor);
 
@@ -113,6 +124,9 @@ namespace snf::server
         void handleClientEvent(int client_descriptor, std::uint32_t event_flags);
         void handleOutboundActions();
         void handleOutboundAction(OutboundAction action);
+        // Closing here needs no outbound capacity, which is what makes it usable as
+        // the policy for a connection that could not obtain any.
+        void closeConnectionsWithFailedOutboundAdmission();
         void handleRuntimeCompletion();
         void handleStopRequest();
         void handleTerminationSignal(int signal_descriptor);
@@ -144,7 +158,7 @@ namespace snf::server
         std::chrono::milliseconds _metrics_report_interval;
         std::function<void()> _on_metrics_interval;
         FrameIngress& _frame_ingress;
-        OutboundActionQueue& _outbound_actions;
+        OutboundChannel& _outbound;
         snf::runtime::RuntimeCompletionSource& _runtime_completion;
         int _outbound_event_descriptor;
         std::chrono::steady_clock::time_point _shutdown_deadline{};
@@ -157,6 +171,8 @@ namespace snf::server
         // Generation tokens let the reactor discard that event instead of targeting the new FD.
         std::unordered_map<std::uint64_t, int> _client_descriptors_by_event_token;
         std::deque<ConnectionClosed> _pending_connection_closes;
+        // Reused across turns so draining the channel's failures allocates nothing.
+        std::vector<snf::net::ConnectionId> _failed_outbound_admissions;
         TcpServerStats _stats;
         snf::runtime::Distribution _reactor_turn_nanoseconds;
         snf::runtime::Distribution _session_pending_send_bytes;

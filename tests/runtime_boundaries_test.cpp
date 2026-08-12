@@ -1,28 +1,20 @@
-#include "snf/net/unique_file_descriptor.hpp"
-#include "snf/runtime/bounded_queue.hpp"
+#include "outbound_reservation_test_support.hpp"
 #include "snf/runtime/runtime_completion.hpp"
 #include "snf/server/outbound_sink.hpp"
 
 #include <cassert>
-#include <chrono>
 #include <cstdint>
-#include <future>
 #include <stdexcept>
-#include <stop_token>
-#include <sys/eventfd.h>
 #include <unistd.h>
+#include <utility>
 #include <variant>
 
 namespace
 {
-    using namespace std::chrono_literals;
+    using snf::test::make_wake_descriptor;
+    using RecordingEndpoint = snf::test::RecordingContinuationEndpoint;
 
-    snf::net::UniqueFileDescriptor make_eventfd()
-    {
-        const int descriptor = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-        assert(descriptor != -1);
-        return snf::net::UniqueFileDescriptor{descriptor};
-    }
+    constexpr snf::net::ConnectionId CONNECTION{.descriptor = 42, .generation = 7};
 
     std::uint64_t read_wakeup_count(const int descriptor)
     {
@@ -32,52 +24,54 @@ namespace
         return wakeup_count;
     }
 
+    snf::server::OutboundAction pong_action(const std::uint32_t request_id)
+    {
+        return snf::server::SendFrame{
+            .connection = CONNECTION,
+            .frame =
+                snf::protocol::Frame{
+                    .type = snf::protocol::MessageType::Pong,
+                    .request_id = request_id,
+                    .payload = {},
+                },
+        };
+    }
+
     void test_outbound_sink_hides_queue_and_wakeup()
     {
-        snf::server::OutboundActionQueue actions{2};
-        const auto event = make_eventfd();
-        snf::server::EventFdOutboundSink sink{actions, event.getDescriptor()};
+        const auto wake = make_wake_descriptor();
+        snf::server::OutboundChannel channel{
+            snf::server::OutboundChannelConfig{.capacity = 2, .max_slots_per_connection = 2},
+            wake.getDescriptor()};
+        snf::server::ChannelOutboundSink sink{channel};
 
-        assert(sink.publish(
-            snf::server::SendFrame{
-                .connection = snf::net::ConnectionId{.descriptor = 42, .generation = 7},
-                .frame =
-                    snf::protocol::Frame{
-                        .type = snf::protocol::MessageType::Pong,
-                        .request_id = 9,
-                        .payload = {},
-                    },
-            },
-            {}));
+        auto reservation = sink.tryReserve(CONNECTION, 1);
+        assert(reservation);
+        assert(sink.commit(*reservation, pong_action(9)));
 
-        assert(read_wakeup_count(event.getDescriptor()) == 1);
-        const auto posted = actions.tryPop();
+        assert(read_wakeup_count(wake.getDescriptor()) == 1);
+        const auto posted = channel.tryPop();
         assert(posted.has_value());
-        // The sink stamps the publication instant; the game runtime never sees it.
+        // The channel stamps the commit instant; the game runtime never sees it.
         assert(posted->posted_at.time_since_epoch().count() != 0);
         const auto* send = std::get_if<snf::server::SendFrame>(&posted->action);
         assert(send != nullptr);
         assert(send->connection.generation == 7);
         assert(send->frame.request_id == 9);
-
-        actions.cancel();
-        assert(!sink.publish(
-            snf::server::CloseConnection{
-                .connection = snf::net::ConnectionId{.descriptor = 42, .generation = 7},
-                .reason = snf::server::CloseReason::ProtocolError,
-            },
-            {}));
     }
 
     void test_runtime_completion_is_authoritative_and_independent_from_outbound_capacity()
     {
-        snf::server::OutboundActionQueue full_outbound{1};
-        assert(full_outbound.tryPush(snf::server::CloseConnection{
-            .connection = snf::net::ConnectionId{.descriptor = 1, .generation = 1},
-            .reason = snf::server::CloseReason::ProtocolError,
-        }));
+        const auto outbound_wake = make_wake_descriptor();
+        snf::server::OutboundChannel full_outbound{
+            snf::server::OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1},
+            outbound_wake.getDescriptor()};
+        snf::server::ChannelOutboundSink sink{full_outbound};
+        auto reservation = sink.tryReserve(CONNECTION, 1);
+        assert(reservation);
+        assert(sink.commit(*reservation, pong_action(1)));
 
-        const auto event = make_eventfd();
+        const auto event = make_wake_descriptor();
         constexpr std::uint64_t required =
             snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic);
         snf::runtime::RuntimeCompletionCoordinator completion{required, event.getDescriptor()};
@@ -93,72 +87,70 @@ namespace
         assert(full_outbound.size() == 1);
     }
 
-    void test_outbound_sink_wait_is_runtime_cancelable_without_canceling_shared_queue()
+    void test_outbound_saturation_defers_instead_of_blocking()
     {
-        snf::server::OutboundActionQueue actions{1};
-        const auto event = make_eventfd();
-        snf::server::EventFdOutboundSink sink{actions, event.getDescriptor()};
+        const auto wake = make_wake_descriptor();
+        snf::server::OutboundChannel channel{
+            snf::server::OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1},
+            wake.getDescriptor()};
+        snf::server::ChannelOutboundSink sink{channel};
+        const auto endpoint = std::make_shared<RecordingEndpoint>();
 
-        assert(sink.publish(
-            snf::server::SendFrame{
-                .connection = snf::net::ConnectionId{.descriptor = 42, .generation = 7},
-                .frame =
-                    snf::protocol::Frame{
-                        .type = snf::protocol::MessageType::Pong,
-                        .request_id = 1,
-                        .payload = {},
-                    },
-            },
-            {}));
-        assert(read_wakeup_count(event.getDescriptor()) == 1);
+        auto queued = sink.tryReserve(CONNECTION, 1);
+        assert(queued);
+        assert(sink.commit(*queued, pong_action(1)));
 
-        std::stop_source publish_stop;
-        auto blocked_publish = std::async(
-            std::launch::async,
-            [&sink, stop_token = publish_stop.get_token()]
-            {
-                return sink.publish(
-                    snf::server::SendFrame{
-                        .connection = snf::net::ConnectionId{.descriptor = 42, .generation = 7},
-                        .frame =
-                            snf::protocol::Frame{
-                                .type = snf::protocol::MessageType::Pong,
-                                .request_id = 2,
-                                .payload = {},
-                            },
-                    },
-                    stop_token);
-            });
+        // A saturated channel refuses without waiting: nothing parks a Worker, and the
+        // caller is left to await capacity through a waiter instead.
+        assert(sink.tryReserve(CONNECTION, 1) == std::nullopt);
 
-        assert(blocked_publish.wait_for(100ms) == std::future_status::timeout);
-        publish_stop.request_stop();
-        const bool stopped = blocked_publish.wait_for(1s) == std::future_status::ready;
-        if (!stopped)
-        {
-            actions.cancel();
-        }
-        assert(!blocked_publish.get());
-        assert(stopped);
-        assert(actions.size() == 1);
+        snf::test::ReservationWaiter waiter{endpoint, 1};
+        const auto ticket = sink.registerWaiter(CONNECTION, 1, std::move(waiter.producer));
+        assert(ticket.valid());
+        assert(waiter.isPending());
 
-        assert(actions.tryPop().has_value());
-        assert(sink.publish(
-            snf::server::CloseConnection{
-                .connection = snf::net::ConnectionId{.descriptor = 42, .generation = 7},
-                .reason = snf::server::CloseReason::ProtocolError,
-            },
-            {}));
-        assert(read_wakeup_count(event.getDescriptor()) == 1);
+        assert(channel.tryPop().has_value());
+        assert(channel.grantPending() == 1);
+        assert(waiter.isCompleted());
+        auto granted = waiter.state->takeResult();
+        assert(granted.valid());
+        assert(sink.commit(granted, pong_action(2)));
+        assert(channel.size() == 1);
+    }
+
+    void test_cancelling_outbound_releases_waiters_so_a_worker_can_drain()
+    {
+        const auto wake = make_wake_descriptor();
+        snf::server::OutboundChannel channel{
+            snf::server::OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1},
+            wake.getDescriptor()};
+        snf::server::ChannelOutboundSink sink{channel};
+        const auto endpoint = std::make_shared<RecordingEndpoint>();
+
+        auto queued = sink.tryReserve(CONNECTION, 1);
+        assert(queued);
+        assert(sink.commit(*queued, pong_action(1)));
+
+        snf::test::ReservationWaiter waiter{endpoint, 1};
+        static_cast<void>(sink.registerWaiter(CONNECTION, 1, std::move(waiter.producer)));
+        assert(waiter.isPending());
+
+        // A stopped reactor can no longer grant. Cancelling is what turns that into a
+        // terminal outcome instead of a Worker waiting forever.
+        assert(channel.cancel() == 1);
+        assert(waiter.isCompleted());
+        assert(!waiter.state->takeResult().valid());
+        assert(channel.pendingWaiterCount() == 0);
     }
 
     void test_rejects_invalid_boundary_configuration()
     {
-        snf::server::OutboundActionQueue actions{1};
-
         bool invalid_outbound_descriptor_rejected = false;
         try
         {
-            [[maybe_unused]] snf::server::EventFdOutboundSink sink{actions, -1};
+            [[maybe_unused]] snf::server::OutboundChannel channel{
+                snf::server::OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1},
+                -1};
         }
         catch (const std::invalid_argument&)
         {
@@ -166,7 +158,7 @@ namespace
         }
         assert(invalid_outbound_descriptor_rejected);
 
-        const auto event = make_eventfd();
+        const auto event = make_wake_descriptor();
         bool empty_required_mask_rejected = false;
         try
         {
@@ -185,6 +177,7 @@ void run_runtime_boundary_tests()
 {
     test_outbound_sink_hides_queue_and_wakeup();
     test_runtime_completion_is_authoritative_and_independent_from_outbound_capacity();
-    test_outbound_sink_wait_is_runtime_cancelable_without_canceling_shared_queue();
+    test_outbound_saturation_defers_instead_of_blocking();
+    test_cancelling_outbound_releases_waiters_so_a_worker_can_drain();
     test_rejects_invalid_boundary_configuration();
 }

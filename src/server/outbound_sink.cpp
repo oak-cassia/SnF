@@ -1,54 +1,42 @@
 #include "snf/server/outbound_sink.hpp"
 
-#include <cerrno>
-#include <chrono>
-#include <stdexcept>
-#include <sys/eventfd.h>
-#include <unistd.h>
 #include <utility>
 
 namespace snf::server
 {
-    EventFdOutboundSink::EventFdOutboundSink(OutboundActionQueue& actions,
-                                             const int wake_descriptor)
-        : _actions(actions)
-        , _wake_descriptor(wake_descriptor)
+    ChannelOutboundSink::ChannelOutboundSink(OutboundChannel& channel) noexcept
+        : _channel(channel)
     {
-        if (_wake_descriptor < 0)
-        {
-            throw std::invalid_argument{"Invalid outbound wake descriptor"};
-        }
     }
 
-    bool EventFdOutboundSink::publish(OutboundAction action, const std::stop_token stop_token)
+    std::optional<OutboundReservation>
+    ChannelOutboundSink::tryReserve(const snf::net::ConnectionId connection,
+                                    const std::size_t slots)
     {
-        // Stamped before the push so a wait on a full queue counts as hand-off
-        // wait rather than disappearing from the measurement.
-        const auto posted_at = std::chrono::steady_clock::now();
-
-        if (!_actions.push(
-                PostedOutboundAction{.action = std::move(action), .posted_at = posted_at},
-                stop_token))
-        {
-            return false;
-        }
-
-        signal();
-        return true;
+        return _channel.tryReserve(connection, slots);
     }
 
-    void EventFdOutboundSink::signal() const noexcept
+    ReservationTicket ChannelOutboundSink::registerWaiter(
+        const snf::net::ConnectionId connection,
+        const std::size_t slots,
+        snf::runtime::AsyncOperationProducer<OutboundReservation> producer)
     {
-        constexpr std::uint64_t wakeup_value = 1;
+        return _channel.registerWaiter(connection, slots, std::move(producer));
+    }
 
-        while (::write(_wake_descriptor, &wakeup_value, sizeof(wakeup_value)) == -1)
-        {
-            if (errno == EINTR)
-            {
-                continue;
-            }
+    void ChannelOutboundSink::withdrawWaiter(const ReservationTicket& ticket) noexcept
+    {
+        _channel.withdrawWaiter(ticket);
+    }
 
-            return;
-        }
+    bool ChannelOutboundSink::commit(OutboundReservation& reservation, OutboundAction action)
+    {
+        return _channel.commit(reservation, std::move(action));
+    }
+
+    void
+    ChannelOutboundSink::reportAdmissionFailure(const snf::net::ConnectionId connection) noexcept
+    {
+        _channel.reportAdmissionFailure(connection);
     }
 }

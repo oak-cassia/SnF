@@ -13,9 +13,11 @@ namespace snf::server
     public:
         explicit ProtocolPlayerEffectSink(OutboundSink& outbound) noexcept;
 
-        [[nodiscard]] bool apply(snf::net::ConnectionId connection,
-                                 PlayerResult result,
-                                 std::stop_token stop_token) override;
+        [[nodiscard]] std::size_t requiredSlots(const PlayerResult& result) const noexcept override;
+
+        [[nodiscard]] bool commit(snf::net::ConnectionId connection,
+                                  PlayerResult result,
+                                  OutboundReservation& reservation) override;
 
     private:
         OutboundSink& _outbound;

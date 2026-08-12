@@ -1,32 +1,52 @@
+#include "outbound_reservation_test_support.hpp"
 #include "snf/server/protocol_player_effect_sink.hpp"
 
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
-#include <stop_token>
+#include <stdexcept>
 #include <utility>
 #include <variant>
 #include <vector>
 
 namespace
 {
-    class RecordingOutboundSink final : public snf::server::OutboundSink
+    // The real channel, because a reservation can only come from one: an effect sink
+    // consumes capacity it did not create, and a stub that mints capacity would test
+    // the wrong contract.
+    struct EffectSinkFixture
     {
-    public:
-        [[nodiscard]] bool publish(snf::server::OutboundAction action,
-                                   const std::stop_token stop_token) override
+        explicit EffectSinkFixture(const std::size_t capacity)
+            : wake(snf::test::make_wake_descriptor())
+            , channel(snf::server::OutboundChannelConfig{.capacity = capacity,
+                                                         .max_slots_per_connection = capacity},
+                      wake.getDescriptor())
+            , outbound(channel)
+            , effects(outbound)
         {
-            if (stop_token.stop_requested() || published.size() == fail_after)
-            {
-                return false;
-            }
-
-            published.push_back(std::move(action));
-            return true;
         }
 
-        std::size_t fail_after{static_cast<std::size_t>(-1)};
-        std::vector<snf::server::OutboundAction> published;
+        [[nodiscard]] snf::server::OutboundReservation
+        reserve(const snf::net::ConnectionId connection, const std::size_t slots)
+        {
+            auto reservation = channel.tryReserve(connection, slots);
+            assert(reservation);
+            return std::move(*reservation);
+        }
+
+        [[nodiscard]] std::uint32_t popRequestId()
+        {
+            const auto posted = channel.tryPop();
+            assert(posted.has_value());
+            const auto* send = std::get_if<snf::server::SendFrame>(&posted->action);
+            assert(send != nullptr);
+            return send->frame.request_id;
+        }
+
+        snf::net::UniqueFileDescriptor wake;
+        snf::server::OutboundChannel channel;
+        snf::server::ChannelOutboundSink outbound;
+        snf::server::ProtocolPlayerEffectSink effects;
     };
 
     snf::server::PlayerResult pong_result(const std::uint32_t request_id,
@@ -46,15 +66,31 @@ namespace
         };
     }
 
+    void test_prices_a_result_by_the_actions_it_emits()
+    {
+        EffectSinkFixture fixture{4};
+        auto result = pong_result(1);
+        assert(fixture.effects.requiredSlots(result) == 1);
+
+        result.effects.push_back(snf::server::SendResponse{
+            .response = snf::server::PongResponse{.request_id = 2, .payload = {}},
+        });
+        assert(fixture.effects.requiredSlots(result) == 2);
+        assert(fixture.effects.requiredSlots(snf::server::PlayerResult{}) == 0);
+    }
+
     void test_maps_send_response_to_a_frame_for_the_same_connection()
     {
-        RecordingOutboundSink outbound;
-        snf::server::ProtocolPlayerEffectSink effects{outbound};
+        EffectSinkFixture fixture{4};
         const snf::net::ConnectionId connection{.descriptor = 4, .generation = 9};
+        auto reservation = fixture.reserve(connection, 1);
 
-        assert(effects.apply(connection, pong_result(42, {std::byte{0xAB}}), {}));
-        assert(outbound.published.size() == 1);
-        const auto* sent = std::get_if<snf::server::SendFrame>(&outbound.published.front());
+        assert(fixture.effects.commit(connection, pong_result(42, {std::byte{0xAB}}), reservation));
+        assert(reservation.remainingSlots() == 0);
+
+        const auto posted = fixture.channel.tryPop();
+        assert(posted.has_value());
+        const auto* sent = std::get_if<snf::server::SendFrame>(&posted->action);
         assert(sent != nullptr);
         assert(sent->connection == connection);
         assert(sent->frame.type == snf::protocol::MessageType::Pong);
@@ -64,53 +100,76 @@ namespace
 
     void test_preserves_effect_order_and_request_ids()
     {
-        RecordingOutboundSink outbound;
-        snf::server::ProtocolPlayerEffectSink effects{outbound};
+        EffectSinkFixture fixture{4};
+        const snf::net::ConnectionId connection{.descriptor = 4, .generation = 9};
         auto result = pong_result(1);
         result.effects.push_back(snf::server::SendResponse{
             .response = snf::server::PongResponse{.request_id = 2, .payload = {}},
         });
 
-        assert(effects.apply({.descriptor = 4, .generation = 9}, std::move(result), {}));
-        assert(outbound.published.size() == 2);
-        assert(std::get<snf::server::SendFrame>(outbound.published[0]).frame.request_id == 1);
-        assert(std::get<snf::server::SendFrame>(outbound.published[1]).frame.request_id == 2);
+        auto reservation = fixture.reserve(connection, fixture.effects.requiredSlots(result));
+        assert(fixture.effects.commit(connection, std::move(result), reservation));
+        assert(fixture.popRequestId() == 1);
+        assert(fixture.popRequestId() == 2);
     }
 
-    void test_stop_or_outbound_failure_rejects_the_result()
+    void test_an_empty_result_consumes_no_capacity()
     {
-        RecordingOutboundSink outbound;
-        snf::server::ProtocolPlayerEffectSink effects{outbound};
-        std::stop_source stopped;
-        stopped.request_stop();
-        assert(!effects.apply(
-            {.descriptor = 4, .generation = 9}, pong_result(1), stopped.get_token()));
-        assert(outbound.published.empty());
+        EffectSinkFixture fixture{1};
+        const snf::net::ConnectionId connection{.descriptor = 4, .generation = 9};
+        auto reservation = fixture.reserve(connection, 0);
 
-        outbound.fail_after = 0;
-        assert(!effects.apply({.descriptor = 4, .generation = 9}, pong_result(2), {}));
+        assert(fixture.effects.commit(connection, snf::server::PlayerResult{}, reservation));
+        assert(fixture.channel.size() == 0);
+        assert(fixture.channel.reservedSlotCount() == 0);
     }
 
-    void test_keeps_already_published_effects_when_a_later_effect_fails()
+    void test_a_cancelled_channel_rejects_the_emission()
     {
-        RecordingOutboundSink outbound;
-        outbound.fail_after = 1;
-        snf::server::ProtocolPlayerEffectSink effects{outbound};
+        EffectSinkFixture fixture{4};
+        const snf::net::ConnectionId connection{.descriptor = 4, .generation = 9};
+        auto reservation = fixture.reserve(connection, 1);
+        static_cast<void>(fixture.channel.cancel());
+
+        assert(!fixture.effects.commit(connection, pong_result(1), reservation));
+        assert(fixture.channel.size() == 0);
+    }
+
+    void test_an_underpriced_reservation_keeps_the_effects_it_already_emitted()
+    {
+        EffectSinkFixture fixture{4};
+        const snf::net::ConnectionId connection{.descriptor = 4, .generation = 9};
         auto result = pong_result(1);
         result.effects.push_back(snf::server::SendResponse{
             .response = snf::server::PongResponse{.request_id = 2, .payload = {}},
         });
 
-        assert(!effects.apply({.descriptor = 4, .generation = 9}, std::move(result), {}));
-        assert(outbound.published.size() == 1);
-        assert(std::get<snf::server::SendFrame>(outbound.published.front()).frame.request_id == 1);
+        // One slot for two effects: emission is not a transaction, so the first effect
+        // stays emitted and the shortfall surfaces as a broken invariant rather than a
+        // silently dropped response.
+        auto reservation = fixture.reserve(connection, 1);
+        bool shortfall_reported = false;
+        try
+        {
+            static_cast<void>(fixture.effects.commit(connection, std::move(result), reservation));
+        }
+        catch (const std::logic_error&)
+        {
+            shortfall_reported = true;
+        }
+
+        assert(shortfall_reported);
+        assert(fixture.channel.size() == 1);
+        assert(fixture.popRequestId() == 1);
     }
 }
 
 void run_player_effect_sink_tests()
 {
+    test_prices_a_result_by_the_actions_it_emits();
     test_maps_send_response_to_a_frame_for_the_same_connection();
     test_preserves_effect_order_and_request_ids();
-    test_stop_or_outbound_failure_rejects_the_result();
-    test_keeps_already_published_effects_when_a_later_effect_fails();
+    test_an_empty_result_consumes_no_capacity();
+    test_a_cancelled_channel_rejects_the_emission();
+    test_an_underpriced_reservation_keeps_the_effects_it_already_emitted();
 }

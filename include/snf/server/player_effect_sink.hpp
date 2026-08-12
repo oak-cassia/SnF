@@ -1,23 +1,31 @@
 #pragma once
 
 #include "snf/net/connection_id.hpp"
+#include "snf/server/outbound_channel.hpp"
 #include "snf/server/player_result.hpp"
 
-#include <stop_token>
+#include <cstddef>
 
 namespace snf::server
 {
-    // Applies completed actor decisions outside the actor handler. Implementations
-    // may block on backpressure, so callers supply their cancellation token.
+    // Applies completed actor decisions outside the actor handler. Emission consumes
+    // capacity the binding reserved beforehand, so this boundary never blocks and
+    // never waits.
     class PlayerEffectSink
     {
     public:
         virtual ~PlayerEffectSink() = default;
 
-        // false means the entire result could not be applied. Effects published
-        // before a later failure remain published; this is not a transaction.
-        [[nodiscard]] virtual bool apply(snf::net::ConnectionId connection,
-                                         PlayerResult result,
-                                         std::stop_token stop_token) = 0;
+        // How much outbound capacity a result needs. Only the sink knows how an effect
+        // maps onto outbound actions, so only the sink can price a result.
+        [[nodiscard]] virtual std::size_t
+        requiredSlots(const PlayerResult& result) const noexcept = 0;
+
+        // Emits the effects in order, consuming one reserved slot each. false means
+        // the outbound backend was cancelled; effects emitted before that stay
+        // emitted, because this is not a transaction.
+        [[nodiscard]] virtual bool commit(snf::net::ConnectionId connection,
+                                          PlayerResult result,
+                                          OutboundReservation& reservation) = 0;
     };
 }
