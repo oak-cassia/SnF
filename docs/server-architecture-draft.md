@@ -743,8 +743,8 @@ inbound/outbound/lifecycle 계약이 안정된 뒤의 선택적 트랙이다.
   과부하는 명시적 정책으로 종료한다.
 - logic worker는 outbound 포화로 무한 대기하지 않는다.
 - 느린 클라이언트의 메모리 사용량과 다른 연결에 미치는 p99 영향이 설정된 상한 안에 머문다.
-- 종료 원인을 누가 먼저 관측하든 `ConnectionClosed`는 정확히 한 번, terminal 전이 전에 승인된 해당
-  연결의 command 뒤에 게시된다.
+- 종료 원인을 누가 먼저 관측하든, ingress close 이전에 종결에 진입한 연결의 `ConnectionClosed`는 정확히
+  한 번, terminal 전이 전에 승인된 해당 연결의 command 뒤에 게시된다. shutdown 중 종결은 게시하지 않는다.
 - actor key 이관 중 도착한 stale command를 거부한다.
 - 위치를 변경하는 모든 경로에서 spatial index와 AOI가 일관된다.
 

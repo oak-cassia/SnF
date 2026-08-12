@@ -130,7 +130,8 @@ operation을 시작하지 않고, 포화일 때만 그 Actor 하나가 suspend�
 상세 단계와 완료 기준은 [개발 로드맵](docs/development-roadmap.md), 목표 구조와 상태 소유권은
 [서버 아키텍처 초안](docs/server-architecture-draft.md), coroutine 수명 규약은
 [Coroutine Actor 계약](docs/coroutine-actor-contract.md), 전체 종료 판정과 실패·취소 전파는
-[Runtime Lifecycle 계약](docs/runtime-lifecycle-contract.md)을 기준으로 한다. 현재 구조에서
+[Runtime Lifecycle 계약](docs/runtime-lifecycle-contract.md), 연결 하나의 네트워크 상태 소유권과 수명은
+[ConnectionScope 계약](docs/connection-scope-contract.md)을 기준으로 한다. 현재 구조에서
 UnifiedRuntime으로 전환하는 이유와 단계별 개요는
 [UnifiedRuntime 전환 개요](study/10-unified-runtime-overview.md)에 정리되어 있다.
 
@@ -211,4 +212,4 @@ cmake --build --preset release
 | `include/snf/`, `src/` | core, network, protocol과 server runtime |
 | `tests/` | 단위·통합 테스트 |
 | `tools/load_client/` | non-blocking 부하 테스트 클라이언트 |
-| `docs/` | 아키텍처, 로드맵, coroutine과 runtime lifecycle 계약 |
+| `docs/` | 아키텍처, 로드맵, coroutine·runtime lifecycle·ConnectionScope 계약 |

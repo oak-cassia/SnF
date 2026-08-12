@@ -329,21 +329,54 @@ Actor queue wait p50이 남은 차이는 command당 lock 획득이 하나 늘어
   4.1은 그 신호를 command를 승인하는 binding 경계에서 생산하므로 credit 취득도 같은 경계여야 한다.
   protocol 단계에서 거부되는 frame은 command가 된 적이 없으므로 credit을 소비하지 않는다.
 - read loop, write loop, deadline과 control이 모두 `requestClose(cause)`를 호출할 수 있고,
-  `ConnectionScope`만 단일 terminal 전이를 수행해 `ConnectionClosed`를 정확히 한 번 게시한다.
+  `ConnectionScope`만 단일 terminal 전이를 수행해 `ConnectionClosed`를 최대 한 번 게시한다. ingress close
+  이전에 종결에 진입했으면 정확히 한 번이고, shutdown 중 종결은 게시하지 않는다.
 - `ConnectionScope`는 새 read admission을 중단하고, read loop이 진행 중인 ingress 게시를 마친 뒤 같은
   ordered ingress에 `ConnectionClosed`를 게시한다. 따라서 terminal 전이 전에 승인된 그 연결의 command
   보다 뒤에 위치한다.
 - heartbeat와 idle timeout은 runtime deadline primitive로 표현하며 Phase 6의 domain `TimerService`에
   의존하지 않는다.
 
-착수 직전 `docs/connection-scope-contract.md`에 Executor 계약, 상태 소유권, 단일 종결, close 순서와
-취소 전파를 고정한다.
+착수 전 [ConnectionScope 계약](./connection-scope-contract.md)에 Executor 계약, 상태 소유권, 단일 종결,
+close 순서와 취소 전파를 고정했다. 그 문서가 고정한 결정은 다음과 같다.
+
+- ready queue는 `coroutine_handle`이 아니라 `{ConnectionId, Side, SuspensionGeneration}`을 저장하고 drain
+  시점에 resolve한다. token은 값이므로 무효 포인터가 되지 않고, 유효성은 scope 존재·side active·awaiter
+  queued·generation 일치를 모두 요구한다. `Closing` scope도 map에 남으므로 scope 존재만으로는 판정이 되지
+  않는다. 논리적 무효화로 충분하므로 물리 token이 남아 있어도 retire를 허용한다. 상한은
+  `2 × max_scopes`이며 고정 용량, checked multiplication, 초과는 불변식 위반이다. 다만 use-after-free와
+  용량 회계는 다른 문제이므로 ring slot 회계는 scope 수명이 아니라 token의 물리 제거에 붙인다. retire
+  시점에 남은 token은 orphan으로 세고 새 scope 수락 조건에 포함되므로, retire가 slot을 조용히 반환해
+  상한을 넘기는 경로가 없다.
+- credit state의 소유 참조는 reactor 하나만 보유하고 release 토큰은 `outstanding` counter만 증감한다.
+  일반적인 refcount로 두면 마지막 참조를 버리는 주체가 Worker가 되어 deallocation이 release 경로에서
+  일어난다. reactor가 `detached && outstanding == 0`을 관측한 뒤 자기 turn에서 회수한다. 취득 경계는
+  release 토큰이 무장되는 binding 경계 그대로이며, 그 경로를 지나는 admission context는 routing DTO까지만
+  가고 `PlayerCommand`나 Actor 상태에는 들어가지 않는다.
+- `ConnectionClosed`는 조건부 exactly-once다. `ServerShutdown`은 명시적 예외이며 이는 현재 동작이다.
+- 종결 시 취소 범위는 cause가 결정한다. 일반 종료는 read/write를 모두 취소하고, `ServerShutdown`은 read만
+  취소해 Logic drain과 send queue empty 또는 grace deadline까지 write-side drain을 유지한다. 그래서 이미
+  승인된 command의 응답이 종료 중에도 나간다.
+- deadline heap은 indexed heap이며 cancel·update가 물리 node를 즉시 제거한다. scope·목적당 등록된
+  deadline이 1개라는 규칙은 등록 수만 제한하므로, 긴 deadline + 연결 churn에서 무효화된 물리 node가 쌓이는
+  경로를 따로 막아야 한다. 활동마다 재무장하지 않고 `last_activity_at`을 검사해 만료 시 한 번 재무장하므로
+  heap push는 frame당이 아니라 timeout 간격당 1회다.
+- heartbeat는 하나의 deadline handle을 상태마다 갱신하는 `Idle → Queued → Awaiting` 상태 기계다.
+  outstanding Ping은 최대 1개이고, response timeout은 enqueue가 아니라 실제 송신 완료 시점부터 세며,
+  interval은 `Awaiting` 해제 시점부터 다시 센다. `Queued`에도 send timeout을 둔다.
+  `max_pending_send_bytes`는 공간 상한이지 진행성 보장이 아니므로, 상대가 읽지 않아 Ping 하나가 queue에
+  남으면 그 상한에 닿지도 않고 송신 완료도 오지 않아 상태가 영구히 머문다.
+- `ConnectionCloseCause::Timeout`을 추가한다. idle timeout과 heartbeat 미응답이 이 cause를 공유한다.
+- heartbeat는 네트워크 계층에서 완결한다. write loop이 outbound channel 밖으로 `Ping`을 방출하고 read
+  loop이 활성 시에만 `Pong`을 가로채므로 command도 credit도 소비하지 않는다. 기본값은 비활성이며 그때
+  inbound `Pong`은 현재의 `ProtocolError` 종료 동작을 그대로 유지한다.
+- 별도 `RuntimeId::Net`은 추가하지 않는다.
 
 완료 기준:
 
 - inbound frame을 조용히 드롭하지 않고 credit 소진 전에 읽기를 중지한다.
-- 종료 원인을 누가 먼저 관측하든 `ConnectionClosed`가 정확히 한 번, terminal 전이 전에 승인된 command
-  뒤에 게시된다.
+- 종료 원인을 누가 먼저 관측하든, ingress close 이전에 종결에 진입한 연결의 `ConnectionClosed`가 정확히
+  한 번, terminal 전이 전에 승인된 command 뒤에 게시된다. shutdown 중 종결은 0회이며 이는 현재 동작이다.
 - coroutine frame 파괴, socket close와 deadline 만료가 경합해도 use-after-free가 없다.
 - partial send와 `EPOLLOUT` 재무장이 write loop 안에서 처리된다.
 - Debug, ASan·UBSan, TSan에서 연결 폭주와 강제 종료 시나리오가 통과한다.

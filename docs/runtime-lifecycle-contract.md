@@ -4,6 +4,7 @@
 > 범위: 서버 전체의 종료 판정, Runtime 사이의 drain 조합, 실패와 취소 전파, 종료 순서
 >
 > Actor runtime 내부 조건은 [Coroutine Actor 계약](./coroutine-actor-contract.md)이,
+> 연결 하나의 네트워크 상태 소유권과 수명은 [ConnectionScope 계약](./connection-scope-contract.md)이,
 > 목표 구조와 불변식은 [서버 아키텍처 초안](./server-architecture-draft.md)이,
 > 구현 순서는 [개발 로드맵](./development-roadmap.md)이 소유한다.
 
@@ -35,7 +36,10 @@ NetworkRuntimeDrained =
 ```
 
 `no active connection`의 현재 의미는 session map이 빈 상태다. 단계 4.5 이후에는 모든
-`ConnectionScope`가 terminal 상태에 도달한 것을 뜻한다.
+`ConnectionScope`가 terminal 상태에 도달한 것을 뜻한다. 그 terminal 상태의 정의와 파괴 조건은
+[ConnectionScope 계약](./connection-scope-contract.md) §3이 소유하며, 이 절의 재정의는 4.5 구현이
+반영되는 시점에 갱신한다. 특히 `Retired`는 socket close와 같은 사건이 아니다. scope는
+`ConnectionClosed`가 종결될 때까지 유지되므로 pending lifecycle 예산이 그 상태에 붙는다.
 
 ### 확장 규칙
 
@@ -68,9 +72,11 @@ UnifiedRuntimeDrained =
   terminal 처리해 in-flight가 0이 되고 모든 Worker가 join한 뒤 endpoint를 비활성화한다. 따라서
   completion claim과 publish 사이에 drain이나 runtime 파괴가 끼어들지 않는다.
 
-`ConnectionScope` 종료는 lifecycle coordinator가 추적한다. 다만 별도 `RuntimeId::Net`을 추가할지는
-단계 4.5 구현 시 결정한다. 논리적인 drain predicate와 `RuntimeId` enum은 같은 결정이 아니며, 한 단계만
-쓰이는 identity를 미리 확정하지 않는다.
+`ConnectionScope` 종료는 lifecycle coordinator가 추적한다. 별도 `RuntimeId::Net`을 추가할지는 단계 4.5
+구현 시 결정하기로 미뤄둔 항목이었고, **추가하지 않기로 결정했다.** 4.5의 최소 Executor가 reactor
+thread에서 실행되므로 network drain을 관측해야 하는 다른 스레드가 없고, 논리적인 drain predicate와
+`RuntimeId` enum은 같은 결정이 아니므로 한 단계만 쓰이는 identity를 확정하지 않는다. 이 결정을 뒤집는
+조건은 4.6에서 network drain을 coordinator가 관측해야 할 때다.
 
 ## 3. 종료 순서
 

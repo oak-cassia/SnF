@@ -5,7 +5,8 @@
 > `ActorRuntimeDrained`와 외부 비동기 operation 수명
 >
 > 이 문서는 Actor runtime 내부 조건만 소유한다. 서버 전체 종료 판정과 Runtime 사이의 조합은
-> [Runtime Lifecycle 계약](./runtime-lifecycle-contract.md)이 소유한다.
+> [Runtime Lifecycle 계약](./runtime-lifecycle-contract.md)이, 연결 하나의 네트워크 상태 소유권과
+> 수명은 [ConnectionScope 계약](./connection-scope-contract.md)이 소유한다.
 
 ## 1. 신원
 
@@ -84,6 +85,8 @@ Idle + mailbox command
 - continuation은 일반 command보다 먼저 해당 Actor를 재개한다.
 - network close는 같은 reactor가 만든 일반 command 뒤에 기존 ingress FIFO로 게시된다. 반대로
   continuation은 command 앞의 priority 규율을 사용하므로 두 입력을 하나의 queue 규칙으로 섞지 않는다.
+  그 게시가 승인된 command 뒤에 온다는 보장은
+  [ConnectionScope 계약](./connection-scope-contract.md) §3이 소유한다.
 - ready queue에는 Actor당 최대 하나의 token만 존재한다.
 - suspended command는 완료 또는 취소 전까지 outstanding capacity를 점유한다.
 - Actor 하나는 동시에 하나의 operation만 await한다. 한 command의 순차적인 여러 await는 허용하지만
