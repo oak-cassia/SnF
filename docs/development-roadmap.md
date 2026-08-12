@@ -311,7 +311,7 @@ Actor queue wait p50이 남은 차이는 command당 lock 획득이 하나 늘어
 드레인을 batch로 바꿔 대부분을 회수했다. RTT는 동등하므로 fast path를 lock-free로 만드는 작업은
 하지 않았다. 향후 측정이 Runtime 최적화를 정당화할 때만 이 경로를 다시 구성한다.
 
-## 4.2. Network Correctness
+## 4.2. Network Correctness (완료)
 
 현재의 단일 `epoll` reactor와 callback 구조를 유지하고 관측된 correctness 문제만 해결한다.
 
@@ -327,6 +327,13 @@ Actor queue wait p50이 남은 차이는 command당 lock 획득이 하나 늘어
 - 오류 앞에 완전히 decode된 frame이 순서대로 반환된다.
 - 오류 후 decoder 상태가 명시적이고 buffer가 무제한 유지되지 않는다.
 - 기존 Debug 단위·통합·부하 테스트가 통과한다.
+
+완료 결과:
+
+- pull API는 frame을 한 번에 하나씩 반환하고 partial frame은 다음 `push()`까지 보존한다.
+- protocol error는 decoder buffer를 초기화한다. 호환 `append()`는 같은 배치에서 오류보다 앞선 정상
+  frame을 반환하며, 오류 뒤 decoder 재사용도 단위 테스트로 검증한다.
+- Debug, ASan·UBSan과 TSan의 단위·통합·부하 테스트가 모두 통과했다.
 
 ## 보류된 Runtime 최적화 설계: ConnectionScope
 
