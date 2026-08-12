@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <iostream>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -19,6 +20,7 @@ namespace
     {
         std::cout << "Usage: " << program_name
                   << " [--host 127.0.0.1] [--port 7777] [--connections 100]"
+                     " [--scenario ping|zone] [--players-per-zone 50]"
                      " [--duration 30] [--requests-per-second 1]"
                      " [--connect-timeout-ms 5000] [--request-timeout-ms 3000]\n";
     }
@@ -80,6 +82,7 @@ int main(const int argument_count, char* arguments[])
 
         if (argument != "--host" && argument != "--port" && argument != "--connections" &&
             argument != "--duration" && argument != "--requests-per-second" &&
+            argument != "--scenario" && argument != "--players-per-zone" &&
             argument != "--connect-timeout-ms" && argument != "--request-timeout-ms")
         {
             std::cerr << "Unknown option: " << argument << '\n';
@@ -142,6 +145,32 @@ int main(const int argument_count, char* arguments[])
 
             config.requests_per_second = *requests_per_second;
         }
+        else if (argument == "--scenario")
+        {
+            if (value == "ping")
+            {
+                config.scenario = snf::load::LoadScenario::Ping;
+            }
+            else if (value == "zone")
+            {
+                config.scenario = snf::load::LoadScenario::Zone;
+            }
+            else
+            {
+                std::cerr << "Invalid scenario: " << value << '\n';
+                return 1;
+            }
+        }
+        else if (argument == "--players-per-zone")
+        {
+            const auto players = parse_positive_size(value, 100'000);
+            if (!players)
+            {
+                std::cerr << "Invalid players per Zone: " << value << '\n';
+                return 1;
+            }
+            config.players_per_zone = *players;
+        }
         else if (argument == "--connect-timeout-ms")
         {
             const auto timeout = parse_positive_size(value, 3'600'000);
@@ -182,6 +211,15 @@ int main(const int argument_count, char* arguments[])
 
     std::ranges::sort(round_trip_milliseconds);
 
+    std::vector<double> gameplay_round_trip_milliseconds;
+    gameplay_round_trip_milliseconds.reserve(result.gameplay_round_trip_times.size());
+    for (const auto round_trip_time : result.gameplay_round_trip_times)
+    {
+        gameplay_round_trip_milliseconds.push_back(
+            std::chrono::duration<double, std::milli>{round_trip_time}.count());
+    }
+    std::ranges::sort(gameplay_round_trip_milliseconds);
+
     const double average_round_trip_milliseconds =
         round_trip_milliseconds.empty()
             ? 0.0
@@ -201,6 +239,10 @@ int main(const int argument_count, char* arguments[])
               << " received, " << result.request_timeouts << " timeout, "
               << result.invalid_responses << " invalid, " << result.socket_errors
               << " socket error\n";
+    std::cout << "Workload: " << result.sent_bootstrap_requests << '/'
+              << result.received_bootstrap_responses << " bootstrap sent/received, "
+              << result.sent_gameplay_requests << '/' << result.received_gameplay_responses
+              << " gameplay sent/received\n";
 
     std::cout << std::fixed << std::setprecision(3) << "Throughput: " << throughput
               << " responses/s\n"
@@ -208,6 +250,12 @@ int main(const int argument_count, char* arguments[])
               << percentile(round_trip_milliseconds, 0.50) << ", p95 "
               << percentile(round_trip_milliseconds, 0.95) << ", p99 "
               << percentile(round_trip_milliseconds, 0.99) << '\n';
+    if (!gameplay_round_trip_milliseconds.empty())
+    {
+        std::cout << "Gameplay RTT ms: p50 " << percentile(gameplay_round_trip_milliseconds, 0.50)
+                  << ", p95 " << percentile(gameplay_round_trip_milliseconds, 0.95) << ", p99 "
+                  << percentile(gameplay_round_trip_milliseconds, 0.99) << '\n';
+    }
 
     if (!result.success)
     {

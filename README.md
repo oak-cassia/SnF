@@ -144,6 +144,13 @@ effect는 network outbound 용량을 소비하지 않는다. 현재 log와 check
 프로세스 crash 복구와 시즌 정산은 durable event store/outbox를 6.3 저장 adapter와 함께 정한 뒤의
 범위다.
 
+콘텐츠 부하를 재현하기 위해 load client는 기존 `ping` 외에 `zone` 시나리오를 제공한다. 각 연결이
+고유 Player로 인증하고 Zone에 입장한 뒤 지속 이동하며 bootstrap과 gameplay RTT를 분리한다. 현재
+Release 기준선(200 connections, 8 Zones, 12초, 연결당 20 req/s)은 48,000/48,000 응답,
+gameplay p99 3.705ms, timeout·queue overflow·tick overrun 0이었다. reactor turn p99 0.655ms와
+균형 잡힌 Worker 처리량을 함께 보면 지금은 ConnectionScope를 구현할 근거가 없으며, durable DB와
+hot Zone 측정이 다음 판단 입력이다.
+
 ## 로드맵
 
 ```text
@@ -179,6 +186,17 @@ docker run --rm -it \
   -v "$PWD:/workspace" \
   -w /workspace \
   snf-server-dev
+```
+
+서버를 실행한 상태에서 playable Zone 부하는 다음처럼 재현한다.
+
+```bash
+./build/release/snf_load_client \
+  --scenario zone \
+  --connections 200 \
+  --players-per-zone 25 \
+  --duration 12 \
+  --requests-per-second 20
 ```
 
 Debug 빌드와 테스트:

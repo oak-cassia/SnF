@@ -1,5 +1,7 @@
 #pragma once
 
+#include "snf/load/load_scenario.hpp"
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -15,6 +17,8 @@ namespace snf::load
         std::size_t connections{100};
         std::chrono::milliseconds duration{30000};
         std::size_t requests_per_second{1};
+        LoadScenario scenario{LoadScenario::Ping};
+        std::size_t players_per_zone{50};
         std::chrono::milliseconds connect_timeout{5000};
         std::chrono::milliseconds request_timeout{3000};
     };
@@ -29,11 +33,16 @@ namespace snf::load
         std::size_t maximum_active_connections{0};
         std::size_t sent_requests{0};
         std::size_t received_responses{0};
+        std::size_t sent_bootstrap_requests{0};
+        std::size_t received_bootstrap_responses{0};
+        std::size_t sent_gameplay_requests{0};
+        std::size_t received_gameplay_responses{0};
         std::size_t request_timeouts{0};
         std::size_t invalid_responses{0};
         std::size_t socket_errors{0};
         std::chrono::steady_clock::duration load_duration{};
         std::vector<std::chrono::steady_clock::duration> round_trip_times;
+        std::vector<std::chrono::steady_clock::duration> gameplay_round_trip_times;
     };
 
     class LoadClient

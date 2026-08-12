@@ -612,6 +612,26 @@ UnifiedRuntimeDrained =
 - DB 대기 중 다른 Actor가 진행하고 tick overrun, shard 편향, queue wait과 end-to-end
   p99를 수집한다.
 
+콘텐츠 부하 기준선 (완료):
+
+- `snf_load_client --scenario zone`은 연결마다 고유 Player를 인증하고, 설정한
+  `players_per_zone`에 따라 Zone에 입장한 뒤 한 번에 하나의 Move를 지속 전송한다. bootstrap과
+  gameplay 요청 수·RTT를 분리해 인증/입장 비용이 이동 p99를 왜곡하지 않게 한다. response type,
+  request ID, Zone, 좌표와 가변 visible-player payload 길이를 검증한다.
+- Release, 200 connections, 8 Zones(Zone당 25명), 12초, 연결당 20 req/s에서 총
+  48,000/48,000 응답, timeout·invalid·socket error 0, gameplay RTT p99 `3.705 ms`였다.
+  actor queue overflow, outbound admission failure, tick drop/skip/overrun도 모두 0이었다.
+- 같은 실행의 reactor turn p99는 `0.655 ms`, outbound hand-off p99는 `0.983 ms`, outbound queue
+  high-water는 `191/4096`이었다. Worker별 queue wait p99는 `0.197/0.262 ms`, 최종 처리량은
+  `24,942/24,954`로 균형이었다. Zone command/tick 실행 p99는 각각 `2.815 µs/0.511 µs`였다.
+- Zone을 4개로 줄인 Debug 탐색에서는 Worker 처리량이 약 1:3으로 기울었고 8개로 늘리자 거의
+  균등해졌다. 이는 ConnectionScope나 runtime 통합이 해결할 cross-runtime 병목이 아니라 적은 hot
+  Actor의 고정 shard 배치 특성이다.
+- 따라서 이 기준선은 4.5 `ConnectionScope` 착수를 지지하지 않는다. 다음 측정은 durable DB 지연,
+  더 큰 AOI 응답과 단일 hot Zone을 각각 분리해 수행한다. 그때 reactor p99/overflow 또는
+  cross-runtime hand-off가 지배적이면 4.5를 승격하고, 특정 Worker queue wait/tick overrun만
+  악화되면 Zone 분할·배치 정책을 먼저 다룬다.
+
 #### 5.3 세부 기준
 
 - 일반화된 scheduler 위에 `ZoneActor`와 Zone binding을 구현해 PlayerActor와 동일한
