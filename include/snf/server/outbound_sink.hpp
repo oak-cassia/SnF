@@ -19,6 +19,11 @@ namespace snf::server
     public:
         virtual ~OutboundSink() = default;
 
+        // Whether a request this size could ever be granted. A request above the
+        // per-connection limit never can, so a caller has to tell it apart from
+        // saturation instead of waiting for a grant that cannot come.
+        [[nodiscard]] virtual bool canEverReserve(std::size_t slots) const noexcept = 0;
+
         // Non-blocking. std::nullopt means capacity must be awaited through
         // registerWaiter; it is not an invitation to retry in a loop.
         [[nodiscard]] virtual std::optional<OutboundReservation>
@@ -42,7 +47,9 @@ namespace snf::server
                                           OutboundAction action) = 0;
 
         // Records a connection whose emission could not even be admitted, so the
-        // backend closes it rather than dropping its response silently.
+        // backend closes it rather than dropping its response silently. Reports for one
+        // connection collapse, so a connection failing repeatedly cannot crowd out
+        // another connection's close.
         virtual void reportAdmissionFailure(snf::net::ConnectionId connection) noexcept = 0;
     };
 
@@ -53,6 +60,8 @@ namespace snf::server
     {
     public:
         explicit ChannelOutboundSink(OutboundChannel& channel) noexcept;
+
+        [[nodiscard]] bool canEverReserve(std::size_t slots) const noexcept override;
 
         [[nodiscard]] std::optional<OutboundReservation>
         tryReserve(snf::net::ConnectionId connection, std::size_t slots) override;

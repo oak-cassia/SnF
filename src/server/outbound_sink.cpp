@@ -9,6 +9,11 @@ namespace snf::server
     {
     }
 
+    bool ChannelOutboundSink::canEverReserve(const std::size_t slots) const noexcept
+    {
+        return _channel.canEverReserve(slots);
+    }
+
     std::optional<OutboundReservation>
     ChannelOutboundSink::tryReserve(const snf::net::ConnectionId connection,
                                     const std::size_t slots)

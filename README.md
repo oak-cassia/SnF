@@ -85,14 +85,15 @@ Network Runtime
 - bounded ingress queue와 Session별 send backpressure
 - 용량 예약으로 동작하는 outbound channel: 포화 시 Worker가 아니라 Actor 하나가 suspend되고, 연결별
   상한과 reactor 회차당 grant 상한이 있으며, 예약 대기조차 승인되지 않으면 그 연결을 종료한다
-- 응답 유무와 무관하게 command마다 정확히 한 번 관측되는 command terminal 신호
+- command마다 정확히 한 번 관측되는 credit 반환 신호와, 그것과 분리해 집계하는 admission 거부 지표
 - connection lifecycle 전달, runtime drain/failure와 graceful shutdown
 - lazy `ActorTask`, bounded continuation reservation과 owning-Worker 전용 coroutine resume/cancel/frame 파괴
 - suspend 중 같은 Actor의 FIFO를 보존하면서 같은 Worker의 다른 Actor를 진행시키는 scheduler
 - in-flight, suspension duration, reservation/cancel/late completion과 passivation 후보 metric
 - reactor turn 지연, Actor queue wait, pending send, outbound depth와 outbound hand-off 시간의
   `p50/p95/p99/max` 계측과 운영 중 주기 노출
-- 예약된 슬롯, 용량을 기다리는 Actor 수, 추적 중인 연결 수와 command terminal 수 gauge
+- 예약된 슬롯, 용량을 기다리는 Actor 수, 추적 중인 연결 수, 결과에 도달한 command 수와 admission
+  거부 수 gauge
 - 단위·TCP 통합·부하 테스트 및 ASan·UBSan·TSan preset
 
 Phase 3.8에서 scheduler의 Player 전용 의존을 제거하고, 모든 Worker를

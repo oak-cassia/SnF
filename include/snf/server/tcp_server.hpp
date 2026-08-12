@@ -55,6 +55,10 @@ namespace snf::server
         // wait for outbound capacity. Counted apart from actor_queue_overflows: the
         // saturated resource is the outbound channel, not a command queue.
         std::uint64_t outbound_admission_failures{0};
+        // Record-budget/allocation fail-safes. Each occurrence closes every current
+        // session rather than losing an admission-failure close or failing a Logic
+        // Worker. Non-zero means the configured record bound deserves investigation.
+        std::uint64_t outbound_admission_failure_fallbacks{0};
         std::uint64_t stale_outbound_actions{0};
         std::uint64_t connection_lifecycle_rejections{0};
         std::size_t pending_connection_closes_high_water_mark{0};

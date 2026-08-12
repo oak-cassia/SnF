@@ -387,6 +387,10 @@ namespace snf::server
                 snf::net::throw_system_error("epoll_ctl(EPOLL_CTL_ADD client)");
             }
 
+            // Creates this connection's outbound accounting once, so its commands do
+            // not each allocate one inside the channel lock.
+            _outbound.trackConnection(connection);
+
             ++_stats.accepted_connections;
             std::cout << "Accepted client FD: " << client_descriptor << '\n';
         }
@@ -591,7 +595,8 @@ namespace snf::server
 
     void TcpServer::closeConnectionsWithFailedOutboundAdmission()
     {
-        _outbound.takePendingAdmissionFailures(_failed_outbound_admissions);
+        const bool close_all_sessions =
+            _outbound.takePendingAdmissionFailures(_failed_outbound_admissions);
 
         for (const snf::net::ConnectionId connection : _failed_outbound_admissions)
         {
@@ -607,6 +612,22 @@ namespace snf::server
         }
 
         _failed_outbound_admissions.clear();
+
+        if (!close_all_sessions)
+        {
+            return;
+        }
+
+        // The channel could not retain one exact connection ID without violating its
+        // fixed memory bound. Closing every current session is deliberately conservative:
+        // it guarantees the affected live connection is not left with a silently missing
+        // response, while the Worker that detected the condition remains healthy.
+        ++_stats.outbound_admission_failure_fallbacks;
+        while (!_sessions.empty())
+        {
+            ++_stats.outbound_admission_failures;
+            removeSession(_sessions.begin()->first, ConnectionCloseCause::Overflow);
+        }
     }
 
     void TcpServer::handleOutboundAction(OutboundAction action)

@@ -107,12 +107,13 @@ namespace
         assert(channel.tryReserve(connection, 2));
     }
 
-    void test_connection_accounting_survives_commands_and_ends_with_the_connection()
+    void test_a_tracked_connection_keeps_its_accounting_between_commands()
     {
         const auto wake = make_wake_descriptor();
         OutboundChannel channel{OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 4},
                                 wake.getDescriptor()};
         const auto connection = connection_of(4);
+        channel.trackConnection(connection);
 
         {
             auto reservation = channel.tryReserve(connection, 1);
@@ -121,8 +122,8 @@ namespace
         }
         assert(channel.tryPop());
 
-        // Idle, but still tracked: the next command of a live connection would only
-        // have to allocate the entry again.
+        // Idle, but still tracked: the next command of a live connection would only have
+        // to allocate the entry again.
         assert(channel.trackedConnectionCount() == 1);
 
         channel.forgetConnection(connection);
@@ -130,6 +131,7 @@ namespace
 
         // Forgotten while it still holds a queued action: the entry has to outlive the
         // session until that action drains.
+        channel.trackConnection(connection);
         auto reservation = channel.tryReserve(connection, 1);
         assert(reservation);
         assert(channel.commit(*reservation, send_action(connection, 2)));
@@ -137,6 +139,32 @@ namespace
         assert(channel.trackedConnectionCount() == 1);
         assert(channel.tryPop());
         assert(channel.trackedConnectionCount() == 0);
+    }
+
+    void test_an_untracked_connection_leaves_no_accounting_behind()
+    {
+        const auto wake = make_wake_descriptor();
+        OutboundChannel channel{OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 4},
+                                wake.getDescriptor()};
+        // A command that reaches the channel after its session closed: the backend never
+        // tracked this connection and will never forget it either, so its accounting has
+        // to go as soon as it is idle. Otherwise connection churn accumulates entries.
+        const auto stale = connection_of(4);
+        channel.forgetConnection(stale);
+
+        auto reservation = channel.tryReserve(stale, 1);
+        assert(reservation);
+        assert(channel.trackedConnectionCount() == 1);
+        assert(channel.commit(*reservation, send_action(stale, 1)));
+        assert(channel.tryPop());
+        assert(channel.trackedConnectionCount() == 0);
+
+        // A refused reserve leaves nothing behind either.
+        const auto other = connection_of(5);
+        auto blocking = channel.tryReserve(other, 4);
+        assert(blocking);
+        assert(channel.tryReserve(connection_of(6), 1) == std::nullopt);
+        assert(channel.trackedConnectionCount() == 1);
     }
 
     void test_reserve_defers_to_a_registered_waiter()
@@ -338,7 +366,25 @@ namespace
         assert(!waiter.state->takeResult().valid());
     }
 
-    void test_admission_failures_are_bounded_and_drained()
+    void test_an_unsatisfiable_request_is_refused_without_throwing()
+    {
+        const auto wake = make_wake_descriptor();
+        OutboundChannel channel{OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 2},
+                                wake.getDescriptor()};
+        const auto connection = connection_of(4);
+
+        // Above the per-connection limit, so no amount of freed capacity would ever
+        // satisfy it. Refusing keeps this from becoming a Worker failure, and
+        // canEverReserve is what lets the caller tell it apart from saturation.
+        assert(!channel.canEverReserve(3));
+        assert(channel.tryReserve(connection, 3) == std::nullopt);
+        assert(channel.trackedConnectionCount() == 0);
+
+        assert(channel.canEverReserve(2));
+        assert(channel.tryReserve(connection, 2));
+    }
+
+    void test_admission_failures_collapse_and_overflow_uses_the_fail_safe()
     {
         const auto wake = make_wake_descriptor();
         OutboundChannel channel{OutboundChannelConfig{.capacity = 1,
@@ -346,19 +392,37 @@ namespace
                                                       .max_pending_admission_failures = 2},
                                 wake.getDescriptor()};
 
+        // One connection reporting repeatedly holds one record, so it cannot crowd out
+        // another connection's close.
+        channel.reportAdmissionFailure(connection_of(4));
+        channel.reportAdmissionFailure(connection_of(4));
+        channel.reportAdmissionFailure(connection_of(4));
+        channel.reportAdmissionFailure(connection_of(5));
+        assert(channel.pendingAdmissionFailureCount() == 2);
+
+        std::vector<snf::net::ConnectionId> failures;
+        assert(!channel.takePendingAdmissionFailures(failures));
+        assert(failures.size() == 2);
+        assert(channel.pendingAdmissionFailureCount() == 0);
+
+        failures.clear();
+        assert(!channel.takePendingAdmissionFailures(failures));
+        assert(failures.empty());
+
+        // Exceeding the exact-record bound neither loses the condition nor throws on the
+        // Worker. The reactor receives a fail-safe bit and closes every current session,
+        // which necessarily includes the affected connection if it is still alive.
         channel.reportAdmissionFailure(connection_of(4));
         channel.reportAdmissionFailure(connection_of(5));
         channel.reportAdmissionFailure(connection_of(6));
 
-        std::vector<snf::net::ConnectionId> failures;
-        channel.takePendingAdmissionFailures(failures);
+        assert(channel.pendingAdmissionFailureCount() == 2);
+        failures.clear();
+        assert(channel.takePendingAdmissionFailures(failures));
         assert(failures.size() == 2);
-        assert(failures[0] == connection_of(4));
-        assert(failures[1] == connection_of(5));
-        assert(channel.droppedAdmissionFailureCount() == 1);
 
         failures.clear();
-        channel.takePendingAdmissionFailures(failures);
+        assert(!channel.takePendingAdmissionFailures(failures));
         assert(failures.empty());
     }
 
@@ -387,7 +451,10 @@ void run_outbound_channel_tests()
     test_reserve_then_commit_moves_capacity_from_reserved_to_queued();
     test_zero_slot_reservation_is_valid_and_consumes_no_capacity();
     test_uncommitted_slots_return_when_the_reservation_dies();
-    test_connection_accounting_survives_commands_and_ends_with_the_connection();
+    test_a_tracked_connection_keeps_its_accounting_between_commands();
+    test_an_untracked_connection_leaves_no_accounting_behind();
+    test_an_unsatisfiable_request_is_refused_without_throwing();
+    test_admission_failures_collapse_and_overflow_uses_the_fail_safe();
     test_reserve_defers_to_a_registered_waiter();
     test_per_connection_limit_does_not_block_another_connection();
     test_global_capacity_blocks_a_waiter_until_a_pop_frees_a_slot();
@@ -396,6 +463,5 @@ void run_outbound_channel_tests()
     test_withdrawn_waiter_is_never_granted();
     test_cancel_releases_every_waiter_with_an_invalid_reservation();
     test_registering_on_a_cancelled_channel_completes_the_producer();
-    test_admission_failures_are_bounded_and_drained();
     test_rejects_an_unsatisfiable_configuration();
 }

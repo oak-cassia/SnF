@@ -34,9 +34,13 @@ namespace snf::server
         GameServerStats counters;
         TcpServerMetrics network;
         snf::runtime::ActorRuntimeStats actor_runtime;
-        // Commands that reached a final result, counted once each whether or not they
-        // answered. Phase 4.5 replaces the counting consumer with the credit owner.
+        // Commands that were admitted and reached a final result, counted once each
+        // whether or not they answered. Phase 4.5 replaces the counting consumer with
+        // the credit owner.
         std::uint64_t command_terminals{0};
+        // Posts the runtime refused. A different fact with a different cause, so it is
+        // never folded into the count above.
+        std::uint64_t command_admission_rejections{0};
     };
 
     struct GameServerConfig
@@ -106,7 +110,7 @@ namespace snf::server
         OutboundChannel _outbound_channel;
         ChannelOutboundSink _outbound_sink;
         ProtocolPlayerEffectSink _player_effects;
-        CountingCommandTerminalSink _command_terminals;
+        CountingCommandLifecycleSink _command_lifecycle;
         snf::runtime::RuntimeCompletionCoordinator _runtime_completion;
         // Bindings must outlive the generic runtime: the worker owns the
         // wrapper destruction, while this object owns Player dependencies.

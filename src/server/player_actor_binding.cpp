@@ -106,9 +106,9 @@ namespace snf::server
     struct PlayerActorBinding::CommandPayload
     {
         PlayerInboundCommand command;
-        // Destroyed with this payload, which is what makes the terminal signal fire
-        // exactly once per command on every path the scheduler has.
-        CommandTerminalToken terminal;
+        // Destroyed with this payload, which is what makes the release fire exactly once
+        // per command on every path the scheduler has.
+        CommandReleaseToken release;
     };
 
     struct PlayerActorBinding::ConnectionClosedPayload
@@ -118,11 +118,11 @@ namespace snf::server
 
     PlayerActorBinding::PlayerActorBinding(PlayerEffectSink& effects,
                                            OutboundSink& outbound,
-                                           CommandTerminalSink& terminals,
+                                           CommandLifecycleSink& lifecycle,
                                            PlayerActorBindingConfig config)
         : _effects(effects)
         , _outbound(outbound)
-        , _terminals(terminals)
+        , _lifecycle(lifecycle)
         , _on_before_command(std::move(config.on_before_command))
     {
     }
@@ -146,10 +146,11 @@ namespace snf::server
             snf::runtime::ActorAccounting::Command,
             CommandPayload{
                 .command = std::move(command),
-                // Armed here, at the boundary that admits a command. A frame rejected
-                // earlier by the protocol never became a command, so it consumes no
-                // credit and reports no terminal.
-                .terminal = CommandTerminalToken{_terminals, connection},
+                // Armed here, at the boundary that admits a command. A frame the protocol
+                // rejected earlier never became a command, so it takes no credit and
+                // reports nothing. A refused post does release, because it took credit
+                // here before the runtime turned it away.
+                .release = CommandReleaseToken{_lifecycle, connection},
             });
     }
 
@@ -242,6 +243,14 @@ namespace snf::server
             slot.stage = PlayerActorSlot::Stage::Reserving;
 
             const std::size_t required_slots = _effects.requiredSlots(slot.pending_result);
+            if (!_outbound.canEverReserve(required_slots))
+            {
+                // More than one connection may ever hold. Waiting would never end and
+                // throwing would take down every actor this Worker owns, so the command
+                // ends here and the backend closes the connection.
+                return abandonEmission(slot);
+            }
+
             if (auto reservation = _outbound.tryReserve(slot.connection, required_slots))
             {
                 // Outside saturation this is the whole story: no operation is begun, so

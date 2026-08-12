@@ -11,6 +11,7 @@
 #include <optional>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace snf::server
@@ -89,7 +90,11 @@ namespace snf::server
         // reserves an in-flight slot before it registers, so registration is never
         // the binding constraint and a full registry means a broken invariant.
         std::size_t max_waiters{4096};
-        std::size_t max_pending_admission_failures{1024};
+        // Covers both the backend's maximum concurrent connections and commands that
+        // were already outstanding when their connection disappeared. Failures are
+        // keyed by connection. Exceeding the bound uses a no-throw reactor fail-safe;
+        // it never discards the condition on the Worker.
+        std::size_t max_pending_admission_failures{4096};
     };
 
     // Owns outbound storage, its capacity accounting and the reactor wake-up behind
@@ -108,8 +113,15 @@ namespace snf::server
         OutboundChannel(const OutboundChannel&) = delete;
         OutboundChannel& operator=(const OutboundChannel&) = delete;
 
+        // Whether a request of this size could ever be granted. A request above the
+        // per-connection limit is unsatisfiable no matter how much capacity frees, so a
+        // caller has to distinguish it from saturation before it waits for a grant that
+        // can never come. Const and lock-free.
+        [[nodiscard]] bool canEverReserve(std::size_t slots) const noexcept;
+
         // Non-blocking. std::nullopt means the caller must register a waiter or give
-        // up; it never means "retry in a loop".
+        // up; it never means "retry in a loop". A request that canEverReserve rejects
+        // also returns std::nullopt, so callers check that first.
         //
         // While any waiter is registered this refuses even a satisfiable request, so
         // a late arrival cannot barge ahead of an actor that is already suspended.
@@ -143,18 +155,33 @@ namespace snf::server
         // expensive. Actions are appended, so the caller controls the buffer.
         void drainInto(std::vector<PostedOutboundAction>& actions, std::size_t max_actions);
         std::size_t grantPending();
-        // Reactor only. A connection's accounting outlives its individual commands, so
-        // entries are kept rather than created and destroyed per command: allocating a
-        // map node inside the lock on every command lengthens the critical section for
-        // everyone. The entry is dropped once the session is gone and whatever it still
-        // holds has drained.
+        // Reactor only, when a connection is accepted. A connection's accounting
+        // outlives its individual commands, so the entry is created here rather than per
+        // command: allocating a map node inside the lock on every command lengthens the
+        // critical section for everyone.
+        void trackConnection(snf::net::ConnectionId connection);
+        // Reactor only, when a connection is gone. The entry is dropped once whatever it
+        // still holds has drained. An entry created for a connection the backend never
+        // tracked -- a late command for a session that is already closed -- is dropped
+        // as soon as it is idle, because no forgetConnection will ever arrive for it.
         void forgetConnection(snf::net::ConnectionId connection);
-        void takePendingAdmissionFailures(std::vector<snf::net::ConnectionId>& failures);
+        // Moves the recorded connections to the caller. true means the fixed record
+        // budget was exceeded (or recording allocated unsuccessfully), so the reactor
+        // must apply the fail-safe policy to every current session: the one record that
+        // could not be retained must never turn into a silently missing response.
+        [[nodiscard]] bool
+        takePendingAdmissionFailures(std::vector<snf::net::ConnectionId>& failures);
 
         // Callable from any thread. Records a connection whose outbound admission
         // failed before any capacity was reserved, so the reactor can close it under
         // the same overflow policy the inbound path uses instead of dropping the
         // response silently.
+        //
+        // Keyed by connection, so repeated reports for one connection collapse and a
+        // single connection cannot crowd out other connections' closes. This is a Worker
+        // failure path and must not throw. If the record budget is nevertheless exceeded,
+        // a preallocated flag asks the reactor to close all current sessions rather than
+        // dropping this close or failing the Worker.
         void reportAdmissionFailure(snf::net::ConnectionId connection) noexcept;
 
         // Abandons queued actions and releases every waiter with the cancelled
@@ -171,7 +198,7 @@ namespace snf::server
         // commands, so this is the gauge that shows the bound holding: it must track
         // live connections and not the command rate.
         [[nodiscard]] std::size_t trackedConnectionCount() const;
-        [[nodiscard]] std::uint64_t droppedAdmissionFailureCount() const;
+        [[nodiscard]] std::size_t pendingAdmissionFailureCount() const;
         [[nodiscard]] bool isCancelled() const;
 
     private:
@@ -190,10 +217,13 @@ namespace snf::server
             // Kept in step with waiters being non-empty, so the grant order holds at
             // most one entry per connection.
             bool queued_for_grant{false};
-            // Set when the backend has dropped the connection. Until then the entry
-            // survives an idle moment, because the next command of a live connection
-            // would only have to allocate it again.
-            bool forgotten{false};
+            // A tracked connection keeps its entry through an idle moment, because its
+            // next command would only have to allocate it again. Everything else --
+            // a connection the backend has dropped, or one it never tracked because the
+            // command arrived after the session closed -- is dropped as soon as it holds
+            // nothing. Defaulting to true is what keeps connection churn from
+            // accumulating entries nobody will ever forget.
+            bool erase_when_idle{true};
         };
 
         // The connection travels with the action so a pop does not have to inspect
@@ -235,12 +265,12 @@ namespace snf::server
         std::unordered_map<snf::net::ConnectionId, ConnectionUsage, snf::net::ConnectionIdHash>
             _connections;
         std::deque<snf::net::ConnectionId> _grant_order;
-        std::deque<snf::net::ConnectionId> _admission_failures;
+        std::unordered_set<snf::net::ConnectionId, snf::net::ConnectionIdHash> _admission_failures;
         std::size_t _reserved_slots{0};
         std::size_t _waiter_count{0};
         std::size_t _high_water_mark{0};
         std::uint64_t _next_ticket{1};
-        std::uint64_t _dropped_admission_failures{0};
+        bool _admission_failure_overflowed{false};
         bool _cancelled{false};
 
         friend class OutboundReservation;

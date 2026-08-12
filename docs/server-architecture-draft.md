@@ -587,7 +587,7 @@ Runtime 사이에서 동기 호출이나 `future.get()`으로 상대 Worker를 �
 | --- | --- | --- | --- |
 | Session inbound | `FramePostResult::Full`이면 그 연결을 `ConnectionCloseCause::Overflow`로 종료한다. frame을 조용히 버리지는 않는다 | in-flight credit 소진 전에 socket 읽기를 중지하고 command terminal에서 credit을 반환한다. admission 실패와 악성 과부하는 명시적 정책으로 종료한다 | 4.5 (계약은 3.9에서 확정) |
 | Actor command ingress | Worker별 bounded capacity. `Full`은 위 inbound 정책으로 귀결된다 | credit이 admission을 앞단에서 제한하므로 `Full` 도달이 예외 경로가 된다 | 4.5 |
-| Outbound queue | Binding이 방출 전에 용량을 예약하고, 실패하면 그 Actor만 suspend된 뒤 reactor의 grant를 기다린다. 연결별 상한이 있고, 예약 대기조차 승인되지 않으면 그 연결을 `Overflow`로 종료한다 | 현재 동작을 유지한다 | 4.1 완료 |
+| Outbound queue | Binding이 방출 전에 용량을 예약하고, 실패하면 그 Actor만 suspend된 뒤 reactor의 grant를 기다린다. 연결별 상한이 있고, 예약 대기조차 승인되지 않거나 결과가 연결별 상한보다 크면 그 연결을 `Overflow`로 종료한다. 종료 요청은 연결 단위로 합치며, 기록 상한/할당 실패에는 Worker 예외나 silent drop 대신 현재 session 전체를 닫는 reactor fail-safe를 쓴다 | 현재 동작을 유지한다 | 4.1 완료 |
 | Connection lifecycle post | reactor 소유 pending deque가 회차당 제한된 건수를 재시도하고, active session과 pending close가 lifecycle slot 예산을 공유한다 | 의미를 유지하되 `ConnectionScope` 단일 종결 경로로 이전한다 | 4.5 |
 | ZoneActor mailbox | 미구현 | 최신 입력 병합, 오래된 입력 폐기, 악성 세션 종료 | 6 |
 | DB queue | 미구현 | 제한된 재시도 또는 요청 실패 처리 | 5 |

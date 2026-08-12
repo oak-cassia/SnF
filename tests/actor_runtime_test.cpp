@@ -86,7 +86,7 @@ namespace
         snf::server::OutboundChannel outbound;
         snf::server::ChannelOutboundSink raw_outbound_sink;
         snf::server::ProtocolPlayerEffectSink outbound_sink;
-        snf::server::CountingCommandTerminalSink terminals;
+        snf::server::CountingCommandLifecycleSink lifecycle;
         RecordingRuntimeCompletion completion;
     };
 
@@ -98,10 +98,10 @@ namespace
                       snf::server::PlayerActorBindingConfig binding_config = {})
             : binding(dependencies.outbound_sink,
                       dependencies.raw_outbound_sink,
-                      dependencies.terminals,
+                      dependencies.lifecycle,
                       std::move(binding_config))
             , runtime(runtime_config, dependencies.completion)
-            , ingress(runtime, binding)
+            , ingress(runtime, binding, dependencies.lifecycle)
         {
             runtime.registerBinding(binding);
         }
@@ -1002,7 +1002,7 @@ namespace
         assert(dependencies.outbound.pendingWaiterCount() == 0);
     }
 
-    void test_every_admitted_command_reports_exactly_one_terminal()
+    void test_admitted_commands_and_refused_posts_are_counted_apart()
     {
         // Success, cancellation and mailbox discard in one run: three commands and a
         // close for the same actor, with the Worker parked until everything is queued.
@@ -1031,13 +1031,15 @@ namespace
             release_worker.set_value();
             player.runtime.join();
 
-            // Cancelled and discarded commands report their terminal exactly like the
-            // ones that answered.
-            assert(dependencies.terminals.count() == 3);
+            // Cancelled and discarded commands reach a result exactly like the ones that
+            // answered, and none of them was refused.
+            assert(dependencies.lifecycle.releaseCount() == 3);
+            assert(dependencies.lifecycle.admissionRejectionCount() == 0);
+            assert(dependencies.lifecycle.terminalCount() == 3);
         }
 
-        // A command refused before it was admitted still owes its terminal: the credit
-        // 4.5 takes at this boundary has to come back.
+        // A refused post still releases the credit it took at this boundary, but it is
+        // not a command that ran, so it is counted apart.
         {
             RuntimeDependencies dependencies{8};
             auto config = player_runtime_config(1, 1);
@@ -1061,10 +1063,80 @@ namespace
             release_worker.set_value();
             player.runtime.join();
 
-            // A post refused after the ingress closed owes one too.
             assert(player.ingress.tryPost(make_command(9, 3)) == PostResult::Closed);
-            assert(dependencies.terminals.count() == 3);
+
+            // Three submissions released their credit, two of them because the runtime
+            // refused the post. Only the admitted one reached a result.
+            assert(dependencies.lifecycle.releaseCount() == 3);
+            assert(dependencies.lifecycle.admissionRejectionCount() == 2);
+            assert(dependencies.lifecycle.terminalCount() == 1);
         }
+    }
+
+    // Prices every result above what one connection may ever hold. This is the shape a
+    // future multi-effect result takes when the per-connection limit is smaller than the
+    // effect count.
+    class OversizedEffectSink final : public snf::server::PlayerEffectSink
+    {
+    public:
+        explicit OversizedEffectSink(const std::size_t slots) noexcept
+            : _slots(slots)
+        {
+        }
+
+        [[nodiscard]] std::size_t
+        requiredSlots(const snf::server::PlayerResult&) const noexcept override
+        {
+            return _slots;
+        }
+
+        [[nodiscard]] bool commit(snf::net::ConnectionId,
+                                  snf::server::PlayerResult,
+                                  snf::server::OutboundReservation&) override
+        {
+            committed = true;
+            return true;
+        }
+
+        bool committed{false};
+
+    private:
+        std::size_t _slots;
+    };
+
+    void test_an_unsatisfiable_result_closes_the_connection_instead_of_failing_the_worker()
+    {
+        RuntimeDependencies dependencies{2};
+        OversizedEffectSink effects{3};
+        snf::server::PlayerActorBinding binding{
+            effects, dependencies.raw_outbound_sink, dependencies.lifecycle};
+        ActorRuntime runtime{player_runtime_config(1, 8), dependencies.completion};
+        runtime.registerBinding(binding);
+        snf::server::PlayerActorIngress ingress{runtime, binding, dependencies.lifecycle};
+
+        runtime.start();
+        assert(ingress.tryPost(make_command(1, 1)) == PostResult::Accepted);
+
+        std::vector<snf::net::ConnectionId> failures;
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        while (failures.empty() && std::chrono::steady_clock::now() < deadline)
+        {
+            const bool used_fail_safe =
+                dependencies.outbound.takePendingAdmissionFailures(failures);
+            assert(!used_fail_safe);
+            std::this_thread::yield();
+        }
+
+        // Reported for closing, not thrown: one oversized result must not take down every
+        // actor the Worker owns.
+        assert(failures.size() == 1);
+        assert(!effects.committed);
+
+        runtime.close();
+        runtime.join();
+        assert(dependencies.completion.drained_count.load() == 1);
+        assert(dependencies.completion.failed_count.load() == 0);
+        assert(dependencies.outbound.pendingWaiterCount() == 0);
     }
 
     void test_exhausted_in_flight_budget_closes_the_connection_instead_of_dropping_a_response()
@@ -1086,7 +1158,9 @@ namespace
         const auto deadline = std::chrono::steady_clock::now() + 2s;
         while (failures.empty() && std::chrono::steady_clock::now() < deadline)
         {
-            dependencies.outbound.takePendingAdmissionFailures(failures);
+            const bool used_fail_safe =
+                dependencies.outbound.takePendingAdmissionFailures(failures);
+            assert(!used_fail_safe);
             std::this_thread::yield();
         }
 
@@ -1174,5 +1248,6 @@ void run_actor_runtime_tests()
     test_cancel_releases_an_actor_suspended_on_outbound_capacity();
     test_saturated_outbound_preserves_effect_order_and_handler_atomicity();
     test_exhausted_in_flight_budget_closes_the_connection_instead_of_dropping_a_response();
-    test_every_admitted_command_reports_exactly_one_terminal();
+    test_an_unsatisfiable_result_closes_the_connection_instead_of_failing_the_worker();
+    test_admitted_commands_and_refused_posts_are_counted_apart();
 }

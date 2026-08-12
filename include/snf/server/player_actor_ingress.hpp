@@ -7,11 +7,16 @@
 namespace snf::server
 {
     // Adapts the Player command boundary to the registered Player binding.
+    //
+    // It is also the only place that knows a post was refused. The refusal is reported
+    // here rather than inferred from the release the refused submission still performs,
+    // so an admission failure never inflates the count of commands that ran.
     class PlayerActorIngress final : public PlayerCommandIngress
     {
     public:
         PlayerActorIngress(snf::runtime::ActorRuntime& runtime,
-                           PlayerActorBinding& binding) noexcept;
+                           PlayerActorBinding& binding,
+                           CommandLifecycleSink& lifecycle) noexcept;
 
         [[nodiscard]] snf::runtime::PostResult tryPost(PlayerInboundCommand command) override;
         [[nodiscard]] snf::runtime::PostResult
@@ -22,5 +27,6 @@ namespace snf::server
     private:
         snf::runtime::ActorRuntime& _runtime;
         PlayerActorBinding& _binding;
+        CommandLifecycleSink& _lifecycle;
     };
 }

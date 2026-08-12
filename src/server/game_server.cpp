@@ -3,6 +3,7 @@
 #include "snf/net/system_error.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 #include <sys/eventfd.h>
 #include <utility>
@@ -19,6 +20,28 @@ namespace
 
         return snf::net::UniqueFileDescriptor{descriptor};
     }
+
+    std::size_t
+    checked_product(const std::size_t left, const std::size_t right, const char* const message)
+    {
+        if (left != 0 && right > std::numeric_limits<std::size_t>::max() / left)
+        {
+            throw std::invalid_argument{message};
+        }
+
+        return left * right;
+    }
+
+    std::size_t
+    checked_sum(const std::size_t left, const std::size_t right, const char* const message)
+    {
+        if (right > std::numeric_limits<std::size_t>::max() - left)
+        {
+            throw std::invalid_argument{message};
+        }
+
+        return left + right;
+    }
 }
 
 namespace snf::server
@@ -29,6 +52,15 @@ namespace snf::server
         , _outbound_channel(
               [&config]
               {
+                  const std::size_t total_in_flight_budget =
+                      checked_product(config.actor_worker_count,
+                                      config.actor_max_in_flight_operations_per_worker,
+                                      "Actor in-flight operation budget exceeds size_t");
+                  const std::size_t total_actor_outstanding_budget =
+                      checked_product(config.actor_worker_count,
+                                      config.actor_queue_capacity_per_worker,
+                                      "Actor outstanding command budget exceeds size_t");
+
                   return OutboundChannelConfig{
                       .capacity = config.outbound_queue_capacity,
                       // A per-connection cap above the shared capacity is unreachable
@@ -40,8 +72,15 @@ namespace snf::server
                       // A Worker reserves an in-flight slot before it registers as a
                       // waiter, so the registry is sized above the sum of those
                       // budgets and can never be the tighter of the two bounds.
-                      .max_waiters = config.actor_worker_count *
-                                     config.actor_max_in_flight_operations_per_worker,
+                      .max_waiters = total_in_flight_budget,
+                      // A pending record can belong either to a current session or to a
+                      // command that was already admitted when its session disappeared.
+                      // Cover both populations; the channel still has a no-throw
+                      // close-all fail-safe if this accounting invariant is ever broken.
+                      .max_pending_admission_failures =
+                          checked_sum(config.connection_lifecycle_capacity,
+                                      total_actor_outstanding_budget,
+                                      "Outbound admission failure budget exceeds size_t"),
                   };
               }(),
               _outbound_event.getDescriptor())
@@ -49,7 +88,7 @@ namespace snf::server
         , _player_effects(_outbound_sink)
         , _runtime_completion(snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
                               _outbound_event.getDescriptor())
-        , _player_actor_binding(_player_effects, _outbound_sink, _command_terminals)
+        , _player_actor_binding(_player_effects, _outbound_sink, _command_lifecycle)
         , _logic_runtime(
               [config]
               {
@@ -61,7 +100,7 @@ namespace snf::server
                   return runtime_config;
               }(),
               _runtime_completion)
-        , _player_actor_ingress(_logic_runtime, _player_actor_binding)
+        , _player_actor_ingress(_logic_runtime, _player_actor_binding, _command_lifecycle)
         , _command_router(_player_actor_ingress)
         , _protocol_gateway(_command_router)
         , _tcp_server(
@@ -132,7 +171,8 @@ namespace snf::server
             .counters = _tcp_server.getStats(),
             .network = _tcp_server.getMetrics(),
             .actor_runtime = _logic_runtime.getStats(),
-            .command_terminals = _command_terminals.count(),
+            .command_terminals = _command_lifecycle.terminalCount(),
+            .command_admission_rejections = _command_lifecycle.admissionRejectionCount(),
         };
     }
 

@@ -240,17 +240,30 @@ Phase 4.0의 첫 production awaiter로 blocking outbound publish를 제거했다
   작업량이 reactor 회차당 상한 안에 머문다. 한 회차에 검사·승인하는 waiter 수를 모두 제한하고,
   대상 상한에 막힌 연결은 뒤로 회전시켜 다른 연결을 막지 않는다.
 - 연결별 상한(`max_outbound_slots_per_connection`)으로 한 연결이 공유 용량 전체를 점유하지 못하게
-  한다. 연결별 회계는 command 단위로 만들고 버리지 않고 연결 수명 동안 유지하며, session이 사라지고
-  보유분이 빠진 뒤 reactor가 정리한다. `tracked_outbound_connections`는 그 회계가 command 발생률이
-  아니라 살아 있는 연결 수를 따라가는지 관측한다.
+  한다. 연결별 회계는 command 단위로 만들고 버리지 않고, reactor가 연결을 수락할 때 만들고 연결이
+  사라진 뒤 보유분이 빠지면 정리한다. reactor가 추적하지 않는 연결의 회계는 — session이 닫힌 뒤
+  도착한 command가 만든 것이므로 앞으로 정리 신호가 오지 않는다 — 비는 즉시 제거한다. 그래서 연결
+  churn이 항목을 쌓지 않는다. `tracked_outbound_connections`는 그 회계가 command 발생률이 아니라
+  살아 있는 연결 수를 따라가는지 관측한다.
 - 예약 대기 자체가 불가능한 경우(Worker in-flight 예산 소진)에는 응답을 조용히 버리지 않고 연결을
   `ConnectionCloseCause::Overflow`로 종료한다. 종료에는 outbound 용량이 필요하지 않으므로 용량이
-  없는 연결에도 적용할 수 있는 정책이다.
-- 3.9에서 정의한 command terminal 신호를 submission payload에 실은 move-only 토큰의 소멸로 생산한다.
-  scheduler가 승인된 submission을 성공·예외·취소·mailbox 폐기·ingress 거부 어느 경로에서도 정확히
-  한 번 파괴하므로, scheduler 변경 없이 응답 유무와 무관하게 exactly-once가 된다. 토큰은 command를
-  승인하는 binding 경계에서 무장하므로, protocol 단계에서 거부된 frame은 terminal을 보고하지 않는다.
-  4.5의 credit 취득도 같은 경계여야 두 수치가 일치한다.
+  없는 연결에도 적용할 수 있는 정책이다. 종료 요청은 연결로 식별해 합치므로 한 연결이 반복 실패해도
+  다른 연결의 종료를 밀어내지 않는다. 기록 상한은 현재 연결 수와 연결 종료 전에 이미 승인된 Actor
+  command 상한을 합쳐 잡는다. 그래도 상한에 도달하거나 기록 allocation이 실패하면 Worker에서 던지거나
+  조건을 버리지 않고 할당 없는 fail-safe flag를 세운다. reactor는 이를 소비해 현재 session을 모두
+  Overflow로 닫으므로, 정확한 연결 ID를 보존하지 못한 경우에도 응답이 조용히 사라지지 않는다.
+- 한 command의 effect 수가 연결별 상한보다 크면 예외가 아니라 command 단위 거부로 처리한다.
+  `canEverReserve`가 그것을 포화와 구분하므로 영원히 오지 않는 grant를 기다리지도 않고, 결과 하나
+  때문에 그 Worker의 모든 Actor가 함께 죽지도 않는다. 처리는 위와 같은 연결 종료다.
+- command의 신원별 신호를 두 가지로 나눈다. **release**는 credit 반환 신호이며 binding이 만든 모든
+  submission에서 정확히 한 번 발생한다. scheduler가 승인된 submission을 성공·예외·취소·mailbox
+  폐기·ingress 거부 어느 경로에서도 정확히 한 번 파괴하기 때문이고, ingress가 거부한 post도 이
+  경계에서 이미 credit을 취득했으므로 반환해야 한다. **admission rejection**은 그 거부 자체이며
+  ingress가 결과를 보고 직접 보고한다. 원인이 다른 사실이므로 실행된 command 수에 합산하지 않는다.
+  따라서 `command_terminals`는 승인되어 결과에 도달한 command만 세고, 거부는
+  `command_admission_rejections`로 따로 노출한다.
+- release 토큰은 command를 승인하는 binding 경계에서 무장하므로, protocol 단계에서 거부된 frame은
+  아무 신호도 내지 않는다. 4.5의 credit 취득도 같은 경계여야 두 수치가 일치한다.
 
 완료 기준 결과:
 
@@ -259,8 +272,9 @@ Phase 4.0의 첫 production awaiter로 blocking outbound publish를 제거했다
   완료된다. capacity 1 단위 테스트에서 effect 순서와 handler 원자성이 유지된다.
 - 같은 Actor의 다음 command는 이전 command가 terminal에 도달한 뒤에만 dispatch되므로 미방출 effect를
   앞지르지 않는다.
-- command terminal이 성공·취소·mailbox 폐기·ingress `Full`·ingress `Closed`에서 각각 정확히 한 번
-  관측된다. 부하 실행에서 48,000 command에 대해 terminal 48,000건이다.
+- release가 성공·취소·mailbox 폐기·ingress `Full`·ingress `Closed`에서 각각 정확히 한 번 관측되고,
+  그중 `Full`과 `Closed`는 terminal이 아니라 admission rejection으로 집계된다. 부하 실행에서 48,000
+  command에 대해 terminal 48,000건, admission rejection 0건이다.
 - 한 연결이 점유할 수 있는 공유 용량은 `max_outbound_slots_per_connection`(기본 64/4096)으로,
   메모리는 그 위에 session별 `max_pending_send_bytes`로 각각 상한이 있다.
 

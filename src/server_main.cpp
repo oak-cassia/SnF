@@ -31,8 +31,9 @@ namespace
                   << counters.protocol_errors << " protocol errors, "
                   << counters.actor_queue_overflows << " actor queue overflows, "
                   << counters.outbound_admission_failures << " outbound admission failures, "
-                  << counters.stale_outbound_actions << " stale outbound actions, "
-                  << counters.connection_lifecycle_rejections
+                  << counters.outbound_admission_failure_fallbacks
+                  << " outbound admission failure fallbacks, " << counters.stale_outbound_actions
+                  << " stale outbound actions, " << counters.connection_lifecycle_rejections
                   << " connection lifecycle rejections, "
                   << counters.pending_connection_closes_high_water_mark
                   << " pending connection closes high-water\n";
@@ -57,7 +58,8 @@ namespace
                   // compares against the 3.9 baseline's single blocking figure.
                   << "Outbound hand-off wait ns: "
                   << format_distribution(network.outbound_queue_wait_nanoseconds) << '\n'
-                  << "Command terminals: " << metrics.command_terminals << '\n';
+                  << "Commands: " << metrics.command_terminals << " reached a result, "
+                  << metrics.command_admission_rejections << " refused admission\n";
 
         const auto& workers = metrics.actor_runtime.workers;
         for (std::size_t worker_index = 0; worker_index < workers.size(); ++worker_index)

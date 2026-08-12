@@ -92,12 +92,20 @@ namespace snf::server
         }
     }
 
+    bool OutboundChannel::canEverReserve(const std::size_t slots) const noexcept
+    {
+        return slots <= _max_slots_per_connection;
+    }
+
     std::optional<OutboundReservation>
     OutboundChannel::tryReserve(const snf::net::ConnectionId connection, const std::size_t slots)
     {
-        if (slots > _max_slots_per_connection)
+        // Refused rather than thrown: a request this size can never be granted, and
+        // turning one oversized result into a Worker failure would take down every
+        // actor that Worker owns. The caller distinguishes it with canEverReserve.
+        if (!canEverReserve(slots))
         {
-            throw std::logic_error{"Outbound reservation exceeds the per-connection slot limit"};
+            return std::nullopt;
         }
 
         std::lock_guard lock{_mutex};
@@ -136,7 +144,10 @@ namespace snf::server
         const std::size_t slots,
         snf::runtime::AsyncOperationProducer<OutboundReservation> producer)
     {
-        if (slots == 0 || slots > _max_slots_per_connection)
+        // Unlike tryReserve this is a caller error: a waiter is only registered after a
+        // reserve attempt failed, and an unsatisfiable size must have been rejected
+        // there instead of parked here forever.
+        if (slots == 0 || !canEverReserve(slots))
         {
             throw std::logic_error{"Outbound waiter slot count is outside the reservable range"};
         }
@@ -288,16 +299,27 @@ namespace snf::server
         }
     }
 
+    void OutboundChannel::trackConnection(const snf::net::ConnectionId connection)
+    {
+        std::lock_guard lock{_mutex};
+        // Off the per-command path on purpose. An entry that exists for the connection's
+        // whole life is what keeps commit and reserve from allocating a map node each.
+        _connections[connection].erase_when_idle = false;
+    }
+
     void OutboundChannel::forgetConnection(const snf::net::ConnectionId connection)
     {
         std::lock_guard lock{_mutex};
         const auto usage_iterator = _connections.find(connection);
         if (usage_iterator == _connections.end())
         {
+            // Nothing to release, and nothing to remember either: an entry created after
+            // this point belongs to a command that arrived for a closed session, and it
+            // defaults to being dropped as soon as it is idle.
             return;
         }
 
-        usage_iterator->second.forgotten = true;
+        usage_iterator->second.erase_when_idle = true;
         eraseUsageIfIdle(connection);
     }
 
@@ -380,12 +402,14 @@ namespace snf::server
         return awards.size();
     }
 
-    void
+    bool
     OutboundChannel::takePendingAdmissionFailures(std::vector<snf::net::ConnectionId>& failures)
     {
         std::lock_guard lock{_mutex};
+        failures.reserve(failures.size() + _admission_failures.size());
         failures.insert(failures.end(), _admission_failures.begin(), _admission_failures.end());
         _admission_failures.clear();
+        return std::exchange(_admission_failure_overflowed, false);
     }
 
     void OutboundChannel::reportAdmissionFailure(const snf::net::ConnectionId connection) noexcept
@@ -394,22 +418,43 @@ namespace snf::server
         {
             {
                 std::lock_guard lock{_mutex};
-                if (_admission_failures.size() == _max_pending_admission_failures)
+                // Keyed by connection, so a connection reporting repeatedly occupies one
+                // entry and cannot crowd out another connection's close.
+                if (_admission_failures.contains(connection))
                 {
-                    ++_dropped_admission_failures;
+                    // It is already guaranteed to be observed by the reactor.
+                }
+                else if (_admission_failures.size() == _max_pending_admission_failures)
+                {
+                    // No allocation and no lost signal: the reactor closes every current
+                    // session when it consumes this flag, which necessarily includes the
+                    // affected session if it is still alive.
+                    _admission_failure_overflowed = true;
                 }
                 else
                 {
-                    _admission_failures.push_back(connection);
+                    _admission_failures.insert(connection);
                 }
             }
-
-            signalWakeUp();
         }
         catch (...)
         {
-            // Reporting must not turn an admission failure into a Worker failure.
+            // Allocation/hash failure must not escape this command-level rejection and
+            // take down the Worker. Setting a bool cannot fail; the reactor applies the
+            // same close-all fail-safe used for a full record budget.
+            try
+            {
+                std::lock_guard lock{_mutex};
+                _admission_failure_overflowed = true;
+            }
+            catch (...)
+            {
+                // std::mutex::lock is not expected to fail for a valid mutex. There is no
+                // safer action available from this noexcept Worker path if it does.
+            }
         }
+
+        signalWakeUp();
     }
 
     std::size_t OutboundChannel::cancel()
@@ -486,10 +531,10 @@ namespace snf::server
         return _connections.size();
     }
 
-    std::uint64_t OutboundChannel::droppedAdmissionFailureCount() const
+    std::size_t OutboundChannel::pendingAdmissionFailureCount() const
     {
         std::lock_guard lock{_mutex};
-        return _dropped_admission_failures;
+        return _admission_failures.size();
     }
 
     bool OutboundChannel::isCancelled() const
@@ -581,12 +626,11 @@ namespace snf::server
         }
 
         const ConnectionUsage& usage = usage_iterator->second;
-        // Only a forgotten connection is dropped, and only once it holds nothing. A
-        // live connection keeps its entry between commands, and an entry still
+        // A tracked connection keeps its entry between commands, and an entry still
         // referenced by the grant order keeps it too: dropping that would leave a stale
         // key a later activation could duplicate.
-        if (usage.forgotten && usage.queued == 0 && usage.reserved == 0 && usage.waiters.empty() &&
-            !usage.queued_for_grant)
+        if (usage.erase_when_idle && usage.queued == 0 && usage.reserved == 0 &&
+            usage.waiters.empty() && !usage.queued_for_grant)
         {
             _connections.erase(usage_iterator);
         }

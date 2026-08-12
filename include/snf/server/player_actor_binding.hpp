@@ -30,7 +30,7 @@ namespace snf::server
     public:
         PlayerActorBinding(PlayerEffectSink& effects,
                            OutboundSink& outbound,
-                           CommandTerminalSink& terminals,
+                           CommandLifecycleSink& lifecycle,
                            PlayerActorBindingConfig config = {});
 
         [[nodiscard]] snf::runtime::ActorKind kind() const noexcept override;
@@ -62,15 +62,17 @@ namespace snf::server
                                                                 std::stop_token stop_token);
         [[nodiscard]] snf::runtime::ActorDispatchResult
         emit(PlayerActorSlot& slot, OutboundReservation& reservation, std::stop_token stop_token);
-        // Ends a command that could not acquire capacity at all. The connection is
-        // closed by the backend, so the command itself ends normally.
+        // Ends a command that could not acquire capacity at all, either because none
+        // could be awaited or because the result asks for more than one connection may
+        // ever hold. The connection is closed by the backend, so the command itself ends
+        // normally.
         [[nodiscard]] snf::runtime::ActorDispatchResult
         abandonEmission(PlayerActorSlot& slot) noexcept;
         static void resetPendingCommand(PlayerActorSlot& slot) noexcept;
 
         PlayerEffectSink& _effects;
         OutboundSink& _outbound;
-        CommandTerminalSink& _terminals;
+        CommandLifecycleSink& _lifecycle;
         std::function<void(ProvisionalActorId, const PlayerCommand&)> _on_before_command;
     };
 }
