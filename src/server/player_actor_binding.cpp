@@ -107,6 +107,27 @@ namespace
             });
         co_return std::move(result);
     }
+
+    snf::runtime::ActorTask<snf::server::PurchaseTransactionResult>
+    awaitPurchase(snf::server::PlayerRepository& repository,
+                  snf::runtime::ActorContext& context,
+                  snf::server::PurchaseRequest request)
+    {
+        auto result =
+            co_await snf::runtime::awaitAsyncOperation<snf::server::PurchaseTransactionResult>(
+                context,
+                [&repository, request](
+                    snf::runtime::AsyncOperationProducer<snf::server::PurchaseTransactionResult>
+                        producer)
+                {
+                    repository.asyncPurchase(
+                        request,
+                        [producer = std::move(producer)](
+                            snf::server::PurchaseTransactionResult result) mutable noexcept
+                        { producer.complete(std::move(result)); });
+                });
+        co_return std::move(result);
+    }
 }
 
 namespace snf::server
@@ -120,6 +141,7 @@ namespace snf::server
             Idle,
             Loading,
             Handling,
+            Purchasing,
             Reserving,
             Saving,
         };
@@ -150,6 +172,7 @@ namespace snf::server
         // Keeping the frame in the slot is what confines resume and destruction to
         // the owning Worker.
         snf::runtime::ActorTask<PlayerResult> task;
+        snf::runtime::ActorTask<PurchaseTransactionResult> purchase_task;
         // Started only when capacity was not immediately available, and owned by the
         // slot for the same reason.
         snf::runtime::ActorTask<OutboundReservation> reservation_task;
@@ -320,6 +343,25 @@ namespace snf::server
             return advance(player_slot, context, stop_token);
         }
 
+        if (const auto* purchase = std::get_if<PurchaseCommand>(&payload.command.command))
+        {
+            if (kind() != snf::runtime::ActorKind::Player)
+            {
+                throw std::logic_error{"PurchaseCommand reached a provisional Player actor"};
+            }
+            player_slot.pending_command = *purchase;
+            player_slot.stage = PlayerActorSlot::Stage::Purchasing;
+            player_slot.purchase_task =
+                awaitPurchase(*_repository,
+                              context,
+                              PurchaseRequest{
+                                  .player = *player_slot.identity.playerId(),
+                                  .idempotency_key = purchase->idempotency_key,
+                                  .product = purchase->product,
+                              });
+            return advance(player_slot, context, stop_token);
+        }
+
         player_slot.stage = PlayerActorSlot::Stage::Handling;
         player_slot.task = player_slot.actor.handle(payload.command.command);
         return advance(player_slot, context, stop_token);
@@ -376,8 +418,22 @@ namespace snf::server
             {
                 throw std::logic_error{"Player load completed without a pending command"};
             }
-            slot.stage = PlayerActorSlot::Stage::Handling;
-            slot.task = slot.actor.handle(*slot.pending_command);
+            if (const auto* purchase = std::get_if<PurchaseCommand>(&*slot.pending_command))
+            {
+                slot.stage = PlayerActorSlot::Stage::Purchasing;
+                slot.purchase_task = awaitPurchase(*_repository,
+                                                   context,
+                                                   PurchaseRequest{
+                                                       .player = *slot.identity.playerId(),
+                                                       .idempotency_key = purchase->idempotency_key,
+                                                       .product = purchase->product,
+                                                   });
+            }
+            else
+            {
+                slot.stage = PlayerActorSlot::Stage::Handling;
+                slot.task = slot.actor.handle(*slot.pending_command);
+            }
         }
 
         if (slot.stage == PlayerActorSlot::Stage::Handling)
@@ -395,7 +451,31 @@ namespace snf::server
             slot.task = {};
             slot.pending_command.reset();
             slot.stage = PlayerActorSlot::Stage::Reserving;
+        }
 
+        if (slot.stage == PlayerActorSlot::Stage::Purchasing)
+        {
+            if (slot.purchase_task.resume() == snf::runtime::ActorTaskStatus::Suspended)
+            {
+                return snf::runtime::ActorDispatchResult::Suspended;
+            }
+
+            PurchaseTransactionResult result = slot.purchase_task.takeResult();
+            slot.purchase_task = {};
+            const auto* purchase = slot.pending_command
+                                       ? std::get_if<PurchaseCommand>(&*slot.pending_command)
+                                       : nullptr;
+            if (purchase == nullptr)
+            {
+                throw std::logic_error{"Purchase completed without its pending command"};
+            }
+            slot.pending_result = slot.actor.completePurchase(*purchase, std::move(result));
+            slot.pending_command.reset();
+            slot.stage = PlayerActorSlot::Stage::Reserving;
+        }
+
+        if (slot.stage == PlayerActorSlot::Stage::Reserving && !slot.reservation_task.valid())
+        {
             const std::size_t required_slots = _effects.requiredSlots(slot.pending_result);
             if (!_outbound.canEverReserve(required_slots))
             {
@@ -509,6 +589,7 @@ namespace snf::server
 
     void PlayerActorBinding::resetPendingCommand(PlayerActorSlot& slot) noexcept
     {
+        slot.pending_command.reset();
         slot.pending_result = PlayerResult{};
         slot.stage = PlayerActorSlot::Stage::Idle;
     }

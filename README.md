@@ -5,8 +5,9 @@ SnF는 C++20을 활용해 MORPG 콘텐츠의 상태, 규칙과 메시지 흐름�
 명확한 상태 소유권과 실행 경계 위에 올리는 것을 주된 목적으로 한다.
 
 현재는 Linux `epoll` 네트워크 런타임과 coroutine suspend/resume을 지원하는 일반화된 sharded Actor
-Runtime 위에서 PING/PONG vertical slice를 실행한다. outbound는 non-blocking 예약으로 동작한다. 다음으로
-network correctness를 정리한 뒤 인증·영속성·Zone 이동을 하나의 playable vertical slice로 구현한다.
+Runtime 위에서 인증, Player 영속성, Zone 이동·tick과 멱등한 구매 vertical slice를
+실행한다. outbound와 repository 대기는 Actor 하나만 suspend하는 non-blocking 경계를
+사용한다. 다음 주요 범위는 durable DB adapter와 Shared Content·Projection slice다.
 `ConnectionScope`와 UnifiedRuntime은 실제 콘텐츠 부하가 필요를 증명할 때 진행할 선택적 최적화다.
 
 ## 프로젝트 목적
@@ -83,9 +84,11 @@ Network Runtime
 - 주입 가능한 clock과 stale `TimerId` 폐기를 갖춘 bounded Zone timer scheduler
 - disconnect/save/reconnect 뒤 복원되는 Player의 마지막 Zone 위치
 - 재화 차감·상품 지급·idempotency 증거를 원자적으로 적용하는 bounded 구매
-  repository (현재 in-memory transaction 참조 구현, wire command는 Phase 6.2 범위)
+  repository와 wire command (현재 in-memory transaction 참조 구현, durable DB는 남음)
 - Zone command/tick 실행 `p50/p95/p99/max`와 tick budget overrun metric
 - `PlayerActor` PING/PONG 처리와 typed result/effect 경계
+- 인증된 Player의 typed 구매 command, repository await와 응답 유실·reconnect retry에서
+  effectively-once effect를 검증하는 purchase result
 - connection generation을 통한 stale response 차단
 - bounded ingress queue와 Session별 send backpressure
 - 용량 예약으로 동작하는 outbound channel: 포화 시 Worker가 아니라 Actor 하나가 suspend되고, 연결별
@@ -119,6 +122,12 @@ Phase 4.1에서는 그 기계의 첫 production 적용으로 blocking outbound�
 `PlayerResult`는 outbound 용량이 유한하다는 사실을 알지 않는다. 포화가 아니면 예약이 즉시 성공해
 operation을 시작하지 않고, 포화일 때만 그 Actor 하나가 suspend된다. Actor drain이 outbound 소비에
 의존하게 되므로 종료 순서 제약도 함께 고정했다.
+
+Phase 6에서는 구매의 재화 차감, 상품 지급과 idempotency 증거를 하나의
+repository transaction으로 묶고, repository 대기 중에도 같은 Worker의 다른 Actor가
+진행하는 wire vertical slice를 추가했다. 현재 adapter는 프로세스 메모리 기반이므로
+disconnect/reconnect retry까지만 보장하며, 프로세스 crash 후 retry는 durable DB adapter의
+남은 범위다.
 
 ## 로드맵
 
@@ -209,8 +218,9 @@ cmake --build --preset release
 [body_length:u32][type:u16][request_id:u32][payload]
 ```
 
-모든 정수는 big-endian이며 body는 최대 64 KiB다. 현재 메시지는 `PING=1`, `PONG=2`를
-사용한다.
+모든 정수는 big-endian이며 body는 최대 64 KiB다. Player 메시지는
+`PING=1`, `PONG=2`, `AUTHENTICATE=3`, `AUTHENTICATED=4`, `PURCHASE=11`,
+`PURCHASE_RESULT=12`를 사용한다. Zone 메시지는 5~10을 사용한다.
 
 ## 디렉터리
 

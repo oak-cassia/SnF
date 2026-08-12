@@ -26,6 +26,8 @@ namespace snf::protocol
         Moved = 8,
         LeaveZone = 9,
         ZoneLeft = 10,
+        Purchase = 11,
+        PurchaseResult = 12,
     };
 
     struct Frame

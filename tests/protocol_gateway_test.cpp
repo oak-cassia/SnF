@@ -128,6 +128,24 @@ namespace
         };
     }
 
+    snf::server::FrameEnvelope make_purchase_frame(const snf::net::ConnectionId connection,
+                                                   const std::uint64_t key,
+                                                   const std::uint32_t product)
+    {
+        std::vector<std::byte> payload;
+        append_u64(payload, key);
+        append_u32(payload, product);
+        return snf::server::FrameEnvelope{
+            .connection = connection,
+            .frame =
+                snf::protocol::Frame{
+                    .type = snf::protocol::MessageType::Purchase,
+                    .request_id = 9,
+                    .payload = std::move(payload),
+                },
+        };
+    }
+
     void test_dispatches_and_routes_a_supported_frame()
     {
         RecordingRoutedIngress commands;
@@ -233,6 +251,31 @@ namespace
 
         assert(gateway.tryPost(make_auth_frame(connection, player)) ==
                snf::server::FramePostResult::Accepted);
+    }
+
+    void test_purchase_requires_authentication_and_routes_to_the_attached_player()
+    {
+        RecordingRoutedIngress commands;
+        snf::server::ProtocolGateway gateway{commands};
+        const snf::net::ConnectionId connection{.descriptor = 55, .generation = 25};
+        const snf::server::PlayerId player{.value = 90};
+
+        assert(gateway.tryPost(make_purchase_frame(connection, 3, 1)) ==
+               snf::server::FramePostResult::InvalidPayload);
+        assert(commands.post_count == 0);
+        assert(gateway.tryPost(make_auth_frame(connection, player)) ==
+               snf::server::FramePostResult::Accepted);
+        assert(gateway.tryPost(make_purchase_frame(connection, 3, 1)) ==
+               snf::server::FramePostResult::Accepted);
+
+        const auto* route = std::get_if<snf::server::PlayerCommandRoute>(&commands.posted->route);
+        assert(route != nullptr);
+        assert(route->actor == player);
+        const auto* purchase = std::get_if<snf::server::PurchaseCommand>(&route->command);
+        assert(purchase != nullptr);
+        assert(purchase->request_id == 9);
+        assert(purchase->idempotency_key.value == 3);
+        assert(purchase->product == snf::server::BASIC_PRODUCT);
     }
 
     void test_rejects_duplicate_player_and_auth_after_provisional_activity()
@@ -401,6 +444,7 @@ void run_protocol_gateway_tests()
     test_preserves_downstream_capacity_and_lifecycle_results();
     test_routes_connection_closed_with_the_same_provisional_actor_id();
     test_authentication_attaches_and_routes_to_a_persistent_player();
+    test_purchase_requires_authentication_and_routes_to_the_attached_player();
     test_rejects_duplicate_player_and_auth_after_provisional_activity();
     test_rolls_back_refused_auth_and_keeps_close_retry_target();
     test_routes_authenticated_zone_enter_move_leave_with_one_epoch();

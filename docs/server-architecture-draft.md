@@ -452,6 +452,17 @@ commit하고, 중복 key를 유일성 제약 또는 동등한 동시성 기구�
 현재 authoritative record에서 읽는다. Player별 idempotency table이 설정 상한에 닿으면
 기존 증거를 지우지 않고 새 transaction을 명시적으로 거부한다.
 
+wire 구매는 인증된 Player route에서만 허용한다. Player binding이 repository
+completion을 async operation으로 기다리는 동안 그 Player의 mailbox는 순서를 유지하고,
+같은 Worker의 다른 Actor는 진행한다. completion은 Player identity, key와 product가
+대기 중이던 command와 일치하는지 확인한 후 owning Worker에서만 PlayerActor 상태에
+적용한다. `Unavailable`은 authoritative snapshot이 아니므로 Actor의 balance와 inventory를
+변경하지 않는다.
+
+현재 in-memory adapter의 idempotency와 record는 프로세스 재시작 후 사라진다. 따라서
+응답 유실·disconnect·reconnect retry는 검증됐지만 crash recovery는 검증되지 않았다.
+운영 adapter는 같은 transaction 경계와 durable idempotency 증거를 유지해야 한다.
+
 ### 4.8 Observability
 
 로그 기록은 전용 bounded queue와 Logger Thread에서 처리한다. 일반 로그가 가득 찼을 때
@@ -624,7 +635,7 @@ Runtime 사이에서 동기 호출이나 `future.get()`으로 상대 Worker를 �
 | Outbound queue | Binding이 방출 전에 용량을 예약하고, 실패하면 그 Actor만 suspend된 뒤 reactor의 grant를 기다린다. 연결별 상한이 있고, 예약 대기조차 승인되지 않거나 결과가 연결별 상한보다 크면 그 연결을 `Overflow`로 종료한다. 종료 요청은 연결 단위로 합치며, 기록 상한/할당 실패에는 Worker 예외나 silent drop 대신 현재 session 전체를 닫는 reactor fail-safe를 쓴다 | 현재 동작을 유지한다 | 4.1 완료 |
 | Connection lifecycle post | reactor 소유 pending deque가 회차당 제한된 건수를 재시도하고, active session과 pending close가 lifecycle slot 예산을 공유한다 | 현재 의미를 유지한다. `ConnectionScope`를 선택할 때만 단일 종결 경로로 이전한다 | 선택적 Runtime 최적화 |
 | ZoneActor mailbox | Worker별 bounded FIFO. `Full`은 해당 연결 종료로 귀결되며 이동도 현재 FIFO에 누적된다 | 최신 이동 입력 병합, 오래된 입력 폐기, 악성 세션 종료 | 5.3 후속 |
-| DB queue | 전용 Worker의 bounded FIFO. load 거부는 연결 종료, save 거부는 상태 유실을 숨기지 않고 runtime failure로 승격한다 | 실제 DB adapter의 제한된 재시도와 요청 실패 의미를 transaction 경계와 함께 고정한다 | 6 |
+| DB queue | 전용 Worker의 bounded FIFO. load 거부는 연결 종료, save 거부는 runtime failure, 구매 거부는 `Unavailable` 응답이다 | durable DB adapter의 제한된 재시도와 요청 실패 의미를 transaction 경계와 함께 고정한다 | 6.3 |
 | 일반 로그 queue | 미구현. 현재는 `std::cerr`로 직접 출력한다 | 전용 bounded queue와 sampling 또는 drop | 미정 |
 
 입력 종류별로 정책이 다를 수 있다. 이동 입력은 최신 값으로 합칠 수 있지만 아이템 구매나

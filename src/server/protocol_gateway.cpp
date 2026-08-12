@@ -304,6 +304,12 @@ namespace snf::server
         {
             actor = *player;
         }
+        else if (std::holds_alternative<PurchaseCommand>(*dispatch_result.command))
+        {
+            // A purchase is persistent Player state. It must never execute on the
+            // connection-scoped provisional actor used by unauthenticated PING.
+            return FramePostResult::InvalidPayload;
+        }
 
         PostResult post_result;
         try

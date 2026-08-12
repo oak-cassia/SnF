@@ -20,6 +20,24 @@ namespace
         return payload;
     }
 
+    std::vector<std::byte> purchase_payload(const std::uint64_t key, const std::uint32_t product)
+    {
+        std::vector<std::byte> payload(12);
+        std::uint64_t remaining_key = key;
+        for (std::size_t index = 8; index > 0; --index)
+        {
+            payload[index - 1] = static_cast<std::byte>(remaining_key & 0xFFU);
+            remaining_key >>= 8U;
+        }
+        std::uint32_t remaining_product = product;
+        for (std::size_t index = payload.size(); index > 8; --index)
+        {
+            payload[index - 1] = static_cast<std::byte>(remaining_product & 0xFFU);
+            remaining_product >>= 8U;
+        }
+        return payload;
+    }
+
     void test_dispatches_ping_to_the_registered_handler()
     {
         snf::server::MessageDispatcher dispatcher;
@@ -76,6 +94,34 @@ namespace
             .payload = player_id_payload(0),
         });
         assert(invalid.status == snf::server::DispatchStatus::InvalidPayload);
+    }
+
+    void test_dispatches_and_validates_a_purchase()
+    {
+        const snf::server::MessageDispatcher dispatcher;
+        const auto result = dispatcher.dispatch(snf::protocol::Frame{
+            .type = snf::protocol::MessageType::Purchase,
+            .request_id = 10,
+            .payload = purchase_payload(0x0102030405060708ULL, 0x11223344U),
+        });
+
+        assert(result.handled());
+        const auto* purchase = std::get_if<snf::server::PurchaseCommand>(&*result.command);
+        assert(purchase != nullptr);
+        assert(purchase->request_id == 10);
+        assert(purchase->idempotency_key.value == 0x0102030405060708ULL);
+        assert(purchase->product.value == 0x11223344U);
+
+        for (const auto& payload :
+             {purchase_payload(0, 1), purchase_payload(1, 0), std::vector<std::byte>(11)})
+        {
+            const auto invalid = dispatcher.dispatch(snf::protocol::Frame{
+                .type = snf::protocol::MessageType::Purchase,
+                .request_id = 11,
+                .payload = payload,
+            });
+            assert(invalid.status == snf::server::DispatchStatus::InvalidPayload);
+        }
     }
 
     void test_registers_an_additional_handler()
@@ -146,6 +192,7 @@ void run_message_dispatcher_tests()
     test_dispatches_ping_to_the_registered_handler();
     test_reports_a_missing_handler();
     test_dispatches_a_valid_persistent_player_authentication();
+    test_dispatches_and_validates_a_purchase();
     test_registers_an_additional_handler();
     test_rejects_a_duplicate_handler();
     test_reports_invalid_payload_from_a_registered_handler();

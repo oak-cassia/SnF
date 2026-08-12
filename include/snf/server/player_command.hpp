@@ -1,6 +1,7 @@
 #pragma once
 
 #include "snf/server/player_id.hpp"
+#include "snf/server/purchase.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -21,7 +22,14 @@ namespace snf::server
         PlayerId player;
     };
 
-    using PlayerCommand = std::variant<PingCommand, AuthenticateCommand>;
+    struct PurchaseCommand
+    {
+        std::uint32_t request_id{0};
+        PurchaseIdempotencyKey idempotency_key;
+        ProductId product;
+    };
+
+    using PlayerCommand = std::variant<PingCommand, AuthenticateCommand, PurchaseCommand>;
 
     [[nodiscard]] inline std::uint32_t requestId(const PlayerCommand& command) noexcept
     {

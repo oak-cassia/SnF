@@ -29,13 +29,13 @@ namespace snf::server
 
     enum class PurchaseStatus : std::uint8_t
     {
-        Committed,
-        InsufficientFunds,
-        ProductNotFound,
-        InventoryCapacityExceeded,
-        IdempotencyConflict,
-        IdempotencyCapacityExceeded,
-        Unavailable,
+        Committed = 0,
+        InsufficientFunds = 1,
+        ProductNotFound = 2,
+        InventoryCapacityExceeded = 3,
+        IdempotencyConflict = 4,
+        IdempotencyCapacityExceeded = 5,
+        Unavailable = 6,
     };
 
     struct PurchaseTransactionResult

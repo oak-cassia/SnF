@@ -123,6 +123,59 @@ namespace
                                                       .position = {.x = 8, .y = 9},
                                                   }));
     }
+
+    void test_purchase_completion_updates_authoritative_state_and_preserves_it_on_unavailable()
+    {
+        const snf::server::PlayerId player{.value = 90};
+        snf::server::PlayerActor actor{snf::server::PlayerActorId{player}};
+        const snf::server::PurchaseCommand command{
+            .request_id = 30,
+            .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = 7},
+            .product = snf::server::BASIC_PRODUCT,
+        };
+
+        const auto committed =
+            actor.completePurchase(command,
+                                   snf::server::PurchaseTransactionResult{
+                                       .status = snf::server::PurchaseStatus::Committed,
+                                       .player = player,
+                                       .idempotency_key = command.idempotency_key,
+                                       .product = command.product,
+                                       .currency_balance = 900,
+                                       .purchased_item_count = 1,
+                                       .replayed = false,
+                                   });
+        assert(actor.state().currencyBalance() == 900);
+        assert(actor.state().purchasedItemCount() == 1);
+        const auto* send = std::get_if<snf::server::SendResponse>(&committed.effects.front());
+        assert(send != nullptr);
+        const auto* response = std::get_if<snf::server::PurchaseResponse>(&send->response);
+        assert(response != nullptr);
+        assert(response->result.currency_balance == 900);
+
+        const auto unavailable =
+            actor.completePurchase(command,
+                                   snf::server::PurchaseTransactionResult{
+                                       .status = snf::server::PurchaseStatus::Unavailable,
+                                       .player = player,
+                                       .idempotency_key = command.idempotency_key,
+                                       .product = command.product,
+                                       .currency_balance = 0,
+                                       .purchased_item_count = 0,
+                                       .replayed = false,
+                                   });
+        assert(actor.state().currencyBalance() == 900);
+        assert(actor.state().purchasedItemCount() == 1);
+        const auto* unavailable_send =
+            std::get_if<snf::server::SendResponse>(&unavailable.effects.front());
+        assert(unavailable_send != nullptr);
+        const auto* unavailable_response =
+            std::get_if<snf::server::PurchaseResponse>(&unavailable_send->response);
+        assert(unavailable_response != nullptr);
+        assert(unavailable_response->result.currency_balance == 900);
+        assert(unavailable_response->result.purchased_item_count == 1);
+        assert(actor.state().handledCommandCount() == 2);
+    }
 }
 
 void run_player_actor_tests()
@@ -131,4 +184,5 @@ void run_player_actor_tests()
     test_handler_body_does_not_run_before_the_first_resume();
     test_persistent_player_actor_acknowledges_its_identity();
     test_persistent_player_actor_restores_and_snapshots_state();
+    test_purchase_completion_updates_authoritative_state_and_preserves_it_on_unavailable();
 }

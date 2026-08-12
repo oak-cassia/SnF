@@ -46,7 +46,41 @@ namespace snf::server
                                 }};
                             });
 
-        if (!ping_registered || !authenticate_registered)
+        const bool purchase_registered = registerHandler(
+            snf::protocol::MessageType::Purchase,
+            [](snf::protocol::Frame request) -> std::optional<PlayerCommand>
+            {
+                constexpr std::size_t PURCHASE_PAYLOAD_SIZE = 12;
+                if (request.payload.size() != PURCHASE_PAYLOAD_SIZE)
+                {
+                    return std::nullopt;
+                }
+
+                std::uint64_t key = 0;
+                for (std::size_t index = 0; index < 8; ++index)
+                {
+                    key = (key << 8U) | std::to_integer<std::uint64_t>(request.payload[index]);
+                }
+
+                std::uint32_t product = 0;
+                for (std::size_t index = 8; index < PURCHASE_PAYLOAD_SIZE; ++index)
+                {
+                    product =
+                        (product << 8U) | std::to_integer<std::uint32_t>(request.payload[index]);
+                }
+                if (key == 0 || product == 0)
+                {
+                    return std::nullopt;
+                }
+
+                return PlayerCommand{PurchaseCommand{
+                    .request_id = request.request_id,
+                    .idempotency_key = PurchaseIdempotencyKey{.value = key},
+                    .product = ProductId{.value = product},
+                }};
+            });
+
+        if (!ping_registered || !authenticate_registered || !purchase_registered)
         {
             throw std::logic_error{"A built-in message handler is already registered"};
         }

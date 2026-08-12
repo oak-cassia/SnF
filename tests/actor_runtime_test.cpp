@@ -114,6 +114,7 @@ namespace
     public:
         DelayedLoadPlayerRepository()
             : load_requested_future(load_requested.get_future())
+            , purchase_requested_future(purchase_requested.get_future())
         {
         }
 
@@ -138,15 +139,10 @@ namespace
         void asyncPurchase(snf::server::PurchaseRequest request,
                            snf::server::PurchaseCompletion completion) override
         {
-            completion(snf::server::PurchaseTransactionResult{
-                .status = snf::server::PurchaseStatus::Unavailable,
-                .player = request.player,
-                .idempotency_key = request.idempotency_key,
-                .product = request.product,
-                .currency_balance = 0,
-                .purchased_item_count = 0,
-                .replayed = false,
-            });
+            std::lock_guard lock{mutex};
+            requested_purchase = request;
+            pending_purchase = std::move(completion);
+            purchase_requested.set_value();
         }
 
         void completeLoad(snf::server::PlayerRecord record)
@@ -163,11 +159,26 @@ namespace
             });
         }
 
+        void completePurchase(snf::server::PurchaseTransactionResult result)
+        {
+            snf::server::PurchaseCompletion completion;
+            {
+                std::lock_guard lock{mutex};
+                completion = std::move(pending_purchase);
+            }
+            assert(completion);
+            completion(std::move(result));
+        }
+
         std::promise<void> load_requested;
         std::future<void> load_requested_future;
+        std::promise<void> purchase_requested;
+        std::future<void> purchase_requested_future;
         std::mutex mutex;
         snf::server::PlayerLoadCompletion pending_load;
+        snf::server::PurchaseCompletion pending_purchase;
         std::optional<snf::server::PlayerId> requested_player;
+        std::optional<snf::server::PurchaseRequest> requested_purchase;
         std::optional<snf::server::PlayerRecord> saved;
     };
 
@@ -1417,6 +1428,153 @@ namespace
         assert(stats.suspended_commands >= 2);
         assert(stats.in_flight_operations == 0);
     }
+
+    void test_purchase_wait_suspends_only_the_purchasing_actor()
+    {
+        RuntimeDependencies dependencies{8};
+        DelayedLoadPlayerRepository repository;
+        snf::server::PlayerActorBinding provisional{
+            dependencies.outbound_sink, dependencies.outbound, dependencies.lifecycle};
+        snf::server::PlayerActorBinding persistent{dependencies.outbound_sink,
+                                                   dependencies.outbound,
+                                                   dependencies.lifecycle,
+                                                   snf::server::PlayerActorBindingConfig{
+                                                       .actor_kind = ActorKind::Player,
+                                                       .repository = &repository,
+                                                       .on_before_command = {},
+                                                       .on_actor_deactivated = {},
+                                                       .on_record_loaded = {},
+                                                   }};
+        ActorRuntime runtime{player_runtime_config(1, 8), dependencies.completion};
+        runtime.registerBinding(provisional);
+        runtime.registerBinding(persistent);
+        snf::server::PlayerActorIngress ingress{
+            runtime, provisional, persistent, dependencies.lifecycle};
+        runtime.start();
+
+        const snf::server::PlayerId player{.value = 78};
+        const snf::net::ConnectionId player_connection{.descriptor = 72, .generation = 702};
+        assert(ingress.tryPost(snf::server::PlayerInboundCommand{
+                   .actor = player,
+                   .connection = player_connection,
+                   .command =
+                       snf::server::AuthenticateCommand{
+                           .request_id = 1,
+                           .player = player,
+                       },
+               }) == PostResult::Accepted);
+        assert(repository.load_requested_future.wait_for(1s) == std::future_status::ready);
+        repository.completeLoad(snf::server::PlayerRecord{
+            .player = player,
+            .handled_command_count = 0,
+            .last_location = std::nullopt,
+            .currency_balance = snf::server::INITIAL_CURRENCY_BALANCE,
+            .purchased_item_count = 0,
+        });
+
+        std::optional<snf::server::PostedOutboundAction> authenticated;
+        const auto auth_deadline = std::chrono::steady_clock::now() + 1s;
+        while (!authenticated && std::chrono::steady_clock::now() < auth_deadline)
+        {
+            authenticated = dependencies.outbound.tryPop();
+            if (!authenticated)
+            {
+                std::this_thread::sleep_for(1ms);
+            }
+        }
+        assert(authenticated.has_value());
+        authenticated.reset();
+
+        const snf::server::PurchaseCommand purchase_command{
+            .request_id = 2,
+            .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = 10},
+            .product = snf::server::BASIC_PRODUCT,
+        };
+        assert(ingress.tryPost(snf::server::PlayerInboundCommand{
+                   .actor = player,
+                   .connection = player_connection,
+                   .command = purchase_command,
+               }) == PostResult::Accepted);
+        assert(repository.purchase_requested_future.wait_for(1s) == std::future_status::ready);
+        assert(repository.requested_purchase.has_value());
+        assert(repository.requested_purchase->player == player);
+
+        const snf::net::ConnectionId provisional_connection{
+            .descriptor = 73,
+            .generation = 703,
+        };
+        assert(ingress.tryPost(snf::server::PlayerInboundCommand{
+                   .actor = snf::server::ProvisionalActorId{.value = 703},
+                   .connection = provisional_connection,
+                   .command = snf::server::PingCommand{.request_id = 3, .payload = {}},
+               }) == PostResult::Accepted);
+
+        std::optional<snf::server::PostedOutboundAction> pong;
+        const auto pong_deadline = std::chrono::steady_clock::now() + 1s;
+        while (!pong && std::chrono::steady_clock::now() < pong_deadline)
+        {
+            pong = dependencies.outbound.tryPop();
+            if (!pong)
+            {
+                std::this_thread::sleep_for(1ms);
+            }
+        }
+        assert(pong.has_value());
+        assert(std::get<snf::server::SendFrame>(pong->action).frame.request_id == 3);
+        pong.reset();
+
+        repository.completePurchase(snf::server::PurchaseTransactionResult{
+            .status = snf::server::PurchaseStatus::Committed,
+            .player = player,
+            .idempotency_key = purchase_command.idempotency_key,
+            .product = purchase_command.product,
+            .currency_balance = 900,
+            .purchased_item_count = 1,
+            .replayed = false,
+        });
+        std::optional<snf::server::PostedOutboundAction> purchase;
+        const auto purchase_deadline = std::chrono::steady_clock::now() + 1s;
+        while (!purchase && std::chrono::steady_clock::now() < purchase_deadline)
+        {
+            purchase = dependencies.outbound.tryPop();
+            if (!purchase)
+            {
+                std::this_thread::sleep_for(1ms);
+            }
+        }
+        assert(purchase.has_value());
+        const auto& purchase_frame = std::get<snf::server::SendFrame>(purchase->action).frame;
+        assert(purchase_frame.type == snf::protocol::MessageType::PurchaseResult);
+        assert(purchase_frame.request_id == 2);
+        purchase.reset();
+
+        assert(ingress.tryPostConnectionClosed(
+                   player,
+                   snf::server::ConnectionClosed{
+                       .connection = player_connection,
+                       .cause = snf::server::ConnectionCloseCause::PeerClosed,
+                       .has_location_snapshot = false,
+                       .last_location = std::nullopt,
+                   }) == PostResult::Accepted);
+        assert(ingress.tryPostConnectionClosed(
+                   snf::server::ProvisionalActorId{.value = 703},
+                   snf::server::ConnectionClosed{
+                       .connection = provisional_connection,
+                       .cause = snf::server::ConnectionCloseCause::PeerClosed,
+                       .has_location_snapshot = false,
+                       .last_location = std::nullopt,
+                   }) == PostResult::Accepted);
+        runtime.close();
+        runtime.join();
+
+        assert(repository.saved.has_value());
+        assert(repository.saved->handled_command_count == 2);
+        assert(repository.saved->currency_balance == 900);
+        assert(repository.saved->purchased_item_count == 1);
+        const auto stats = runtime.getStats().workers.front();
+        assert(stats.suspended_commands >= 2);
+        assert(stats.in_flight_operations == 0);
+    }
 }
 
 void run_actor_runtime_tests()
@@ -1440,4 +1598,5 @@ void run_actor_runtime_tests()
     test_an_unsatisfiable_result_closes_the_connection_instead_of_failing_the_worker();
     test_admitted_commands_and_refused_posts_are_counted_apart();
     test_player_repository_wait_suspends_only_the_loading_actor();
+    test_purchase_wait_suspends_only_the_purchasing_actor();
 }

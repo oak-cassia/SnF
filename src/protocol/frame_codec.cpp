@@ -49,6 +49,8 @@ namespace
         case snf::protocol::MessageType::Moved:
         case snf::protocol::MessageType::LeaveZone:
         case snf::protocol::MessageType::ZoneLeft:
+        case snf::protocol::MessageType::Purchase:
+        case snf::protocol::MessageType::PurchaseResult:
             return true;
         }
 

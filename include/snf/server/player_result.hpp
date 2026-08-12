@@ -1,6 +1,7 @@
 #pragma once
 
 #include "snf/server/player_id.hpp"
+#include "snf/server/purchase.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -21,7 +22,13 @@ namespace snf::server
         PlayerId player;
     };
 
-    using PlayerResponse = std::variant<PongResponse, AuthenticatedResponse>;
+    struct PurchaseResponse
+    {
+        std::uint32_t request_id{0};
+        PurchaseTransactionResult result;
+    };
+
+    using PlayerResponse = std::variant<PongResponse, AuthenticatedResponse, PurchaseResponse>;
 
     struct SendResponse
     {

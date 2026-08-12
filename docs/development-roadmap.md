@@ -491,14 +491,14 @@ UnifiedRuntimeDrained =
 - `PlayerRepository`는 value record와 completion callback만 받으며 Actor, coroutine handle과 runtime
   mutable state를 받지 않는다. `ThreadedPlayerRepository`는 non-blocking bounded FIFO 뒤의 전용
   Worker에서 job을 실행하고 queue depth, high-water mark와 admission rejection을 노출한다.
-- 현재 저장 backend는 결정적 in-memory store다. 실제 DB 종류와 transaction adapter는 6의 구매
+- 현재 저장 backend는 결정적 in-memory store다. 실제 DB 종류와 transaction adapter는 6.3의 구매
   slice에서 고르며, repository queue와 Actor continuation 계약은 그대로 유지한다.
 - 첫 persistent command는 load completion까지 해당 Player만 suspend한다. `ConnectionClosed`는 save
   completion 뒤에만 evict하고, reconnect activation은 저장된 `handled_command_count`를 복원한다.
 - 느린 load를 고정한 단일 Worker 테스트에서 같은 Worker의 provisional Player가 PING을 먼저 완료한다.
   두 차례 auth/PING/disconnect 통합 테스트는 저장 값이 `2 → restore → 4`로 이어짐을 검증한다.
 - repository unavailable은 load 결과로 명시되어 연결 종료를 요청하고, save unavailable은 영속 상태
-  유실을 숨기지 않고 runtime failure로 승격한다. 실제 DB adapter의 재시도/idempotency 정책은 6에서
+  유실을 숨기지 않고 runtime failure로 승격한다. 실제 DB adapter의 재시도/idempotency 정책은 6.3에서
   transaction 의미와 함께 확정한다.
 
 ### 5.3 Minimal Zone
@@ -653,13 +653,33 @@ UnifiedRuntimeDrained =
 - bounded repository queue가 포화되거나 종료됐으면 `Unavailable`을 completion으로
   반환하고 Logic Worker를 block하지 않는다. commit, replay와 reject 건수를 계측한다.
 
-### 6.2 Player command와 wire retry (진행 예정)
+### 6.2 Player command와 wire retry (완료)
 
-- `idempotency key`가 있는 구매 요청을 typed Player command로 추가한다.
-- DB transaction으로 재화 차감과 상품 지급을 함께 commit한다.
-- 중복 요청, commit 성공 후 응답 유실, timeout/retry와 reconnect 후 결과 조회를 검증한다.
-- at-least-once 재전달은 transaction과 idempotency record로 effectively-once application으로
-  바꾸며 exactly-once delivery를 가정하지 않는다.
+- `Purchase=11`은 8-byte idempotency key와 4-byte Product ID를 받는 typed Player command다.
+  인증된 persistent Player route에서만 실행하며, 인증 전 요청은 provisional actor에
+  배치하지 않고 protocol error로 거부한다.
+- Player binding은 repository transaction completion을 Actor async operation으로 기다린다. 해당
+  Player만 suspend되고 같은 Worker의 다른 Actor는 계속 실행한다. repository와 DB Worker는
+  Actor object, coroutine handle이나 mutable state를 보유하지 않는다.
+- `PurchaseResult=12`는 status, replay 표시, key, product, 현재 balance와 item count를
+  big-endian으로 반환한다. repository queue 거부는 `Unavailable`로 응답하며 저장소
+  snapshot이 아닌 0으로 Actor 상태를 덮어쓰지 않는다.
+- 중복 key와 commit 성공 후 응답 미수신을 검증한다. TCP 통합 테스트는 두 번째
+  구매를 보낸 직후 응답을 읽지 않고 연결을 닫은 뒤, passivation·save·reconnect·load
+  후 같은 key를 재전송해 replay 응답과 한 번의 effect만 관측한다.
+- at-least-once 재전달을 transaction과 idempotency record로 effectively-once application으로
+  바꾸며 exactly-once delivery를 가정하지 않는다. commit, replay와 reject는 각각
+  repository metric으로 집계한다.
+
+### 6.3 Durable DB adapter와 crash recovery (남음)
+
+- 현재 idempotency record와 Player record는 프로세스 메모리에 있어 같은 서버 프로세스의
+  reconnect/retry만 보장한다. 재시작과 crash 후 retry까지 보장하려면 운영 DB
+  adapter가 필요하다.
+- DB adapter는 debit, grant와 idempotency row를 하나의 transaction으로 commit하고,
+  unique key 경합, commit 직전/직후 crash와 client timeout retry를 fault injection으로 검증한다.
+- idempotency 기록의 보존 기간·archive·partition 정책을 재시도 보장 창과 함께 결정한다.
+  단순 eviction으로 증거를 지운 후 같은 key를 신규 거래로 적용하지 않는다.
 
 ## 7. Shared Content와 Projection
 

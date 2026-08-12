@@ -9,6 +9,18 @@
 namespace
 {
     template <typename> inline constexpr bool always_false_v = false;
+
+    constexpr std::uint64_t BYTE_MASK = 0xFFU;
+
+    template <typename Integer>
+    void append_big_endian(std::vector<std::byte>& payload, Integer value)
+    {
+        for (std::size_t remaining = sizeof(Integer); remaining > 0; --remaining)
+        {
+            const std::size_t shift = (remaining - 1) * 8;
+            payload.push_back(static_cast<std::byte>((value >> shift) & BYTE_MASK));
+        }
+    }
 }
 
 namespace snf::server
@@ -40,6 +52,24 @@ namespace snf::server
 
                     return snf::protocol::Frame{
                         .type = snf::protocol::MessageType::Authenticated,
+                        .request_id = value.request_id,
+                        .payload = std::move(payload),
+                    };
+                }
+                else if constexpr (std::is_same_v<Response, PurchaseResponse>)
+                {
+                    constexpr std::size_t PURCHASE_RESULT_PAYLOAD_SIZE = 30;
+                    std::vector<std::byte> payload;
+                    payload.reserve(PURCHASE_RESULT_PAYLOAD_SIZE);
+                    payload.push_back(static_cast<std::byte>(value.result.status));
+                    payload.push_back(static_cast<std::byte>(value.result.replayed ? 1 : 0));
+                    append_big_endian(payload, value.result.idempotency_key.value);
+                    append_big_endian(payload, value.result.product.value);
+                    append_big_endian(payload, value.result.currency_balance);
+                    append_big_endian(payload, value.result.purchased_item_count);
+
+                    return snf::protocol::Frame{
+                        .type = snf::protocol::MessageType::PurchaseResult,
                         .request_id = value.request_id,
                         .payload = std::move(payload),
                     };

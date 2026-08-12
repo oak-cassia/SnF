@@ -53,6 +53,44 @@ namespace snf::server
         _state._last_location = location;
     }
 
+    PlayerResult PlayerActor::completePurchase(const PurchaseCommand& command,
+                                               PurchaseTransactionResult result)
+    {
+        const auto player = _state._identity.playerId();
+        if (!player || result.player != *player ||
+            result.idempotency_key != command.idempotency_key || result.product != command.product)
+        {
+            throw std::logic_error{"Purchase completion does not match the Player command"};
+        }
+
+        if (result.status == PurchaseStatus::Unavailable)
+        {
+            // Queue admission failure has no authoritative storage snapshot. Keep
+            // the Actor state and report its current values instead of applying zeros.
+            result.currency_balance = _state._currency_balance;
+            result.purchased_item_count = _state._purchased_item_count;
+        }
+        else
+        {
+            _state._currency_balance = result.currency_balance;
+            _state._purchased_item_count = result.purchased_item_count;
+        }
+        ++_state._handled_command_count;
+
+        return PlayerResult{
+            .effects =
+                {
+                    SendResponse{
+                        .response =
+                            PurchaseResponse{
+                                .request_id = command.request_id,
+                                .result = std::move(result),
+                            },
+                    },
+                },
+        };
+    }
+
     PlayerRecord PlayerActor::snapshot() const
     {
         const auto player = _state._identity.playerId();
@@ -118,5 +156,10 @@ namespace snf::server
                     },
                 },
         };
+    }
+
+    PlayerResult PlayerActor::handleCommand(const PurchaseCommand&)
+    {
+        throw std::logic_error{"PurchaseCommand must be completed by PlayerActorBinding"};
     }
 }

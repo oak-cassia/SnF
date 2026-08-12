@@ -49,6 +49,8 @@ namespace snf::server
         [[nodiscard]] const PlayerState& state() const noexcept;
         void restore(const PlayerRecord& record);
         void setLastLocation(std::optional<PlayerLocation> location) noexcept;
+        [[nodiscard]] PlayerResult completePurchase(const PurchaseCommand& command,
+                                                    PurchaseTransactionResult result);
         [[nodiscard]] PlayerRecord snapshot() const;
 
         // The caller must keep the command alive until the returned task
@@ -66,6 +68,7 @@ namespace snf::server
     private:
         [[nodiscard]] PlayerResult handleCommand(const PingCommand& command);
         [[nodiscard]] PlayerResult handleCommand(const AuthenticateCommand& command);
+        [[nodiscard]] PlayerResult handleCommand(const PurchaseCommand& command);
 
         PlayerState _state;
     };

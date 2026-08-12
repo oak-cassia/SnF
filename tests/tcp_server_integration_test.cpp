@@ -351,6 +351,12 @@ namespace
         payload.push_back(static_cast<std::byte>(value & 0xFFU));
     }
 
+    void append_u64(std::vector<std::byte>& payload, const std::uint64_t value)
+    {
+        append_u32(payload, static_cast<std::uint32_t>(value >> 32U));
+        append_u32(payload, static_cast<std::uint32_t>(value));
+    }
+
     std::uint32_t read_u32(const std::vector<std::byte>& payload, const std::size_t offset)
     {
         return (std::to_integer<std::uint32_t>(payload[offset]) << 24U) |
@@ -372,6 +378,20 @@ namespace
             .type = snf::protocol::MessageType::Authenticate,
             .request_id = request_id,
             .payload = player_id_payload(player_id),
+        };
+    }
+
+    snf::protocol::Frame purchase_frame(const std::uint32_t request_id,
+                                        const std::uint64_t idempotency_key,
+                                        const std::uint32_t product = 1)
+    {
+        std::vector<std::byte> payload;
+        append_u64(payload, idempotency_key);
+        append_u32(payload, product);
+        return snf::protocol::Frame{
+            .type = snf::protocol::MessageType::Purchase,
+            .request_id = request_id,
+            .payload = std::move(payload),
         };
     }
 
@@ -401,6 +421,41 @@ namespace
         assert(decoded.ok());
         assert(decoded.frames.size() == 1);
         return decoded.frames.front();
+    }
+
+    snf::protocol::Frame receive_purchase_response(const int socket_descriptor)
+    {
+        constexpr std::size_t PURCHASE_RESPONSE_PAYLOAD_SIZE = 30;
+        constexpr std::size_t PURCHASE_RESPONSE_FRAME_SIZE =
+            snf::protocol::FRAME_LENGTH_FIELD_SIZE + snf::protocol::MIN_BODY_SIZE +
+            PURCHASE_RESPONSE_PAYLOAD_SIZE;
+        snf::protocol::FrameDecoder decoder;
+        const auto decoded =
+            decoder.append(receive_exact(socket_descriptor, PURCHASE_RESPONSE_FRAME_SIZE));
+        assert(decoded.ok());
+        assert(decoded.frames.size() == 1);
+        return decoded.frames.front();
+    }
+
+    void assert_purchase_response(const snf::protocol::Frame& response,
+                                  const std::uint32_t request_id,
+                                  const snf::server::PurchaseStatus status,
+                                  const bool replayed,
+                                  const std::uint64_t key,
+                                  const std::uint32_t product,
+                                  const std::uint64_t balance,
+                                  const std::uint64_t item_count)
+    {
+        assert(response.type == snf::protocol::MessageType::PurchaseResult);
+        assert(response.request_id == request_id);
+        assert(response.payload.size() == 30);
+        assert(std::to_integer<std::uint8_t>(response.payload[0]) ==
+               static_cast<std::uint8_t>(status));
+        assert(std::to_integer<std::uint8_t>(response.payload[1]) == (replayed ? 1 : 0));
+        assert(read_u64(response.payload, 2) == key);
+        assert(read_u32(response.payload, 10) == product);
+        assert(read_u64(response.payload, 14) == balance);
+        assert(read_u64(response.payload, 22) == item_count);
     }
 
     void receive_until_closed(const int socket_descriptor)
@@ -719,6 +774,114 @@ namespace
         server.stop();
     }
 
+    void test_purchase_is_effectively_once_after_response_loss_and_reconnect()
+    {
+        RunningServer server;
+        constexpr std::uint64_t player_id = 79;
+        const snf::server::PlayerId player{.value = player_id};
+
+        auto client = connect_client(server.getPort());
+        const auto auth = authentication_frame(110, player_id);
+        const auto auth_bytes = snf::protocol::encode_frame(auth);
+        send_all(client.getDescriptor(), auth_bytes);
+        assert_authenticated(
+            receive_exact(client.getDescriptor(), auth_bytes.size()), auth.request_id, player_id);
+
+        const auto first = purchase_frame(111, 1);
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(first));
+        assert_purchase_response(receive_purchase_response(client.getDescriptor()),
+                                 first.request_id,
+                                 snf::server::PurchaseStatus::Committed,
+                                 false,
+                                 1,
+                                 1,
+                                 900,
+                                 1);
+
+        const auto duplicate = purchase_frame(112, 1);
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(duplicate));
+        assert_purchase_response(receive_purchase_response(client.getDescriptor()),
+                                 duplicate.request_id,
+                                 snf::server::PurchaseStatus::Committed,
+                                 true,
+                                 1,
+                                 1,
+                                 900,
+                                 1);
+
+        // The transaction commits before response emission. Closing immediately
+        // after the send models a client that cannot know whether key 2 committed.
+        const auto lost_response = purchase_frame(113, 2);
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(lost_response));
+        client.init();
+
+        const auto commit_deadline = std::chrono::steady_clock::now() + 1s;
+        std::optional<snf::server::PlayerRecord> committed;
+        while (std::chrono::steady_clock::now() < commit_deadline)
+        {
+            committed = server.getPlayerRecord(player);
+            if (committed && committed->currency_balance == 800 &&
+                committed->purchased_item_count == 2)
+            {
+                break;
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+        assert(committed.has_value());
+        assert(committed->currency_balance == 800);
+        assert(committed->purchased_item_count == 2);
+
+        const auto passivation_deadline = std::chrono::steady_clock::now() + 1s;
+        while (actor_count(server.getActorRuntimeStats()) != 0 &&
+               std::chrono::steady_clock::now() < passivation_deadline)
+        {
+            std::this_thread::sleep_for(1ms);
+        }
+        assert(actor_count(server.getActorRuntimeStats()) == 0);
+
+        auto reconnected = connect_client(server.getPort());
+        const auto reconnect_auth = authentication_frame(114, player_id);
+        const auto reconnect_auth_bytes = snf::protocol::encode_frame(reconnect_auth);
+        send_all(reconnected.getDescriptor(), reconnect_auth_bytes);
+        assert_authenticated(
+            receive_exact(reconnected.getDescriptor(), reconnect_auth_bytes.size()),
+            reconnect_auth.request_id,
+            player_id);
+
+        const auto retry = purchase_frame(115, 2);
+        send_all(reconnected.getDescriptor(), snf::protocol::encode_frame(retry));
+        assert_purchase_response(receive_purchase_response(reconnected.getDescriptor()),
+                                 retry.request_id,
+                                 snf::server::PurchaseStatus::Committed,
+                                 true,
+                                 2,
+                                 1,
+                                 800,
+                                 2);
+
+        const auto conflict = purchase_frame(116, 2, 2);
+        send_all(reconnected.getDescriptor(), snf::protocol::encode_frame(conflict));
+        assert_purchase_response(receive_purchase_response(reconnected.getDescriptor()),
+                                 conflict.request_id,
+                                 snf::server::PurchaseStatus::IdempotencyConflict,
+                                 false,
+                                 2,
+                                 2,
+                                 800,
+                                 2);
+
+        reconnected.init();
+        server.stop();
+        const auto metrics = server.getMetricsSnapshot();
+        assert(metrics.player_repository.purchase_committed == 2);
+        assert(metrics.player_repository.purchase_replayed == 2);
+        assert(metrics.player_repository.purchase_rejected == 1);
+        const auto saved = server.getPlayerRecord(player);
+        assert(saved.has_value());
+        assert(saved->currency_balance == 800);
+        assert(saved->purchased_item_count == 2);
+    }
+
     void test_authenticated_player_enters_moves_and_leaves_a_zone()
     {
         RunningServer server{snf::server::GameServerConfig{
@@ -758,7 +921,8 @@ namespace
         assert(static_cast<std::int32_t>(read_u32(entered.payload, 21)) == 20);
 
         const auto tick_deadline = std::chrono::steady_clock::now() + 1s;
-        while (server.getZoneTimerStats().fired == 0 &&
+        while ((server.getZoneTimerStats().fired == 0 ||
+                server.getZoneActorStats().tick_execution_nanoseconds.sample_count == 0) &&
                std::chrono::steady_clock::now() < tick_deadline)
         {
             std::this_thread::sleep_for(1ms);
@@ -1404,6 +1568,7 @@ int main()
 {
     test_returns_pong_for_ping();
     test_authenticates_one_session_and_allows_reconnect_after_passivation();
+    test_purchase_is_effectively_once_after_response_loss_and_reconnect();
     test_authenticated_player_enters_moves_and_leaves_a_zone();
     test_zone_position_survives_disconnect_save_and_reconnect();
     test_collects_baseline_saturation_metrics_for_a_round_trip();
