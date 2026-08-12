@@ -6,6 +6,7 @@ void run_command_router_tests();
 void run_protocol_gateway_tests();
 void run_protocol_response_mapper_tests();
 void run_player_effect_sink_tests();
+void run_outbound_channel_tests();
 void run_runtime_boundary_tests();
 void run_player_actor_tests();
 void run_actor_runtime_tests();
@@ -26,6 +27,7 @@ int main()
     run_protocol_gateway_tests();
     run_protocol_response_mapper_tests();
     run_player_effect_sink_tests();
+    run_outbound_channel_tests();
     run_runtime_boundary_tests();
     run_player_actor_tests();
     run_actor_runtime_tests();

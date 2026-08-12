@@ -92,6 +92,7 @@ add_library(snf_server_runtime STATIC
     src/server/player_actor_binding.cpp
     src/server/player_actor_ingress.cpp
     src/server/outbound_sink.cpp
+    src/server/outbound_channel.cpp
     src/server/game_server.cpp
     src/server/tcp_server.cpp
 )
@@ -129,6 +130,7 @@ if(BUILD_TESTING)
         tests/protocol_gateway_test.cpp
         tests/protocol_response_mapper_test.cpp
         tests/player_effect_sink_test.cpp
+        tests/outbound_channel_test.cpp
         tests/runtime_boundaries_test.cpp
         tests/player_actor_test.cpp
         tests/actor_runtime_test.cpp
