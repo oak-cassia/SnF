@@ -886,12 +886,12 @@ namespace
                                         }));
 
         const auto passivation_deadline = std::chrono::steady_clock::now() + 1s;
-        while (actor_count(server.getActorRuntimeStats()) != 1 &&
+        while (actor_count(server.getActorRuntimeStats()) != 0 &&
                std::chrono::steady_clock::now() < passivation_deadline)
         {
             std::this_thread::sleep_for(1ms);
         }
-        assert(actor_count(server.getActorRuntimeStats()) == 1);
+        assert(actor_count(server.getActorRuntimeStats()) == 0);
 
         const auto reconnected = connect_client(server.getPort());
         const auto auth = authentication_frame(303, player_id);

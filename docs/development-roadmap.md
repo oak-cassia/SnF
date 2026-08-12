@@ -539,7 +539,7 @@ UnifiedRuntimeDrained =
 - 단위 테스트는 route 멱등성·epoch·rollback, wire result와 outbound 포화, Zone binding의 terminal
   회계를 검증한다. TCP 통합 테스트는 authenticate → enter → move → leave 왕복과 epoch/좌표 보존을
   실제 socket으로 검증한다.
-- 5.3의 남은 범위는 tick 실행 시간·overrun 지표, 빈 Zone passivation과 이동 최신값 coalescing이다.
+- 5.3의 남은 범위는 tick 실행 시간·overrun 지표와 이동 최신값 coalescing이다.
 
 #### 5.3c Domain Zone TimerService (완료)
 
@@ -578,6 +578,19 @@ UnifiedRuntimeDrained =
 - 단위 테스트는 repository round-trip, Player snapshot, session location, explicit leave clear와 close
   value routing을 검증한다. TCP 통합 테스트는 authenticate → enter → move → disconnect/save → 같은
   PlayerId reconnect/load → enter가 client의 새 좌표 대신 저장된 좌표를 반환하는 전체 흐름을 검증한다.
+
+#### 5.3e Empty Zone passivation (완료)
+
+- 마지막 route의 Leave와 timer Cancel은 같은 Zone mailbox에 순서대로 들어간다. ZoneActor가 player 0,
+  active timer 없음이 된 turn에서 binding이 `PassivateIfIdle`을 반환하고 runtime은 그 시점 mailbox까지
+  비어 있을 때만 slot을 제거한다.
+- lifecycle fence인 기존 `Evict`는 Player close처럼 mailbox tail을 의도적으로 폐기한다.
+  `PassivateIfIdle`은 이미 승인된 tail이 있으면 activation을 유지하고 계속 처리한다. 따라서 Cancel 뒤
+  새 Arm/Enter가 queue된 재입장 경쟁에서 새 route가 사라지지 않는다.
+- binding 테스트는 정상 Leave → Cancel 뒤 빈 Zone 제거와, 첫 dispatch를 고정한 상태에서
+  Leave/Cancel → Arm/Enter 재입장 tail을 미리 승인해 8개 command가 모두 처리되고 최종 빈 상태에서만
+  한 번 evict되는지를 검증한다. disconnect/save/reconnect TCP 테스트도 Player와 Zone slot이 모두
+  제거된 뒤 재접속한다.
 
 완료 기준:
 

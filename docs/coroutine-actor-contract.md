@@ -145,8 +145,10 @@ state == Idle
 && no lifecycle resource requiring retention
 ```
 
-Phase 4.0은 passivation을 실행하지 않는다. runtime이 판단할 수 있는 scheduler 조건만
-`scheduler_passivatable_actor_count`로 관찰하며, lifecycle resource retention까지 판정하지 않는다.
+Phase 4.0에서는 scheduler 조건만 `scheduler_passivatable_actor_count`로 관찰했다. Phase 5의 binding은
+domain resource가 없음을 확인한 뒤 `PassivateIfIdle`을 반환할 수 있다. runtime은 mailbox가 비었을
+때만 이를 적용하며 이미 승인된 tail이 있으면 activation을 유지한다. 반대로 lifecycle fence인
+`Evict`는 mailbox tail을 폐기할 수 있으므로 단순 비활성화 요청에 사용하지 않는다.
 
 ## 7. 필수 경합 테스트
 

@@ -371,7 +371,7 @@ worker_index = hash(ActorKey{ActorKind::Zone, zone_id}) % logic_worker_count;
 동등한 key가 아니므로 항상 서로 다른 ActorSlot과 mailbox를 갖는다.
 
 이동 입력, 관리 명령과 주기 갱신은 모두 같은 mailbox로 들어간다. Timer Scheduler는 시간이 되면
-`ZoneSimulationTick{scheduled_at, sequence}` 메시지만 게시하며 Zone 상태를 직접 실행하거나 수정하지 않는다.
+`ZoneSimulationTick{timer, tick}` 메시지만 게시하며 Zone 상태를 직접 실행하거나 수정하지 않는다.
 ZoneActor가 tick message를 처리하는 권장 순서는 다음과 같다.
 
 ```text
@@ -388,6 +388,10 @@ ZoneActor가 tick message를 처리하는 권장 순서는 다음과 같다.
 tick message도 일반 command와 같은 turn budget과 단일 실행 규칙을 따른다. 늦어진 tick을 무제한
 catch-up하지 않고 오래된 tick을 합치거나 건너뛰는 정책을 둔다. 비활성 Zone은 주기 tick 대신 필요한
 timer나 domain event만 받도록 passivation할 수 있다.
+
+현재 구현은 마지막 Leave 뒤 같은 mailbox의 `CancelZoneSimulationTimer`가 적용되어 player 0, active
+timer 없음이 된 경우 `PassivateIfIdle`을 요청한다. scheduler는 mailbox tail이 비었을 때만 제거하므로
+동시에 승인된 새 Arm/Enter를 passivation이 폐기하지 않는다.
 
 ### 4.6 Shared Content Actor
 

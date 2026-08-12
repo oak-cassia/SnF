@@ -1156,29 +1156,44 @@ namespace snf::runtime
             }
             ++handled_submissions;
 
-            if (result == ActorDispatchResult::Evict)
+            if (result == ActorDispatchResult::Evict ||
+                result == ActorDispatchResult::PassivateIfIdle)
             {
                 std::size_t discarded_mailbox_submissions = 0;
                 std::unique_ptr<ActorSlot> actor_to_destroy;
+                bool retained_for_accepted_work = false;
                 {
                     std::lock_guard lock{worker.scheduling_mutex};
-                    discarded_mailbox_submissions = slot->mailbox.size();
-                    slot->mailbox.clear();
-                    if (discarded_mailbox_submissions != 0)
+                    if (result == ActorDispatchResult::PassivateIfIdle && !slot->mailbox.empty())
                     {
-                        worker.counters.mailbox_depth.fetch_sub(discarded_mailbox_submissions,
-                                                                std::memory_order_relaxed);
-                        releaseOutstanding(worker, discarded_mailbox_submissions);
+                        retained_for_accepted_work = true;
                     }
+                    else
+                    {
+                        discarded_mailbox_submissions = slot->mailbox.size();
+                        slot->mailbox.clear();
+                        if (discarded_mailbox_submissions != 0)
+                        {
+                            worker.counters.mailbox_depth.fetch_sub(discarded_mailbox_submissions,
+                                                                    std::memory_order_relaxed);
+                            releaseOutstanding(worker, discarded_mailbox_submissions);
+                        }
 
-                    const auto actor_iterator = worker.actors.find(key);
-                    if (actor_iterator == worker.actors.end() || &actor_iterator->second != slot)
-                    {
-                        throw std::logic_error{"ActorRuntime actor eviction invariant violated"};
+                        const auto actor_iterator = worker.actors.find(key);
+                        if (actor_iterator == worker.actors.end() ||
+                            &actor_iterator->second != slot)
+                        {
+                            throw std::logic_error{
+                                "ActorRuntime actor eviction invariant violated"};
+                        }
+                        actor_to_destroy = std::move(actor_iterator->second.actor);
+                        worker.actors.erase(actor_iterator);
+                        worker.counters.evicted_actors.fetch_add(1, std::memory_order_relaxed);
                     }
-                    actor_to_destroy = std::move(actor_iterator->second.actor);
-                    worker.actors.erase(actor_iterator);
-                    worker.counters.evicted_actors.fetch_add(1, std::memory_order_relaxed);
+                }
+                if (retained_for_accepted_work)
+                {
+                    continue;
                 }
                 actor_to_destroy.reset();
                 return true;

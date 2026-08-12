@@ -118,6 +118,11 @@ namespace snf::server
         {
             _on_result(payload.command, result);
         }
+
+        if (zone_slot.actor.playerCount() == 0 && !zone_slot.actor.activeTimer())
+        {
+            return snf::runtime::ActorDispatchResult::PassivateIfIdle;
+        }
         return snf::runtime::ActorDispatchResult::KeepActive;
     }
 

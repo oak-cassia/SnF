@@ -42,6 +42,11 @@ namespace snf::runtime
     {
         KeepActive,
         Evict,
+        // Passivation request rather than a lifecycle fence. The scheduler evicts
+        // only if this actor's mailbox is empty at the decision point; otherwise it
+        // keeps the activation and processes the already accepted work. Unlike Evict,
+        // this never discards a mailbox tail.
+        PassivateIfIdle,
         Stopped,
         // The handler awaited an operation. The scheduler keeps the command's
         // capacity and turn accounting open until a terminal continuation or a
