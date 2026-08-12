@@ -491,15 +491,15 @@ UnifiedRuntimeDrained =
 - `PlayerRepository`는 value record와 completion callback만 받으며 Actor, coroutine handle과 runtime
   mutable state를 받지 않는다. `ThreadedPlayerRepository`는 non-blocking bounded FIFO 뒤의 전용
   Worker에서 job을 실행하고 queue depth, high-water mark와 admission rejection을 노출한다.
-- 현재 저장 backend는 결정적 in-memory store다. 실제 DB 종류와 transaction adapter는 6.3의 구매
-  slice에서 고르며, repository queue와 Actor continuation 계약은 그대로 유지한다.
+- 이 단계의 저장 backend는 결정적 in-memory store였다. 6.3에서 MySQL/InnoDB adapter를 추가했으며,
+  repository queue와 Actor continuation 계약은 그대로 유지한다.
 - 첫 persistent command는 load completion까지 해당 Player만 suspend한다. `ConnectionClosed`는 save
   completion 뒤에만 evict하고, reconnect activation은 저장된 `handled_command_count`를 복원한다.
 - 느린 load를 고정한 단일 Worker 테스트에서 같은 Worker의 provisional Player가 PING을 먼저 완료한다.
   두 차례 auth/PING/disconnect 통합 테스트는 저장 값이 `2 → restore → 4`로 이어짐을 검증한다.
 - repository unavailable은 load 결과로 명시되어 연결 종료를 요청하고, save unavailable은 영속 상태
-  유실을 숨기지 않고 runtime failure로 승격한다. 실제 DB adapter의 재시도/idempotency 정책은 6.3에서
-  transaction 의미와 함께 확정한다.
+  유실을 숨기지 않고 runtime failure로 승격한다. 실제 DB adapter의 재시도/idempotency 정책은
+  6.3에서 transaction 의미와 함께 확정했다.
 
 ### 5.3 Minimal Zone
 
@@ -539,7 +539,9 @@ UnifiedRuntimeDrained =
 - 단위 테스트는 route 멱등성·epoch·rollback, wire result와 outbound 포화, Zone binding의 terminal
   회계를 검증한다. TCP 통합 테스트는 authenticate → enter → move → leave 왕복과 epoch/좌표 보존을
   실제 socket으로 검증한다.
-- 5.3의 남은 범위는 tick 실행 시간·overrun 지표와 이동 최신값 coalescing이다.
+- tick 실행 시간·overrun 지표는 5.3f에서 완료했다. 이동 최신값 coalescing은 playable 기준선에서
+  queue overflow나 tick overrun이 재현되지 않아 선행 구현하지 않고, 단일 hot Zone 측정이 필요를
+  증명할 때 진행한다.
 
 #### 5.3c Domain Zone TimerService (완료)
 
@@ -617,7 +619,8 @@ UnifiedRuntimeDrained =
 - `snf_load_client --scenario zone`은 연결마다 고유 Player를 인증하고, 설정한
   `players_per_zone`에 따라 Zone에 입장한 뒤 한 번에 하나의 Move를 지속 전송한다. bootstrap과
   gameplay 요청 수·RTT를 분리해 인증/입장 비용이 이동 p99를 왜곡하지 않게 한다. response type,
-  request ID, Zone, 좌표와 가변 visible-player payload 길이를 검증한다.
+  request ID, Zone, route epoch, Move 좌표와 가변 visible-player payload를 검증한다. Enter 좌표는
+  reconnect 시 저장된 authoritative 위치일 수 있으므로 요청 좌표와 같다고 가정하지 않는다.
 - Release, 200 connections, 8 Zones(Zone당 25명), 12초, 연결당 20 req/s에서 총
   48,000/48,000 응답, timeout·invalid·socket error 0, gameplay RTT p99 `3.705 ms`였다.
   actor queue overflow, outbound admission failure, tick drop/skip/overrun도 모두 0이었다.
@@ -627,10 +630,10 @@ UnifiedRuntimeDrained =
 - Zone을 4개로 줄인 Debug 탐색에서는 Worker 처리량이 약 1:3으로 기울었고 8개로 늘리자 거의
   균등해졌다. 이는 ConnectionScope나 runtime 통합이 해결할 cross-runtime 병목이 아니라 적은 hot
   Actor의 고정 shard 배치 특성이다.
-- 따라서 이 기준선은 4.5 `ConnectionScope` 착수를 지지하지 않는다. 다음 측정은 durable DB 지연,
-  더 큰 AOI 응답과 단일 hot Zone을 각각 분리해 수행한다. 그때 reactor p99/overflow 또는
-  cross-runtime hand-off가 지배적이면 4.5를 승격하고, 특정 Worker queue wait/tick overrun만
-  악화되면 Zone 분할·배치 정책을 먼저 다룬다.
+- 따라서 이 기준선은 4.5 `ConnectionScope` 착수를 지지하지 않는다. 다음 측정은 MySQL을 붙인
+  playable DB queue/operation 지연, 더 큰 AOI 응답과 단일 hot Zone을 각각 분리해 수행한다.
+  그때 reactor p99/overflow 또는 cross-runtime hand-off가 지배적이면 4.5를 승격하고, 특정 Worker
+  queue wait/tick overrun만 악화되면 Zone 분할·배치 정책을 먼저 다룬다.
 
 #### 5.3 세부 기준
 
@@ -660,9 +663,9 @@ UnifiedRuntimeDrained =
 - `PurchaseRequest`는 Player, 64-bit idempotency key와 Product ID를 value로 저장소에
   전달한다. 재화 차감, 상품 지급과 idempotency record 생성은 하나의 임계 구역에서
   commit되며, 재화 부족과 inventory counter overflow는 어느 상태도 부분 변경하지 않는다.
-- 현재 `InMemoryPlayerRepository`의 mutex 임계 구역은 transaction 의미의 결정적 참조
-  구현이다. 실제 DB adapter는 재화, inventory와 idempotency row를 같은 DB transaction에서
-  commit해 동일한 원자성을 보존해야 한다.
+- `InMemoryPlayerRepository`의 mutex 임계 구역은 transaction 의미의 결정적 참조 구현이다.
+  6.3의 MySQL adapter는 재화, inventory와 idempotency row를 같은 DB transaction에서 commit해
+  동일한 원자성을 보존한다.
 - 같은 key와 같은 product는 저장된 결과를 replay하고, 같은 key와 다른 product는
   `IdempotencyConflict`를 반환한다. replay된 성공/실패 outcome은 변하지 않지만,
   PlayerActor가 나중 변경을 과거 snapshot으로 되돌리지 않도록 절대 balance와 item count는
@@ -691,15 +694,23 @@ UnifiedRuntimeDrained =
   바꾸며 exactly-once delivery를 가정하지 않는다. commit, replay와 reject는 각각
   repository metric으로 집계한다.
 
-### 6.3 Durable DB adapter와 crash recovery (남음)
+### 6.3 Durable DB adapter와 crash recovery (완료)
 
-- 현재 idempotency record와 Player record는 프로세스 메모리에 있어 같은 서버 프로세스의
-  reconnect/retry만 보장한다. 재시작과 crash 후 retry까지 보장하려면 운영 DB
-  adapter가 필요하다.
-- DB adapter는 debit, grant와 idempotency row를 하나의 transaction으로 commit하고,
-  unique key 경합, commit 직전/직후 crash와 client timeout retry를 fault injection으로 검증한다.
-- idempotency 기록의 보존 기간·archive·partition 정책을 재시도 보장 창과 함께 결정한다.
-  단순 eviction으로 증거를 지운 후 같은 key를 신규 거래로 적용하지 않는다.
+- `MySqlPlayerRepository`는 기존 `PlayerRepository` 경계 뒤의 bounded non-blocking FIFO와 전용
+  Worker Pool을 유지하고, Worker마다 blocking MySQL connection을 소유한다. queue 포화는 호출 thread를
+  막지 않고 기존 `Unavailable` 의미로 반환하며, operation failure와 latency 분포를 노출한다.
+- MySQL 8/InnoDB schema version 1은 Player snapshot과 `(PlayerId, idempotency key)` unique row를
+  저장한다. 구매는 Player row를 잠근 뒤 debit, grant와 성공·실패 idempotency 증거를 한 transaction으로
+  commit한다. 같은 key 경합은 하나의 신규 적용과 하나의 replay로 직렬화된다.
+- 서버는 기본적으로 결정적 in-memory adapter를 유지하고 `SNF_MYSQL_HOST`, `SNF_MYSQL_USER`와 선택적
+  port/password/database 환경 변수가 주어지면 durable adapter를 선택한다. 실제 TCP 서버를 두 번
+  기동한 통합 테스트가 마지막 Zone 위치를 포함한 Player 상태 복원을 검증한다.
+- 별도 MySQL 통합 테스트는 repository 재생성, 두 adapter instance의 unique key 경합, key conflict,
+  durable 실패 outcome과 bounded queue를 검증한다. `fork()` fault injection으로 commit 직전 crash는
+  rollback 뒤 신규 적용되고, commit 직후 completion 전 crash는 retry에서 replay됨을 확인한다.
+- idempotency 증거는 설정 상한에 도달하면 새 key를 거부하며 자동 eviction하지 않는다. `created_at`은
+  운영 archive를 위한 관측점일 뿐이다. 보존 기간·partition/archive 정책과 그에 따른 retry 보장 창은
+  실제 운영 요구가 정해질 때 결정해야 하며, 증거 삭제를 무제한 retry와 함께 약속하지 않는다.
 
 ## 7. Shared Content와 Projection
 
@@ -740,10 +751,10 @@ UnifiedRuntimeDrained =
 - 별도 `RankingProjection`은 global offset을 연속 적용하고 score 내림차순, 동점 PlayerId
   오름차순으로 결정적 standings를 만든다. checkpoint restore 뒤 tail replay가 live view와
   동일한지, 같은 tail의 재실행이 idempotent한지 자동화 테스트로 검증한다.
-- 현재 event log, checkpoint와 Player repository는 모두 프로세스 메모리 기반인 의미 참조
-  구현이다. 프로세스 crash/restart 복구에는 6.3의 durable transaction adapter와 함께 durable
-  event store/checkpoint 또는 transactional outbox의 원자성 경계를 결정해야 한다. 그 전에는
-  시즌 정산 job을 추가하지 않는다.
+- 현재 event log와 checkpoint는 프로세스 메모리 기반인 의미 참조 구현이다. Player snapshot은
+  6.3 MySQL adapter로 durable하게 만들 수 있지만 event publish와 snapshot 저장은 원자적이지 않다.
+  crash/restart 복구에는 Player 변경과 event/outbox 기록을 묶는 transaction 경계, durable event
+  store와 checkpoint를 결정해야 한다. 그 전에는 시즌 정산 job을 추가하지 않는다.
 
 ## 선택적 인프라 트랙: io_uring Network Backend
 

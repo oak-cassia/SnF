@@ -454,12 +454,11 @@ PlayerActor는 완료 메시지를 자신의 mailbox 또는 Worker queue에서 �
 - command id를 이용한 중요 상태 변경의 멱등 처리
 - 재화 같은 중요 변경에 명시적인 실패 및 재시도 정책 적용
 
-Phase 6의 구매 참조 구현은 `PlayerRecord`의 재화·inventory counter와 Player별
-idempotency record를 하나의 in-memory mutex 임계 구역에서 변경한다. 이 임계 구역이
-현재 transaction 경계며, DB Worker의 여러 thread가 동시에 요청해도 debit, grant와
-idempotency 증거가 분리되지 않는다. 이는 운영 DB 선택이 아니라 transaction 의미의
-결정적 adapter다. 향후 SQL/KV adapter는 같은 세 변경을 하나의 DB transaction으로
-commit하고, 중복 key를 유일성 제약 또는 동등한 동시성 기구로 직렬화해야 한다.
+Phase 6의 결정적 참조 구현은 `PlayerRecord`의 재화·inventory counter와 Player별
+idempotency record를 하나의 in-memory mutex 임계 구역에서 변경한다. 6.3의 운영 참조 adapter는
+같은 `PlayerRepository` 경계 뒤에서 MySQL 8/InnoDB를 사용한다. Player row lock과
+`(PlayerId, idempotency key)` unique key로 동시 요청을 직렬화하고 debit, grant와 idempotency
+증거를 하나의 DB transaction으로 commit한다.
 
 같은 key·product의 replay는 원래 outcome을 유지한다. 단 completion이 PlayerActor에 적용될
 때 후속 transaction의 상태를 되돌리지 않도록, 응답의 절대 balance와 inventory count는
@@ -473,9 +472,11 @@ completion을 async operation으로 기다리는 동안 그 Player의 mailbox는
 적용한다. `Unavailable`은 authoritative snapshot이 아니므로 Actor의 balance와 inventory를
 변경하지 않는다.
 
-현재 in-memory adapter의 idempotency와 record는 프로세스 재시작 후 사라진다. 따라서
-응답 유실·disconnect·reconnect retry는 검증됐지만 crash recovery는 검증되지 않았다.
-운영 adapter는 같은 transaction 경계와 durable idempotency 증거를 유지해야 한다.
+기본 in-memory adapter는 빠른 결정적 테스트를 위해 남아 있다. `SNF_MYSQL_HOST`로 선택하는 MySQL
+adapter는 Player snapshot과 idempotency 증거를 durable하게 유지한다. commit 직전 프로세스 crash는
+rollback 뒤 신규 적용되고, commit 직후 completion 전 crash는 같은 key retry에서 replay된다.
+증거를 자동 eviction하지 않으며 설정 상한에서는 새 key를 명시적으로 거부한다. 운영 archive와
+보존 기간은 retry 보장 창을 먼저 정한 뒤 별도로 결정한다.
 
 ### 4.8 Observability
 
@@ -501,8 +502,9 @@ completion을 async operation으로 기다리는 동안 그 Player의 mailbox는
 Logic Worker에서 reactor로의 outbound hand-off 시간을 `p50/p95/p99/max`로 노출하고 운영 중 주기 보고
 경로를 만들었다. percentile은 bucket 상한 추정이므로 표현 범위 안에서는 실제 값보다 작아지지 않고,
 그 범위를 넘는 표본은 상한에서 포화하므로 max만 정확하다. 5.3f에서 Zone command/tick 실행 시간과
-tick budget overrun을 같은 표면에 추가했다. end-to-end 응답 지연은 load client가 수집하며 실제 DB
-query latency는 DB adapter를 고르는 transaction 단계에서 추가한다.
+tick budget overrun을 같은 표면에 추가했다. end-to-end 응답 지연은 load client가 수집하며 6.3의
+MySQL adapter는 repository operation latency, failure, queue depth와 high-water mark를 같은 주기
+snapshot에 추가했다.
 
 보고 경로 자체가 부하가 되지 않아야 한다. 주기 보고 callback은 reactor thread에서 실행되므로 block하면
 안 되고, 파일이나 수집기 전송이 필요하면 위의 로그 정책과 같은 별도 bounded queue에 게시한다. 보고 비용은
@@ -668,7 +670,7 @@ Runtime 사이에서 동기 호출이나 `future.get()`으로 상대 Worker를 �
 | Connection lifecycle post | reactor 소유 pending deque가 회차당 제한된 건수를 재시도하고, active session과 pending close가 lifecycle slot 예산을 공유한다 | 현재 의미를 유지한다. `ConnectionScope`를 선택할 때만 단일 종결 경로로 이전한다 | 선택적 Runtime 최적화 |
 | ZoneActor mailbox | Worker별 bounded FIFO. `Full`은 해당 연결 종료로 귀결되며 이동도 현재 FIFO에 누적된다 | 최신 이동 입력 병합, 오래된 입력 폐기, 악성 세션 종료 | 5.3 후속 |
 | PartyActor mailbox | Worker별 bounded FIFO. runtime queue `Full`은 해당 연결을 종료하지만 domain member 용량 초과는 typed `PartyFull`로 응답한다 | 현재 동작을 유지한다 | 7.1 완료 |
-| DB queue | 전용 Worker의 bounded FIFO. load 거부는 연결 종료, save 거부는 runtime failure, 구매 거부는 `Unavailable` 응답이다 | durable DB adapter의 제한된 재시도와 요청 실패 의미를 transaction 경계와 함께 고정한다 | 6.3 |
+| DB queue | 전용 Worker의 bounded FIFO. load 거부는 연결 종료, save 거부는 runtime failure, 구매 거부는 `Unavailable` 응답이다. MySQL Worker는 실패한 connection을 버리고 다음 job에서 재연결한다 | retry 보장 창과 운영 장애별 제한 재시도 정책을 정한다 | 6.3 완료 / 운영 정책 |
 | 일반 로그 queue | 미구현. 현재는 `std::cerr`로 직접 출력한다 | 전용 bounded queue와 sampling 또는 drop | 미정 |
 
 입력 종류별로 정책이 다를 수 있다. 이동 입력은 최신 값으로 합칠 수 있지만 아이템 구매나
@@ -712,8 +714,8 @@ ZoneActor의 주기 갱신은 별도 tick 실행 스레드가 상태를 수정�
 
 | 상태 | 토폴로지 | 시점 |
 | --- | --- | --- |
-| 현재 | Network Reactor 1(main thread) + Player·Zone·Party Actor-Bound Logic Pool 2 + bounded Player Repository Worker 1 + Zone Timer Scheduler 1 | 7.1 |
-| 콘텐츠 목표 | Network Reactor + Actor-Bound Logic Pool + 실제 DB adapter를 실행하는 bounded DB Pool + Zone Timer Scheduler + Logger | Playable Session 이후 |
+| 현재 | Network Reactor 1(main thread) + Player·Zone·Party Actor-Bound Logic Pool 2 + bounded in-memory 또는 MySQL Repository Pool + Zone Timer Scheduler 1 | 7.2 / 6.3 |
+| 콘텐츠 목표 | Network Reactor + Actor-Bound Logic Pool + bounded MySQL Pool + Zone Timer Scheduler + durable projection outbox/checkpoint + Logger | Projection 내구화 이후 |
 | 선택적 최적화 | UnifiedRuntime N + 별도 Blocking DB Pool + Logger | 병목 증명 후 |
 
 선택적 전환의 판단 근거는 [UnifiedRuntime 전환 개요](../study/10-unified-runtime-overview.md)에 있다. 영역별 초기 Worker 수와
@@ -852,7 +854,7 @@ inbound/outbound/lifecycle 계약이 안정된 뒤의 선택적 트랙이다.
 | Actor 종류·command별 mailbox coalescing 정책과 turn budget | 5.3 | 입력 유실률, tick 지연 |
 | 네트워크 패킷 sequence와 재전송 정책 | 5.3 | 이동 입력 유실률 |
 | hot Zone의 공간 분할 방식 | 5.3 이후 | Zone별 entity 수, AOI 계산 비용 |
-| DB 종류, connection pool 크기와 저장 보장 수준 | 5.2 | DB queue depth, query latency |
+| MySQL connection/Worker 수와 장애별 제한 재시도 | MySQL playable 부하 이후 | DB queue depth, operation latency/failure, connection 한도 |
 | snapshot, event journal 또는 outbox 도입 범위 | 5.2 이후 | 저장 실패율과 복구 요구 수준 |
 | 프로세스 분리 시 내부 프로토콜과 Actor Directory 방식 | 미정 | 단일 프로세스 한계 지표 |
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "snf/runtime/bounded_queue.hpp"
+#include "snf/runtime/distribution.hpp"
 #include "snf/server/player_id.hpp"
 #include "snf/server/player_record.hpp"
 #include "snf/server/purchase.hpp"
@@ -43,6 +44,30 @@ namespace snf::server
     using PlayerLoadCompletion = std::function<void(PlayerLoadResult)>;
     using PlayerSaveCompletion = std::function<void(PlayerSaveResult)>;
     using PurchaseCompletion = std::function<void(PurchaseTransactionResult)>;
+
+    struct PlayerRepositoryStats
+    {
+        std::uint64_t accepted{0};
+        std::uint64_t rejected{0};
+        std::size_t queue_depth{0};
+        std::size_t queue_high_water_mark{0};
+        std::uint64_t purchase_committed{0};
+        std::uint64_t purchase_replayed{0};
+        std::uint64_t purchase_rejected{0};
+        std::uint64_t operation_failures{0};
+        snf::runtime::DistributionSnapshot operation_latency_nanoseconds;
+    };
+
+    // Read-only diagnostics shared by the in-memory and durable adapters. It is
+    // deliberately separate from PlayerRepository so deterministic test fakes do
+    // not need to expose storage internals.
+    class PlayerRepositoryDiagnostics
+    {
+    public:
+        virtual ~PlayerRepositoryDiagnostics() = default;
+        [[nodiscard]] virtual std::optional<PlayerRecord> find(PlayerId player) const = 0;
+        [[nodiscard]] virtual PlayerRepositoryStats stats() const = 0;
+    };
 
     // The repository receives values and completion callbacks only. An adapter
     // may run blocking storage work elsewhere, but it never receives an Actor,
@@ -103,22 +128,14 @@ namespace snf::server
         std::size_t max_idempotency_records_per_player{1024};
     };
 
-    struct ThreadedPlayerRepositoryStats
-    {
-        std::uint64_t accepted{0};
-        std::uint64_t rejected{0};
-        std::size_t queue_depth{0};
-        std::size_t queue_high_water_mark{0};
-        std::uint64_t purchase_committed{0};
-        std::uint64_t purchase_replayed{0};
-        std::uint64_t purchase_rejected{0};
-    };
+    using ThreadedPlayerRepositoryStats = PlayerRepositoryStats;
 
     // Blocking-adapter boundary. Jobs are admitted non-blockingly into a bounded
     // FIFO and executed only by the repository Workers. The in-memory storage is
     // deterministic here; replacing the job body with a DB client does not change
     // the Actor-facing completion contract.
-    class ThreadedPlayerRepository final : public PlayerRepository
+    class ThreadedPlayerRepository final : public PlayerRepository,
+                                           public PlayerRepositoryDiagnostics
     {
     public:
         explicit ThreadedPlayerRepository(ThreadedPlayerRepositoryConfig config = {});
@@ -132,8 +149,8 @@ namespace snf::server
         void asyncPurchase(PurchaseRequest request, PurchaseCompletion completion) override;
 
         void close() noexcept;
-        [[nodiscard]] std::optional<PlayerRecord> find(PlayerId player) const;
-        [[nodiscard]] ThreadedPlayerRepositoryStats stats() const;
+        [[nodiscard]] std::optional<PlayerRecord> find(PlayerId player) const override;
+        [[nodiscard]] PlayerRepositoryStats stats() const override;
 
     private:
         struct LoadJob

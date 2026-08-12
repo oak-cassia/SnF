@@ -479,12 +479,17 @@ namespace snf::load
         if (response.payload.size() < FIXED_ZONE_RESPONSE_SIZE ||
             std::to_integer<std::uint8_t>(response.payload[0]) != 0 ||
             read_big_endian<std::uint64_t>(response.payload, 1) != _workload.zone_id ||
-            read_big_endian<std::uint64_t>(response.payload, 9) == 0 ||
-            read_big_endian<std::int32_t>(response.payload, 17) !=
-                _outstanding_request->expected_x ||
-            read_big_endian<std::int32_t>(response.payload, 21) != _outstanding_request->expected_y)
+            read_big_endian<std::uint64_t>(response.payload, 9) == 0)
         {
             return protocol_error("Zone response fields do not match the request");
+        }
+        if (_outstanding_request->request_type == snf::protocol::MessageType::Move &&
+            (read_big_endian<std::int32_t>(response.payload, 17) !=
+                 _outstanding_request->expected_x ||
+             read_big_endian<std::int32_t>(response.payload, 21) !=
+                 _outstanding_request->expected_y))
+        {
+            return protocol_error("Move response position does not match the request");
         }
         const std::uint16_t visible_count = read_big_endian<std::uint16_t>(response.payload, 25);
         if (response.payload.size() != FIXED_ZONE_RESPONSE_SIZE + visible_count * 8U)

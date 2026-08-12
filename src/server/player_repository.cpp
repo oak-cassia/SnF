@@ -315,10 +315,10 @@ namespace snf::server
         return _storage.find(player);
     }
 
-    ThreadedPlayerRepositoryStats ThreadedPlayerRepository::stats() const
+    PlayerRepositoryStats ThreadedPlayerRepository::stats() const
     {
         const InMemoryPlayerRepository::PurchaseStats purchases = _storage.purchaseStats();
-        return ThreadedPlayerRepositoryStats{
+        return PlayerRepositoryStats{
             .accepted = _accepted.load(std::memory_order_relaxed),
             .rejected = _rejected.load(std::memory_order_relaxed),
             .queue_depth = _jobs.size(),
@@ -326,6 +326,8 @@ namespace snf::server
             .purchase_committed = purchases.committed,
             .purchase_replayed = purchases.replayed,
             .purchase_rejected = purchases.rejected,
+            .operation_failures = 0,
+            .operation_latency_nanoseconds = {},
         };
     }
 

@@ -7,7 +7,8 @@ SnF는 C++20을 활용해 MORPG 콘텐츠의 상태, 규칙과 메시지 흐름�
 현재는 Linux `epoll` 네트워크 런타임과 coroutine suspend/resume을 지원하는 일반화된 sharded Actor
 Runtime 위에서 인증, Player 영속성, Zone 이동·tick과 멱등한 구매 vertical slice를
 실행한다. outbound와 repository 대기는 Actor 하나만 suspend하는 non-blocking 경계를
-사용한다. 다음 주요 범위는 durable DB adapter와 Shared Content·Projection slice다.
+사용한다. MySQL durable adapter와 Shared Content·Projection의 in-memory reference까지
+완료했으며, 다음 주요 범위는 ranking outbox/checkpoint 내구성과 hot Zone 측정이다.
 `ConnectionScope`와 UnifiedRuntime은 실제 콘텐츠 부하가 필요를 증명할 때 진행할 선택적 최적화다.
 
 ## 프로젝트 목적
@@ -85,7 +86,9 @@ Network Runtime
 - 주입 가능한 clock과 stale `TimerId` 폐기를 갖춘 bounded Zone timer scheduler
 - disconnect/save/reconnect 뒤 복원되는 Player의 마지막 Zone 위치
 - 재화 차감·상품 지급·idempotency 증거를 원자적으로 적용하는 bounded 구매
-  repository와 wire command (현재 in-memory transaction 참조 구현, durable DB는 남음)
+  repository와 wire command
+- 전용 bounded Worker Pool에서 blocking MySQL C API를 실행하는 durable Player repository:
+  Player snapshot과 구매 idempotency를 InnoDB에 저장하고 unique key 경합과 crash/retry를 복구
 - Zone command/tick 실행 `p50/p95/p99/max`와 tick budget overrun metric
 - `PlayerActor` PING/PONG 처리와 typed result/effect 경계
 - 인증된 Player의 typed 구매 command, repository await와 응답 유실·reconnect retry에서
@@ -128,9 +131,10 @@ operation을 시작하지 않고, 포화일 때만 그 Actor 하나가 suspend�
 
 Phase 6에서는 구매의 재화 차감, 상품 지급과 idempotency 증거를 하나의
 repository transaction으로 묶고, repository 대기 중에도 같은 Worker의 다른 Actor가
-진행하는 wire vertical slice를 추가했다. 현재 adapter는 프로세스 메모리 기반이므로
-disconnect/reconnect retry까지만 보장하며, 프로세스 crash 후 retry는 durable DB adapter의
-남은 범위다.
+진행하는 wire vertical slice를 추가했다. 기본값은 결정적 in-memory adapter이고,
+`SNF_MYSQL_HOST`를 설정하면 bounded MySQL adapter를 사용한다. MySQL adapter는 Player snapshot,
+재화 차감, 상품 지급과 idempotency row를 InnoDB transaction으로 저장해 프로세스 crash 전후의
+retry를 복구한다.
 
 Phase 7.1에서는 공유 콘텐츠의 첫 vertical slice로 PartyActor를 추가했다. PartyId별
 FIFO mailbox가 membership을 변경하고, coordinator의 session route와 membership epoch이
@@ -141,15 +145,16 @@ Phase 7.2에서는 PlayerActor가 신뢰된 gameplay score command를 적용하�
 sequence의 domain event를 발행한다. bounded in-memory event log와 ranking projection은 duplicate,
 conflict, 순서 오류를 구분하며 checkpoint 뒤 tail replay로 같은 standings를 복원한다. event-only
 effect는 network outbound 용량을 소비하지 않는다. 현재 log와 checkpoint는 의미 참조 구현이므로
-프로세스 crash 복구와 시즌 정산은 durable event store/outbox를 6.3 저장 adapter와 함께 정한 뒤의
-범위다.
+Player snapshot이 MySQL에 저장되더라도 event publish와 원자적이지 않다. 프로세스 crash 복구와
+시즌 정산은 transactional outbox와 durable checkpoint를 정한 뒤의 범위다.
 
 콘텐츠 부하를 재현하기 위해 load client는 기존 `ping` 외에 `zone` 시나리오를 제공한다. 각 연결이
 고유 Player로 인증하고 Zone에 입장한 뒤 지속 이동하며 bootstrap과 gameplay RTT를 분리한다. 현재
 Release 기준선(200 connections, 8 Zones, 12초, 연결당 20 req/s)은 48,000/48,000 응답,
 gameplay p99 3.705ms, timeout·queue overflow·tick overrun 0이었다. reactor turn p99 0.655ms와
 균형 잡힌 Worker 처리량을 함께 보면 지금은 ConnectionScope를 구현할 근거가 없으며, durable DB와
-hot Zone 측정이 다음 판단 입력이다.
+hot Zone 측정이 다음 판단 입력이다. 여기서 durable DB는 adapter 구현 여부가 아니라 MySQL을 붙인
+playable 부하의 queue/operation 지연을 뜻한다.
 
 ## 로드맵
 
@@ -232,6 +237,31 @@ cmake --build --preset release
 
 ```bash
 ./build/release/snf_server
+```
+
+기본 서버는 in-memory repository를 사용한다. MySQL 8/InnoDB repository를 선택하려면 먼저
+database와 사용자를 만든 뒤 환경 변수를 전달한다. schema version과 필요한 table은 서버 시작 시
+확인·생성한다.
+
+```bash
+SNF_MYSQL_HOST=127.0.0.1 \
+SNF_MYSQL_PORT=3306 \
+SNF_MYSQL_USER=snf \
+SNF_MYSQL_PASSWORD=secret \
+SNF_MYSQL_DATABASE=snf \
+./build/release/snf_server
+```
+
+MySQL 통합 테스트는 `SNF_MYSQL_TEST_HOST`가 없으면 skip된다. 실제 DB에 대해 실행할 때는 별도의
+test database를 사용해야 한다. 테스트가 `snf_players`와 `snf_purchase_idempotency`의 모든 row를
+삭제하므로 운영 database를 지정하면 안 된다.
+
+```bash
+SNF_MYSQL_TEST_HOST=127.0.0.1 \
+SNF_MYSQL_TEST_USER=snf \
+SNF_MYSQL_TEST_PASSWORD=secret \
+SNF_MYSQL_TEST_DATABASE=snf_test \
+./build/debug/snf_mysql_integration_tests
 ```
 
 부하 테스트 클라이언트:

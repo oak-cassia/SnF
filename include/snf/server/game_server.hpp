@@ -6,6 +6,7 @@
 #include "snf/runtime/runtime_completion.hpp"
 #include "snf/server/command_router.hpp"
 #include "snf/server/command_terminal.hpp"
+#include "snf/server/mysql_player_repository.hpp"
 #include "snf/server/outbound_channel.hpp"
 #include "snf/server/party_actor_binding.hpp"
 #include "snf/server/party_actor_ingress.hpp"
@@ -30,6 +31,7 @@
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <thread>
 #include <vector>
@@ -46,7 +48,7 @@ namespace snf::server
         GameServerStats counters;
         TcpServerMetrics network;
         snf::runtime::ActorRuntimeStats actor_runtime;
-        ThreadedPlayerRepositoryStats player_repository;
+        PlayerRepositoryStats player_repository;
         ZoneTimerServiceStats zone_timers;
         ZoneActorBindingStats zone_actors;
         PartyActorBindingStats party_actors;
@@ -75,6 +77,9 @@ namespace snf::server
         std::size_t player_repository_worker_count{1};
         std::size_t player_repository_queue_capacity{4096};
         std::size_t max_purchase_idempotency_records_per_player{1024};
+        // Empty keeps the deterministic in-memory adapter. A value selects the
+        // durable MySQL adapter and its own bounded Worker/queue configuration.
+        std::optional<MySqlPlayerRepositoryConfig> mysql_player_repository{};
         std::size_t max_player_domain_events{65536};
         std::size_t max_party_members{8};
         std::int32_t zone_aoi_radius{1000};
@@ -150,7 +155,7 @@ namespace snf::server
         PlayerSessionDirectory _player_sessions;
         RouteCoordinator _route_coordinator;
         PartyCoordinator _party_coordinator;
-        ThreadedPlayerRepository _player_repository;
+        std::unique_ptr<PlayerRepository> _player_repository;
         snf::runtime::RuntimeCompletionCoordinator _runtime_completion;
         // Bindings must outlive the generic runtime: the worker owns the
         // wrapper destruction, while this object owns Player dependencies.

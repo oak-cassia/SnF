@@ -70,6 +70,8 @@ target_include_directories(snf_core
 snf_configure_target(snf_core)
 
 find_package(Threads REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(MySQL REQUIRED IMPORTED_TARGET mysqlclient)
 
 add_library(snf_runtime STATIC
     src/runtime/runtime_completion.cpp
@@ -96,6 +98,7 @@ add_library(snf_server_runtime STATIC
     src/server/player_actor_binding.cpp
     src/server/player_actor_ingress.cpp
     src/server/player_repository.cpp
+    src/server/mysql_player_repository.cpp
     src/server/ranking_projection.cpp
     src/server/player_session_directory.cpp
     src/server/zone_actor.cpp
@@ -110,7 +113,7 @@ add_library(snf_server_runtime STATIC
     src/server/game_server.cpp
     src/server/tcp_server.cpp
 )
-target_link_libraries(snf_server_runtime PUBLIC snf_core snf_runtime)
+target_link_libraries(snf_server_runtime PUBLIC snf_core snf_runtime PkgConfig::MySQL)
 snf_configure_target(snf_server_runtime)
 
 add_executable(snf_server
@@ -198,4 +201,21 @@ if(BUILD_TESTING)
 
     add_test(NAME snf_load_client_integration_tests COMMAND snf_load_client_integration_tests)
     set_tests_properties(snf_load_client_integration_tests PROPERTIES TIMEOUT 15)
+
+    add_executable(snf_mysql_integration_tests
+        tests/mysql_player_repository_integration_test.cpp
+    )
+    target_link_libraries(snf_mysql_integration_tests
+        PRIVATE
+            snf_server_runtime
+            snf_load_client_runtime
+            Threads::Threads
+    )
+    snf_configure_target(snf_mysql_integration_tests)
+
+    add_test(NAME snf_mysql_integration_tests COMMAND snf_mysql_integration_tests)
+    set_tests_properties(snf_mysql_integration_tests PROPERTIES
+        TIMEOUT 30
+        SKIP_RETURN_CODE 77
+    )
 endif()

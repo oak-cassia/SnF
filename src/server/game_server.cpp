@@ -11,6 +11,35 @@
 
 namespace
 {
+    std::unique_ptr<snf::server::PlayerRepository>
+    make_player_repository(const snf::server::GameServerConfig& config)
+    {
+        if (config.mysql_player_repository)
+        {
+            return std::make_unique<snf::server::MySqlPlayerRepository>(
+                *config.mysql_player_repository);
+        }
+        return std::make_unique<snf::server::ThreadedPlayerRepository>(
+            snf::server::ThreadedPlayerRepositoryConfig{
+                .worker_count = config.player_repository_worker_count,
+                .queue_capacity = config.player_repository_queue_capacity,
+                .max_idempotency_records_per_player =
+                    config.max_purchase_idempotency_records_per_player,
+            });
+    }
+
+    const snf::server::PlayerRepositoryDiagnostics&
+    repository_diagnostics(const snf::server::PlayerRepository& repository)
+    {
+        const auto* diagnostics =
+            dynamic_cast<const snf::server::PlayerRepositoryDiagnostics*>(&repository);
+        if (diagnostics == nullptr)
+        {
+            throw std::logic_error{"Configured Player repository has no diagnostics"};
+        }
+        return *diagnostics;
+    }
+
     snf::net::UniqueFileDescriptor create_outbound_event()
     {
         const int descriptor = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -105,12 +134,7 @@ namespace snf::server
         , _zone_results(_outbound_channel)
         , _party_results(_outbound_channel)
         , _party_coordinator(checked_party_members(config.max_party_members))
-        , _player_repository(ThreadedPlayerRepositoryConfig{
-              .worker_count = config.player_repository_worker_count,
-              .queue_capacity = config.player_repository_queue_capacity,
-              .max_idempotency_records_per_player =
-                  config.max_purchase_idempotency_records_per_player,
-          })
+        , _player_repository(make_player_repository(config))
         , _runtime_completion(snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
                               _outbound_event.getDescriptor())
         , _player_actor_binding(_player_effects, _outbound_channel, _command_lifecycle)
@@ -120,7 +144,7 @@ namespace snf::server
               _command_lifecycle,
               PlayerActorBindingConfig{
                   .actor_kind = snf::runtime::ActorKind::Player,
-                  .repository = &_player_repository,
+                  .repository = _player_repository.get(),
                   .on_before_command = {},
                   .on_actor_deactivated =
                       [this](const PlayerActorId actor)
@@ -282,7 +306,7 @@ namespace snf::server
 
     std::optional<PlayerRecord> GameServer::getPlayerRecord(const PlayerId player) const
     {
-        return _player_repository.find(player);
+        return repository_diagnostics(*_player_repository).find(player);
     }
 
     ZoneTimerServiceStats GameServer::getZoneTimerStats() const
@@ -316,7 +340,7 @@ namespace snf::server
             .counters = _tcp_server.getStats(),
             .network = _tcp_server.getMetrics(),
             .actor_runtime = _logic_runtime.getStats(),
-            .player_repository = _player_repository.stats(),
+            .player_repository = repository_diagnostics(*_player_repository).stats(),
             .zone_timers = _zone_timers.stats(),
             .zone_actors = _zone_actor_binding.stats(),
             .party_actors = _party_actor_binding.stats(),
