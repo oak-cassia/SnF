@@ -506,6 +506,13 @@ tick budget overrun을 같은 표면에 추가했다. end-to-end 응답 지연�
 MySQL adapter는 repository operation latency, failure, queue depth와 high-water mark를 같은 주기
 snapshot에 추가했다.
 
+200-connection playable 대조 측정에서 MySQL과 in-memory의 gameplay p99는 각각 10.654ms와
+10.209ms였고 MySQL operation p99는 4.719ms였다. 저장소 작업은 login/save 경계에서만 발생해
+steady-state Zone command를 막지 않았지만, login burst queue high-water는 198/4096이었다. 따라서
+DB 확장의 다음 근거는 일반 gameplay RTT가 아니라 동시 login 수에 따른 queue depth, operation p99와
+admission rejection이다. 200명을 단일 Zone에 둔 측정은 실패 없이 끝났지만 한 Logic Worker로 거의
+모든 command가 집중됐으므로, 규모를 더 키울 때는 Runtime 통합보다 Zone 분할/배치를 먼저 검토한다.
+
 보고 경로 자체가 부하가 되지 않아야 한다. 주기 보고 callback은 reactor thread에서 실행되므로 block하면
 안 되고, 파일이나 수집기 전송이 필요하면 위의 로그 정책과 같은 별도 bounded queue에 게시한다. 보고 비용은
 turn 측정 이후에 발생하므로 reactor turn 분포에는 나타나지 않는다.

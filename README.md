@@ -156,6 +156,13 @@ gameplay p99 3.705ms, timeout·queue overflow·tick overrun 0이었다. reactor 
 hot Zone 측정이 다음 판단 입력이다. 여기서 durable DB는 adapter 구현 여부가 아니라 MySQL을 붙인
 playable 부하의 queue/operation 지연을 뜻한다.
 
+같은 200-connection 조건에서 MySQL을 붙인 후속 측정은 47,800/47,800 응답, gameplay p99
+10.654ms였고, 바로 이어 실행한 in-memory 대조군은 48,000/48,000, 10.209ms였다. MySQL operation
+p99는 4.719ms, queue high-water는 로그인 burst에서 198이었지만 거부·실패는 없었다. 단일 Zone에
+200명을 모은 측정도 48,000/48,000, gameplay p99 8.960ms, tick overrun 0이었다. 이때 Logic 처리량은
+한 Worker에 집중되고 Zone command p99가 7.167µs로 올라 병목 방향은 Zone shard임을 보였지만,
+현재 규모에서 분할·coalescing 또는 ConnectionScope를 정당화할 장애는 재현되지 않았다.
+
 ## 로드맵
 
 ```text

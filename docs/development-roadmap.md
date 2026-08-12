@@ -635,6 +635,25 @@ UnifiedRuntimeDrained =
   그때 reactor p99/overflow 또는 cross-runtime hand-off가 지배적이면 4.5를 승격하고, 특정 Worker
   queue wait/tick overrun만 악화되면 Zone 분할·배치 정책을 먼저 다룬다.
 
+후속 MySQL·hot Zone 측정 (완료):
+
+- 동일한 Release 200 connections, 8 Zones, 12초, 20 req/s에서 MySQL adapter는
+  47,800/47,800 응답, gameplay RTT p99 `10.654 ms`였고 timeout·invalid·overflow는 0이었다.
+  같은 Docker 실행환경에서 바로 측정한 in-memory 대조군은 48,000/48,000, p99 `10.209 ms`였다.
+  이전 실행의 3.705ms와 달라진 절대값보다 동시점 대조를 사용하며, 이 결과에는 MySQL 때문에
+  steady-state gameplay p99가 유의하게 악화됐다는 증거가 없다.
+- MySQL 실행의 reactor p99는 `0.262 ms`, outbound hand-off p99는 `0.786 ms`였다. repository는
+  로그인·종료의 load/save 400건을 실패·거부 없이 처리했고 operation p99 `4.719 ms`, max
+  `19.287 ms`였다. 시작 burst에서 두 DB Worker 앞 queue high-water가 `198/4096`까지 올랐으므로
+  더 큰 login storm에서는 DB Worker/connection 수와 admission 정책을 별도로 측정해야 한다.
+- 200명을 한 Zone에 모은 in-memory 측정도 48,000/48,000, gameplay p99 `8.960 ms`, overflow와
+  tick overrun 0이었다. Zone command/tick p99는 `7.167 µs/0.959 µs`, owning Worker queue wait
+  p99는 `1.049 ms`였다. 한 Worker가 48,327건, 다른 Worker가 94건을 처리해 고정 shard 편향은
+  분명하지만 현재 부하에서는 deadline이나 용량 실패로 이어지지 않았다.
+- 결론은 4.5를 계속 보류하는 것이다. 다음 성능 작업은 동시 login 규모를 단계적으로 올려 DB queue
+  포화점을 찾거나, entity/AOI와 이동률을 올려 hot Zone의 tick/queue budget을 실제로 넘기는
+  실험이다. 그 전에는 ConnectionScope, Zone 분할과 이동 coalescing을 구현하지 않는다.
+
 #### 5.3 세부 기준
 
 - 일반화된 scheduler 위에 `ZoneActor`와 Zone binding을 구현해 PlayerActor와 동일한
