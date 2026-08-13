@@ -17,6 +17,8 @@ namespace snf::server
         StaleRoute,
         StaleTimer,
         StaleTick,
+        TransitionInProgress,
+        TransferFailed,
     };
 
     struct ZoneResult

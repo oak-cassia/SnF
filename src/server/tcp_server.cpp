@@ -92,6 +92,7 @@ namespace snf::server
         , _connection_lifecycle_capacity(config.connection_lifecycle_capacity)
         , _metrics_report_interval(config.metrics_report_interval)
         , _on_metrics_interval(config.on_metrics_interval)
+        , _on_control_wake(config.on_control_wake)
         , _frame_ingress(frame_ingress)
         , _outbound(outbound)
         , _runtime_completion(runtime_completion)
@@ -561,6 +562,11 @@ namespace snf::server
             }
 
             snf::net::throw_system_error("read(outbound eventfd)");
+        }
+
+        if (_on_control_wake)
+        {
+            _on_control_wake();
         }
 
         while (true)

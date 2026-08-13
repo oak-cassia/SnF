@@ -224,11 +224,17 @@ shutdown은 새 handoff admission을 먼저 닫는다. 이미 승인된 handoff 
 queued completion과 release가 경합해도 consume 전에는 예약을 반환하지 않는다. Worker binding과 reactor
 drain을 실제 source/target command에 연결하는 작업은 7.4b에서 수행한다.
 
-### 7.4b Happy path와 protocol
+### 7.4b Happy path와 protocol (완료)
 
 - source leave → target enter → route publish 순서를 연결한다.
 - transition 중 typed busy/failure와 client terminal ownership을 구현한다.
 - timer/location journal과 TCP happy-path를 검증한다.
+
+구현은 shared reactor eventfd가 깨어난 회차에 reserved transition completion을 설정된 budget만큼 소비한다.
+source Leave 결과를 확인한 뒤 target Enter를 게시하고 target 적용 뒤에만 route와 location journal을
+교체한다. client token은 reactor record 하나가 소유하며 내부 두 command는 token을 만들지 않는다. 전환
+중 gameplay는 `TransitionInProgress`, source 변경 전 admission 실패는 `TransferFailed`로 응답한다. 단위
+상태 기계와 실제 TCP Zone A→B→Move→Leave 흐름이 이 순서와 terminal/reservation 회계를 검증한다.
 
 ### 7.4c Compensation, disconnect와 shutdown
 

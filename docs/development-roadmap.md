@@ -837,7 +837,7 @@ UnifiedRuntimeDrained =
   상세 조건과 원자료는 `docs/ranking-performance-baseline.md`에 기록한다.
 - schema v4를 포함한 실제 MySQL 경로 Debug 5회 반복과 ASan/UBSan·TSan 전체 테스트가 통과했다.
 
-### 7.4 Cross-Zone handoff (7.4a 완료; 7.4b~c 남음)
+### 7.4 Cross-Zone handoff (7.4a~b 완료; 7.4c 남음)
 
 - 상세 계약은 `docs/cross-zone-handoff-contract.md`를 단일 기준으로 사용한다. route epoch만으로 전환을
   원자화하지 않고 reactor 소유 `Stable/Transferring` state machine이 source drain → target activation →
@@ -863,6 +863,21 @@ UnifiedRuntimeDrained =
 - 최소 capacity에서 전환 admission 거부, source leave 전 rollback, source restore, target publish,
   abandon과 stale identity를 검증했다. completion channel은 여러 Worker의 동시 publish, cancel, slot 재사용과
   queued release를 검증한다. 실제 Worker→reactor 연결과 TCP happy path는 7.4b 범위다.
+
+#### 7.4b Happy path와 protocol (완료)
+
+- client의 cross-zone `EnterZone`은 reactor transition record가 terminal token 하나를 소유하고, source
+  Leave와 target Enter는 reply/credit 없는 internal command로 같은 Actor mailbox에 게시한다. Worker는
+  immutable handoff context를 reserved channel로 반환하고 reactor는 회차당 설정된 completion 수만 처리한다.
+- source Leave completion 전에는 stable route 조회를 숨기고, target Enter가 `Applied` 또는
+  `AlreadyPresent`로 끝난 뒤에만 target epoch을 공개한다. 그때 session location을 authoritative target
+  좌표로 바꾸고 source timer를 취소한 뒤 `ZoneEntered` 하나와 client terminal 하나를 방출한다.
+- 전환 중 Enter/Move/Leave는 source나 target mailbox에 게시하지 않고 각 message type의
+  `TransitionInProgress` 응답으로 끝낸다. target timer·handoff reservation·source command admission이 source
+  Leave 전에 실패하면 source stable route를 유지하고 `TransferFailed`를 응답한다.
+- 단위 테스트는 source completion 전 route 비공개, typed busy, target publish, source post `Full` rollback과
+  terminal/reservation 회계를 검증한다. 실제 TCP는 Zone A enter → Zone B handoff → target Move/Leave를 새
+  epoch과 좌표로 왕복하고 completion 두 개와 transition duration을 계측한다.
 
 ## 선택적 인프라 트랙: io_uring Network Backend
 

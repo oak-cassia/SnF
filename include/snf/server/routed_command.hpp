@@ -49,8 +49,19 @@ namespace snf::server
         std::uint32_t request_id{0};
     };
 
-    using CommandRoute = std::
-        variant<PlayerCommandRoute, ConnectionClosedRoute, ZoneCommandRoute, PartyCommandRoute>;
+    // Internal cross-Zone stages already contain their immutable reactor reply
+    // identity. Keeping them in a distinct route alternative prevents a caller
+    // from accidentally attaching a normal client reply/credit to the command.
+    struct ZoneHandoffCommandRoute
+    {
+        ZoneInboundCommand command;
+    };
+
+    using CommandRoute = std::variant<PlayerCommandRoute,
+                                      ConnectionClosedRoute,
+                                      ZoneCommandRoute,
+                                      PartyCommandRoute,
+                                      ZoneHandoffCommandRoute>;
 
     struct RoutedCommand
     {

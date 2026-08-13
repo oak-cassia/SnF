@@ -1146,6 +1146,99 @@ namespace
         server.stop();
     }
 
+    void test_authenticated_player_handoffs_between_zones_and_publishes_target_route()
+    {
+        RunningServer server{snf::server::GameServerConfig{
+            .port = 0,
+            .shutdown_grace_period = 200ms,
+            .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
+            .client_send_buffer_size = std::nullopt,
+            .zone_tick_interval = 5ms,
+            .max_zone_handoffs = 1,
+            .max_zone_handoff_completions_per_turn = 1,
+        }};
+        const auto client = connect_client(server.getPort());
+        constexpr std::uint64_t player_id = 93;
+        constexpr std::uint64_t source_zone = 8;
+        constexpr std::uint64_t target_zone = 9;
+
+        const auto auth = authentication_frame(400, player_id);
+        const auto auth_bytes = snf::protocol::encode_frame(auth);
+        send_all(client.getDescriptor(), auth_bytes);
+        assert_authenticated(
+            receive_exact(client.getDescriptor(), auth_bytes.size()), auth.request_id, player_id);
+
+        std::vector<std::byte> source_payload = player_id_payload(source_zone);
+        append_u32(source_payload, 10);
+        append_u32(source_payload, 20);
+        send_all(client.getDescriptor(),
+                 snf::protocol::encode_frame(snf::protocol::Frame{
+                     .type = snf::protocol::MessageType::EnterZone,
+                     .request_id = 401,
+                     .payload = std::move(source_payload),
+                 }));
+        const auto source_entered = receive_zone_response(client.getDescriptor());
+        assert(source_entered.type == snf::protocol::MessageType::ZoneEntered);
+        assert(read_u64(source_entered.payload, 1) == source_zone);
+        assert(read_u64(source_entered.payload, 9) == 1);
+
+        std::vector<std::byte> target_payload = player_id_payload(target_zone);
+        append_u32(target_payload, static_cast<std::uint32_t>(-50));
+        append_u32(target_payload, 60);
+        send_all(client.getDescriptor(),
+                 snf::protocol::encode_frame(snf::protocol::Frame{
+                     .type = snf::protocol::MessageType::EnterZone,
+                     .request_id = 402,
+                     .payload = std::move(target_payload),
+                 }));
+        const auto target_entered = receive_zone_response(client.getDescriptor());
+        assert(target_entered.type == snf::protocol::MessageType::ZoneEntered);
+        assert(target_entered.request_id == 402);
+        assert(target_entered.payload[0] ==
+               static_cast<std::byte>(snf::server::ZoneCommandStatus::Applied));
+        assert(read_u64(target_entered.payload, 1) == target_zone);
+        assert(read_u64(target_entered.payload, 9) == 2);
+        assert(static_cast<std::int32_t>(read_u32(target_entered.payload, 17)) == -50);
+        assert(static_cast<std::int32_t>(read_u32(target_entered.payload, 21)) == 60);
+
+        std::vector<std::byte> move_payload;
+        append_u32(move_payload, 70);
+        append_u32(move_payload, static_cast<std::uint32_t>(-80));
+        send_all(client.getDescriptor(),
+                 snf::protocol::encode_frame(snf::protocol::Frame{
+                     .type = snf::protocol::MessageType::Move,
+                     .request_id = 403,
+                     .payload = std::move(move_payload),
+                 }));
+        const auto moved = receive_zone_response(client.getDescriptor());
+        assert(moved.type == snf::protocol::MessageType::Moved);
+        assert(read_u64(moved.payload, 1) == target_zone);
+        assert(read_u64(moved.payload, 9) == 2);
+
+        send_all(client.getDescriptor(),
+                 snf::protocol::encode_frame(snf::protocol::Frame{
+                     .type = snf::protocol::MessageType::LeaveZone,
+                     .request_id = 404,
+                     .payload = {},
+                 }));
+        const auto left = receive_zone_response(client.getDescriptor());
+        assert(left.type == snf::protocol::MessageType::ZoneLeft);
+        assert(read_u64(left.payload, 1) == target_zone);
+        assert(read_u64(left.payload, 9) == 2);
+
+        server.stop();
+        const auto metrics = server.getMetricsSnapshot();
+        assert(metrics.zone_handoffs.handoffs_started == 1);
+        assert(metrics.zone_handoffs.handoffs_completed == 1);
+        assert(metrics.zone_handoffs.pending_handoffs == 0);
+        assert(metrics.zone_handoff_gateway.transition_nanoseconds.sample_count == 1);
+        assert(metrics.zone_handoff_gateway.pending == 0);
+        assert(metrics.zone_transition_channel.completions_published == 2);
+        assert(metrics.zone_transition_channel.completions_consumed == 2);
+        assert(metrics.zone_transition_channel.reservations == 0);
+        assert(metrics.command_terminals == 5);
+    }
+
     void test_peer_disconnect_evicts_the_player_actor()
     {
         RunningServer server;
@@ -1747,6 +1840,7 @@ int main()
     test_purchase_is_effectively_once_after_response_loss_and_reconnect();
     test_two_players_share_one_party_actor_and_passivate_it_when_empty();
     test_authenticated_player_enters_moves_and_leaves_a_zone();
+    test_authenticated_player_handoffs_between_zones_and_publishes_target_route();
     test_zone_position_survives_disconnect_save_and_reconnect();
     test_collects_baseline_saturation_metrics_for_a_round_trip();
     test_saturated_outbound_answers_every_request_and_still_drains();

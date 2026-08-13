@@ -41,6 +41,9 @@ namespace snf::server
         // reactor_turn_nanoseconds. That metric is reactor work per turn, not full
         // reactor occupancy.
         std::function<void()> on_metrics_interval{};
+        // Invoked after the shared reactor eventfd is consumed and before outbound
+        // actions are drained. The callback must be bounded and non-blocking.
+        std::function<void()> on_control_wake{};
     };
 
     struct TcpServerStats
@@ -164,6 +167,7 @@ namespace snf::server
         std::size_t _connection_lifecycle_capacity;
         std::chrono::milliseconds _metrics_report_interval;
         std::function<void()> _on_metrics_interval;
+        std::function<void()> _on_control_wake;
         FrameIngress& _frame_ingress;
         OutboundChannel& _outbound;
         snf::runtime::RuntimeCompletionSource& _runtime_completion;

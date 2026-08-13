@@ -626,6 +626,11 @@ leader election과 season archive/prune은 아직 범위 밖이다.
 
 구현 시 route 변경은 `RouteCoordinator`가 직렬화한다.
 
+현재 cross-zone 정상 경로는 reactor가 `Stable/Transferring` route와 client terminal token을 소유하고,
+Worker는 source Leave와 target Enter 결과를 handoff admission에서 예약한 bounded value channel로만
+반환한다. shared eventfd는 outbound와 wake-up만 공유하며 queue와 회계는 분리되고, reactor는 회차당
+completion budget을 넘지 않는다. target Enter completion 전에는 gameplay route를 공개하지 않는다.
+
 구체적인 state, bounded Worker→reactor completion, 보상과 disconnect/shutdown 순서는
 `docs/cross-zone-handoff-contract.md`를 따른다.
 

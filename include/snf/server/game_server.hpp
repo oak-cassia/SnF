@@ -54,6 +54,7 @@ namespace snf::server
         ZoneTimerServiceStats zone_timers;
         ZoneActorBindingStats zone_actors;
         RouteCoordinatorStats zone_handoffs;
+        ZoneHandoffGatewayStats zone_handoff_gateway;
         ZoneTransitionChannelStats zone_transition_channel;
         PartyActorBindingStats party_actors;
         RankingPipelineStats ranking_projection;
@@ -95,6 +96,7 @@ namespace snf::server
         std::chrono::nanoseconds zone_tick_budget{std::chrono::milliseconds{5}};
         std::size_t max_zone_timers{4096};
         std::size_t max_zone_handoffs{4096};
+        std::size_t max_zone_handoff_completions_per_turn{64};
         std::size_t outbound_queue_capacity{4096};
         // Bounds the shared outbound capacity one connection may hold at once.
         std::size_t max_outbound_slots_per_connection{64};

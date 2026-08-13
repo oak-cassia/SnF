@@ -104,6 +104,14 @@ namespace snf::server
                         .reply = std::move(reply),
                     });
                 }
+                else if constexpr (std::is_same_v<Route, ZoneHandoffCommandRoute>)
+                {
+                    if (_zone_commands == nullptr || !route.command.handoff || route.command.reply)
+                    {
+                        return PostResult::Closed;
+                    }
+                    return _zone_commands->tryPost(std::move(route.command));
+                }
                 else
                 {
                     static_assert(always_false_v<Route>, "Unhandled CommandRoute alternative");

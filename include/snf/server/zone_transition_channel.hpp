@@ -44,6 +44,7 @@ namespace snf::server
                                    ZoneHandoffCompletion completion) noexcept;
         [[nodiscard]] std::optional<ZoneHandoffCompletion> tryPop();
         void release(ZoneTransitionTicket ticket) noexcept;
+        void wakeIfPending() const noexcept;
         void cancel() noexcept;
 
         [[nodiscard]] ZoneTransitionChannelStats stats() const;

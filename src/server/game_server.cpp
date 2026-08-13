@@ -289,7 +289,11 @@ namespace snf::server
                             _player_sessions,
                             _route_coordinator,
                             _zone_timers,
-                            _party_coordinator)
+                            _party_coordinator,
+                            _zone_transition_channel,
+                            _command_lifecycle,
+                            _zone_results,
+                            config.max_zone_handoff_completions_per_turn)
         , _tcp_server(
               TcpServerConfig{
                   .port = config.port,
@@ -299,6 +303,7 @@ namespace snf::server
                   .connection_lifecycle_capacity = config.connection_lifecycle_capacity,
                   .metrics_report_interval = config.metrics_report_interval,
                   .on_metrics_interval = [this] { publishMetrics(); },
+                  .on_control_wake = [this] { _protocol_gateway.drainZoneTransitions(); },
               },
               _protocol_gateway,
               _outbound_channel,
@@ -402,6 +407,7 @@ namespace snf::server
             .zone_timers = _zone_timers.stats(),
             .zone_actors = _zone_actor_binding.stats(),
             .zone_handoffs = _route_coordinator.stats(),
+            .zone_handoff_gateway = _protocol_gateway.zoneHandoffStats(),
             .zone_transition_channel = _zone_transition_channel.stats(),
             .party_actors = _party_actor_binding.stats(),
             .ranking_projection = _ranking_projector.stats(),

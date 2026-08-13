@@ -1,3 +1,5 @@
+#include "outbound_reservation_test_support.hpp"
+#include "snf/server/outbound_channel.hpp"
 #include "snf/server/protocol_gateway.hpp"
 
 #include <cassert>
@@ -35,6 +37,25 @@ namespace
         int post_count{0};
         int close_count{0};
         int cancel_count{0};
+    };
+
+    class FixedTimerClock final : public snf::server::TimerClock
+    {
+    public:
+        [[nodiscard]] snf::server::TimerTimePoint now() const noexcept override
+        {
+            return {};
+        }
+    };
+
+    class AcceptingTimerSink final : public snf::server::ZoneTimerSink
+    {
+    public:
+        [[nodiscard]] snf::runtime::PostResult
+        tryPostTimerCommand(snf::server::ZoneId, snf::server::ZoneCommand) override
+        {
+            return snf::runtime::PostResult::Accepted;
+        }
     };
 
     snf::server::FrameEnvelope make_frame(const snf::protocol::MessageType type)
@@ -511,6 +532,130 @@ namespace
                                             .position = {.x = -7, .y = 12},
                                         }));
     }
+
+    void test_cross_zone_handoff_hides_route_until_target_completion()
+    {
+        RecordingRoutedIngress commands;
+        snf::server::PlayerSessionDirectory sessions;
+        snf::server::RouteCoordinator routes{2};
+        snf::server::PartyCoordinator parties{4};
+        AcceptingTimerSink timer_sink;
+        FixedTimerClock timer_clock;
+        snf::server::ZoneTimerService timers{
+            timer_sink,
+            timer_clock,
+            snf::server::ZoneTimerServiceConfig{
+                .tick_interval = std::chrono::milliseconds{0},
+                .cancellation_retry_interval = std::chrono::milliseconds{1},
+                .max_timers = 2,
+                .on_failure = {},
+            },
+        };
+        const auto wake = snf::test::make_wake_descriptor();
+        snf::server::ZoneTransitionChannel transitions{2, wake.getDescriptor()};
+        snf::server::OutboundChannel outbound{
+            snf::server::OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 4},
+            wake.getDescriptor()};
+        snf::server::ProtocolZoneResultSink zone_results{outbound};
+        snf::server::CountingCommandLifecycleSink lifecycle;
+        snf::server::ProtocolGateway gateway{
+            commands, sessions, routes, timers, parties, transitions, lifecycle, zone_results, 1};
+        const snf::net::ConnectionId connection{.descriptor = 62, .generation = 32};
+        const snf::server::PlayerId player{.value = 103};
+        const snf::server::ZoneId source_zone{.value = 10};
+        const snf::server::ZoneId target_zone{.value = 11};
+
+        assert(gateway.tryPost(make_auth_frame(connection, player)) ==
+               snf::server::FramePostResult::Accepted);
+        assert(gateway.tryPost(make_enter_frame(connection, source_zone.value, 1, 2)) ==
+               snf::server::FramePostResult::Accepted);
+        assert(routes.routeFor(connection)->zone == source_zone);
+
+        assert(gateway.tryPost(make_enter_frame(connection, target_zone.value, 3, 4)) ==
+               snf::server::FramePostResult::Accepted);
+        const auto* source_stage =
+            std::get_if<snf::server::ZoneHandoffCommandRoute>(&commands.posted->route);
+        assert(source_stage != nullptr && source_stage->command.handoff);
+        const snf::server::ZoneHandoffContext source_context = *source_stage->command.handoff;
+        assert(source_context.step == snf::server::ZoneHandoffStep::LeaveSource);
+        assert(!routes.routeFor(connection));
+
+        const int posts_before_busy = commands.post_count;
+        assert(gateway.tryPost(make_move_frame(connection, 5, 6)) ==
+               snf::server::FramePostResult::Accepted);
+        assert(commands.post_count == posts_before_busy);
+        const auto busy = outbound.tryPop();
+        assert(busy);
+        const auto* busy_send = std::get_if<snf::server::SendFrame>(&busy->action);
+        assert(busy_send != nullptr);
+        assert(busy_send->frame.type == snf::protocol::MessageType::Moved);
+        assert(busy_send->frame.payload[0] ==
+               static_cast<std::byte>(snf::server::ZoneCommandStatus::TransitionInProgress));
+        assert(lifecycle.terminalCount() == 1);
+
+        assert(transitions.publish(source_context.ticket,
+                                   snf::server::ZoneHandoffCompletion{
+                                       .handoff_id = source_context.handoff_id,
+                                       .connection = connection,
+                                       .player = player,
+                                       .zone = source_zone,
+                                       .route_epoch = source_context.route_epoch,
+                                       .step = source_context.step,
+                                       .status = snf::server::ZoneCommandStatus::Applied,
+                                       .position = snf::server::ZonePosition{.x = 1, .y = 2},
+                                   }));
+        gateway.drainZoneTransitions();
+        const auto* target_stage =
+            std::get_if<snf::server::ZoneHandoffCommandRoute>(&commands.posted->route);
+        assert(target_stage != nullptr && target_stage->command.handoff);
+        const snf::server::ZoneHandoffContext target_context = *target_stage->command.handoff;
+        assert(target_context.step == snf::server::ZoneHandoffStep::EnterTarget);
+        assert(!routes.routeFor(connection));
+
+        assert(transitions.publish(target_context.ticket,
+                                   snf::server::ZoneHandoffCompletion{
+                                       .handoff_id = target_context.handoff_id,
+                                       .connection = connection,
+                                       .player = player,
+                                       .zone = target_zone,
+                                       .route_epoch = target_context.route_epoch,
+                                       .step = target_context.step,
+                                       .status = snf::server::ZoneCommandStatus::Applied,
+                                       .position = snf::server::ZonePosition{.x = 3, .y = 4},
+                                   }));
+        gateway.drainZoneTransitions();
+
+        const auto route = routes.routeFor(connection);
+        assert(route && route->zone == target_zone && route->route_epoch == 2);
+        assert((sessions.locationFor(connection) == snf::server::PlayerLocation{
+                                                        .zone = target_zone,
+                                                        .position = {.x = 3, .y = 4},
+                                                    }));
+        const auto entered = outbound.tryPop();
+        assert(entered);
+        const auto* entered_send = std::get_if<snf::server::SendFrame>(&entered->action);
+        assert(entered_send != nullptr);
+        assert(entered_send->frame.type == snf::protocol::MessageType::ZoneEntered);
+        assert(lifecycle.terminalCount() == 2);
+        assert(transitions.stats().reservations == 0);
+
+        commands.result = snf::server::PostResult::Full;
+        assert(gateway.tryPost(make_enter_frame(connection, source_zone.value, 7, 8)) ==
+               snf::server::FramePostResult::Accepted);
+        const auto failed = outbound.tryPop();
+        assert(failed);
+        const auto* failed_send = std::get_if<snf::server::SendFrame>(&failed->action);
+        assert(failed_send != nullptr);
+        assert(failed_send->frame.type == snf::protocol::MessageType::ZoneEntered);
+        assert(failed_send->frame.payload[0] ==
+               static_cast<std::byte>(snf::server::ZoneCommandStatus::TransferFailed));
+        const auto stable_after_failure = routes.routeFor(connection);
+        assert(stable_after_failure && stable_after_failure->zone == target_zone &&
+               stable_after_failure->route_epoch == 2);
+        assert(lifecycle.terminalCount() == 3);
+        assert(transitions.stats().reservations == 0);
+        assert(gateway.zoneHandoffStats().failures_before_source_leave == 1);
+    }
 }
 
 void run_protocol_gateway_tests()
@@ -527,4 +672,5 @@ void run_protocol_gateway_tests()
     test_rolls_back_refused_auth_and_keeps_close_retry_target();
     test_routes_authenticated_zone_enter_move_leave_with_one_epoch();
     test_connection_close_leaves_zone_before_player_passivation();
+    test_cross_zone_handoff_hides_route_until_target_completion();
 }

@@ -135,6 +135,24 @@ namespace snf::server
         }
     }
 
+    void ZoneTransitionChannel::wakeIfPending() const noexcept
+    {
+        bool pending = false;
+        try
+        {
+            std::lock_guard lock{_mutex};
+            pending = _queued != 0;
+        }
+        catch (...)
+        {
+            return;
+        }
+        if (pending)
+        {
+            signalWakeUp();
+        }
+    }
+
     void ZoneTransitionChannel::cancel() noexcept
     {
         try
