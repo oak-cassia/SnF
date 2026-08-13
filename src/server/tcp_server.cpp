@@ -758,10 +758,6 @@ namespace snf::server
 
         _is_stopping = true;
         _shutdown_deadline = std::chrono::steady_clock::now() + _shutdown_grace_period;
-        _frame_ingress.close();
-        // Closed ingress cannot accept lifecycle retries. Shutdown deliberately
-        // releases their retained slots instead of attempting reinjection.
-        _pending_connection_closes.clear();
 
         if (_listener.isValid())
         {
@@ -779,7 +775,22 @@ namespace snf::server
         {
             static_cast<void>(client_descriptor);
             updateClientEvents(session);
+
+            ConnectionClosed closed{
+                .connection = session.getConnectionId(),
+                .cause = ConnectionCloseCause::ServerShutdown,
+                .has_location_snapshot = false,
+                .last_location = std::nullopt,
+            };
+            if (_frame_ingress.tryPostConnectionClosed(closed) == PostResult::Full)
+            {
+                _pending_connection_closes.push_back(std::move(closed));
+            }
         }
+
+        _stats.pending_connection_closes_high_water_mark = std::max(
+            _stats.pending_connection_closes_high_water_mark, _pending_connection_closes.size());
+        retryPendingConnectionCloses();
 
         if (_logic_runtime_drained && isControlDrained())
         {
@@ -967,6 +978,21 @@ namespace snf::server
                 _pending_connection_closes.push_back(std::move(closed));
             }
         }
+
+        closeFrameIngressAfterConnectionLifecyclesDrain();
+    }
+
+    void TcpServer::closeFrameIngressAfterConnectionLifecyclesDrain()
+    {
+        if (!_is_stopping || _frame_ingress_closed || !_pending_connection_closes.empty())
+        {
+            return;
+        }
+
+        // ConnectionClosed drives Player snapshot persistence and actor eviction.
+        // Close Logic ingress only after every retained lifecycle fact was admitted.
+        _frame_ingress_closed = true;
+        _frame_ingress.close();
     }
 
     void TcpServer::reportMetricsIfDue()

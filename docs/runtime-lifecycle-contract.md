@@ -81,11 +81,10 @@ graceful shutdown은 다음 순서를 따른다.
 ```text
 새 연결 수락 중지
 → Session의 새 게임 command 수락 중지
-→ Logic Actor Runtime에 종료 경계 전달
-→ 모든 Actor mailbox와 continuation drain
+→ 활성 Session의 ConnectionClosed 게시(포화 시 bounded retry)
+→ 모든 lifecycle 게시 승인 뒤 Logic Actor Runtime에 종료 경계 전달
+→ 저장을 포함한 모든 Actor mailbox와 continuation drain
 → coordinator가 required runtime의 drain 확인
-→ 필요한 dirty state 저장 요청
-→ DB queue drain 또는 timeout
 → outbound queue drain 또는 timeout
 → Reactor 종료
 → Logger flush
@@ -114,7 +113,8 @@ outbound channel을 반드시 취소한다. 취소는 등록된 모든 waiter에
 - 한 Runtime의 취소가 공유 sink 자체를 취소하지 않는다. 단계 4.1부터 포화 대기는 blocking이 아니라
   Actor suspend이므로, 그 Runtime의 취소는 자신의 suspended task를 terminal cancel하고 frame을
   파괴하면서 예약 waiter까지 회수한다. 다른 Runtime은 같은 channel을 계속 사용한다.
-- 종료 경로에서 닫힌 ingress에 lifecycle 이벤트를 재주입하지 않는다.
+- graceful 종료는 lifecycle 이벤트를 먼저 승인받고 ingress를 닫는다. 포화된 lifecycle은 bounded retry로
+  보존하며, grace period 만료나 runtime 실패의 cancel 경로만 이를 중단할 수 있다.
 
 ## 5. 검증
 

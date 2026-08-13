@@ -26,8 +26,10 @@ namespace snf::server
         std::size_t max_pending_send_bytes{snf::net::MAX_PENDING_SEND_BYTES};
         std::optional<int> client_send_buffer_size{};
         // A slot is retained until a disconnected session's lifecycle fact is
-        // accepted or the ingress closes. This bounds both active sessions and
-        // the reactor-owned retry deque without dropping ConnectionClosed.
+        // accepted or the ingress closes. During normal operation, active sessions
+        // and retries share this bound. During shutdown each still-active session
+        // may also have one retained close while its write side drains; admission
+        // has already stopped and the retry deque itself remains bounded here.
         std::size_t connection_lifecycle_capacity{4096};
         // Zero disables periodic reporting. Otherwise the reactor bounds its
         // epoll timeout by this interval so a quiet server still reports.
@@ -153,6 +155,7 @@ namespace snf::server
         void closeRemainingSessions();
         void notifyConnectionClosed(ConnectionClosed closed);
         void retryPendingConnectionCloses();
+        void closeFrameIngressAfterConnectionLifecyclesDrain();
         void reportMetricsIfDue();
         [[nodiscard]] bool hasAvailableConnectionLifecycleSlot() const noexcept;
         [[nodiscard]] bool isControlDrained() const noexcept;
@@ -181,6 +184,7 @@ namespace snf::server
         std::chrono::steady_clock::time_point _next_metrics_report{};
         std::uint64_t _next_connection_generation{0};
         bool _is_stopping{false};
+        bool _frame_ingress_closed{false};
         bool _logic_runtime_drained{false};
         std::unordered_map<int, snf::net::Session> _sessions;
         // epoll may return a copied event after its FD has been closed and reused.

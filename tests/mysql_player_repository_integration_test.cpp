@@ -243,6 +243,45 @@ namespace
         assert(loaded.record->last_domain_event_sequence == 2);
     }
 
+    void test_session_snapshot_does_not_overwrite_transaction_owned_fields(
+        const snf::server::MySqlPlayerRepositoryConfig& repository_config)
+    {
+        const snf::server::PlayerId player{.value = 1008};
+        snf::server::MySqlPlayerRepository repository{repository_config};
+        const auto purchased = purchase(repository, player, 81);
+        assert(purchased.status == snf::server::PurchaseStatus::Committed);
+        const auto awarded = award(repository, player, 82, 35);
+        assert(awarded.status == snf::server::RankingAwardStatus::Committed);
+
+        assert(save(repository,
+                    snf::server::PlayerRecord{
+                        .player = player,
+                        .handled_command_count = 9,
+                        .last_location =
+                            snf::server::PlayerLocation{
+                                .zone = snf::server::ZoneId{.value = 8},
+                                .position = {.x = -9, .y = 10},
+                            },
+                        .currency_balance = 0,
+                        .purchased_item_count = 0,
+                        .ranking_score = 0,
+                        .last_domain_event_sequence = 0,
+                    })
+                   .saved());
+
+        const auto loaded = load(repository, player);
+        assert(loaded.record.has_value());
+        assert(loaded.record->handled_command_count == 9);
+        assert((loaded.record->last_location == snf::server::PlayerLocation{
+                                                    .zone = snf::server::ZoneId{.value = 8},
+                                                    .position = {.x = -9, .y = 10},
+                                                }));
+        assert(loaded.record->currency_balance == 900);
+        assert(loaded.record->purchased_item_count == 1);
+        assert(loaded.record->ranking_score == 35);
+        assert(loaded.record->last_domain_event_sequence == 1);
+    }
+
     void test_concurrent_unique_key_commits_once(
         const snf::server::MySqlPlayerRepositoryConfig& repository_config)
     {
@@ -658,17 +697,9 @@ namespace
         assert(insufficient.status == snf::server::PurchaseStatus::InsufficientFunds);
         assert(!insufficient.replayed);
 
-        assert(save(repository,
-                    snf::server::PlayerRecord{
-                        .player = player,
-                        .handled_command_count = 0,
-                        .last_location = std::nullopt,
-                        .currency_balance = 1000,
-                        .purchased_item_count = 0,
-                        .ranking_score = 0,
-                        .last_domain_event_sequence = 0,
-                    })
-                   .saved());
+        execute_sql(repository_config,
+                    "UPDATE snf_players SET currency_balance=1000 WHERE player_id=" +
+                        std::to_string(player.value));
         const auto replay = purchase(repository, player, 71);
         assert(replay.status == snf::server::PurchaseStatus::InsufficientFunds);
         assert(replay.replayed);
@@ -844,6 +875,8 @@ int main()
     test_schema_v3_checkpoint_migrates_without_losing_state(repository_config);
     reset_storage(repository_config);
     test_record_survives_repository_restart(repository_config);
+    test_session_snapshot_does_not_overwrite_transaction_owned_fields(repository_config);
+    reset_storage(repository_config);
     test_concurrent_unique_key_commits_once(repository_config);
     test_crash_before_and_after_commit_is_recoverable(repository_config);
     test_ranking_award_is_durable_ordered_and_idempotent(repository_config);

@@ -1565,12 +1565,30 @@ namespace
         RunningServer server;
         const auto port = server.getPort();
         const auto client = connect_client(port);
+        constexpr std::uint64_t player_id = 155;
+        const auto auth = authentication_frame(1550, player_id);
+        const auto auth_bytes = snf::protocol::encode_frame(auth);
+        send_all(client.getDescriptor(), auth_bytes);
+        assert_authenticated(
+            receive_exact(client.getDescriptor(), auth_bytes.size()), auth.request_id, player_id);
+
+        const snf::protocol::Frame ping{
+            .type = snf::protocol::MessageType::Ping,
+            .request_id = 1551,
+            .payload = {std::byte{0x55}},
+        };
+        const auto ping_bytes = snf::protocol::encode_frame(ping);
+        send_all(client.getDescriptor(), ping_bytes);
+        assert_pong(receive_exact(client.getDescriptor(), ping_bytes.size()), ping);
 
         const auto start_time = std::chrono::steady_clock::now();
         server.stop();
         const auto elapsed_time = std::chrono::steady_clock::now() - start_time;
 
         assert(elapsed_time < 1s);
+        const auto saved = server.getPlayerRecord(snf::server::PlayerId{.value = player_id});
+        assert(saved.has_value());
+        assert(saved->handled_command_count == 2);
 
         snf::net::UniqueFileDescriptor connection_attempt{
             ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};

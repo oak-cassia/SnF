@@ -134,7 +134,10 @@ namespace snf::server
         }
         if (result.status != RankingAwardStatus::Committed)
         {
-            throw std::runtime_error{"Ranking award transaction did not commit"};
+            // Rejections and temporary repository failures are request outcomes, not
+            // runtime failures. The durable transaction did not change ranking state.
+            ++_state._handled_command_count;
+            return PlayerResult{};
         }
         if (result.event_sequence == 0 || result.global_offset == 0 ||
             result.authoritative_sequence < result.event_sequence ||

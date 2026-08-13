@@ -478,6 +478,10 @@ rollback 뒤 신규 적용되고, commit 직후 completion 전 crash는 같은 k
 증거를 자동 eviction하지 않으며 설정 상한에서는 새 key를 명시적으로 거부한다. 운영 archive와
 보존 기간은 retry 보장 창을 먼저 정한 뒤 별도로 결정한다.
 
+MySQL의 disconnect snapshot 갱신은 handled command와 location만 소유한다. currency와 inventory는
+purchase transaction이, ranking score와 sequence는 award transaction이 소유하므로 기존 row에 대한
+일반 snapshot save가 이 필드를 덮어쓰지 않는다.
+
 ### 4.8 Observability
 
 로그 기록은 전용 bounded queue와 Logger Thread에서 처리한다. 일반 로그가 가득 찼을 때
@@ -845,7 +849,8 @@ inbound/outbound/lifecycle 계약이 안정된 뒤의 선택적 트랙이다.
 - logic worker는 outbound 포화로 무한 대기하지 않는다.
 - 느린 클라이언트의 메모리 사용량과 다른 연결에 미치는 p99 영향이 설정된 상한 안에 머문다.
 - 종료 원인을 누가 먼저 관측하든, ingress close 이전에 종결에 진입한 연결의 `ConnectionClosed`는 정확히
-  한 번, terminal 전이 전에 승인된 해당 연결의 command 뒤에 게시된다. shutdown 중 종결은 게시하지 않는다.
+  한 번, terminal 전이 전에 승인된 해당 연결의 command 뒤에 게시된다. graceful shutdown도 활성 연결의
+  lifecycle을 승인한 뒤 ingress를 닫는다.
 - actor key 이관 중 도착한 stale command를 거부한다.
 - 위치를 변경하는 모든 경로에서 spatial index와 AOI가 일관된다.
 

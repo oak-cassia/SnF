@@ -191,13 +191,12 @@ read loop, write loop, deadline과 control이 모두 `requestClose(cause)`를 �
 
 ### 3.1 게시 불변식
 
-> `ConnectionClosed`는 최대 한 번 게시된다. `Draining` 진입이 ingress close 이전이면 정확히 한 번
-> 게시된다. ingress가 닫힌 뒤 `Draining`에 진입한 scope는 게시 없이 `Retired`로 직행한다.
+> `ConnectionClosed`는 최대 한 번 게시된다. graceful shutdown을 포함해 ingress close 이전에
+> `Draining`에 진입한 scope는 정확히 한 번 승인된다. 포화 시 lifecycle slot에 보존해 재시도하고,
+> 모든 lifecycle이 승인된 뒤에만 Logic ingress를 닫는다.
 
-`ServerShutdown`은 exactly-once의 명시적 예외다. 이것은 현재 동작이며 — 종료 중에는 lifecycle을
-게시하지 않고 보류 중이던 항목도 버린다 — [Runtime Lifecycle 계약](./runtime-lifecycle-contract.md) §4의
-"종료 경로에서 닫힌 ingress에 lifecycle 이벤트를 재주입하지 않는다"와 일치한다. 이 단계는 그 동작을
-바꾸지 않고 조건부 exactly-once로 서술한다.
+grace deadline 만료나 runtime 실패처럼 cancel로 전환된 경로에서는 승인을 보장하지 않는다. 이 경계는
+[Runtime Lifecycle 계약](./runtime-lifecycle-contract.md) §3·4와 같다.
 
 ### 3.2 파괴 조건과 close 순서
 
@@ -387,7 +386,7 @@ heartbeat deadline은 종결 경로가 §3.2의 물리 제거로 회수한다.
 - credit 소진 상태에서 읽기 중지와 release 후 재개. **첫 command의 terminal을 막아 두 번째 command가
   release 전에 승인되지 않음을 확인한다.** 그래야 gating 자체가 증명된다.
 - 배치 중간의 protocol error. 앞선 frame이 이미 승인된 상태에서 `ConnectionClosed`가 그 뒤에 한 번.
-- shutdown 중 종결에서 게시 0회.
+- 활성 연결을 둔 shutdown에서 `ServerShutdown` lifecycle이 한 번 승인되고 Player snapshot이 저장됨.
 - **`ServerShutdown` 중 write-side drain 유지.** read는 취소되고 write는 이미 승인된 command의 응답을
   끝까지 내보낸다. grace deadline이 먼저 오는 경우도 함께 확인한다.
 - coroutine frame 파괴, socket close, deadline 만료가 같은 turn에 경합.

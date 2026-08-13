@@ -1,5 +1,6 @@
 #include "snf/server/player_actor.hpp"
 
+#include <array>
 #include <cassert>
 #include <cstdint>
 #include <variant>
@@ -240,6 +241,50 @@ namespace
         assert(actor.state().rankingScore() == 140);
         assert(actor.state().lastDomainEventSequence() == 4);
     }
+
+    void test_rejected_score_awards_are_request_outcomes_and_preserve_state()
+    {
+        const snf::server::PlayerId player{.value = 92};
+        snf::server::PlayerActor actor{snf::server::PlayerActorId{player}};
+        actor.restore(snf::server::PlayerRecord{
+            .player = player,
+            .handled_command_count = 7,
+            .last_location = std::nullopt,
+            .currency_balance = 800,
+            .purchased_item_count = 2,
+            .ranking_score = 125,
+            .last_domain_event_sequence = 3,
+        });
+        const snf::server::AwardRankingScoreCommand command{
+            .request_id = 41,
+            .award_id = snf::server::RankingAwardId{.value = 401},
+            .score_delta = 25,
+        };
+        constexpr std::array rejected_statuses{
+            snf::server::RankingAwardStatus::IdempotencyConflict,
+            snf::server::RankingAwardStatus::ScoreOverflow,
+            snf::server::RankingAwardStatus::SequenceOverflow,
+            snf::server::RankingAwardStatus::EventOffsetOverflow,
+            snf::server::RankingAwardStatus::CapacityExceeded,
+            snf::server::RankingAwardStatus::Unavailable,
+        };
+
+        for (const auto status : rejected_statuses)
+        {
+            const auto result =
+                actor.completeRankingAward(command,
+                                           snf::server::RankingAwardTransactionResult{
+                                               .status = status,
+                                               .player = player,
+                                               .award_id = command.award_id,
+                                               .score_delta = command.score_delta,
+                                           });
+            assert(result.effects.empty());
+            assert(actor.state().rankingScore() == 125);
+            assert(actor.state().lastDomainEventSequence() == 3);
+        }
+        assert(actor.state().handledCommandCount() == 7 + rejected_statuses.size());
+    }
 }
 
 void run_player_actor_tests()
@@ -250,4 +295,5 @@ void run_player_actor_tests()
     test_persistent_player_actor_restores_and_snapshots_state();
     test_purchase_completion_updates_authoritative_state_and_preserves_it_on_unavailable();
     test_trusted_score_award_updates_state_and_emits_an_absolute_event();
+    test_rejected_score_awards_are_request_outcomes_and_preserve_state();
 }

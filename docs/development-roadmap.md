@@ -71,8 +71,8 @@ Network Runtime
   evict한다.
 - lifecycle post가 포화되면 reactor 소유 pending deque가 회차당 최대 64건을 재시도한다. active
   session과 pending close는 하나의 bounded lifecycle slot 예산을 공유하며, 예산 소진 시 새 연결을
-  Actor 생성 전에 거부한다. command overload 통계와 lifecycle 통계는 분리하며, shutdown에서는 닫힌
-  ingress에 close를 재주입하지 않는다.
+  Actor 생성 전에 거부한다. command overload 통계와 lifecycle 통계는 분리한다. graceful shutdown은
+  활성 session의 close를 이 retry 경로로 모두 승인한 뒤 ingress를 닫는다.
 
 ## 3.8. Actor-Bound Logic Runtime 일반화 (완료)
 
@@ -363,7 +363,7 @@ Actor queue wait p50이 남은 차이는 command당 lock 획득이 하나 늘어
   protocol 단계에서 거부되는 frame은 command가 된 적이 없으므로 credit을 소비하지 않는다.
 - read loop, write loop, deadline과 control이 모두 `requestClose(cause)`를 호출할 수 있고,
   `ConnectionScope`만 단일 terminal 전이를 수행해 `ConnectionClosed`를 최대 한 번 게시한다. ingress close
-  이전에 종결에 진입했으면 정확히 한 번이고, shutdown 중 종결은 게시하지 않는다.
+  이전에 종결에 진입했으면 정확히 한 번이며, graceful shutdown도 먼저 활성 scope를 종결한다.
 - `ConnectionScope`는 새 read admission을 중단하고, read loop이 진행 중인 ingress 게시를 마친 뒤 같은
   ordered ingress에 `ConnectionClosed`를 게시한다. 따라서 terminal 전이 전에 승인된 그 연결의 command
   보다 뒤에 위치한다.
@@ -386,7 +386,7 @@ close 순서와 취소 전파를 고정했다. 그 문서가 고정한 결정은
   일어난다. reactor가 `detached && outstanding == 0`을 관측한 뒤 자기 turn에서 회수한다. 취득 경계는
   release 토큰이 무장되는 binding 경계 그대로이며, 그 경로를 지나는 admission context는 routing DTO까지만
   가고 `PlayerCommand`나 Actor 상태에는 들어가지 않는다.
-- `ConnectionClosed`는 조건부 exactly-once다. `ServerShutdown`은 명시적 예외이며 이는 현재 동작이다.
+- `ConnectionClosed`는 graceful shutdown을 포함해 ingress close 전에 종결된 연결마다 exactly-once다.
 - 종결 시 취소 범위는 cause가 결정한다. 일반 종료는 read/write를 모두 취소하고, `ServerShutdown`은 read만
   취소해 Logic drain과 send queue empty 또는 grace deadline까지 write-side drain을 유지한다. 그래서 이미
   승인된 command의 응답이 종료 중에도 나간다.
@@ -409,7 +409,8 @@ close 순서와 취소 전파를 고정했다. 그 문서가 고정한 결정은
 
 - inbound frame을 조용히 드롭하지 않고 credit 소진 전에 읽기를 중지한다.
 - 종료 원인을 누가 먼저 관측하든, ingress close 이전에 종결에 진입한 연결의 `ConnectionClosed`가 정확히
-  한 번, terminal 전이 전에 승인된 command 뒤에 게시된다. shutdown 중 종결은 0회이며 이는 현재 동작이다.
+  한 번, terminal 전이 전에 승인된 command 뒤에 게시된다. graceful shutdown은 활성 연결의 lifecycle
+  승인과 Player snapshot 저장 뒤 Logic ingress를 닫는다.
 - coroutine frame 파괴, socket close와 deadline 만료가 경합해도 use-after-free가 없다.
 - partial send와 `EPOLLOUT` 재무장이 write loop 안에서 처리된다.
 - Debug, ASan·UBSan, TSan에서 연결 폭주와 강제 종료 시나리오가 통과한다.

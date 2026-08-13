@@ -18,6 +18,11 @@ event publish 뒤 snapshot 저장 전에 crash하면 event와 score가 모두 �
 Phase 7.3의 목적은 Player score/sequence와 outbox event를 **하나의 durable transaction**으로 만들고,
 projection이 durable checkpoint 뒤의 outbox tail만으로 항상 복구되게 하는 것이다.
 
+따라서 disconnect snapshot은 기존 Player row의 handled command와 location만 갱신한다. currency,
+inventory, ranking score와 sequence는 각각 purchase/award transaction만 갱신하며, 오래된 Actor
+snapshot이 commit된 transaction state를 덮어쓰지 않는다. Player row가 아직 없을 때의 최초 insert만
+전체 기본 상태를 seed한다.
+
 이 단계는 다음을 포함한다.
 
 - 신뢰된 score award의 idempotency identity

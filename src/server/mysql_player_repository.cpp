@@ -302,6 +302,9 @@ namespace
                 record.last_location ? std::to_string(record.last_location->position.x) : "NULL";
             const std::string position_y =
                 record.last_location ? std::to_string(record.last_location->position.y) : "NULL";
+            // The INSERT seeds a missing Player. Once the row exists, disconnect
+            // snapshots own only activity/location; purchase and ranking transactions
+            // are the sole writers of their durable fields.
             const std::string sql =
                 "INSERT INTO snf_players (player_id, handled_command_count, zone_id, "
                 "position_x, position_y, currency_balance, purchased_item_count, ranking_score, "
@@ -312,12 +315,11 @@ namespace
                 std::to_string(record.purchased_item_count) + "," +
                 std::to_string(record.ranking_score) + "," +
                 std::to_string(record.last_domain_event_sequence) +
-                ") ON DUPLICATE KEY UPDATE handled_command_count=VALUES(handled_command_count), "
+                ") ON DUPLICATE KEY UPDATE "
+                "handled_command_count=GREATEST(handled_command_count, "
+                "VALUES(handled_command_count)), "
                 "zone_id=VALUES(zone_id), position_x=VALUES(position_x), "
-                "position_y=VALUES(position_y), currency_balance=VALUES(currency_balance), "
-                "purchased_item_count=VALUES(purchased_item_count), "
-                "ranking_score=VALUES(ranking_score), "
-                "last_domain_event_sequence=VALUES(last_domain_event_sequence)";
+                "position_y=VALUES(position_y)";
             _connection.execute(sql);
             return snf::server::PlayerSaveResult{
                 .status = snf::server::PlayerRepositoryStatus::Success,
