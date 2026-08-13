@@ -7,6 +7,7 @@
 #include "snf/server/player_record.hpp"
 #include "snf/server/purchase.hpp"
 #include "snf/server/ranking_award.hpp"
+#include "snf/server/ranking_store.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -94,7 +95,7 @@ namespace snf::server
     // but still crosses the Actor continuation queue because the binding wraps it
     // in an async operation. The mutex also makes it safe for integration tests to
     // inspect records while the owning Worker may complete a save.
-    class InMemoryPlayerRepository final : public PlayerRepository
+    class InMemoryPlayerRepository final : public PlayerRepository, public RankingStore
     {
     public:
         explicit InMemoryPlayerRepository(std::size_t max_idempotency_records_per_player = 1024,
@@ -107,7 +108,11 @@ namespace snf::server
                                     RankingAwardCompletion completion) override;
 
         [[nodiscard]] std::optional<PlayerRecord> find(PlayerId player) const;
-        [[nodiscard]] std::vector<PlayerEventRecord> rankingEventsAfter(std::uint64_t offset) const;
+        [[nodiscard]] RankingCheckpoint loadRankingCheckpoint() const override;
+        void saveRankingCheckpoint(const RankingCheckpoint& checkpoint) override;
+        [[nodiscard]] std::uint64_t rankingTailOffset() const override;
+        [[nodiscard]] std::vector<PlayerEventRecord>
+        rankingEventsAfter(std::uint64_t offset, std::size_t limit = 1024) const override;
 
         struct PurchaseStats
         {
@@ -152,6 +157,7 @@ namespace snf::server
         std::vector<PlayerEventRecord> _ranking_events;
         PurchaseStats _purchase_stats;
         RankingAwardStats _ranking_award_stats;
+        RankingCheckpoint _ranking_checkpoint;
     };
 
     struct ThreadedPlayerRepositoryConfig
@@ -169,7 +175,8 @@ namespace snf::server
     // deterministic here; replacing the job body with a DB client does not change
     // the Actor-facing completion contract.
     class ThreadedPlayerRepository final : public PlayerRepository,
-                                           public PlayerRepositoryDiagnostics
+                                           public PlayerRepositoryDiagnostics,
+                                           public RankingStore
     {
     public:
         explicit ThreadedPlayerRepository(ThreadedPlayerRepositoryConfig config = {});
@@ -187,6 +194,11 @@ namespace snf::server
         void close() noexcept;
         [[nodiscard]] std::optional<PlayerRecord> find(PlayerId player) const override;
         [[nodiscard]] PlayerRepositoryStats stats() const override;
+        [[nodiscard]] RankingCheckpoint loadRankingCheckpoint() const override;
+        void saveRankingCheckpoint(const RankingCheckpoint& checkpoint) override;
+        [[nodiscard]] std::uint64_t rankingTailOffset() const override;
+        [[nodiscard]] std::vector<PlayerEventRecord>
+        rankingEventsAfter(std::uint64_t offset, std::size_t limit = 1024) const override;
 
     private:
         struct LoadJob

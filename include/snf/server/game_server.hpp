@@ -20,6 +20,7 @@
 #include "snf/server/protocol_player_effect_sink.hpp"
 #include "snf/server/protocol_zone_result_sink.hpp"
 #include "snf/server/ranking_projection.hpp"
+#include "snf/server/repository_ranking_projector.hpp"
 #include "snf/server/route_coordinator.hpp"
 #include "snf/server/tcp_server.hpp"
 #include "snf/server/zone_actor_binding.hpp"
@@ -81,6 +82,9 @@ namespace snf::server
         // durable MySQL adapter and its own bounded Worker/queue configuration.
         std::optional<MySqlPlayerRepositoryConfig> mysql_player_repository{};
         std::size_t max_player_domain_events{65536};
+        std::size_t ranking_projector_batch_size{1024};
+        std::uint64_t ranking_checkpoint_every_events{1024};
+        std::chrono::milliseconds ranking_projector_poll_interval{100};
         std::size_t max_party_members{8};
         std::int32_t zone_aoi_radius{1000};
         std::chrono::milliseconds zone_tick_interval{50};
@@ -147,7 +151,6 @@ namespace snf::server
         // The domain side takes it as an OutboundSink&, so the binding and the effect
         // sink still cannot reach the reactor-only half.
         OutboundChannel _outbound_channel;
-        InMemoryRankingEventPipeline _ranking_events;
         ProtocolPlayerEffectSink _player_effects;
         ProtocolZoneResultSink _zone_results;
         ProtocolPartyResultSink _party_results;
@@ -156,6 +159,7 @@ namespace snf::server
         RouteCoordinator _route_coordinator;
         PartyCoordinator _party_coordinator;
         std::unique_ptr<PlayerRepository> _player_repository;
+        RepositoryRankingProjector _ranking_projector;
         snf::runtime::RuntimeCompletionCoordinator _runtime_completion;
         // Bindings must outlive the generic runtime: the worker owns the
         // wrapper destruction, while this object owns Player dependencies.

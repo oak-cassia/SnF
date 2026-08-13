@@ -66,7 +66,7 @@ struct RankingAwardRequest {
 
 ## 4. MySQL transaction
 
-schema version 2는 다음 durable state를 추가한다.
+schema version 2는 다음 durable outbox state를 추가한다.
 
 ```text
 snf_event_stream(stream='ranking', last_offset)
@@ -210,12 +210,24 @@ checkpoint tail을 재생한다. 따라서 projection drain은 Player transactio
 MySQL에서 동일 award 경합, strict offset, commit 직전 rollback과 commit 직후 replay를 Debug 반복,
 ASan/UBSan 및 TSan으로 검증했다.
 
-### 7.3b Projector recovery와 checkpoint
+### 7.3b Projector recovery와 checkpoint (완료)
 
 - ordered MySQL tail reader, startup replay와 live projector를 구현한다.
 - checkpoint transaction과 restart restore를 구현한다.
 - completion 역순, projector 중단/재시작, checkpoint write crash와 tail replay를 검증한다.
 - projector lag/failure metric과 graceful shutdown catch-up을 server snapshot에 연결한다.
+
+구현 결과 `RankingStore`가 in-memory와 MySQL adapter의 ordered tail/checkpoint 경계를 통일하고, 전용
+projector thread가 construction에서 checkpoint restore와 tail catch-up을 끝낸 뒤 live polling을
+시작한다. MySQL schema version 3은 checkpoint meta/entry table을 추가한다. `GameServer`는 Actor runtime
+drain 뒤 projector를 stop해 final catch-up/checkpoint를 시도하므로 `run()` 반환 뒤 standings와 metric이
+committed tail을 반영한다. read와 checkpoint 실패는 live projection을 폐기하지 않고 각각 metric을
+올린 뒤 재시도한다.
+
+in-memory 테스트는 batch replay, live poll, read/checkpoint 실패 재시도와 stop 직후 final drain을
+검증한다. 실제 MySQL 테스트는 checkpoint restore 뒤 tail, live award, restart, checkpoint commit
+직전 rollback과 commit 직후 process crash, `GameServer` 재시작 복구를 검증한다. Debug 실제 MySQL
+경로 5회 반복과 ASan/UBSan·TSan 전체/실제 MySQL 경로가 통과했다.
 
 ### 7.3c 운영 부하와 retention 결정
 

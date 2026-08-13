@@ -87,8 +87,13 @@ namespace snf::server
         std::uint64_t published{0};
         std::uint64_t duplicates{0};
         std::uint64_t rejected{0};
+        std::uint64_t poll_failures{0};
+        std::uint64_t checkpoint_failures{0};
         std::size_t event_count{0};
+        std::uint64_t committed_tail_offset{0};
         std::uint64_t projection_offset{0};
+        std::uint64_t projection_lag{0};
+        std::uint64_t checkpoint_offset{0};
     };
 
     class InMemoryRankingEventPipeline final : public PlayerDomainEventSink

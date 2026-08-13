@@ -770,12 +770,11 @@ UnifiedRuntimeDrained =
 - 별도 `RankingProjection`은 global offset을 연속 적용하고 score 내림차순, 동점 PlayerId
   오름차순으로 결정적 standings를 만든다. checkpoint restore 뒤 tail replay가 live view와
   동일한지, 같은 tail의 재실행이 idempotent한지 자동화 테스트로 검증한다.
-- 현재 projection과 checkpoint는 프로세스 메모리 기반인 의미 참조 구현이다. 7.3a에서 Player
-  score/sequence와 outbox 기록의 MySQL transaction은 완료했지만, 서버 projection이 durable tail을
-  startup/live 경로에서 아직 소비하지 않는다. ordered projector와 durable checkpoint가 완료되기
-  전에는 standings를 crash-recovery나 시즌 정산의 근거로 쓰지 않는다.
+- in-memory projection은 의미 참조 구현으로 남고, production `GameServer`는 7.3b의 durable checkpoint와
+  outbox tail을 startup/live/shutdown 경로에서 소비한다. 여러 프로세스 projector의 leader election과
+  season archive/retention은 아직 지원하지 않는다.
 
-### 7.3 Durable ranking outbox와 checkpoint (7.3a 완료; 7.3b~c 남음)
+### 7.3 Durable ranking outbox와 checkpoint (7.3a~b 완료; 7.3c 남음)
 
 - 상세 계약은 `docs/durable-ranking-contract.md`를 단일 기준으로 사용한다. Player score·sequence와
   outbox event를 MySQL transaction 하나로 commit하고, Actor는 authoritative completion만 적용한다.
@@ -800,8 +799,20 @@ UnifiedRuntimeDrained =
 - 실제 MySQL 통합 테스트는 두 repository instance의 동일 award 경합, 다른 delta conflict, 연속 global
   offset과 event tail을 검증한다. process crash fault injection에서 commit 직전은 rollback 후 신규
   적용되고 commit 직후 completion 전 crash는 같은 identity retry에서 replay된다.
-- Debug 반복 5회, ASan/UBSan과 TSan의 실제 MySQL 경로가 통과했다. 7.3b 전까지 outbox는 durable하지만
-  `GameServer::getRankingStandings()`는 이 tail을 자동 재생하지 않는다.
+- Debug 반복 5회, ASan/UBSan과 TSan의 실제 MySQL 경로가 통과했다.
+
+#### 7.3b Ordered projector와 durable checkpoint (완료)
+
+- 전용 blocking projector thread가 schema v3 checkpoint를 복원하고 strict global offset tail을 batch로
+  적용한다. construction의 동기 catch-up이 끝난 뒤에만 `GameServer`가 gameplay ingress를 시작한다.
+- 실행 중 bounded polling은 read/checkpoint 실패를 별도 metric으로 남기고 재시도한다. committed tail,
+  projection offset/lag와 checkpoint offset을 server snapshot에 노출한다.
+- 정상 종료는 Actor/repository transaction drain 뒤 projector를 stop해 마지막 tail replay와 checkpoint를
+  시도한다. checkpoint 실패는 live projection이나 outbox를 되돌리지 않으며 다음 startup replay가
+  복구한다.
+- in-memory restart와 poll failure 재시도, 실제 MySQL checkpoint/tail restart, checkpoint commit 직전·직후
+  process crash, `GameServer` 두 번 재시작을 자동화 테스트로 검증한다.
+- Debug 실제 MySQL 경로 5회 반복과 ASan/UBSan·TSan 전체/실제 MySQL 경로가 통과했다.
 
 ## 선택적 인프라 트랙: io_uring Network Backend
 

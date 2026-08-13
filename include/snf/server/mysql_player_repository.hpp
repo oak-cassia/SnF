@@ -23,6 +23,12 @@ namespace snf::server
         AfterCommitBeforeCompletion,
     };
 
+    enum class MySqlRankingCheckpointFaultPoint
+    {
+        BeforeCommit,
+        AfterCommit,
+    };
+
     struct MySqlPlayerRepositoryConfig
     {
         std::string host{"127.0.0.1"};
@@ -39,11 +45,14 @@ namespace snf::server
         // Test-only crash/failure injection. Production leaves this empty.
         std::function<void(MySqlPurchaseFaultPoint)> purchase_fault_injector;
         std::function<void(MySqlRankingAwardFaultPoint)> ranking_award_fault_injector;
+        std::function<void(MySqlRankingCheckpointFaultPoint)> ranking_checkpoint_fault_injector;
     };
 
     // Durable blocking adapter. Its bounded queue is non-blocking at the Actor
     // boundary and each repository Worker owns one MySQL connection at a time.
-    class MySqlPlayerRepository final : public PlayerRepository, public PlayerRepositoryDiagnostics
+    class MySqlPlayerRepository final : public PlayerRepository,
+                                        public PlayerRepositoryDiagnostics,
+                                        public RankingStore
     {
     public:
         explicit MySqlPlayerRepository(MySqlPlayerRepositoryConfig config);
@@ -63,10 +72,13 @@ namespace snf::server
         void close() noexcept;
         [[nodiscard]] std::optional<PlayerRecord> find(PlayerId player) const override;
         [[nodiscard]] PlayerRepositoryStats stats() const override;
-        // Blocking diagnostic/startup read. Call it only from a dedicated DB or
-        // projector thread, never from an Actor Worker or the network reactor.
+        [[nodiscard]] RankingCheckpoint loadRankingCheckpoint() const override;
+        void saveRankingCheckpoint(const RankingCheckpoint& checkpoint) override;
+        [[nodiscard]] std::uint64_t rankingTailOffset() const override;
+        // Blocking projector reads. Never call these from an Actor Worker or the
+        // network reactor.
         [[nodiscard]] std::vector<PlayerEventRecord>
-        rankingEventsAfter(std::uint64_t offset, std::size_t limit = 1024) const;
+        rankingEventsAfter(std::uint64_t offset, std::size_t limit = 1024) const override;
 
     private:
         class Impl;

@@ -289,7 +289,10 @@ namespace snf::server
             .duplicates = _duplicates,
             .rejected = _rejected,
             .event_count = _log.size(),
+            .committed_tail_offset = _projection.offset(),
             .projection_offset = _projection.offset(),
+            .projection_lag = 0,
+            .checkpoint_offset = 0,
         };
     }
 }

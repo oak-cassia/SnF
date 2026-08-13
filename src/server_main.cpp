@@ -67,6 +67,7 @@ namespace
             .write_timeout = std::chrono::seconds{5},
             .purchase_fault_injector = {},
             .ranking_award_fault_injector = {},
+            .ranking_checkpoint_fault_injector = {},
         };
     }
 
@@ -139,8 +140,12 @@ namespace
 
         const auto& ranking = metrics.ranking_projection;
         std::cout << "Ranking projection: " << ranking.event_count << " events, offset "
-                  << ranking.projection_offset << ", " << ranking.published << " published/"
-                  << ranking.duplicates << " duplicate/" << ranking.rejected << " rejected\n";
+                  << ranking.projection_offset << '/' << ranking.committed_tail_offset << " (lag "
+                  << ranking.projection_lag << "), " << ranking.published << " published/"
+                  << ranking.duplicates << " duplicate/" << ranking.rejected << " rejected, "
+                  << ranking.poll_failures << " poll failures, " << ranking.checkpoint_failures
+                  << " checkpoint failures, checkpoint offset " << ranking.checkpoint_offset
+                  << '\n';
 
         const auto& repository = metrics.player_repository;
         std::cout << "Player repository: " << repository.queue_depth << " queued, "

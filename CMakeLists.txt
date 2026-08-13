@@ -100,6 +100,7 @@ add_library(snf_server_runtime STATIC
     src/server/player_repository.cpp
     src/server/mysql_player_repository.cpp
     src/server/ranking_projection.cpp
+    src/server/repository_ranking_projector.cpp
     src/server/player_session_directory.cpp
     src/server/zone_actor.cpp
     src/server/zone_actor_binding.cpp

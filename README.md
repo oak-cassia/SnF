@@ -7,8 +7,8 @@ SnF는 C++20을 활용해 MORPG 콘텐츠의 상태, 규칙과 메시지 흐름�
 현재는 Linux `epoll` 네트워크 런타임과 coroutine suspend/resume을 지원하는 일반화된 sharded Actor
 Runtime 위에서 인증, Player 영속성, Zone 이동·tick과 멱등한 구매 vertical slice를
 실행한다. outbound와 repository 대기는 Actor 하나만 suspend하는 non-blocking 경계를
-사용한다. MySQL durable adapter와 Shared Content·Projection의 in-memory reference까지
-완료했으며, 다음 주요 범위는 ranking outbox/checkpoint 내구성이다.
+사용한다. MySQL durable adapter와 Shared Content·Projection, durable ranking outbox/checkpoint까지
+완료했으며, 다음 주요 범위는 ranking 운영 부하·retention 결정과 cross-zone handoff다.
 `ConnectionScope`와 UnifiedRuntime은 실제 콘텐츠 부하가 필요를 증명할 때 진행할 선택적 최적화다.
 
 ## 프로젝트 목적
@@ -95,6 +95,8 @@ Network Runtime
   effectively-once effect를 검증하는 purchase result
 - 두 Player가 공유하는 bounded PartyActor membership, typed `PartyFull`, disconnect leave와
   mailbox-safe empty Party passivation
+- Player score/sequence와 event를 원자적으로 기록하는 durable ranking outbox, startup/live tail을
+  strict offset 순서로 적용하는 전용 projector와 schema v3 checkpoint 복구
 - connection generation을 통한 stale response 차단
 - bounded ingress queue와 Session별 send backpressure
 - 용량 예약으로 동작하는 outbound channel: 포화 시 Worker가 아니라 Actor 하나가 suspend되고, 연결별
@@ -141,17 +143,16 @@ FIFO mailbox가 membership을 변경하고, coordinator의 session route와 memb
 stale leave를 차단한다. 용량 초과는 연결 종료가 아닌 typed `PartyFull`로 응답하며,
 마지막 leave 후 빈 Actor를 회수한다.
 
-Phase 7.2에서는 PlayerActor가 신뢰된 gameplay score command를 적용하고 절대 score와 단조
-sequence의 domain event를 발행한다. bounded in-memory event log와 ranking projection은 duplicate,
-conflict, 순서 오류를 구분하며 checkpoint 뒤 tail replay로 같은 standings를 복원한다. event-only
-effect는 network outbound 용량을 소비하지 않는다. 현재 log와 checkpoint는 의미 참조 구현이므로
-Phase 7.3a 이전에는 Player snapshot과 event publish가 원자적이지 않았다. 이제 trusted award는
-durable identity를 가지며 Player score/sequence와 outbox event를 schema v2 MySQL transaction 하나로
-commit한다. 다만 서버 projection은 아직 durable tail을 시작·실행 중에 소비하지 않으므로 standings의
-프로세스 crash 복구와 시즌 정산은 ordered projector와 durable checkpoint 뒤의 범위다.
+Phase 7.2에서는 절대 score와 Player별 단조 sequence, strict global offset을 적용하는 결정적 ranking
+projection과 checkpoint/tail replay 의미를 in-memory reference로 검증했다. Phase 7.3a는 trusted
+award에 durable identity를 부여하고 Player score/sequence와 outbox event를 schema v2 MySQL
+transaction 하나로 commit한다.
 
 Phase 7.3 계약은 strict global offset projector와 checkpoint/shutdown 복구 순서까지 고정했다.
-7.3a award transaction은 완료했고 다음 구현 범위는 7.3b ordered projector/checkpoint다.
+7.3b는 schema v3 checkpoint와 전용 projector를 추가했다. 서버는 gameplay ingress 전에 checkpoint와
+durable tail을 동기 복구하고, 실행 중 bounded polling으로 새 event를 적용하며, Actor/repository drain
+뒤 마지막 tail과 checkpoint를 확정한다. 다음 범위는 7.3c stream cursor/checkpoint 부하 측정과
+retention 결정이다.
 
 콘텐츠 부하를 재현하기 위해 load client는 기존 `ping` 외에 `zone` 시나리오를 제공한다. 각 연결이
 고유 Player로 인증하고 Zone에 입장한 뒤 지속 이동하며 bootstrap과 gameplay RTT를 분리한다. 현재

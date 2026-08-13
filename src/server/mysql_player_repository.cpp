@@ -596,6 +596,97 @@ namespace
             return records;
         }
 
+        [[nodiscard]] std::uint64_t rankingTailOffset()
+        {
+            auto row = _connection.query(
+                "SELECT last_offset FROM snf_event_stream WHERE stream_name='ranking'");
+            if (::mysql_num_rows(row.get()) != 1)
+            {
+                throw std::runtime_error{"Ranking event stream cursor is missing"};
+            }
+            return parse_integer<std::uint64_t>(::mysql_fetch_row(row.get())[0],
+                                                "ranking last_offset");
+        }
+
+        [[nodiscard]] snf::server::RankingCheckpoint loadRankingCheckpoint()
+        {
+            Transaction transaction{_connection};
+            auto meta = _connection.query("SELECT global_offset FROM snf_ranking_checkpoint_meta "
+                                          "WHERE singleton_id=1 FOR UPDATE");
+            if (::mysql_num_rows(meta.get()) != 1)
+            {
+                throw std::runtime_error{"Ranking checkpoint metadata is missing"};
+            }
+            const std::uint64_t offset = parse_integer<std::uint64_t>(
+                ::mysql_fetch_row(meta.get())[0], "ranking checkpoint offset");
+
+            auto rows = _connection.query("SELECT player_id, score, player_sequence "
+                                          "FROM snf_ranking_checkpoint_entries ORDER BY player_id");
+            std::vector<snf::server::RankingEntry> entries;
+            entries.reserve(static_cast<std::size_t>(::mysql_num_rows(rows.get())));
+            while (MYSQL_ROW row = ::mysql_fetch_row(rows.get()))
+            {
+                entries.push_back(snf::server::RankingEntry{
+                    .player = snf::server::PlayerId{.value = parse_integer<std::uint64_t>(
+                                                        row[0], "checkpoint player_id")},
+                    .score = parse_integer<std::uint64_t>(row[1], "checkpoint score"),
+                    .last_sequence =
+                        parse_integer<std::uint64_t>(row[2], "checkpoint player_sequence"),
+                });
+            }
+            snf::server::RankingCheckpoint checkpoint{
+                .offset = offset,
+                .entries = std::move(entries),
+            };
+            snf::server::RankingProjection validation;
+            validation.restore(checkpoint);
+            transaction.commit();
+            return checkpoint;
+        }
+
+        void saveRankingCheckpoint(const snf::server::RankingCheckpoint& checkpoint)
+        {
+            snf::server::RankingProjection validation;
+            validation.restore(checkpoint);
+
+            Transaction transaction{_connection};
+            auto stream = _connection.query(
+                "SELECT last_offset FROM snf_event_stream WHERE stream_name='ranking' FOR UPDATE");
+            if (::mysql_num_rows(stream.get()) != 1)
+            {
+                throw std::runtime_error{"Ranking event stream cursor is missing"};
+            }
+            const std::uint64_t tail = parse_integer<std::uint64_t>(
+                ::mysql_fetch_row(stream.get())[0], "ranking last_offset");
+            if (checkpoint.offset > tail)
+            {
+                throw std::out_of_range{"Ranking checkpoint is beyond the event tail"};
+            }
+
+            _connection.execute("DELETE FROM snf_ranking_checkpoint_entries");
+            for (const snf::server::RankingEntry& entry : checkpoint.entries)
+            {
+                _connection.execute("INSERT INTO snf_ranking_checkpoint_entries "
+                                    "(player_id, score, player_sequence) VALUES (" +
+                                    std::to_string(entry.player.value) + "," +
+                                    std::to_string(entry.score) + "," +
+                                    std::to_string(entry.last_sequence) + ")");
+            }
+            _connection.execute("UPDATE snf_ranking_checkpoint_meta SET global_offset=" +
+                                std::to_string(checkpoint.offset) + " WHERE singleton_id=1");
+            if (_config.ranking_checkpoint_fault_injector)
+            {
+                _config.ranking_checkpoint_fault_injector(
+                    snf::server::MySqlRankingCheckpointFaultPoint::BeforeCommit);
+            }
+            transaction.commit();
+            if (_config.ranking_checkpoint_fault_injector)
+            {
+                _config.ranking_checkpoint_fault_injector(
+                    snf::server::MySqlRankingCheckpointFaultPoint::AfterCommit);
+            }
+        }
+
     private:
         void ensureSchema()
         {
@@ -611,7 +702,7 @@ namespace
             }
             const std::uint32_t schema_version =
                 parse_integer<std::uint32_t>(version_row[0], "schema version");
-            if (schema_version == 0 || schema_version > 2)
+            if (schema_version == 0 || schema_version > 3)
             {
                 throw std::runtime_error{"MySQL schema version is unsupported"};
             }
@@ -658,6 +749,22 @@ namespace
             if (schema_version == 1)
             {
                 _connection.execute("INSERT INTO snf_schema_version (version) VALUES (2)");
+            }
+            _connection.execute("CREATE TABLE IF NOT EXISTS snf_ranking_checkpoint_meta ("
+                                "singleton_id TINYINT UNSIGNED NOT NULL PRIMARY KEY, "
+                                "global_offset BIGINT UNSIGNED NOT NULL, "
+                                "CONSTRAINT snf_ranking_checkpoint_singleton CHECK "
+                                "(singleton_id=1)) ENGINE=InnoDB");
+            _connection.execute(
+                "INSERT IGNORE INTO snf_ranking_checkpoint_meta (singleton_id, global_offset) "
+                "VALUES (1,0)");
+            _connection.execute("CREATE TABLE IF NOT EXISTS snf_ranking_checkpoint_entries ("
+                                "player_id BIGINT UNSIGNED NOT NULL PRIMARY KEY, "
+                                "score BIGINT UNSIGNED NOT NULL, "
+                                "player_sequence BIGINT UNSIGNED NOT NULL) ENGINE=InnoDB");
+            if (schema_version <= 2)
+            {
+                _connection.execute("INSERT INTO snf_schema_version (version) VALUES (3)");
             }
         }
 
@@ -887,6 +994,65 @@ namespace snf::server
                 _operation_latency.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now() - started_at));
                 return records;
+            }
+            catch (...)
+            {
+                _operation_failures.fetch_add(1, std::memory_order_relaxed);
+                _operation_latency.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - started_at));
+                throw;
+            }
+        }
+
+        [[nodiscard]] std::uint64_t rankingTailOffset()
+        {
+            const auto started_at = std::chrono::steady_clock::now();
+            try
+            {
+                MySqlStore store{_config, false};
+                const std::uint64_t offset = store.rankingTailOffset();
+                _operation_latency.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - started_at));
+                return offset;
+            }
+            catch (...)
+            {
+                _operation_failures.fetch_add(1, std::memory_order_relaxed);
+                _operation_latency.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - started_at));
+                throw;
+            }
+        }
+
+        [[nodiscard]] RankingCheckpoint loadRankingCheckpoint()
+        {
+            const auto started_at = std::chrono::steady_clock::now();
+            try
+            {
+                MySqlStore store{_config, false};
+                auto checkpoint = store.loadRankingCheckpoint();
+                _operation_latency.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - started_at));
+                return checkpoint;
+            }
+            catch (...)
+            {
+                _operation_failures.fetch_add(1, std::memory_order_relaxed);
+                _operation_latency.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - started_at));
+                throw;
+            }
+        }
+
+        void saveRankingCheckpoint(const RankingCheckpoint& checkpoint)
+        {
+            const auto started_at = std::chrono::steady_clock::now();
+            try
+            {
+                MySqlStore store{_config, false};
+                store.saveRankingCheckpoint(checkpoint);
+                _operation_latency.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - started_at));
             }
             catch (...)
             {
@@ -1148,6 +1314,21 @@ namespace snf::server
     PlayerRepositoryStats MySqlPlayerRepository::stats() const
     {
         return _impl->stats();
+    }
+
+    RankingCheckpoint MySqlPlayerRepository::loadRankingCheckpoint() const
+    {
+        return _impl->loadRankingCheckpoint();
+    }
+
+    void MySqlPlayerRepository::saveRankingCheckpoint(const RankingCheckpoint& checkpoint)
+    {
+        _impl->saveRankingCheckpoint(checkpoint);
+    }
+
+    std::uint64_t MySqlPlayerRepository::rankingTailOffset() const
+    {
+        return _impl->rankingTailOffset();
     }
 
     std::vector<PlayerEventRecord>

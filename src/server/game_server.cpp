@@ -3,6 +3,7 @@
 #include "snf/net/system_error.hpp"
 
 #include <algorithm>
+#include <exception>
 #include <limits>
 #include <stdexcept>
 #include <sys/eventfd.h>
@@ -39,6 +40,16 @@ namespace
             throw std::logic_error{"Configured Player repository has no diagnostics"};
         }
         return *diagnostics;
+    }
+
+    snf::server::RankingStore& ranking_store(snf::server::PlayerRepository& repository)
+    {
+        auto* store = dynamic_cast<snf::server::RankingStore*>(&repository);
+        if (store == nullptr)
+        {
+            throw std::logic_error{"Configured Player repository has no ranking store"};
+        }
+        return *store;
     }
 
     snf::net::UniqueFileDescriptor create_outbound_event()
@@ -130,12 +141,17 @@ namespace snf::server
                   };
               }(),
               _outbound_event.getDescriptor())
-        , _ranking_events(config.max_player_domain_events)
-        , _player_effects(_outbound_channel, &_ranking_events)
+        , _player_effects(_outbound_channel)
         , _zone_results(_outbound_channel)
         , _party_results(_outbound_channel)
         , _party_coordinator(checked_party_members(config.max_party_members))
         , _player_repository(make_player_repository(config))
+        , _ranking_projector(ranking_store(*_player_repository),
+                             RepositoryRankingProjectorConfig{
+                                 .batch_size = config.ranking_projector_batch_size,
+                                 .checkpoint_every_events = config.ranking_checkpoint_every_events,
+                                 .poll_interval = config.ranking_projector_poll_interval,
+                             })
         , _runtime_completion(snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
                               _outbound_event.getDescriptor())
         , _player_actor_binding(_player_effects, _outbound_channel, _command_lifecycle)
@@ -327,12 +343,12 @@ namespace snf::server
 
     RankingPipelineStats GameServer::getRankingStats() const
     {
-        return _ranking_events.stats();
+        return _ranking_projector.stats();
     }
 
     std::vector<RankingEntry> GameServer::getRankingStandings() const
     {
-        return _ranking_events.standings();
+        return _ranking_projector.standings();
     }
 
     ServerMetricsSnapshot GameServer::getMetricsSnapshot() const
@@ -345,7 +361,7 @@ namespace snf::server
             .zone_timers = _zone_timers.stats(),
             .zone_actors = _zone_actor_binding.stats(),
             .party_actors = _party_actor_binding.stats(),
-            .ranking_projection = _ranking_events.stats(),
+            .ranking_projection = _ranking_projector.stats(),
             .command_terminals = _command_lifecycle.terminalCount(),
             .command_admission_rejections = _command_lifecycle.admissionRejectionCount(),
         };
@@ -397,7 +413,24 @@ namespace snf::server
     void GameServer::joinActorRuntime()
     {
         _zone_timers.stop();
-        _logic_runtime.join();
+        std::exception_ptr actor_failure;
+        try
+        {
+            _logic_runtime.join();
+        }
+        catch (...)
+        {
+            actor_failure = std::current_exception();
+        }
+
+        // No transaction can commit after the Actor runtime drains. Stop then
+        // performs one final durable-tail replay and checkpoint before run()
+        // returns, so post-run metrics and standings are authoritative.
+        _ranking_projector.stop();
+        if (actor_failure)
+        {
+            std::rethrow_exception(actor_failure);
+        }
         _zone_timers.rethrowIfFailed();
     }
 

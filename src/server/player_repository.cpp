@@ -1,5 +1,6 @@
 #include "snf/server/player_repository.hpp"
 
+#include <algorithm>
 #include <limits>
 #include <stdexcept>
 #include <type_traits>
@@ -332,16 +333,47 @@ namespace snf::server
         return iterator->second;
     }
 
-    std::vector<PlayerEventRecord>
-    InMemoryPlayerRepository::rankingEventsAfter(const std::uint64_t offset) const
+    RankingCheckpoint InMemoryPlayerRepository::loadRankingCheckpoint() const
     {
+        std::lock_guard lock{_mutex};
+        return _ranking_checkpoint;
+    }
+
+    void InMemoryPlayerRepository::saveRankingCheckpoint(const RankingCheckpoint& checkpoint)
+    {
+        RankingProjection validation;
+        validation.restore(checkpoint);
+        std::lock_guard lock{_mutex};
+        if (checkpoint.offset > _ranking_events.size())
+        {
+            throw std::out_of_range{"Ranking checkpoint is beyond the event tail"};
+        }
+        _ranking_checkpoint = checkpoint;
+    }
+
+    std::uint64_t InMemoryPlayerRepository::rankingTailOffset() const
+    {
+        std::lock_guard lock{_mutex};
+        return static_cast<std::uint64_t>(_ranking_events.size());
+    }
+
+    std::vector<PlayerEventRecord>
+    InMemoryPlayerRepository::rankingEventsAfter(const std::uint64_t offset,
+                                                 const std::size_t limit) const
+    {
+        if (limit == 0)
+        {
+            throw std::invalid_argument{"Ranking event read limit must be positive"};
+        }
         std::lock_guard lock{_mutex};
         if (offset > _ranking_events.size())
         {
             throw std::out_of_range{"Ranking event offset is beyond its tail"};
         }
-        return std::vector<PlayerEventRecord>{
-            _ranking_events.begin() + static_cast<std::size_t>(offset), _ranking_events.end()};
+        const std::size_t begin = static_cast<std::size_t>(offset);
+        const std::size_t count = std::min(limit, _ranking_events.size() - begin);
+        return std::vector<PlayerEventRecord>{_ranking_events.begin() + begin,
+                                              _ranking_events.begin() + begin + count};
     }
 
     InMemoryPlayerRepository::PurchaseStats InMemoryPlayerRepository::purchaseStats() const
@@ -517,6 +549,28 @@ namespace snf::server
             .operation_failures = 0,
             .operation_latency_nanoseconds = {},
         };
+    }
+
+    RankingCheckpoint ThreadedPlayerRepository::loadRankingCheckpoint() const
+    {
+        return _storage.loadRankingCheckpoint();
+    }
+
+    void ThreadedPlayerRepository::saveRankingCheckpoint(const RankingCheckpoint& checkpoint)
+    {
+        _storage.saveRankingCheckpoint(checkpoint);
+    }
+
+    std::uint64_t ThreadedPlayerRepository::rankingTailOffset() const
+    {
+        return _storage.rankingTailOffset();
+    }
+
+    std::vector<PlayerEventRecord>
+    ThreadedPlayerRepository::rankingEventsAfter(const std::uint64_t offset,
+                                                 const std::size_t limit) const
+    {
+        return _storage.rankingEventsAfter(offset, limit);
     }
 
     void ThreadedPlayerRepository::runWorker()
