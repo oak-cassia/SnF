@@ -837,6 +837,19 @@ UnifiedRuntimeDrained =
   상세 조건과 원자료는 `docs/ranking-performance-baseline.md`에 기록한다.
 - schema v4를 포함한 실제 MySQL 경로 Debug 5회 반복과 ASan/UBSan·TSan 전체 테스트가 통과했다.
 
+### 7.4 Cross-Zone handoff (계약 완료; 구현 남음)
+
+- 상세 계약은 `docs/cross-zone-handoff-contract.md`를 단일 기준으로 사용한다. route epoch만으로 전환을
+  원자화하지 않고 reactor 소유 `Stable/Transferring` state machine이 source drain → target activation →
+  route publish 순서를 직렬화한다.
+- Worker completion은 reserved bounded value channel로 reactor에 돌아온다. handoff 하나당 단계 하나만
+  in-flight라 completion slot을 admission에서 예약할 수 있고, outbound action과 별도 drain predicate를
+  가진다.
+- client command token은 reactor transition record 하나가 소유하고 내부 source/target/보상 command는
+  client credit을 만들지 않는다. 성공 응답, typed failure 또는 연결 종료 중 하나로 한 번 종결한다.
+- 구현은 7.4a transition/completion channel, 7.4b happy path/protocol, 7.4c compensation·disconnect·shutdown
+  순서로 나눈다.
+
 ## 선택적 인프라 트랙: io_uring Network Backend
 
 io_uring은 콘텐츠 단계의 선행 조건이 아니다. epoll backend와 첫 영속성 slice로

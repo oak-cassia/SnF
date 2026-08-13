@@ -626,6 +626,9 @@ leader election과 season archive/prune은 아직 범위 밖이다.
 
 구현 시 route 변경은 `RouteCoordinator`가 직렬화한다.
 
+구체적인 state, bounded Worker→reactor completion, 보상과 disconnect/shutdown 순서는
+`docs/cross-zone-handoff-contract.md`를 따른다.
+
 ```text
 이전 destination 입력 중지와 drain 경계 확정
 → 새 destination activation 완료

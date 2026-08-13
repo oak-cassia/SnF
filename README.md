@@ -8,7 +8,8 @@ SnF는 C++20을 활용해 MORPG 콘텐츠의 상태, 규칙과 메시지 흐름�
 Runtime 위에서 인증, Player 영속성, Zone 이동·tick과 멱등한 구매 vertical slice를
 실행한다. outbound와 repository 대기는 Actor 하나만 suspend하는 non-blocking 경계를
 사용한다. MySQL durable adapter와 Shared Content·Projection, durable ranking outbox/checkpoint까지
-완료했으며, 다음 주요 범위는 ranking 운영 부하·retention 결정과 cross-zone handoff다.
+완료했으며, 다음 주요 범위는 source drain·target activation·route publish를 직렬화하는 cross-zone
+handoff다.
 `ConnectionScope`와 UnifiedRuntime은 실제 콘텐츠 부하가 필요를 증명할 때 진행할 선택적 최적화다.
 
 ## 프로젝트 목적
@@ -191,6 +192,8 @@ p99는 4.719ms, queue high-water는 로그인 burst에서 198이었지만 거부
 [Durable Ranking 계약](docs/durable-ranking-contract.md)은 Phase 7.3의 transaction, projector와
 checkpoint 복구 기준이고, [Ranking 성능 기준선](docs/ranking-performance-baseline.md)은 cursor/checkpoint
 측정과 retention 결정을 기록한다.
+[Cross-Zone Handoff 계약](docs/cross-zone-handoff-contract.md)은 Phase 7.4의 transition state,
+completion 상한, 보상과 disconnect/shutdown 순서를 정의한다.
 [ConnectionScope 계약](docs/connection-scope-contract.md)과
 [UnifiedRuntime 전환 개요](study/10-unified-runtime-overview.md)는 Playable Session과 Zone 부하가 실제
 runtime 병목을 증명할 때 사용할 선택적 최적화 트랙의 설계 입력이다.
