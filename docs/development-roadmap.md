@@ -837,7 +837,7 @@ UnifiedRuntimeDrained =
   상세 조건과 원자료는 `docs/ranking-performance-baseline.md`에 기록한다.
 - schema v4를 포함한 실제 MySQL 경로 Debug 5회 반복과 ASan/UBSan·TSan 전체 테스트가 통과했다.
 
-### 7.4 Cross-Zone handoff (계약 완료; 구현 남음)
+### 7.4 Cross-Zone handoff (7.4a 완료; 7.4b~c 남음)
 
 - 상세 계약은 `docs/cross-zone-handoff-contract.md`를 단일 기준으로 사용한다. route epoch만으로 전환을
   원자화하지 않고 reactor 소유 `Stable/Transferring` state machine이 source drain → target activation →
@@ -849,6 +849,20 @@ UnifiedRuntimeDrained =
   client credit을 만들지 않는다. 성공 응답, typed failure 또는 연결 종료 중 하나로 한 번 종결한다.
 - 구현은 7.4a transition/completion channel, 7.4b happy path/protocol, 7.4c compensation·disconnect·shutdown
   순서로 나눈다.
+
+#### 7.4a Transition state와 bounded completion (완료)
+
+- reactor 소유 `RouteCoordinator`에 connection별 `ZoneHandoffId`와
+  `LeaveSource → EnterTarget → RestoreSource` 전환 상태를 추가했다. 전환 중에는 stable route 조회를
+  숨기되 source와 target Zone의 수명 회계는 모두 유지한다. target 성공과 source 복구는 각각 단조 증가한
+  새 route epoch을 공개한다.
+- `ZoneTransitionChannel`은 `max_zone_handoffs`와 같은 고정 용량을 갖고 handoff 시작 시 ticket 하나를
+  예약한다. 단계는 한 번에 하나만 in-flight이므로 Worker publish는 이미 확보된 value slot을 사용하며,
+  같은 ticket의 중복 publish와 다른 handoff identity를 거부한다. release가 queued completion과 경합하면
+  실제 consume 뒤 reservation을 반환한다.
+- 최소 capacity에서 전환 admission 거부, source leave 전 rollback, source restore, target publish,
+  abandon과 stale identity를 검증했다. completion channel은 여러 Worker의 동시 publish, cancel, slot 재사용과
+  queued release를 검증한다. 실제 Worker→reactor 연결과 TCP happy path는 7.4b 범위다.
 
 ## 선택적 인프라 트랙: io_uring Network Backend
 

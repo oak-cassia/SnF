@@ -2,6 +2,7 @@
 
 #include "snf/net/connection_id.hpp"
 #include "snf/server/zone_command.hpp"
+#include "snf/server/zone_handoff.hpp"
 #include "snf/server/zone_id.hpp"
 
 #include <cstdint>
@@ -28,5 +29,6 @@ namespace snf::server
         ZoneId zone;
         ZoneCommand command;
         std::optional<ZoneReplyContext> reply;
+        std::optional<ZoneHandoffContext> handoff;
     };
 }

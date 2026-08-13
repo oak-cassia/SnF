@@ -49,6 +49,7 @@ namespace snf::server
             .zone = zone,
             .command = std::move(command),
             .reply = std::nullopt,
+            .handoff = std::nullopt,
         });
     }
 }

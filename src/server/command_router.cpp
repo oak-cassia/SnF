@@ -78,6 +78,7 @@ namespace snf::server
                         .zone = route.zone,
                         .command = std::move(route.command),
                         .reply = std::move(reply),
+                        .handoff = std::nullopt,
                     });
                 }
                 else if constexpr (std::is_same_v<Route, PartyCommandRoute>)

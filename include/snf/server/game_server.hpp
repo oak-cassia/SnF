@@ -26,6 +26,7 @@
 #include "snf/server/zone_actor_binding.hpp"
 #include "snf/server/zone_actor_ingress.hpp"
 #include "snf/server/zone_timer_service.hpp"
+#include "snf/server/zone_transition_channel.hpp"
 
 #include <chrono>
 #include <cstddef>
@@ -52,6 +53,8 @@ namespace snf::server
         PlayerRepositoryStats player_repository;
         ZoneTimerServiceStats zone_timers;
         ZoneActorBindingStats zone_actors;
+        RouteCoordinatorStats zone_handoffs;
+        ZoneTransitionChannelStats zone_transition_channel;
         PartyActorBindingStats party_actors;
         RankingPipelineStats ranking_projection;
         // Commands that were admitted and reached a final result, counted once each
@@ -91,6 +94,7 @@ namespace snf::server
         std::chrono::milliseconds zone_tick_interval{50};
         std::chrono::nanoseconds zone_tick_budget{std::chrono::milliseconds{5}};
         std::size_t max_zone_timers{4096};
+        std::size_t max_zone_handoffs{4096};
         std::size_t outbound_queue_capacity{4096};
         // Bounds the shared outbound capacity one connection may hold at once.
         std::size_t max_outbound_slots_per_connection{64};
@@ -152,6 +156,7 @@ namespace snf::server
         // The domain side takes it as an OutboundSink&, so the binding and the effect
         // sink still cannot reach the reactor-only half.
         OutboundChannel _outbound_channel;
+        ZoneTransitionChannel _zone_transition_channel;
         ProtocolPlayerEffectSink _player_effects;
         ProtocolZoneResultSink _zone_results;
         ProtocolPartyResultSink _party_results;

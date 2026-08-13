@@ -99,6 +99,17 @@ namespace
         }
         return max_members;
     }
+
+    std::size_t checked_zone_handoffs(const std::size_t max_handoffs,
+                                      const std::size_t lifecycle_capacity)
+    {
+        if (max_handoffs == 0 || max_handoffs > lifecycle_capacity)
+        {
+            throw std::invalid_argument{
+                "Zone handoff capacity must be positive and no greater than lifecycle capacity"};
+        }
+        return max_handoffs;
+    }
 }
 
 namespace snf::server
@@ -141,9 +152,14 @@ namespace snf::server
                   };
               }(),
               _outbound_event.getDescriptor())
+        , _zone_transition_channel(
+              checked_zone_handoffs(config.max_zone_handoffs, config.connection_lifecycle_capacity),
+              _outbound_event.getDescriptor())
         , _player_effects(_outbound_channel)
         , _zone_results(_outbound_channel)
         , _party_results(_outbound_channel)
+        , _route_coordinator(
+              checked_zone_handoffs(config.max_zone_handoffs, config.connection_lifecycle_capacity))
         , _party_coordinator(checked_party_members(config.max_party_members))
         , _player_repository(make_player_repository(config))
         , _ranking_projector(
@@ -181,8 +197,31 @@ namespace snf::server
               ZoneActorBindingConfig{
                   .actor = ZoneActorConfig{.aoi_radius = config.zone_aoi_radius},
                   .tick_budget = config.zone_tick_budget,
-                  .on_result = [this](const ZoneInboundCommand& command, const ZoneResult& result)
-                  { _zone_results.accept(command, result); },
+                  .on_result =
+                      [this](const ZoneInboundCommand& command, const ZoneResult& result)
+                  {
+                      if (!command.handoff)
+                      {
+                          _zone_results.accept(command, result);
+                          return;
+                      }
+
+                      const ZoneHandoffContext& context = *command.handoff;
+                      if (!_zone_transition_channel.publish(context.ticket,
+                                                            ZoneHandoffCompletion{
+                                                                .handoff_id = context.handoff_id,
+                                                                .connection = context.connection,
+                                                                .player = context.player,
+                                                                .zone = command.zone,
+                                                                .route_epoch = context.route_epoch,
+                                                                .step = context.step,
+                                                                .status = result.status,
+                                                                .position = result.position,
+                                                            }))
+                      {
+                          _runtime_completion.notifyFailed(snf::runtime::RuntimeId::Logic);
+                      }
+                  },
               },
               _command_lifecycle)
         , _party_actor_binding(
@@ -362,6 +401,8 @@ namespace snf::server
             .player_repository = repository_diagnostics(*_player_repository).stats(),
             .zone_timers = _zone_timers.stats(),
             .zone_actors = _zone_actor_binding.stats(),
+            .zone_handoffs = _route_coordinator.stats(),
+            .zone_transition_channel = _zone_transition_channel.stats(),
             .party_actors = _party_actor_binding.stats(),
             .ranking_projection = _ranking_projector.stats(),
             .command_terminals = _command_lifecycle.terminalCount(),
@@ -446,6 +487,7 @@ namespace snf::server
         {
         }
         _protocol_gateway.cancel();
+        _zone_transition_channel.cancel();
         // Also the path a reactor failure takes, and the reason a Worker suspended on
         // outbound capacity still reaches a terminal outcome when the reactor is gone.
         static_cast<void>(_outbound_channel.cancel());

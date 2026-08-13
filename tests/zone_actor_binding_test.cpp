@@ -87,6 +87,7 @@ namespace
                            .request_id = 1,
                            .kind = snf::server::ZoneReplyKind::Entered,
                        },
+                   .handoff = std::nullopt,
                }) == snf::runtime::PostResult::Accepted);
         assert(ingress.tryPost(snf::server::ZoneInboundCommand{
                    .zone = zone,
@@ -102,6 +103,7 @@ namespace
                            .request_id = 2,
                            .kind = snf::server::ZoneReplyKind::Moved,
                        },
+                   .handoff = std::nullopt,
                }) == snf::runtime::PostResult::Accepted);
         assert(ingress.tryPassivate(zone) == snf::runtime::PostResult::Accepted);
         runtime.close();
@@ -159,6 +161,7 @@ namespace
                            .position = {.x = 1, .y = 2},
                        },
                    .reply = std::nullopt,
+                   .handoff = std::nullopt,
                }) == snf::runtime::PostResult::Accepted);
         assert(ingress.tryPost(snf::server::ZoneInboundCommand{
                    .zone = zone,
@@ -168,6 +171,7 @@ namespace
                            .route_epoch = 1,
                        },
                    .reply = std::nullopt,
+                   .handoff = std::nullopt,
                }) == snf::runtime::PostResult::Accepted);
         assert(ingress.tryPostTimerCommand(
                    zone, snf::server::CancelZoneSimulationTimer{.timer = timer}) ==
@@ -231,6 +235,7 @@ namespace
                 .zone = zone,
                 .command = std::move(command),
                 .reply = std::nullopt,
+                .handoff = std::nullopt,
             });
         };
         assert(post_player(snf::server::EnterZoneCommand{

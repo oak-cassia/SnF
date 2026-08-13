@@ -212,11 +212,17 @@ shutdown은 새 handoff admission을 먼저 닫는다. 이미 승인된 handoff 
 
 ## 11. 구현 순서
 
-### 7.4a Transition state와 bounded completion
+### 7.4a Transition state와 bounded completion (완료)
 
 - `RouteCoordinator` stable/transferring 상태와 handoff identity를 추가한다.
 - reserved `ZoneTransitionChannel`과 reactor turn/drain 계측을 추가한다.
 - 내부 Zone command에 handoff step identity를 싣고 Worker result를 value completion으로 돌려준다.
+
+구현 결과 `RouteCoordinator`가 connection별 stable/transferring 상태와 handoff identity, source/target
+수명 회계를 소유한다. `ZoneTransitionChannel`은 handoff admission에서 고정 용량 ticket을 예약하고,
+하나의 in-flight 단계가 그 slot을 재사용한다. 다른 identity와 중복 completion은 상태를 진행시키지 않으며,
+queued completion과 release가 경합해도 consume 전에는 예약을 반환하지 않는다. Worker binding과 reactor
+drain을 실제 source/target command에 연결하는 작업은 7.4b에서 수행한다.
 
 ### 7.4b Happy path와 protocol
 

@@ -34,6 +34,7 @@ namespace
                         .request_id = 42,
                         .kind = snf::server::ZoneReplyKind::Moved,
                     },
+                .handoff = std::nullopt,
             },
             snf::server::ZoneResult{
                 .status = snf::server::ZoneCommandStatus::Applied,
@@ -74,6 +75,7 @@ namespace
                         .tick = 1,
                     },
                 .reply = std::nullopt,
+                .handoff = std::nullopt,
             },
             result);
         assert(outbound.size() == 0);
@@ -94,6 +96,7 @@ namespace
                         .request_id = 2,
                         .kind = snf::server::ZoneReplyKind::Moved,
                     },
+                .handoff = std::nullopt,
             },
             result);
 
