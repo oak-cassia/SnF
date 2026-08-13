@@ -25,6 +25,7 @@ namespace snf::server
 
     enum class MySqlRankingCheckpointFaultPoint
     {
+        BeforePointerSwap,
         BeforeCommit,
         AfterCommit,
     };

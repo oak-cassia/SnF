@@ -136,6 +136,12 @@ add_executable(snf_load_client
 target_link_libraries(snf_load_client PRIVATE snf_load_client_runtime)
 snf_configure_target(snf_load_client)
 
+add_executable(snf_ranking_benchmark
+    tools/ranking_benchmark/ranking_benchmark_main.cpp
+)
+target_link_libraries(snf_ranking_benchmark PRIVATE snf_server_runtime)
+snf_configure_target(snf_ranking_benchmark)
+
 include(CTest)
 if(BUILD_TESTING)
     add_executable(snf_unit_tests

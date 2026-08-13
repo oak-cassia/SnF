@@ -1,6 +1,7 @@
 #include "snf/server/player_repository.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <stdexcept>
 #include <type_traits>
@@ -548,6 +549,7 @@ namespace snf::server
             .ranking_awards_rejected = ranking_awards.rejected,
             .operation_failures = 0,
             .operation_latency_nanoseconds = {},
+            .ranking_award_latency_nanoseconds = _ranking_award_latency.snapshot(),
         };
     }
 
@@ -595,7 +597,17 @@ namespace snf::server
                     }
                     else
                     {
-                        _storage.asyncAwardRankingScore(value.request, std::move(value.completion));
+                        const auto started_at = std::chrono::steady_clock::now();
+                        _storage.asyncAwardRankingScore(
+                            value.request,
+                            [this, started_at, completion = std::move(value.completion)](
+                                RankingAwardTransactionResult result) mutable
+                            {
+                                _ranking_award_latency.record(
+                                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                        std::chrono::steady_clock::now() - started_at));
+                                completion(std::move(result));
+                            });
                     }
                 },
                 std::move(*job));

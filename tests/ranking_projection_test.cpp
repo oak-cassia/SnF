@@ -208,6 +208,7 @@ namespace
 
         const snf::server::RepositoryRankingProjectorConfig config{
             .batch_size = 1,
+            .max_batches_per_poll = 8,
             .checkpoint_every_events = 1,
             .poll_interval = 5ms,
         };
@@ -232,6 +233,8 @@ namespace
             assert(projector.stats().projection_lag == 0);
             assert(projector.stats().poll_failures == 0);
             assert(projector.stats().checkpoint_failures == 0);
+            assert(projector.stats().poll_latency_nanoseconds.sample_count != 0);
+            assert(projector.stats().checkpoint_latency_nanoseconds.sample_count != 0);
         }
 
         assert(store.loadRankingCheckpoint().offset == 3);
@@ -249,6 +252,7 @@ namespace
         FlakyRankingStore store;
         const snf::server::RepositoryRankingProjectorConfig config{
             .batch_size = 1,
+            .max_batches_per_poll = 8,
             .checkpoint_every_events = 1,
             .poll_interval = 5ms,
         };

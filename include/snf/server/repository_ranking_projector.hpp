@@ -16,6 +16,7 @@ namespace snf::server
     struct RepositoryRankingProjectorConfig
     {
         std::size_t batch_size{1024};
+        std::size_t max_batches_per_poll{8};
         std::uint64_t checkpoint_every_events{1024};
         std::chrono::milliseconds poll_interval{100};
     };
@@ -41,6 +42,7 @@ namespace snf::server
     private:
         [[nodiscard]] bool catchUpOnce();
         void catchUpAll();
+        void pollOnce();
         void saveCheckpoint(bool force);
         void run() noexcept;
 
@@ -55,6 +57,8 @@ namespace snf::server
         std::uint64_t _checkpoint_failures{0};
         std::uint64_t _committed_tail_offset{0};
         std::uint64_t _checkpoint_offset{0};
+        snf::runtime::Distribution _poll_latency;
+        snf::runtime::Distribution _checkpoint_latency;
         std::mutex _control_mutex;
         std::condition_variable _control;
         bool _stopping{false};

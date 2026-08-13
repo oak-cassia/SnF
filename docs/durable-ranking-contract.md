@@ -145,20 +145,26 @@ hint일 뿐이며 유실돼도 polling이 복구한다. query는 `global_offset 
 global_offset LIMIT batch_size`이고, 첫 record가 `current_offset + 1`이 아니면 corruption/failure로
 승격한다.
 
-checkpoint는 다음 두 table을 하나의 transaction에서 교체한다.
+checkpoint는 generation snapshot과 meta pointer를 사용한다.
 
 ```text
-snf_ranking_checkpoint_meta(singleton_id, global_offset)
-snf_ranking_checkpoint_entries(player_id PK, score, player_sequence)
+snf_ranking_checkpoint_meta(singleton_id, global_offset, generation)
+snf_ranking_checkpoint_entries(generation, player_id, score, player_sequence,
+                               PK(generation, player_id))
 ```
 
-작은 reference 구현은 전체 standings snapshot을 transaction 안에서 교체한다. 데이터 규모가 커져
-이 비용이 측정되면 generation table을 새로 쓰고 meta pointer만 atomic swap하는 방식을 도입한다.
-checkpoint 실패는 live projection을 되돌리지 않으며 failure metric을 올린 뒤 durable tail을 유지한다.
+schema version 3의 작은 reference 구현은 stream cursor를 잠근 transaction 안에서 전체 standings를
+교체했다. 7.3c 측정에서 이 구간이 award max를 키워 schema version 4로 전환했다. v4는 다음 generation
+entry를 먼저 쓴 뒤 stream cursor와 meta row를 잠그고 pointer만 atomic swap한다. snapshot row 작성은
+award cursor를 보유하지 않는다. commit 뒤 이전 generation을 회수하며, commit 직후 crash로 두 generation이
+남아도 다음 save 시작 시 현재 generation보다 오래된 row를 정리한다. checkpoint 실패는 live projection을
+되돌리지 않으며 failure metric을 올린 뒤 durable tail을 유지한다.
 
-outbox row는 checkpoint가 성공했다고 즉시 지우지 않는다. archive/retention이 정해지기 전에는
-보존한다. 향후 prune은 backup 또는 season snapshot이 확보되고 모든 projector가 확인한 offset 이하만
-대상으로 한다.
+outbox row는 checkpoint가 성공했다고 지우지 않는다. 현재 identity 범위에는 season이 없고 outbox의
+`(PlayerId, award_id)` unique row가 replay 증거도 겸한다. 따라서 시간 기반 prune은 오래된 award retry를
+새 award로 오인하게 만든다. 현 single-season schema는 outbox 전체 보존을 정책으로 택한다. 향후 prune은
+season identity와 별도 receipt tombstone, final checkpoint, 검증된 archive/backup이 모두 갖춰지고 모든
+projector가 확인한 offset 이하만 대상으로 한다.
 
 ## 7. Shutdown과 failure
 
@@ -192,8 +198,10 @@ checkpoint tail을 재생한다. 따라서 projection drain은 Player transactio
 ## 8. 상한과 관측
 
 - repository queue와 Worker 수는 Phase 6.3 상한을 공유한다.
-- projector batch size, polling interval과 한 번에 읽을 최대 tail record 수를 설정으로 둔다.
-- outbox 자체는 DB storage/retention 정책으로 bounded해야 한다. 임의 eviction은 허용하지 않는다.
+- projector batch size, 회차당 최대 batch 수와 polling interval로 live poll의 DB 작업량을 제한한다.
+- outbox는 process-memory queue가 아니며 임의 eviction을 허용하지 않는다. 현재 single-season 전체 보존은
+  구조적으로 unbounded하므로 DB row/byte capacity를 운영에서 감시하고 season schema 전에는 prune하지
+  않는다.
 - 최소 metric은 award commit/replay/conflict/unavailable, repository latency, projector applied/duplicate/
   rejected, projection lag(`committed_tail - applied_offset`), poll/checkpoint failure와 checkpoint latency다.
 
@@ -219,7 +227,7 @@ ASan/UBSan 및 TSan으로 검증했다.
 
 구현 결과 `RankingStore`가 in-memory와 MySQL adapter의 ordered tail/checkpoint 경계를 통일하고, 전용
 projector thread가 construction에서 checkpoint restore와 tail catch-up을 끝낸 뒤 live polling을
-시작한다. MySQL schema version 3은 checkpoint meta/entry table을 추가한다. `GameServer`는 Actor runtime
+시작한다. MySQL schema version 3은 checkpoint meta/entry table을 추가했다. `GameServer`는 Actor runtime
 drain 뒤 projector를 stop해 final catch-up/checkpoint를 시도하므로 `run()` 반환 뒤 standings와 metric이
 committed tail을 반영한다. read와 checkpoint 실패는 live projection을 폐기하지 않고 각각 metric을
 올린 뒤 재시도한다.
@@ -229,11 +237,21 @@ in-memory 테스트는 batch replay, live poll, read/checkpoint 실패 재시도
 직전 rollback과 commit 직후 process crash, `GameServer` 재시작 복구를 검증한다. Debug 실제 MySQL
 경로 5회 반복과 ASan/UBSan·TSan 전체/실제 MySQL 경로가 통과했다.
 
-### 7.3c 운영 부하와 retention 결정
+### 7.3c 운영 부하와 retention 결정 (완료)
 
 - score award rate와 Player 수를 올려 stream cursor lock, DB queue와 checkpoint latency를 측정한다.
 - cursor가 병목일 때만 stream partition/gap 계약을 재검토한다.
 - season/backup 요구를 기준으로 outbox archive와 idempotency retention 창을 결정한다.
+
+Release/MySQL 8.0.46 기준선에서 1/2/4 Worker 처리량은 `990/1,149/1,092 awards/s`였고 Worker 수를
+늘릴수록 award p99가 `1.704/3.670/5.767 ms`로 증가했다. strict stream cursor가 병목임은 확인됐지만
+현재 콘텐츠의 요구율보다 충분한 기준선이므로 gap/partition으로 의미를 복잡하게 만들지 않는다.
+
+5,000 Player full snapshot에서 v3 checkpoint p99 `156.429 ms`와 award max `123.479 ms`를 확인해 schema
+v4 generation pointer swap을 도입했다. v4 checkpoint 총비용 p99는 `182.917 ms`지만 snapshot 작성 중
+stream lock을 보유하지 않아 award max가 `71.542 ms`로 줄었다. live poll도 회차당 batch 수를 bounded해
+지속 입력 중 checkpoint가 밀리지 않는다. retention은 위 §6의 single-season 전체 보존으로 결정했다.
+재현 명령과 전체 수치는 [ranking performance baseline](./ranking-performance-baseline.md)에 있다.
 
 7.3 뒤의 콘텐츠 순서는 cross-zone handoff다. 이전 destination drain, 새 destination activation과 route
 공개를 하나의 protocol로 검증할 실제 gameplay 요구가 생긴 뒤 구현한다. 이동 coalescing, Zone 분할,

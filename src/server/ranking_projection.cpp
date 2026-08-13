@@ -293,6 +293,8 @@ namespace snf::server
             .projection_offset = _projection.offset(),
             .projection_lag = 0,
             .checkpoint_offset = 0,
+            .poll_latency_nanoseconds = {},
+            .checkpoint_latency_nanoseconds = {},
         };
     }
 }

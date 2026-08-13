@@ -146,12 +146,14 @@ namespace snf::server
         , _party_results(_outbound_channel)
         , _party_coordinator(checked_party_members(config.max_party_members))
         , _player_repository(make_player_repository(config))
-        , _ranking_projector(ranking_store(*_player_repository),
-                             RepositoryRankingProjectorConfig{
-                                 .batch_size = config.ranking_projector_batch_size,
-                                 .checkpoint_every_events = config.ranking_checkpoint_every_events,
-                                 .poll_interval = config.ranking_projector_poll_interval,
-                             })
+        , _ranking_projector(
+              ranking_store(*_player_repository),
+              RepositoryRankingProjectorConfig{
+                  .batch_size = config.ranking_projector_batch_size,
+                  .max_batches_per_poll = config.ranking_projector_max_batches_per_poll,
+                  .checkpoint_every_events = config.ranking_checkpoint_every_events,
+                  .poll_interval = config.ranking_projector_poll_interval,
+              })
         , _runtime_completion(snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
                               _outbound_event.getDescriptor())
         , _player_actor_binding(_player_effects, _outbound_channel, _command_lifecycle)

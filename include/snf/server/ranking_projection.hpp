@@ -1,5 +1,6 @@
 #pragma once
 
+#include "snf/runtime/distribution.hpp"
 #include "snf/server/player_domain_event.hpp"
 #include "snf/server/player_domain_event_sink.hpp"
 
@@ -94,6 +95,8 @@ namespace snf::server
         std::uint64_t projection_offset{0};
         std::uint64_t projection_lag{0};
         std::uint64_t checkpoint_offset{0};
+        snf::runtime::DistributionSnapshot poll_latency_nanoseconds;
+        snf::runtime::DistributionSnapshot checkpoint_latency_nanoseconds;
     };
 
     class InMemoryRankingEventPipeline final : public PlayerDomainEventSink

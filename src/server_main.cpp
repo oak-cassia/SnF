@@ -145,7 +145,9 @@ namespace
                   << ranking.duplicates << " duplicate/" << ranking.rejected << " rejected, "
                   << ranking.poll_failures << " poll failures, " << ranking.checkpoint_failures
                   << " checkpoint failures, checkpoint offset " << ranking.checkpoint_offset
-                  << '\n';
+                  << ", poll latency ns " << format_distribution(ranking.poll_latency_nanoseconds)
+                  << ", checkpoint latency ns "
+                  << format_distribution(ranking.checkpoint_latency_nanoseconds) << '\n';
 
         const auto& repository = metrics.player_repository;
         std::cout << "Player repository: " << repository.queue_depth << " queued, "
@@ -157,7 +159,9 @@ namespace
                   << repository.ranking_awards_replayed << " replayed/"
                   << repository.ranking_awards_rejected << " rejected, "
                   << repository.operation_failures << " operation failures, latency ns "
-                  << format_distribution(repository.operation_latency_nanoseconds) << '\n';
+                  << format_distribution(repository.operation_latency_nanoseconds)
+                  << ", ranking award latency ns "
+                  << format_distribution(repository.ranking_award_latency_nanoseconds) << '\n';
 
         const auto& workers = metrics.actor_runtime.workers;
         for (std::size_t worker_index = 0; worker_index < workers.size(); ++worker_index)

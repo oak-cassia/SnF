@@ -63,6 +63,7 @@ namespace snf::server
         std::uint64_t ranking_awards_rejected{0};
         std::uint64_t operation_failures{0};
         snf::runtime::DistributionSnapshot operation_latency_nanoseconds;
+        snf::runtime::DistributionSnapshot ranking_award_latency_nanoseconds;
     };
 
     // Read-only diagnostics shared by the in-memory and durable adapters. It is
@@ -232,6 +233,7 @@ namespace snf::server
         InMemoryPlayerRepository _storage;
         snf::runtime::BoundedQueue<Job> _jobs;
         std::vector<std::thread> _workers;
+        snf::runtime::Distribution _ranking_award_latency;
         std::atomic<std::uint64_t> _accepted{0};
         std::atomic<std::uint64_t> _rejected{0};
     };

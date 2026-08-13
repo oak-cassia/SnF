@@ -96,7 +96,7 @@ Network Runtime
 - 두 Player가 공유하는 bounded PartyActor membership, typed `PartyFull`, disconnect leave와
   mailbox-safe empty Party passivation
 - Player score/sequence와 event를 원자적으로 기록하는 durable ranking outbox, startup/live tail을
-  strict offset 순서로 적용하는 전용 projector와 schema v3 checkpoint 복구
+  strict offset 순서로 적용하는 전용 projector와 schema v4 generation checkpoint 복구
 - connection generation을 통한 stale response 차단
 - bounded ingress queue와 Session별 send backpressure
 - 용량 예약으로 동작하는 outbound channel: 포화 시 Worker가 아니라 Actor 하나가 suspend되고, 연결별
@@ -149,10 +149,11 @@ award에 durable identity를 부여하고 Player score/sequence와 outbox event�
 transaction 하나로 commit한다.
 
 Phase 7.3 계약은 strict global offset projector와 checkpoint/shutdown 복구 순서까지 고정했다.
-7.3b는 schema v3 checkpoint와 전용 projector를 추가했다. 서버는 gameplay ingress 전에 checkpoint와
+7.3b는 durable checkpoint와 전용 projector를 추가했다. 서버는 gameplay ingress 전에 checkpoint와
 durable tail을 동기 복구하고, 실행 중 bounded polling으로 새 event를 적용하며, Actor/repository drain
-뒤 마지막 tail과 checkpoint를 확정한다. 다음 범위는 7.3c stream cursor/checkpoint 부하 측정과
-retention 결정이다.
+뒤 마지막 tail과 checkpoint를 확정한다. 7.3c 부하 측정으로 strict cursor의 약 1.1k awards/s 포화와
+full-snapshot checkpoint의 Player 수 비례 비용을 확인했다. schema v4 generation swap은 snapshot 작성
+중 stream lock을 제거했고, retention은 season identity/archive 계약 전까지 outbox 전체 보존으로 정했다.
 
 콘텐츠 부하를 재현하기 위해 load client는 기존 `ping` 외에 `zone` 시나리오를 제공한다. 각 연결이
 고유 Player로 인증하고 Zone에 입장한 뒤 지속 이동하며 bootstrap과 gameplay RTT를 분리한다. 현재
@@ -188,7 +189,8 @@ p99는 4.719ms, queue high-water는 로그인 burst에서 198이었지만 거부
 [Coroutine Actor 계약](docs/coroutine-actor-contract.md), 전체 종료 판정과 실패·취소 전파는
 [Runtime Lifecycle 계약](docs/runtime-lifecycle-contract.md)을 기준으로 한다.
 [Durable Ranking 계약](docs/durable-ranking-contract.md)은 Phase 7.3의 transaction, projector와
-checkpoint 복구 기준이다.
+checkpoint 복구 기준이고, [Ranking 성능 기준선](docs/ranking-performance-baseline.md)은 cursor/checkpoint
+측정과 retention 결정을 기록한다.
 [ConnectionScope 계약](docs/connection-scope-contract.md)과
 [UnifiedRuntime 전환 개요](study/10-unified-runtime-overview.md)는 Playable Session과 Zone 부하가 실제
 runtime 병목을 증명할 때 사용할 선택적 최적화 트랙의 설계 입력이다.
@@ -268,8 +270,8 @@ SNF_MYSQL_DATABASE=snf \
 ```
 
 MySQL 통합 테스트는 `SNF_MYSQL_TEST_HOST`가 없으면 skip된다. 실제 DB에 대해 실행할 때는 별도의
-test database를 사용해야 한다. 테스트가 `snf_players`와 `snf_purchase_idempotency`의 모든 row를
-삭제하므로 운영 database를 지정하면 안 된다.
+test database를 사용해야 한다. 테스트가 Player, purchase, ranking outbox/checkpoint table을 초기화하고
+schema migration을 재현하므로 운영 database를 지정하면 안 된다.
 
 ```bash
 SNF_MYSQL_TEST_HOST=127.0.0.1 \
@@ -277,6 +279,18 @@ SNF_MYSQL_TEST_USER=snf \
 SNF_MYSQL_TEST_PASSWORD=secret \
 SNF_MYSQL_TEST_DATABASE=snf_test \
 ./build/debug/snf_mysql_integration_tests
+```
+
+trusted ranking award와 projector/checkpoint 부하는 별도 database에서 다음처럼 재현한다.
+
+```bash
+SNF_MYSQL_HOST=127.0.0.1 \
+SNF_MYSQL_USER=snf \
+SNF_MYSQL_PASSWORD=secret \
+SNF_MYSQL_DATABASE=snf_ranking_bench \
+./build/release/snf_ranking_benchmark \
+  --players 1000 --awards 5000 --workers 4 \
+  --checkpoint-every 1000
 ```
 
 부하 테스트 클라이언트:
@@ -309,4 +323,5 @@ Party 메시지는 `PARTY_JOIN=13`, `PARTY_JOINED=14`, `PARTY_LEAVE=15`,
 | `include/snf/`, `src/` | core, network, protocol과 server runtime |
 | `tests/` | 단위·통합 테스트 |
 | `tools/load_client/` | non-blocking 부하 테스트 클라이언트 |
+| `tools/ranking_benchmark/` | durable award/projector/checkpoint 부하 측정 도구 |
 | `docs/` | 아키텍처, 로드맵, coroutine·runtime lifecycle·ConnectionScope 계약 |

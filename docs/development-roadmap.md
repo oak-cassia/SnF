@@ -774,7 +774,7 @@ UnifiedRuntimeDrained =
   outbox tail을 startup/live/shutdown 경로에서 소비한다. 여러 프로세스 projector의 leader election과
   season archive/retention은 아직 지원하지 않는다.
 
-### 7.3 Durable ranking outbox와 checkpoint (7.3a~b 완료; 7.3c 남음)
+### 7.3 Durable ranking outbox와 checkpoint (완료)
 
 - 상세 계약은 `docs/durable-ranking-contract.md`를 단일 기준으로 사용한다. Player score·sequence와
   outbox event를 MySQL transaction 하나로 commit하고, Actor는 authoritative completion만 적용한다.
@@ -803,7 +803,7 @@ UnifiedRuntimeDrained =
 
 #### 7.3b Ordered projector와 durable checkpoint (완료)
 
-- 전용 blocking projector thread가 schema v3 checkpoint를 복원하고 strict global offset tail을 batch로
+- 전용 blocking projector thread가 durable checkpoint를 복원하고 strict global offset tail을 batch로
   적용한다. construction의 동기 catch-up이 끝난 뒤에만 `GameServer`가 gameplay ingress를 시작한다.
 - 실행 중 bounded polling은 read/checkpoint 실패를 별도 metric으로 남기고 재시도한다. committed tail,
   projection offset/lag와 checkpoint offset을 server snapshot에 노출한다.
@@ -813,6 +813,29 @@ UnifiedRuntimeDrained =
 - in-memory restart와 poll failure 재시도, 실제 MySQL checkpoint/tail restart, checkpoint commit 직전·직후
   process crash, `GameServer` 두 번 재시작을 자동화 테스트로 검증한다.
 - Debug 실제 MySQL 경로 5회 반복과 ASan/UBSan·TSan 전체/실제 MySQL 경로가 통과했다.
+
+#### 7.3c 운영 부하와 retention 결정 (완료)
+
+- `snf_ranking_benchmark`가 Player/award/Worker/in-flight/checkpoint 주기를 바꿔 throughput, end-to-end와
+  repository award 지연, queue high-water, projector poll/checkpoint 지연과 최종 lag을 출력한다.
+- MySQL 8.0.46 local Docker Release 기준 100 Player·2,000 award에서 1/2/4 Worker 처리량은 각각
+  `990/1,149/1,092 awards/s`, repository award p99는 `1.704/3.670/5.767 ms`였다. strict cursor가
+  처리량 상한이며 Worker 4개는 scale-out하지 않고 lock wait만 늘렸다. 기본 Worker 2개를 유지한다.
+- 지속 부하에서 unbounded catch-up이 checkpoint를 종료까지 미루던 문제를 측정으로 발견했다. live poll은
+  회차당 `batch_size × max_batches_per_poll`로 제한하고 batch 사이 checkpoint를 시도한다. 5,000 events,
+  checkpoint 주기 1,000에서 write 5회와 final lag 0을 확인했다.
+- v3 full replacement는 5,000 Player checkpoint p99 `156.429 ms`, award max `123.479 ms`였다. schema
+  v4는 새 generation을 먼저 쓴 뒤 stream cursor와 meta pointer만 원자 교체한다. checkpoint 자체 p99는
+  `182.917 ms`지만 award max는 `71.542 ms`, 처리량은 `1,036→1,071 awards/s`로 개선됐고 snapshot 작성
+  중 별도 award가 완료되는 통합 테스트도 추가했다.
+- 현재 trusted award producer에는 이 기준선을 넘는 요구율이 정의되지 않았으므로 strict global cursor를
+  유지한다. 배포 환경의 지속 목표가 해당 환경 포화 처리량의 50%를 넘거나 award p99 예산을 위반할
+  때만 partition/gap 계약을 다시 연다.
+- `(PlayerId, award_id)` replay 증거가 outbox row와 함께 있으므로 시간 기반 자동 prune은 같은 award의
+  이중 적용을 허용한다. 현재 single-season schema에서는 outbox 전체를 보존한다. season identity,
+  receipt tombstone, final checkpoint와 검증된 archive/backup을 함께 설계한 뒤에만 이전 season을 prune한다.
+  상세 조건과 원자료는 `docs/ranking-performance-baseline.md`에 기록한다.
+- schema v4를 포함한 실제 MySQL 경로 Debug 5회 반복과 ASan/UBSan·TSan 전체 테스트가 통과했다.
 
 ## 선택적 인프라 트랙: io_uring Network Backend
 

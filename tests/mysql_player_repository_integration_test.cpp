@@ -106,9 +106,40 @@ namespace
                     "UPDATE snf_event_stream SET last_offset=0 WHERE stream_name='ranking'");
         execute_sql(repository_config, "DELETE FROM snf_ranking_checkpoint_entries");
         execute_sql(repository_config,
-                    "UPDATE snf_ranking_checkpoint_meta SET global_offset=0 WHERE singleton_id=1");
+                    "UPDATE snf_ranking_checkpoint_meta SET global_offset=0, generation=0 "
+                    "WHERE singleton_id=1");
         execute_sql(repository_config, "DELETE FROM snf_purchase_idempotency");
         execute_sql(repository_config, "DELETE FROM snf_players");
+    }
+
+    void test_schema_v3_checkpoint_migrates_without_losing_state(
+        const snf::server::MySqlPlayerRepositoryConfig& repository_config)
+    {
+        {
+            snf::server::MySqlPlayerRepository repository{repository_config};
+        }
+        execute_sql(repository_config, "DELETE FROM snf_ranking_checkpoint_entries");
+        execute_sql(repository_config,
+                    "UPDATE snf_ranking_checkpoint_meta SET global_offset=1, generation=0 "
+                    "WHERE singleton_id=1");
+        execute_sql(repository_config,
+                    "INSERT INTO snf_ranking_checkpoint_entries "
+                    "(generation, player_id, score, player_sequence) VALUES (0,991,17,1)");
+        execute_sql(repository_config,
+                    "ALTER TABLE snf_ranking_checkpoint_entries DROP PRIMARY KEY, "
+                    "DROP COLUMN generation, ADD PRIMARY KEY (player_id)");
+        execute_sql(repository_config,
+                    "ALTER TABLE snf_ranking_checkpoint_meta DROP COLUMN generation");
+        execute_sql(repository_config, "DELETE FROM snf_schema_version WHERE version=4");
+
+        snf::server::MySqlPlayerRepository migrated{repository_config};
+        const auto checkpoint = migrated.loadRankingCheckpoint();
+        assert(checkpoint.offset == 1);
+        assert(
+            (checkpoint.entries ==
+             std::vector<snf::server::RankingEntry>{
+                 {.player = snf::server::PlayerId{.value = 991}, .score = 17, .last_sequence = 1},
+             }));
     }
 
     snf::server::PlayerLoadResult load(snf::server::PlayerRepository& repository,
@@ -458,6 +489,7 @@ namespace
     {
         const snf::server::RepositoryRankingProjectorConfig projector_config{
             .batch_size = 2,
+            .max_batches_per_poll = 8,
             .checkpoint_every_events = 1,
             .poll_interval = 5ms,
         };
@@ -560,6 +592,48 @@ namespace
             assert(recovered.loadRankingCheckpoint().offset == next.offset);
             assert(recovered.loadRankingCheckpoint().entries == next.entries);
         }
+    }
+
+    void test_checkpoint_snapshot_write_does_not_hold_the_ranking_stream(
+        const snf::server::MySqlPlayerRepositoryConfig& base_config)
+    {
+        snf::server::RankingCheckpoint checkpoint;
+        {
+            snf::server::MySqlPlayerRepository repository{base_config};
+            checkpoint = repository.loadRankingCheckpoint();
+        }
+
+        std::promise<void> rows_written;
+        auto rows_written_future = rows_written.get_future();
+        std::promise<void> release_pointer_swap;
+        auto release = release_pointer_swap.get_future().share();
+        auto checkpoint_config = base_config;
+        checkpoint_config.ranking_checkpoint_fault_injector =
+            [&rows_written, release](const snf::server::MySqlRankingCheckpointFaultPoint point)
+        {
+            if (point == snf::server::MySqlRankingCheckpointFaultPoint::BeforePointerSwap)
+            {
+                rows_written.set_value();
+                release.wait();
+            }
+        };
+
+        snf::server::MySqlPlayerRepository checkpoint_repository{checkpoint_config};
+        auto saved = std::async(std::launch::async,
+                                [&checkpoint_repository, &checkpoint]
+                                { checkpoint_repository.saveRankingCheckpoint(checkpoint); });
+        assert(rows_written_future.wait_for(5s) == std::future_status::ready);
+
+        snf::server::MySqlPlayerRepository award_repository{base_config};
+        auto awarded = std::async(
+            std::launch::async,
+            [&award_repository]
+            { return award(award_repository, snf::server::PlayerId{.value = 1199}, 1, 1); });
+        assert(awarded.wait_for(2s) == std::future_status::ready);
+        assert(awarded.get().status == snf::server::RankingAwardStatus::Committed);
+
+        release_pointer_swap.set_value();
+        saved.get();
     }
 
     void test_failed_outcome_and_capacity_are_durable(
@@ -767,6 +841,7 @@ int main()
     }
 
     const auto repository_config = config();
+    test_schema_v3_checkpoint_migrates_without_losing_state(repository_config);
     reset_storage(repository_config);
     test_record_survives_repository_restart(repository_config);
     test_concurrent_unique_key_commits_once(repository_config);
@@ -775,6 +850,7 @@ int main()
     test_ranking_award_crash_boundary_recovers_from_outbox(repository_config);
     test_ranking_projector_restores_live_tail_and_checkpoints(repository_config);
     test_ranking_checkpoint_commit_is_atomic(repository_config);
+    test_checkpoint_snapshot_write_does_not_hold_the_ranking_stream(repository_config);
     test_failed_outcome_and_capacity_are_durable(repository_config);
     test_mysql_queue_is_bounded_without_blocking_the_caller(repository_config);
     test_game_server_restores_mysql_players_across_restart(repository_config);

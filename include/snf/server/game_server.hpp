@@ -83,6 +83,7 @@ namespace snf::server
         std::optional<MySqlPlayerRepositoryConfig> mysql_player_repository{};
         std::size_t max_player_domain_events{65536};
         std::size_t ranking_projector_batch_size{1024};
+        std::size_t ranking_projector_max_batches_per_poll{8};
         std::uint64_t ranking_checkpoint_every_events{1024};
         std::chrono::milliseconds ranking_projector_poll_interval{100};
         std::size_t max_party_members{8};

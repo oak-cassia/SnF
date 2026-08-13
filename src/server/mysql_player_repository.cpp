@@ -611,17 +611,22 @@ namespace
         [[nodiscard]] snf::server::RankingCheckpoint loadRankingCheckpoint()
         {
             Transaction transaction{_connection};
-            auto meta = _connection.query("SELECT global_offset FROM snf_ranking_checkpoint_meta "
-                                          "WHERE singleton_id=1 FOR UPDATE");
+            auto meta = _connection.query(
+                "SELECT global_offset, generation FROM snf_ranking_checkpoint_meta "
+                "WHERE singleton_id=1 FOR UPDATE");
             if (::mysql_num_rows(meta.get()) != 1)
             {
                 throw std::runtime_error{"Ranking checkpoint metadata is missing"};
             }
-            const std::uint64_t offset = parse_integer<std::uint64_t>(
-                ::mysql_fetch_row(meta.get())[0], "ranking checkpoint offset");
+            MYSQL_ROW meta_row = ::mysql_fetch_row(meta.get());
+            const std::uint64_t offset =
+                parse_integer<std::uint64_t>(meta_row[0], "ranking checkpoint offset");
+            const std::uint64_t generation =
+                parse_integer<std::uint64_t>(meta_row[1], "ranking checkpoint generation");
 
             auto rows = _connection.query("SELECT player_id, score, player_sequence "
-                                          "FROM snf_ranking_checkpoint_entries ORDER BY player_id");
+                                          "FROM snf_ranking_checkpoint_entries WHERE generation=" +
+                                          std::to_string(generation) + " ORDER BY player_id");
             std::vector<snf::server::RankingEntry> entries;
             entries.reserve(static_cast<std::size_t>(::mysql_num_rows(rows.get())));
             while (MYSQL_ROW row = ::mysql_fetch_row(rows.get()))
@@ -649,7 +654,51 @@ namespace
             snf::server::RankingProjection validation;
             validation.restore(checkpoint);
 
+            auto current = _connection.query(
+                "SELECT global_offset, generation FROM snf_ranking_checkpoint_meta "
+                "WHERE singleton_id=1");
+            if (::mysql_num_rows(current.get()) != 1)
+            {
+                throw std::runtime_error{"Ranking checkpoint metadata is missing"};
+            }
+            MYSQL_ROW current_row = ::mysql_fetch_row(current.get());
+            const std::uint64_t current_offset =
+                parse_integer<std::uint64_t>(current_row[0], "ranking checkpoint offset");
+            const std::uint64_t current_generation =
+                parse_integer<std::uint64_t>(current_row[1], "ranking checkpoint generation");
+            if (checkpoint.offset < current_offset)
+            {
+                throw std::out_of_range{"Ranking checkpoint would regress its durable offset"};
+            }
+            if (current_generation == std::numeric_limits<std::uint64_t>::max())
+            {
+                throw std::overflow_error{"Ranking checkpoint generation is exhausted"};
+            }
+            const std::uint64_t next_generation = current_generation + 1;
+
+            // A post-commit process crash may leave the previously active generation.
+            // Reclaim it before writing the next one without taking the stream lock.
+            _connection.execute("DELETE FROM snf_ranking_checkpoint_entries WHERE generation<" +
+                                std::to_string(current_generation));
+
             Transaction transaction{_connection};
+            for (const snf::server::RankingEntry& entry : checkpoint.entries)
+            {
+                _connection.execute("INSERT INTO snf_ranking_checkpoint_entries "
+                                    "(generation, player_id, score, player_sequence) VALUES (" +
+                                    std::to_string(next_generation) + "," +
+                                    std::to_string(entry.player.value) + "," +
+                                    std::to_string(entry.score) + "," +
+                                    std::to_string(entry.last_sequence) + ")");
+            }
+
+            // Only the pointer swap is serialized with awards. Snapshot row writes
+            // above do not hold the strict ranking stream cursor.
+            if (_config.ranking_checkpoint_fault_injector)
+            {
+                _config.ranking_checkpoint_fault_injector(
+                    snf::server::MySqlRankingCheckpointFaultPoint::BeforePointerSwap);
+            }
             auto stream = _connection.query(
                 "SELECT last_offset FROM snf_event_stream WHERE stream_name='ranking' FOR UPDATE");
             if (::mysql_num_rows(stream.get()) != 1)
@@ -663,17 +712,25 @@ namespace
                 throw std::out_of_range{"Ranking checkpoint is beyond the event tail"};
             }
 
-            _connection.execute("DELETE FROM snf_ranking_checkpoint_entries");
-            for (const snf::server::RankingEntry& entry : checkpoint.entries)
+            auto locked_meta = _connection.query(
+                "SELECT global_offset, generation FROM snf_ranking_checkpoint_meta "
+                "WHERE singleton_id=1 FOR UPDATE");
+            if (::mysql_num_rows(locked_meta.get()) != 1)
             {
-                _connection.execute("INSERT INTO snf_ranking_checkpoint_entries "
-                                    "(player_id, score, player_sequence) VALUES (" +
-                                    std::to_string(entry.player.value) + "," +
-                                    std::to_string(entry.score) + "," +
-                                    std::to_string(entry.last_sequence) + ")");
+                throw std::runtime_error{"Ranking checkpoint metadata is missing"};
+            }
+            MYSQL_ROW locked_meta_row = ::mysql_fetch_row(locked_meta.get());
+            const std::uint64_t locked_offset =
+                parse_integer<std::uint64_t>(locked_meta_row[0], "ranking checkpoint offset");
+            const std::uint64_t locked_generation =
+                parse_integer<std::uint64_t>(locked_meta_row[1], "ranking checkpoint generation");
+            if (locked_generation != current_generation || checkpoint.offset < locked_offset)
+            {
+                throw std::runtime_error{"Concurrent ranking checkpoint update detected"};
             }
             _connection.execute("UPDATE snf_ranking_checkpoint_meta SET global_offset=" +
-                                std::to_string(checkpoint.offset) + " WHERE singleton_id=1");
+                                std::to_string(checkpoint.offset) + ", generation=" +
+                                std::to_string(next_generation) + " WHERE singleton_id=1");
             if (_config.ranking_checkpoint_fault_injector)
             {
                 _config.ranking_checkpoint_fault_injector(
@@ -685,6 +742,8 @@ namespace
                 _config.ranking_checkpoint_fault_injector(
                     snf::server::MySqlRankingCheckpointFaultPoint::AfterCommit);
             }
+            _connection.execute("DELETE FROM snf_ranking_checkpoint_entries WHERE generation<" +
+                                std::to_string(next_generation));
         }
 
     private:
@@ -702,7 +761,7 @@ namespace
             }
             const std::uint32_t schema_version =
                 parse_integer<std::uint32_t>(version_row[0], "schema version");
-            if (schema_version == 0 || schema_version > 3)
+            if (schema_version == 0 || schema_version > 4)
             {
                 throw std::runtime_error{"MySQL schema version is unsupported"};
             }
@@ -765,6 +824,33 @@ namespace
             if (schema_version <= 2)
             {
                 _connection.execute("INSERT INTO snf_schema_version (version) VALUES (3)");
+            }
+            if (schema_version <= 3)
+            {
+                auto meta_generation = _connection.query(
+                    "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() "
+                    "AND table_name='snf_ranking_checkpoint_meta' AND column_name='generation'");
+                if (parse_integer<std::uint64_t>(::mysql_fetch_row(meta_generation.get())[0],
+                                                 "checkpoint meta generation column count") == 0)
+                {
+                    _connection.execute(
+                        "ALTER TABLE snf_ranking_checkpoint_meta ADD COLUMN generation "
+                        "BIGINT UNSIGNED NOT NULL DEFAULT 0");
+                }
+
+                auto entry_generation = _connection.query(
+                    "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() "
+                    "AND table_name='snf_ranking_checkpoint_entries' AND column_name='generation'");
+                if (parse_integer<std::uint64_t>(::mysql_fetch_row(entry_generation.get())[0],
+                                                 "checkpoint entry generation column count") == 0)
+                {
+                    _connection.execute(
+                        "ALTER TABLE snf_ranking_checkpoint_entries ADD COLUMN generation "
+                        "BIGINT UNSIGNED NOT NULL DEFAULT 0");
+                }
+                _connection.execute("ALTER TABLE snf_ranking_checkpoint_entries DROP PRIMARY KEY, "
+                                    "ADD PRIMARY KEY (generation, player_id)");
+                _connection.execute("INSERT INTO snf_schema_version (version) VALUES (4)");
             }
         }
 
@@ -980,6 +1066,7 @@ namespace snf::server
                 .ranking_awards_rejected = _ranking_awards_rejected.load(std::memory_order_relaxed),
                 .operation_failures = _operation_failures.load(std::memory_order_relaxed),
                 .operation_latency_nanoseconds = _operation_latency.snapshot(),
+                .ranking_award_latency_nanoseconds = _ranking_award_latency.snapshot(),
             };
         }
 
@@ -1094,7 +1181,7 @@ namespace snf::server
             {
                 const auto started_at = std::chrono::steady_clock::now();
                 std::visit(
-                    [this, &store](auto value)
+                    [this, &store, started_at](auto value)
                     {
                         using Value = std::decay_t<decltype(value)>;
                         if constexpr (std::is_same_v<Value, LoadJob>)
@@ -1162,12 +1249,16 @@ namespace snf::server
                                 failStore(store);
                                 result = rankingUnavailable(value.request);
                             }
+                            _ranking_award_latency.record(
+                                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    std::chrono::steady_clock::now() - started_at));
                             invoke(value.completion, std::move(result));
                         }
                     },
                     std::move(*job));
-                _operation_latency.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - started_at));
+                const auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - started_at);
+                _operation_latency.record(duration);
             }
             store.reset();
             ::mysql_thread_end();
@@ -1270,6 +1361,7 @@ namespace snf::server
         std::atomic<std::uint64_t> _ranking_awards_rejected{0};
         std::atomic<std::uint64_t> _operation_failures{0};
         snf::runtime::Distribution _operation_latency;
+        snf::runtime::Distribution _ranking_award_latency;
     };
 
     MySqlPlayerRepository::MySqlPlayerRepository(MySqlPlayerRepositoryConfig config)

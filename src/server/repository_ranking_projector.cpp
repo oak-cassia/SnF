@@ -12,7 +12,8 @@ namespace snf::server
         : _store(store)
         , _config(config)
     {
-        if (_config.batch_size == 0 || _config.checkpoint_every_events == 0 ||
+        if (_config.batch_size == 0 || _config.max_batches_per_poll == 0 ||
+            _config.checkpoint_every_events == 0 ||
             _config.poll_interval <= std::chrono::milliseconds::zero())
         {
             throw std::invalid_argument{"Ranking projector configuration must be positive"};
@@ -70,6 +71,8 @@ namespace snf::server
             .projection_offset = offset,
             .projection_lag = lag,
             .checkpoint_offset = _checkpoint_offset,
+            .poll_latency_nanoseconds = _poll_latency.snapshot(),
+            .checkpoint_latency_nanoseconds = _checkpoint_latency.snapshot(),
         };
     }
 
@@ -121,9 +124,71 @@ namespace snf::server
 
     void RepositoryRankingProjector::catchUpAll()
     {
-        while (catchUpOnce())
+        const auto started_at = std::chrono::steady_clock::now();
+        try
         {
+            while (catchUpOnce())
+            {
+            }
         }
+        catch (...)
+        {
+            _poll_latency.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - started_at));
+            throw;
+        }
+        _poll_latency.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - started_at));
+    }
+
+    void RepositoryRankingProjector::pollOnce()
+    {
+        const auto started_at = std::chrono::steady_clock::now();
+        bool read_failed = false;
+        bool checkpoint_failed = false;
+        for (std::size_t batch = 0; batch < _config.max_batches_per_poll; ++batch)
+        {
+            bool caught_up = false;
+            try
+            {
+                caught_up = !catchUpOnce();
+            }
+            catch (...)
+            {
+                std::lock_guard lock{_projection_mutex};
+                ++_poll_failures;
+                read_failed = true;
+                break;
+            }
+            if (caught_up)
+            {
+                break;
+            }
+            try
+            {
+                saveCheckpoint(false);
+            }
+            catch (...)
+            {
+                std::lock_guard lock{_projection_mutex};
+                ++_checkpoint_failures;
+                checkpoint_failed = true;
+            }
+        }
+        if (!read_failed && !checkpoint_failed)
+        {
+            try
+            {
+                saveCheckpoint(false);
+            }
+            catch (...)
+            {
+                std::lock_guard lock{_projection_mutex};
+                ++_checkpoint_failures;
+            }
+        }
+        _poll_latency.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - started_at));
     }
 
     void RepositoryRankingProjector::saveCheckpoint(const bool force)
@@ -139,7 +204,19 @@ namespace snf::server
             checkpoint = _projection.checkpoint();
         }
 
-        _store.saveRankingCheckpoint(checkpoint);
+        const auto started_at = std::chrono::steady_clock::now();
+        try
+        {
+            _store.saveRankingCheckpoint(checkpoint);
+        }
+        catch (...)
+        {
+            _checkpoint_latency.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - started_at));
+            throw;
+        }
+        _checkpoint_latency.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - started_at));
         std::lock_guard lock{_projection_mutex};
         _checkpoint_offset = checkpoint.offset;
     }
@@ -155,24 +232,7 @@ namespace snf::server
                 break;
             }
             control_lock.unlock();
-            try
-            {
-                catchUpAll();
-            }
-            catch (...)
-            {
-                std::lock_guard projection_lock{_projection_mutex};
-                ++_poll_failures;
-            }
-            try
-            {
-                saveCheckpoint(false);
-            }
-            catch (...)
-            {
-                std::lock_guard projection_lock{_projection_mutex};
-                ++_checkpoint_failures;
-            }
+            pollOnce();
             control_lock.lock();
         }
         control_lock.unlock();
