@@ -36,6 +36,7 @@ namespace snf::server
         EnterTarget,
         RestoreSource,
         CleanupTarget,
+        CleanupSource,
     };
 
     // Immutable routing identity carried by one internal Zone submission. It is

@@ -82,6 +82,9 @@ namespace snf::server
                                           ZonePosition position) noexcept;
         [[nodiscard]] std::optional<std::uint64_t>
         beginSourceRestore(snf::net::ConnectionId connection, ZoneHandoffId handoff);
+        [[nodiscard]] bool beginCleanup(snf::net::ConnectionId connection,
+                                        ZoneHandoffId handoff,
+                                        ZoneHandoffStep cleanup_step) noexcept;
         [[nodiscard]] std::optional<SessionRoute>
         completeTargetEnter(snf::net::ConnectionId connection, ZoneHandoffId handoff) noexcept;
         [[nodiscard]] std::optional<SessionRoute>

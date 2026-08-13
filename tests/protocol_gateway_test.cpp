@@ -4,6 +4,7 @@
 
 #include <cassert>
 #include <cstdint>
+#include <deque>
 #include <optional>
 #include <utility>
 #include <variant>
@@ -18,6 +19,12 @@ namespace
             route_indices.push_back(command.route.index());
             posted = std::move(command);
             ++post_count;
+            if (!results.empty())
+            {
+                const snf::server::PostResult next = results.front();
+                results.pop_front();
+                return next;
+            }
             return result;
         }
 
@@ -32,6 +39,7 @@ namespace
         }
 
         snf::server::PostResult result{snf::server::PostResult::Accepted};
+        std::deque<snf::server::PostResult> results;
         std::optional<snf::server::RoutedCommand> posted;
         std::vector<std::size_t> route_indices;
         int post_count{0};
@@ -580,6 +588,22 @@ namespace
         assert(source_context.step == snf::server::ZoneHandoffStep::LeaveSource);
         assert(!routes.routeFor(connection));
 
+        assert(transitions.publish(
+            source_context.ticket,
+            snf::server::ZoneHandoffCompletion{
+                .handoff_id = source_context.handoff_id,
+                .connection = snf::net::ConnectionId{.descriptor = 999, .generation = 999},
+                .player = player,
+                .zone = source_zone,
+                .route_epoch = source_context.route_epoch,
+                .step = source_context.step,
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .position = snf::server::ZonePosition{.x = 1, .y = 2},
+            }));
+        gateway.drainZoneTransitions();
+        assert(gateway.zoneHandoffStats().stale_completions == 1);
+        assert(!routes.routeFor(connection));
+
         const int posts_before_busy = commands.post_count;
         assert(gateway.tryPost(make_move_frame(connection, 5, 6)) ==
                snf::server::FramePostResult::Accepted);
@@ -655,6 +679,243 @@ namespace
         assert(lifecycle.terminalCount() == 3);
         assert(transitions.stats().reservations == 0);
         assert(gateway.zoneHandoffStats().failures_before_source_leave == 1);
+
+        commands.result = snf::server::PostResult::Accepted;
+        assert(gateway.tryPost(make_enter_frame(connection, source_zone.value, 9, 10)) ==
+               snf::server::FramePostResult::Accepted);
+        source_stage = std::get_if<snf::server::ZoneHandoffCommandRoute>(&commands.posted->route);
+        assert(source_stage != nullptr && source_stage->command.handoff);
+        const snf::server::ZoneHandoffContext compensation_leave = *source_stage->command.handoff;
+        commands.results.push_back(snf::server::PostResult::Full);
+        commands.results.push_back(snf::server::PostResult::Accepted);
+        assert(transitions.publish(compensation_leave.ticket,
+                                   snf::server::ZoneHandoffCompletion{
+                                       .handoff_id = compensation_leave.handoff_id,
+                                       .connection = connection,
+                                       .player = player,
+                                       .zone = target_zone,
+                                       .route_epoch = compensation_leave.route_epoch,
+                                       .step = compensation_leave.step,
+                                       .status = snf::server::ZoneCommandStatus::Applied,
+                                       .position = snf::server::ZonePosition{.x = 3, .y = 4},
+                                   }));
+        gateway.drainZoneTransitions();
+        const auto* restore_stage =
+            std::get_if<snf::server::ZoneHandoffCommandRoute>(&commands.posted->route);
+        assert(restore_stage != nullptr && restore_stage->command.handoff);
+        const snf::server::ZoneHandoffContext restore_context = *restore_stage->command.handoff;
+        assert(restore_context.step == snf::server::ZoneHandoffStep::RestoreSource);
+        assert(restore_context.route_epoch == 5);
+        assert(transitions.publish(restore_context.ticket,
+                                   snf::server::ZoneHandoffCompletion{
+                                       .handoff_id = restore_context.handoff_id,
+                                       .connection = connection,
+                                       .player = player,
+                                       .zone = target_zone,
+                                       .route_epoch = restore_context.route_epoch,
+                                       .step = restore_context.step,
+                                       .status = snf::server::ZoneCommandStatus::Applied,
+                                       .position = snf::server::ZonePosition{.x = 3, .y = 4},
+                                   }));
+        gateway.drainZoneTransitions();
+        const auto compensated_route = routes.routeFor(connection);
+        assert(compensated_route && compensated_route->zone == target_zone &&
+               compensated_route->route_epoch == 5);
+        const auto compensation_reply = outbound.tryPop();
+        assert(compensation_reply);
+        const auto* compensation_send =
+            std::get_if<snf::server::SendFrame>(&compensation_reply->action);
+        assert(compensation_send != nullptr);
+        assert(compensation_send->frame.payload[0] ==
+               static_cast<std::byte>(snf::server::ZoneCommandStatus::TransferFailed));
+        assert(lifecycle.terminalCount() == 4);
+        assert(gateway.zoneHandoffStats().target_failures == 1);
+        assert(gateway.zoneHandoffStats().compensated == 1);
+        assert(routes.stats().handoffs_restored == 1);
+
+        assert(gateway.tryPost(make_enter_frame(connection, source_zone.value, 11, 12)) ==
+               snf::server::FramePostResult::Accepted);
+        source_stage = std::get_if<snf::server::ZoneHandoffCommandRoute>(&commands.posted->route);
+        assert(source_stage != nullptr && source_stage->command.handoff);
+        const snf::server::ZoneHandoffContext fatal_leave = *source_stage->command.handoff;
+        commands.results.push_back(snf::server::PostResult::Full);
+        commands.results.push_back(snf::server::PostResult::Full);
+        assert(transitions.publish(fatal_leave.ticket,
+                                   snf::server::ZoneHandoffCompletion{
+                                       .handoff_id = fatal_leave.handoff_id,
+                                       .connection = connection,
+                                       .player = player,
+                                       .zone = target_zone,
+                                       .route_epoch = fatal_leave.route_epoch,
+                                       .step = fatal_leave.step,
+                                       .status = snf::server::ZoneCommandStatus::Applied,
+                                       .position = snf::server::ZonePosition{.x = 3, .y = 4},
+                                   }));
+        gateway.drainZoneTransitions();
+        assert(!routes.routeFor(connection));
+        const auto fatal_location = sessions.locationSnapshotFor(connection);
+        assert(fatal_location.known && !fatal_location.location);
+        std::vector<snf::net::ConnectionId> failed_connections;
+        assert(!outbound.takePendingAdmissionFailures(failed_connections));
+        assert(failed_connections == std::vector<snf::net::ConnectionId>{connection});
+        assert(gateway.zoneHandoffStats().fatal == 1);
+        assert(lifecycle.terminalCount() == 5);
+        assert(transitions.stats().reservations == 0);
+    }
+
+    void test_cross_zone_disconnect_waits_for_source_or_target_cleanup()
+    {
+        RecordingRoutedIngress commands;
+        snf::server::PlayerSessionDirectory sessions;
+        snf::server::RouteCoordinator routes{2};
+        snf::server::PartyCoordinator parties{4};
+        AcceptingTimerSink timer_sink;
+        FixedTimerClock timer_clock;
+        snf::server::ZoneTimerService timers{
+            timer_sink,
+            timer_clock,
+            snf::server::ZoneTimerServiceConfig{
+                .tick_interval = std::chrono::milliseconds{0},
+                .cancellation_retry_interval = std::chrono::milliseconds{1},
+                .max_timers = 4,
+                .on_failure = {},
+            },
+        };
+        const auto wake = snf::test::make_wake_descriptor();
+        snf::server::ZoneTransitionChannel transitions{2, wake.getDescriptor()};
+        snf::server::OutboundChannel outbound{
+            snf::server::OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 4},
+            wake.getDescriptor()};
+        snf::server::ProtocolZoneResultSink zone_results{outbound};
+        snf::server::CountingCommandLifecycleSink lifecycle;
+        snf::server::ProtocolGateway gateway{
+            commands, sessions, routes, timers, parties, transitions, lifecycle, zone_results, 1};
+        const snf::server::ZoneId source_zone{.value = 20};
+        const snf::server::ZoneId target_zone{.value = 21};
+
+        const auto begin_transfer =
+            [&](const snf::net::ConnectionId connection, const snf::server::PlayerId player)
+        {
+            assert(gateway.tryPost(make_auth_frame(connection, player)) ==
+                   snf::server::FramePostResult::Accepted);
+            assert(gateway.tryPost(make_enter_frame(connection, source_zone.value, 1, 2)) ==
+                   snf::server::FramePostResult::Accepted);
+            assert(gateway.tryPost(make_enter_frame(connection, target_zone.value, 3, 4)) ==
+                   snf::server::FramePostResult::Accepted);
+            const auto* stage =
+                std::get_if<snf::server::ZoneHandoffCommandRoute>(&commands.posted->route);
+            assert(stage != nullptr && stage->command.handoff);
+            return *stage->command.handoff;
+        };
+        const auto close_value = [](const snf::net::ConnectionId connection)
+        {
+            return snf::server::ConnectionClosed{
+                .connection = connection,
+                .cause = snf::server::ConnectionCloseCause::PeerClosed,
+                .has_location_snapshot = false,
+                .last_location = std::nullopt,
+            };
+        };
+
+        const snf::net::ConnectionId first_connection{.descriptor = 70, .generation = 40};
+        const snf::server::PlayerId first_player{.value = 110};
+        const auto first_source = begin_transfer(first_connection, first_player);
+        assert(gateway.tryPostConnectionClosed(close_value(first_connection)) ==
+               snf::server::PostResult::Full);
+        assert(transitions.publish(first_source.ticket,
+                                   snf::server::ZoneHandoffCompletion{
+                                       .handoff_id = first_source.handoff_id,
+                                       .connection = first_connection,
+                                       .player = first_player,
+                                       .zone = source_zone,
+                                       .route_epoch = first_source.route_epoch,
+                                       .step = first_source.step,
+                                       .status = snf::server::ZoneCommandStatus::Applied,
+                                       .position = snf::server::ZonePosition{.x = 1, .y = 2},
+                                   }));
+        gateway.drainZoneTransitions();
+        assert(gateway.zoneTransitionsDrained());
+        assert(!routes.routeFor(first_connection));
+        const auto first_snapshot = sessions.locationSnapshotFor(first_connection);
+        assert(first_snapshot.known && !first_snapshot.location);
+        assert(gateway.tryPostConnectionClosed(close_value(first_connection)) ==
+               snf::server::PostResult::Accepted);
+        const auto* first_close =
+            std::get_if<snf::server::ConnectionClosedRoute>(&commands.posted->route);
+        assert(first_close != nullptr && first_close->has_location_snapshot &&
+               !first_close->last_location);
+
+        const snf::net::ConnectionId second_connection{.descriptor = 71, .generation = 41};
+        const snf::server::PlayerId second_player{.value = 111};
+        const auto second_source = begin_transfer(second_connection, second_player);
+        assert(transitions.publish(second_source.ticket,
+                                   snf::server::ZoneHandoffCompletion{
+                                       .handoff_id = second_source.handoff_id,
+                                       .connection = second_connection,
+                                       .player = second_player,
+                                       .zone = source_zone,
+                                       .route_epoch = second_source.route_epoch,
+                                       .step = second_source.step,
+                                       .status = snf::server::ZoneCommandStatus::Applied,
+                                       .position = snf::server::ZonePosition{.x = 1, .y = 2},
+                                   }));
+        gateway.drainZoneTransitions();
+        const auto* target_stage =
+            std::get_if<snf::server::ZoneHandoffCommandRoute>(&commands.posted->route);
+        assert(target_stage != nullptr && target_stage->command.handoff);
+        const snf::server::ZoneHandoffContext target_context = *target_stage->command.handoff;
+        assert(gateway.tryPostConnectionClosed(close_value(second_connection)) ==
+               snf::server::PostResult::Full);
+        assert(transitions.publish(target_context.ticket,
+                                   snf::server::ZoneHandoffCompletion{
+                                       .handoff_id = target_context.handoff_id,
+                                       .connection = second_connection,
+                                       .player = second_player,
+                                       .zone = target_zone,
+                                       .route_epoch = target_context.route_epoch,
+                                       .step = target_context.step,
+                                       .status = snf::server::ZoneCommandStatus::Applied,
+                                       .position = snf::server::ZonePosition{.x = 3, .y = 4},
+                                   }));
+        gateway.drainZoneTransitions();
+        const auto* cleanup_stage =
+            std::get_if<snf::server::ZoneHandoffCommandRoute>(&commands.posted->route);
+        assert(cleanup_stage != nullptr && cleanup_stage->command.handoff);
+        const snf::server::ZoneHandoffContext cleanup_context = *cleanup_stage->command.handoff;
+        assert(cleanup_context.step == snf::server::ZoneHandoffStep::CleanupTarget);
+        assert(transitions.publish(cleanup_context.ticket,
+                                   snf::server::ZoneHandoffCompletion{
+                                       .handoff_id = cleanup_context.handoff_id,
+                                       .connection = second_connection,
+                                       .player = second_player,
+                                       .zone = target_zone,
+                                       .route_epoch = cleanup_context.route_epoch,
+                                       .step = cleanup_context.step,
+                                       .status = snf::server::ZoneCommandStatus::Applied,
+                                       .position = snf::server::ZonePosition{.x = 3, .y = 4},
+                                   }));
+        gateway.drainZoneTransitions();
+        assert(gateway.zoneTransitionsDrained());
+        assert(gateway.tryPostConnectionClosed(close_value(second_connection)) ==
+               snf::server::PostResult::Accepted);
+        const auto* second_close =
+            std::get_if<snf::server::ConnectionClosedRoute>(&commands.posted->route);
+        assert(second_close != nullptr && second_close->has_location_snapshot &&
+               !second_close->last_location);
+        assert(gateway.zoneHandoffStats().disconnect_cleanups == 2);
+        assert(lifecycle.terminalCount() == 2);
+
+        const snf::net::ConnectionId third_connection{.descriptor = 72, .generation = 42};
+        const snf::server::PlayerId third_player{.value = 112};
+        static_cast<void>(begin_transfer(third_connection, third_player));
+        gateway.close();
+        gateway.cancel();
+        assert(gateway.zoneTransitionsDrained());
+        assert(!routes.handoffFor(third_connection));
+        const auto third_snapshot = sessions.locationSnapshotFor(third_connection);
+        assert(third_snapshot.known && !third_snapshot.location);
+        assert(gateway.zoneHandoffStats().shutdown_cancels == 1);
+        assert(lifecycle.terminalCount() == 3);
     }
 }
 
@@ -673,4 +934,5 @@ void run_protocol_gateway_tests()
     test_routes_authenticated_zone_enter_move_leave_with_one_epoch();
     test_connection_close_leaves_zone_before_player_passivation();
     test_cross_zone_handoff_hides_route_until_target_completion();
+    test_cross_zone_disconnect_waits_for_source_or_target_cleanup();
 }

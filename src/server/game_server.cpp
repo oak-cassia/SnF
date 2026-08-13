@@ -304,6 +304,8 @@ namespace snf::server
                   .metrics_report_interval = config.metrics_report_interval,
                   .on_metrics_interval = [this] { publishMetrics(); },
                   .on_control_wake = [this] { _protocol_gateway.drainZoneTransitions(); },
+                  .is_control_drained = [this]
+                  { return _protocol_gateway.zoneTransitionsDrained(); },
               },
               _protocol_gateway,
               _outbound_channel,

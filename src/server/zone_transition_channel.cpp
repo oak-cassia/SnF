@@ -197,6 +197,19 @@ namespace snf::server
         return _capacity;
     }
 
+    bool ZoneTransitionChannel::drained() const noexcept
+    {
+        try
+        {
+            std::lock_guard lock{_mutex};
+            return _queued == 0 && _reservations.empty();
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
     void ZoneTransitionChannel::signalWakeUp() const noexcept
     {
         constexpr std::uint64_t wakeup_value = 1;

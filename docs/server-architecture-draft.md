@@ -630,6 +630,9 @@ leader election과 season archive/prune은 아직 범위 밖이다.
 Worker는 source Leave와 target Enter 결과를 handoff admission에서 예약한 bounded value channel로만
 반환한다. shared eventfd는 outbound와 wake-up만 공유하며 queue와 회계는 분리되고, reactor는 회차당
 completion budget을 넘지 않는다. target Enter completion 전에는 gameplay route를 공개하지 않는다.
+target 실패는 더 큰 epoch으로 source를 복구하고, transition 중 disconnect는 적용된 target/source를 내부
+Leave로 정리한 뒤에만 Player close snapshot을 확정한다. 따라서 shutdown 완료 조건도 Logic mailbox뿐 아니라
+reactor의 active handoff와 reserved completion channel이 모두 빈 상태를 포함한다.
 
 구체적인 state, bounded Worker→reactor completion, 보상과 disconnect/shutdown 순서는
 `docs/cross-zone-handoff-contract.md`를 따른다.

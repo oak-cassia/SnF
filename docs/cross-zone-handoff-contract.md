@@ -2,8 +2,9 @@
 
 ## 1. 목적과 범위
 
-현재 `RouteCoordinator`는 연결마다 안정된 Zone route 하나를 소유한다. 같은 Zone 재입장은 멱등하지만
-다른 Zone으로의 `EnterZone`은 거부한다. 단순히 source `Leave`와 target `Enter`를 연달아 enqueue하면
+Phase 7.4 착수 전 `RouteCoordinator`는 연결마다 안정된 Zone route 하나만 소유했다. 같은 Zone 재입장은
+멱등하지만 다른 Zone으로의 `EnterZone`은 거부했다. 단순히 source `Leave`와 target `Enter`를 연달아
+enqueue하면
 다음 실패 창이 생긴다.
 
 ```text
@@ -36,7 +37,13 @@ Worker가 완료를 알릴 때는 immutable value만 bounded `ZoneTransitionChan
 ```cpp
 struct ZoneHandoffId { std::uint64_t value; };
 
-enum class ZoneHandoffStep { LeaveSource, EnterTarget, RestoreSource, CleanupTarget };
+enum class ZoneHandoffStep {
+    LeaveSource,
+    EnterTarget,
+    RestoreSource,
+    CleanupTarget,
+    CleanupSource
+};
 
 struct ZoneHandoffCompletion {
     ZoneHandoffId handoff_id;
@@ -236,8 +243,15 @@ source Leave 결과를 확인한 뒤 target Enter를 게시하고 target 적용 
 중 gameplay는 `TransitionInProgress`, source 변경 전 admission 실패는 `TransferFailed`로 응답한다. 단위
 상태 기계와 실제 TCP Zone A→B→Move→Leave 흐름이 이 순서와 terminal/reservation 회계를 검증한다.
 
-### 7.4c Compensation, disconnect와 shutdown
+### 7.4c Compensation, disconnect와 shutdown (완료)
 
 - target failure의 source restore, ambiguous result fatal cleanup을 구현한다.
 - transition-aware `ConnectionClosed` continuation과 shutdown drain/cancel을 runtime predicate에 연결한다.
 - 최소 capacity, stale completion, failure injection과 sanitizer 반복을 통과한다.
+
+구현은 target post/result 실패를 더 큰 restore epoch의 source Enter로 보상하고, restore 성공 뒤에만 source
+route를 재공개한다. disconnect lifecycle value는 transition 동안 기존 bounded TCP retry deque에 남으며,
+target 또는 restore source가 이미 적용됐다면 reply 없는 cleanup Leave completion 뒤에 authoritative none
+snapshot으로 Player close를 재개한다. 복구 불가능한 상태는 route/location을 none으로 확정하고 연결 종료를
+요청한다. shutdown predicate는 Logic drain에 active transition과 completion reservation drain을 추가하며,
+grace cancel은 남은 token과 route를 명시적으로 회수한다.

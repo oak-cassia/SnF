@@ -44,6 +44,9 @@ namespace snf::server
         // Invoked after the shared reactor eventfd is consumed and before outbound
         // actions are drained. The callback must be bounded and non-blocking.
         std::function<void()> on_control_wake{};
+        // Extends the shutdown predicate for bounded reactor-owned control state
+        // that may outlive the Logic Runtime's last mailbox item.
+        std::function<bool()> is_control_drained{};
     };
 
     struct TcpServerStats
@@ -152,6 +155,7 @@ namespace snf::server
         void retryPendingConnectionCloses();
         void reportMetricsIfDue();
         [[nodiscard]] bool hasAvailableConnectionLifecycleSlot() const noexcept;
+        [[nodiscard]] bool isControlDrained() const noexcept;
         [[nodiscard]] bool hasMetricsReporting() const noexcept;
         [[nodiscard]] bool hasShutdownDeadlineExpired() const noexcept;
         [[nodiscard]] int getEpollWaitTimeout() const;
@@ -168,6 +172,7 @@ namespace snf::server
         std::chrono::milliseconds _metrics_report_interval;
         std::function<void()> _on_metrics_interval;
         std::function<void()> _on_control_wake;
+        std::function<bool()> _is_control_drained;
         FrameIngress& _frame_ingress;
         OutboundChannel& _outbound;
         snf::runtime::RuntimeCompletionSource& _runtime_completion;

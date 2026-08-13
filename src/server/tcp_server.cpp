@@ -93,6 +93,7 @@ namespace snf::server
         , _metrics_report_interval(config.metrics_report_interval)
         , _on_metrics_interval(config.on_metrics_interval)
         , _on_control_wake(config.on_control_wake)
+        , _is_control_drained(config.is_control_drained)
         , _frame_ingress(frame_ingress)
         , _outbound(outbound)
         , _runtime_completion(runtime_completion)
@@ -172,7 +173,7 @@ namespace snf::server
         {
             retryPendingConnectionCloses();
 
-            if (_is_stopping && _logic_runtime_drained && _sessions.empty())
+            if (_is_stopping && _logic_runtime_drained && isControlDrained() && _sessions.empty())
             {
                 break;
             }
@@ -596,6 +597,10 @@ namespace snf::server
         static_cast<void>(_outbound.grantPending());
 
         handleRuntimeCompletion();
+        if (_is_stopping && _logic_runtime_drained && isControlDrained())
+        {
+            completeShutdownAfterLogicRuntimeDrained();
+        }
         retryPendingConnectionCloses();
     }
 
@@ -693,7 +698,7 @@ namespace snf::server
         if (!_logic_runtime_drained && _runtime_completion.allRequiredRuntimesDrained())
         {
             _logic_runtime_drained = true;
-            if (_is_stopping)
+            if (_is_stopping && isControlDrained())
             {
                 completeShutdownAfterLogicRuntimeDrained();
             }
@@ -776,7 +781,7 @@ namespace snf::server
             updateClientEvents(session);
         }
 
-        if (_logic_runtime_drained)
+        if (_logic_runtime_drained && isControlDrained())
         {
             completeShutdownAfterLogicRuntimeDrained();
         }
@@ -986,6 +991,11 @@ namespace snf::server
         return _sessions.size() < _connection_lifecycle_capacity &&
                _pending_connection_closes.size() <
                    _connection_lifecycle_capacity - _sessions.size();
+    }
+
+    bool TcpServer::isControlDrained() const noexcept
+    {
+        return !_is_control_drained || _is_control_drained();
     }
 
     bool TcpServer::hasMetricsReporting() const noexcept

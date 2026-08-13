@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <exception>
 #include <future>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <poll.h>
@@ -42,7 +43,10 @@ namespace
         [[nodiscard]] snf::server::PostResult
         tryPostConnectionClosed(snf::server::ConnectionClosed closed) override
         {
-            connection_closes.push_back(closed);
+            {
+                std::lock_guard lock{connection_closes_mutex};
+                connection_closes.push_back(closed);
+            }
             const std::size_t attempt = lifecycle_attempts.fetch_add(1);
             return attempt < lifecycle_results.size() ? lifecycle_results[attempt]
                                                       : lifecycle_fallback;
@@ -58,10 +62,35 @@ namespace
             cancelled = true;
         }
 
+        [[nodiscard]] std::size_t distinctConnectionCloseCount() const
+        {
+            std::lock_guard lock{connection_closes_mutex};
+            std::size_t distinct = 0;
+            for (std::size_t index = 0; index < connection_closes.size(); ++index)
+            {
+                bool seen = false;
+                for (std::size_t previous = 0; previous < index; ++previous)
+                {
+                    if (connection_closes[previous].connection ==
+                        connection_closes[index].connection)
+                    {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (!seen)
+                {
+                    ++distinct;
+                }
+            }
+            return distinct;
+        }
+
         bool closed{false};
         bool cancelled{false};
         std::vector<snf::server::PostResult> lifecycle_results;
         snf::server::PostResult lifecycle_fallback{snf::server::PostResult::Accepted};
+        mutable std::mutex connection_closes_mutex;
         std::vector<snf::server::ConnectionClosed> connection_closes;
         std::atomic<std::size_t> lifecycle_attempts{0};
     };
@@ -1810,12 +1839,12 @@ namespace
             }
 
             const auto deadline = std::chrono::steady_clock::now() + 1s;
-            while (ingress.lifecycle_attempts.load() < close_index + 1 &&
+            while (ingress.distinctConnectionCloseCount() < close_index + 1 &&
                    std::chrono::steady_clock::now() < deadline)
             {
                 std::this_thread::sleep_for(1ms);
             }
-            assert(ingress.lifecycle_attempts.load() >= close_index + 1);
+            assert(ingress.distinctConnectionCloseCount() >= close_index + 1);
         }
 
         const auto rejected_client = connect_client(server.getPort());
@@ -1830,6 +1859,64 @@ namespace
         assert(server.getStats().closed_connections == 2);
         assert(server.getStats().connection_lifecycle_rejections == 1);
         assert(server.getStats().pending_connection_closes_high_water_mark == 2);
+    }
+
+    void test_shutdown_waits_for_reactor_control_state_after_logic_drains()
+    {
+        RecordingFrameIngress ingress;
+        const auto outbound_event = make_eventfd();
+        snf::server::OutboundChannel outbound{
+            snf::server::OutboundChannelConfig{.capacity = 2, .max_slots_per_connection = 2},
+            outbound_event.getDescriptor()};
+        snf::runtime::RuntimeCompletionCoordinator runtime_completion{
+            snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
+            outbound_event.getDescriptor()};
+        std::atomic<bool> control_drained{false};
+        snf::server::TcpServer server{
+            snf::server::TcpServerConfig{
+                .port = 0,
+                .shutdown_grace_period = 500ms,
+                .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
+                .client_send_buffer_size = std::nullopt,
+                .connection_lifecycle_capacity = 2,
+                .metrics_report_interval = 0ms,
+                .on_metrics_interval = {},
+                .on_control_wake = {},
+                .is_control_drained = [&control_drained]
+                { return control_drained.load(std::memory_order_acquire); },
+            },
+            ingress,
+            outbound,
+            runtime_completion,
+            outbound_event.getDescriptor()};
+
+        std::exception_ptr server_error;
+        std::promise<void> finished;
+        auto finished_future = finished.get_future();
+        std::thread server_thread{[&]
+                                  {
+                                      try
+                                      {
+                                          server.run();
+                                      }
+                                      catch (...)
+                                      {
+                                          server_error = std::current_exception();
+                                      }
+                                      finished.set_value();
+                                  }};
+
+        runtime_completion.notifyDrained(snf::runtime::RuntimeId::Logic);
+        server.requestStop();
+        assert(finished_future.wait_for(30ms) == std::future_status::timeout);
+
+        control_drained.store(true, std::memory_order_release);
+        constexpr std::uint64_t wake = 1;
+        assert(::write(outbound_event.getDescriptor(), &wake, sizeof(wake)) ==
+               static_cast<ssize_t>(sizeof(wake)));
+        assert(finished_future.wait_for(1s) == std::future_status::ready);
+        server_thread.join();
+        assert(server_error == nullptr);
     }
 }
 
@@ -1859,4 +1946,5 @@ int main()
     test_actor_runtime_failure_aborts_without_waiting_for_grace_period();
     test_retries_a_full_connection_closed_post_without_duplicate_after_acceptance();
     test_bounds_pending_connection_closes_and_rejects_new_connections_at_capacity();
+    test_shutdown_waits_for_reactor_control_state_after_logic_drains();
 }

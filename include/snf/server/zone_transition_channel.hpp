@@ -49,6 +49,7 @@ namespace snf::server
 
         [[nodiscard]] ZoneTransitionChannelStats stats() const;
         [[nodiscard]] std::size_t capacity() const noexcept;
+        [[nodiscard]] bool drained() const noexcept;
 
     private:
         struct Reservation

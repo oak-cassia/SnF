@@ -140,6 +140,28 @@ namespace snf::server
         return iterator->second.restore_epoch;
     }
 
+    bool RouteCoordinator::beginCleanup(const snf::net::ConnectionId connection,
+                                        const ZoneHandoffId handoff,
+                                        const ZoneHandoffStep cleanup_step) noexcept
+    {
+        std::lock_guard lock{_mutex};
+        const auto iterator = findHandoff(connection, handoff);
+        if (iterator == _handoffs.end())
+        {
+            return false;
+        }
+        const bool cleans_target = cleanup_step == ZoneHandoffStep::CleanupTarget &&
+                                   iterator->second.step == ZoneHandoffStep::EnterTarget;
+        const bool cleans_source = cleanup_step == ZoneHandoffStep::CleanupSource &&
+                                   iterator->second.step == ZoneHandoffStep::RestoreSource;
+        if (!cleans_target && !cleans_source)
+        {
+            return false;
+        }
+        iterator->second.step = cleanup_step;
+        return true;
+    }
+
     std::optional<SessionRoute>
     RouteCoordinator::completeTargetEnter(const snf::net::ConnectionId connection,
                                           const ZoneHandoffId handoff) noexcept

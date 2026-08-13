@@ -24,8 +24,13 @@ namespace snf::server
     {
         snf::runtime::DistributionSnapshot transition_nanoseconds;
         std::uint64_t failures_before_source_leave{0};
+        std::uint64_t target_failures{0};
+        std::uint64_t compensated{0};
+        std::uint64_t fatal{0};
         std::uint64_t transition_busy_replies{0};
         std::uint64_t stale_completions{0};
+        std::uint64_t disconnect_cleanups{0};
+        std::uint64_t shutdown_cancels{0};
         std::size_t pending{0};
     };
 
@@ -78,6 +83,7 @@ namespace snf::server
         [[nodiscard]] FramePostResult tryPost(FrameEnvelope envelope) override;
         [[nodiscard]] PostResult tryPostConnectionClosed(ConnectionClosed closed) override;
         void drainZoneTransitions();
+        [[nodiscard]] bool zoneTransitionsDrained() const noexcept;
         [[nodiscard]] ZoneHandoffGatewayStats zoneHandoffStats() const noexcept;
         void close() noexcept override;
         void cancel() noexcept override;
@@ -88,6 +94,7 @@ namespace snf::server
             ZoneTransitionTicket ticket;
             CommandReleaseToken release;
             bool target_timer_created{false};
+            bool disconnecting{false};
             std::chrono::steady_clock::time_point started_at;
         };
 
@@ -102,6 +109,13 @@ namespace snf::server
         void failHandoffBeforeSourceLeave(snf::net::ConnectionId connection,
                                           ZoneHandoffId handoff,
                                           ZoneCommandStatus status);
+        void beginSourceRestore(const ZoneHandoff& handoff);
+        void finishSourceRestore(const ZoneHandoff& handoff, ZonePosition position);
+        void beginDisconnectCleanup(const ZoneHandoff& handoff, ZoneHandoffStep cleanup_step);
+        void finishDisconnectedHandoff(const ZoneHandoff& handoff);
+        void finishFatalHandoff(const ZoneHandoff& handoff);
+        void finishActiveHandoff(snf::net::ConnectionId connection);
+        void cancelUnusedTimer(ZoneId zone, bool created);
         void replyZoneStatus(snf::net::ConnectionId connection,
                              PlayerId player,
                              ZoneId zone,
@@ -131,7 +145,13 @@ namespace snf::server
             _active_zone_handoffs;
         snf::runtime::Distribution _zone_transition_nanoseconds;
         std::uint64_t _handoff_failures_before_source_leave{0};
+        std::uint64_t _handoff_target_failures{0};
+        std::uint64_t _handoffs_compensated{0};
+        std::uint64_t _fatal_handoffs{0};
         std::uint64_t _transition_busy_replies{0};
         std::uint64_t _stale_handoff_completions{0};
+        std::uint64_t _disconnect_handoff_cleanups{0};
+        std::uint64_t _shutdown_handoff_cancels{0};
+        bool _handoff_admission_closed{false};
     };
 }

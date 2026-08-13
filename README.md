@@ -8,8 +8,9 @@ SnF는 C++20을 활용해 MORPG 콘텐츠의 상태, 규칙과 메시지 흐름�
 Runtime 위에서 인증, Player 영속성, Zone 이동·tick과 멱등한 구매 vertical slice를
 실행한다. outbound와 repository 대기는 Actor 하나만 suspend하는 non-blocking 경계를
 사용한다. MySQL durable adapter와 Shared Content·Projection, durable ranking outbox/checkpoint까지
-완료했으며, cross-zone handoff의 source drain·target activation·route publish 정상 경로도 연결했다.
-다음 주요 범위는 target 실패 보상과 transition 중 disconnect·shutdown 정리다.
+완료했으며, cross-zone handoff의 정상 경로, target 실패 보상과 transition 중
+disconnect·shutdown 정리까지 연결했다. 현재 콘텐츠 로드맵의 필수 단계는 완료됐고,
+후속 Runtime 변경은 측정이 필요를 증명할 때 진행하는 선택적 최적화다.
 `ConnectionScope`와 UnifiedRuntime은 실제 콘텐츠 부하가 필요를 증명할 때 진행할 선택적 최적화다.
 
 ## 프로젝트 목적

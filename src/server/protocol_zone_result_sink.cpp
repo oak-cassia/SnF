@@ -65,6 +65,12 @@ namespace snf::server
         }
     }
 
+    void
+    ProtocolZoneResultSink::reportAdmissionFailure(const snf::net::ConnectionId connection) noexcept
+    {
+        _outbound.reportAdmissionFailure(connection);
+    }
+
     snf::protocol::Frame ProtocolZoneResultSink::map(const ZoneInboundCommand& command,
                                                      const ZoneResult& result) const
     {

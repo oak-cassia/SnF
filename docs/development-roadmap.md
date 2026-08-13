@@ -529,8 +529,9 @@ UnifiedRuntimeDrained =
   단조 증가한다.
 - initial enter route는 command ingress 승인 전에 임시 등록하고 `Full`, `Closed` 또는 예외면 rollback한다.
   명시적 leave와 disconnect는 같은 Zone mailbox에 `LeaveZoneCommand`를 먼저 승인한 뒤 route를
-  제거한다. 여러 Zone 사이 handoff의 이전 destination 정지 → 새 destination 활성화 → route 공개
-  protocol은 아직 구현하지 않았고, 현재 cross-zone enter를 거부해 부분 전환을 만들지 않는다.
+  제거한다. 5.3b 완료 시점에는 여러 Zone 사이 handoff의 이전 destination 정지 → 새 destination 활성화 →
+  route 공개 protocol이 없어 cross-zone enter를 거부했다. 이 제한은 7.4에서 bounded completion과 보상
+  상태 기계를 연결해 해제했다.
 - `ProtocolZoneResultSink`가 Zone 결과를 bounded wire payload로 바꾸고 기존 outbound reservation을
   사용한다. 즉시 용량을 얻지 못하면 응답을 버리지 않고 해당 연결의 admission failure를 reactor에
   보고한다. client-originated Zone command도 Player command와 같은 exactly-once terminal signal과
@@ -837,7 +838,7 @@ UnifiedRuntimeDrained =
   상세 조건과 원자료는 `docs/ranking-performance-baseline.md`에 기록한다.
 - schema v4를 포함한 실제 MySQL 경로 Debug 5회 반복과 ASan/UBSan·TSan 전체 테스트가 통과했다.
 
-### 7.4 Cross-Zone handoff (7.4a~b 완료; 7.4c 남음)
+### 7.4 Cross-Zone handoff (완료)
 
 - 상세 계약은 `docs/cross-zone-handoff-contract.md`를 단일 기준으로 사용한다. route epoch만으로 전환을
   원자화하지 않고 reactor 소유 `Stable/Transferring` state machine이 source drain → target activation →
@@ -878,6 +879,24 @@ UnifiedRuntimeDrained =
 - 단위 테스트는 source completion 전 route 비공개, typed busy, target publish, source post `Full` rollback과
   terminal/reservation 회계를 검증한다. 실제 TCP는 Zone A enter → Zone B handoff → target Move/Leave를 새
   epoch과 좌표로 왕복하고 completion 두 개와 transition duration을 계측한다.
+
+#### 7.4c Compensation, disconnect와 shutdown (완료)
+
+- source Leave 뒤 target post/result가 실패하면 target epoch보다 큰 restore epoch으로 source Enter를
+  게시한다. restore completion 뒤에만 source route와 location을 다시 공개하고 `TransferFailed`를 한 번
+  응답한다. restore admission/result도 실패하면 route를 추측하지 않고 location을 authoritative `none`으로
+  만든 뒤 기존 outbound admission-failure 경로로 연결 종료를 요청한다.
+- transition 중 `ConnectionClosed`는 즉시 Player save를 게시하지 않고 기존 bounded lifecycle retry
+  deque에 남는다. source가 아직 떠나는 중이면 그 completion 뒤 none으로 끝내고, target 또는 복구 source가
+  적용된 뒤라면 내부 cleanup Leave completion까지 기다린다. active transition이 사라진 다음 같은 close
+  value가 재시도되어 authoritative none snapshot으로 Player close/save를 진행한다.
+- shutdown은 Logic Runtime drain만으로 끝나지 않고 active handoff와 reserved completion channel이 모두 빈
+  조건을 추가로 관찰한다. completion이 budget보다 많으면 shared eventfd를 다시 깨워 다음 reactor turn에서
+  계속 처리하고, grace deadline의 cancel은 route/token/reservation을 명시적으로 회수한다.
+- 단위 테스트는 target post `Full` 뒤 source restore, restore도 `Full`인 fatal close, stale completion,
+  source leave 전 disconnect, target 적용 뒤 cleanup과 shutdown cancel을 검증한다. TCP reactor 테스트는
+  Logic drain 뒤 control state가 남은 동안 shutdown이 반환하지 않는지 확인한다. Debug, ASan·UBSan과 TSan
+  전체 회귀를 완료 기준으로 사용한다.
 
 ## 선택적 인프라 트랙: io_uring Network Backend
 

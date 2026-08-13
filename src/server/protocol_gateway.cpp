@@ -181,7 +181,7 @@ namespace snf::server
                                                          const SessionRoute& source)
     {
         if (_zone_transitions == nullptr || _lifecycle == nullptr || _zone_results == nullptr ||
-            _zone_timers == nullptr)
+            _zone_timers == nullptr || _handoff_admission_closed)
         {
             return FramePostResult::InvalidPayload;
         }
@@ -252,6 +252,7 @@ namespace snf::server
             return FramePostResult::Accepted;
         }
 
+        bool inserted_active = false;
         try
         {
             const auto [active, inserted] = _active_zone_handoffs.try_emplace(
@@ -267,6 +268,7 @@ namespace snf::server
             {
                 throw std::logic_error{"Connection already owns a Zone handoff"};
             }
+            inserted_active = true;
 
             if (postZoneHandoffStage(*handoff, ZoneHandoffStep::LeaveSource) !=
                 PostResult::Accepted)
@@ -278,7 +280,7 @@ namespace snf::server
         catch (...)
         {
             if (const auto active = _active_zone_handoffs.find(envelope.connection);
-                active != _active_zone_handoffs.end())
+                inserted_active && active != _active_zone_handoffs.end())
             {
                 _zone_transitions->release(active->second.ticket);
                 _active_zone_handoffs.erase(active);
@@ -321,6 +323,40 @@ namespace snf::server
                 .player = handoff.source.player,
                 .route_epoch = epoch,
                 .position = handoff.requested_target_position,
+            };
+        }
+        else if (step == ZoneHandoffStep::RestoreSource)
+        {
+            if (handoff.restore_epoch == 0)
+            {
+                return PostResult::Closed;
+            }
+            epoch = handoff.restore_epoch;
+            command = EnterZoneCommand{
+                .player = handoff.source.player,
+                .route_epoch = epoch,
+                .position = handoff.last_source_position,
+            };
+        }
+        else if (step == ZoneHandoffStep::CleanupTarget)
+        {
+            zone = handoff.target_zone;
+            epoch = handoff.target_epoch;
+            command = LeaveZoneCommand{
+                .player = handoff.source.player,
+                .route_epoch = epoch,
+            };
+        }
+        else if (step == ZoneHandoffStep::CleanupSource)
+        {
+            if (handoff.restore_epoch == 0)
+            {
+                return PostResult::Closed;
+            }
+            epoch = handoff.restore_epoch;
+            command = LeaveZoneCommand{
+                .player = handoff.source.player,
+                .route_epoch = epoch,
             };
         }
         else if (step != ZoneHandoffStep::LeaveSource)
@@ -389,6 +425,145 @@ namespace snf::server
         _active_zone_handoffs.erase(active);
     }
 
+    void ProtocolGateway::cancelUnusedTimer(const ZoneId zone, const bool created)
+    {
+        if (created && _zone_timers != nullptr && _routes.routeCountFor(zone) == 0)
+        {
+            static_cast<void>(_zone_timers->tryCancelTimer(zone));
+        }
+    }
+
+    void ProtocolGateway::finishActiveHandoff(const snf::net::ConnectionId connection)
+    {
+        const auto active = _active_zone_handoffs.find(connection);
+        if (active == _active_zone_handoffs.end())
+        {
+            return;
+        }
+        _zone_transitions->release(active->second.ticket);
+        _zone_transition_nanoseconds.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - active->second.started_at));
+        _active_zone_handoffs.erase(active);
+    }
+
+    void ProtocolGateway::beginSourceRestore(const ZoneHandoff& handoff)
+    {
+        ++_handoff_target_failures;
+        if (!_routes.beginSourceRestore(handoff.source.connection, handoff.id))
+        {
+            finishFatalHandoff(handoff);
+            return;
+        }
+        const auto restore = _routes.handoffFor(handoff.source.connection);
+        if (!restore ||
+            postZoneHandoffStage(*restore, ZoneHandoffStep::RestoreSource) != PostResult::Accepted)
+        {
+            finishFatalHandoff(restore.value_or(handoff));
+        }
+    }
+
+    void ProtocolGateway::finishSourceRestore(const ZoneHandoff& handoff,
+                                              const ZonePosition position)
+    {
+        const auto active = _active_zone_handoffs.find(handoff.source.connection);
+        if (active == _active_zone_handoffs.end())
+        {
+            return;
+        }
+        if (active->second.disconnecting)
+        {
+            beginDisconnectCleanup(handoff, ZoneHandoffStep::CleanupSource);
+            return;
+        }
+
+        const auto route = _routes.completeSourceRestore(handoff.source.connection, handoff.id);
+        if (!route)
+        {
+            finishFatalHandoff(handoff);
+            return;
+        }
+        _sessions.noteLocation(handoff.source.connection,
+                               PlayerLocation{
+                                   .zone = route->zone,
+                                   .position = position,
+                               });
+        cancelUnusedTimer(handoff.target_zone, active->second.target_timer_created);
+        replyZoneStatus(handoff.source.connection,
+                        route->player,
+                        route->zone,
+                        route->route_epoch,
+                        position,
+                        handoff.request_id,
+                        ZoneReplyKind::Entered,
+                        ZoneCommandStatus::TransferFailed);
+        ++_handoffs_compensated;
+        finishActiveHandoff(handoff.source.connection);
+    }
+
+    void ProtocolGateway::beginDisconnectCleanup(const ZoneHandoff& handoff,
+                                                 const ZoneHandoffStep cleanup_step)
+    {
+        if (!_routes.beginCleanup(handoff.source.connection, handoff.id, cleanup_step))
+        {
+            finishFatalHandoff(handoff);
+            return;
+        }
+        const auto cleanup = _routes.handoffFor(handoff.source.connection);
+        if (!cleanup || postZoneHandoffStage(*cleanup, cleanup_step) != PostResult::Accepted)
+        {
+            finishFatalHandoff(cleanup.value_or(handoff));
+        }
+    }
+
+    void ProtocolGateway::finishDisconnectedHandoff(const ZoneHandoff& handoff)
+    {
+        const auto active = _active_zone_handoffs.find(handoff.source.connection);
+        if (active == _active_zone_handoffs.end())
+        {
+            return;
+        }
+        const bool target_timer_created = active->second.target_timer_created;
+        _sessions.noteLocation(handoff.source.connection, std::nullopt);
+        _routes.abandon(handoff.source.connection);
+        if (_zone_timers != nullptr)
+        {
+            if (_routes.routeCountFor(handoff.source.zone) == 0)
+            {
+                static_cast<void>(_zone_timers->tryCancelTimer(handoff.source.zone));
+            }
+            cancelUnusedTimer(handoff.target_zone, target_timer_created);
+        }
+        ++_disconnect_handoff_cleanups;
+        finishActiveHandoff(handoff.source.connection);
+    }
+
+    void ProtocolGateway::finishFatalHandoff(const ZoneHandoff& handoff)
+    {
+        const auto active = _active_zone_handoffs.find(handoff.source.connection);
+        if (active == _active_zone_handoffs.end())
+        {
+            return;
+        }
+        const bool disconnecting = active->second.disconnecting;
+        const bool target_timer_created = active->second.target_timer_created;
+        _sessions.noteLocation(handoff.source.connection, std::nullopt);
+        _routes.abandon(handoff.source.connection);
+        if (_zone_timers != nullptr)
+        {
+            if (_routes.routeCountFor(handoff.source.zone) == 0)
+            {
+                static_cast<void>(_zone_timers->tryCancelTimer(handoff.source.zone));
+            }
+            cancelUnusedTimer(handoff.target_zone, target_timer_created);
+        }
+        if (!disconnecting && _zone_results != nullptr)
+        {
+            _zone_results->reportAdmissionFailure(handoff.source.connection);
+        }
+        ++_fatal_handoffs;
+        finishActiveHandoff(handoff.source.connection);
+    }
+
     void ProtocolGateway::replyZoneStatus(const snf::net::ConnectionId connection,
                                           const PlayerId player,
                                           const ZoneId zone,
@@ -448,6 +623,17 @@ namespace snf::server
             return completion.zone == handoff.target_zone &&
                    completion.route_epoch == handoff.target_epoch;
         }
+        if (completion.step == ZoneHandoffStep::RestoreSource ||
+            completion.step == ZoneHandoffStep::CleanupSource)
+        {
+            return completion.zone == handoff.source.zone && handoff.restore_epoch != 0 &&
+                   completion.route_epoch == handoff.restore_epoch;
+        }
+        if (completion.step == ZoneHandoffStep::CleanupTarget)
+        {
+            return completion.zone == handoff.target_zone &&
+                   completion.route_epoch == handoff.target_epoch;
+        }
         return false;
     }
 
@@ -468,52 +654,103 @@ namespace snf::server
                 !_routes.noteSourceLeft(
                     completion.connection, completion.handoff_id, *completion.position))
             {
-                throw std::logic_error{"Source Zone leave did not complete authoritatively"};
+                finishFatalHandoff(*handoff);
+                return;
             }
             const auto next = _routes.handoffFor(completion.connection);
-            if (!next ||
-                postZoneHandoffStage(*next, ZoneHandoffStep::EnterTarget) != PostResult::Accepted)
+            if (!next)
             {
-                throw std::runtime_error{"Target Zone enter could not be admitted"};
+                finishFatalHandoff(*handoff);
+                return;
+            }
+            if (active->second.disconnecting)
+            {
+                finishDisconnectedHandoff(*next);
+                return;
+            }
+            if (postZoneHandoffStage(*next, ZoneHandoffStep::EnterTarget) != PostResult::Accepted)
+            {
+                beginSourceRestore(*next);
             }
             return;
         }
 
-        if ((completion.status != ZoneCommandStatus::Applied &&
-             completion.status != ZoneCommandStatus::AlreadyPresent) ||
-            !completion.position)
+        if (completion.step == ZoneHandoffStep::EnterTarget)
         {
-            throw std::logic_error{"Target Zone enter did not complete authoritatively"};
+            if ((completion.status != ZoneCommandStatus::Applied &&
+                 completion.status != ZoneCommandStatus::AlreadyPresent) ||
+                !completion.position)
+            {
+                if (active->second.disconnecting)
+                {
+                    ++_handoff_target_failures;
+                    finishDisconnectedHandoff(*handoff);
+                }
+                else
+                {
+                    beginSourceRestore(*handoff);
+                }
+                return;
+            }
+            if (active->second.disconnecting)
+            {
+                beginDisconnectCleanup(*handoff, ZoneHandoffStep::CleanupTarget);
+                return;
+            }
+
+            const auto route =
+                _routes.completeTargetEnter(completion.connection, completion.handoff_id);
+            if (!route)
+            {
+                finishFatalHandoff(*handoff);
+                return;
+            }
+            _sessions.noteLocation(completion.connection,
+                                   PlayerLocation{
+                                       .zone = route->zone,
+                                       .position = *completion.position,
+                                   });
+            if (_zone_timers != nullptr && _routes.routeCountFor(handoff->source.zone) == 0)
+            {
+                static_cast<void>(_zone_timers->tryCancelTimer(handoff->source.zone));
+            }
+
+            replyZoneStatus(completion.connection,
+                            route->player,
+                            route->zone,
+                            route->route_epoch,
+                            *completion.position,
+                            handoff->request_id,
+                            ZoneReplyKind::Entered,
+                            completion.status);
+            finishActiveHandoff(completion.connection);
+            return;
         }
 
-        const auto route =
-            _routes.completeTargetEnter(completion.connection, completion.handoff_id);
-        if (!route)
+        if (completion.step == ZoneHandoffStep::RestoreSource)
         {
-            throw std::logic_error{"Target Zone route publish identity diverged"};
-        }
-        _sessions.noteLocation(completion.connection,
-                               PlayerLocation{
-                                   .zone = route->zone,
-                                   .position = *completion.position,
-                               });
-        if (_zone_timers != nullptr && _routes.routeCountFor(handoff->source.zone) == 0)
-        {
-            static_cast<void>(_zone_timers->tryCancelTimer(handoff->source.zone));
+            if ((completion.status != ZoneCommandStatus::Applied &&
+                 completion.status != ZoneCommandStatus::AlreadyPresent) ||
+                !completion.position)
+            {
+                finishFatalHandoff(*handoff);
+                return;
+            }
+            finishSourceRestore(*handoff, *completion.position);
+            return;
         }
 
-        replyZoneStatus(completion.connection,
-                        route->player,
-                        route->zone,
-                        route->route_epoch,
-                        *completion.position,
-                        handoff->request_id,
-                        ZoneReplyKind::Entered,
-                        completion.status);
-        _zone_transitions->release(active->second.ticket);
-        _zone_transition_nanoseconds.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - active->second.started_at));
-        _active_zone_handoffs.erase(active);
+        if (completion.step == ZoneHandoffStep::CleanupTarget ||
+            completion.step == ZoneHandoffStep::CleanupSource)
+        {
+            if (completion.status != ZoneCommandStatus::Applied &&
+                completion.status != ZoneCommandStatus::PlayerMissing)
+            {
+                finishFatalHandoff(*handoff);
+                return;
+            }
+            finishDisconnectedHandoff(*handoff);
+        }
     }
 
     void ProtocolGateway::drainZoneTransitions()
@@ -534,13 +771,24 @@ namespace snf::server
         _zone_transitions->wakeIfPending();
     }
 
+    bool ProtocolGateway::zoneTransitionsDrained() const noexcept
+    {
+        return _active_zone_handoffs.empty() &&
+               (_zone_transitions == nullptr || _zone_transitions->drained());
+    }
+
     ZoneHandoffGatewayStats ProtocolGateway::zoneHandoffStats() const noexcept
     {
         return ZoneHandoffGatewayStats{
             .transition_nanoseconds = _zone_transition_nanoseconds.snapshot(),
             .failures_before_source_leave = _handoff_failures_before_source_leave,
+            .target_failures = _handoff_target_failures,
+            .compensated = _handoffs_compensated,
+            .fatal = _fatal_handoffs,
             .transition_busy_replies = _transition_busy_replies,
             .stale_completions = _stale_handoff_completions,
+            .disconnect_cleanups = _disconnect_handoff_cleanups,
+            .shutdown_cancels = _shutdown_handoff_cancels,
             .pending = _active_zone_handoffs.size(),
         };
     }
@@ -948,6 +1196,16 @@ namespace snf::server
 
     PostResult ProtocolGateway::tryPostConnectionClosed(ConnectionClosed closed)
     {
+        if (const auto active = _active_zone_handoffs.find(closed.connection);
+            active != _active_zone_handoffs.end())
+        {
+            active->second.disconnecting = true;
+            // TcpServer retains this exact lifecycle value in its bounded retry
+            // deque. Once transition cleanup removes the active record, the retry
+            // continues through the normal Player close/save path below.
+            return PostResult::Full;
+        }
+
         if (!closed.has_location_snapshot)
         {
             const PlayerLocationSnapshot snapshot =
@@ -1075,18 +1333,22 @@ namespace snf::server
 
     void ProtocolGateway::close() noexcept
     {
+        _handoff_admission_closed = true;
         _commands.close();
     }
 
     void ProtocolGateway::cancel() noexcept
     {
+        _handoff_admission_closed = true;
         if (_zone_transitions != nullptr)
         {
             _zone_transitions->cancel();
         }
+        _shutdown_handoff_cancels += _active_zone_handoffs.size();
         for (const auto& [connection, active] : _active_zone_handoffs)
         {
             static_cast<void>(active);
+            _sessions.noteLocation(connection, std::nullopt);
             _routes.abandon(connection);
         }
         _active_zone_handoffs.clear();

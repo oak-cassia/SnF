@@ -12,6 +12,7 @@ namespace snf::server
         explicit ProtocolZoneResultSink(OutboundSink& outbound) noexcept;
 
         void accept(const ZoneInboundCommand& command, const ZoneResult& result);
+        void reportAdmissionFailure(snf::net::ConnectionId connection) noexcept;
 
     private:
         [[nodiscard]] snf::protocol::Frame map(const ZoneInboundCommand& command,
