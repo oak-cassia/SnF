@@ -101,8 +101,6 @@ namespace
                 },
             .currency_balance = 700,
             .purchased_item_count = 3,
-            .ranking_score = 40,
-            .last_domain_event_sequence = 2,
         });
 
         const auto command = make_ping(20);
@@ -112,8 +110,6 @@ namespace
         assert(record.handled_command_count == 11);
         assert(record.currency_balance == 700);
         assert(record.purchased_item_count == 3);
-        assert(record.ranking_score == 40);
-        assert(record.last_domain_event_sequence == 2);
         assert((record.last_location == snf::server::PlayerLocation{
                                             .zone = snf::server::ZoneId{.value = 5},
                                             .position = {.x = 3, .y = -4},
@@ -129,162 +125,116 @@ namespace
                                                   }));
     }
 
-    void test_purchase_completion_updates_authoritative_state_and_preserves_it_on_unavailable()
+    void test_live_purchase_is_memory_authoritative_and_bounded()
     {
-        const snf::server::PlayerId player{.value = 90};
-        snf::server::PlayerActor actor{snf::server::PlayerActorId{player}};
-        const snf::server::PurchaseCommand command{
-            .request_id = 30,
-            .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = 7},
+        const snf::server::PlayerId player{.value = 89};
+        snf::server::PlayerActor actor{snf::server::PlayerActorId{player}, 1};
+        actor.restore(snf::server::PlayerRecord{
+            .player = player,
+            .last_location = std::nullopt,
+            .currency_balance = 1000,
+            .purchased_item_count = 0,
+        });
+
+        const snf::server::PurchaseCommand first{
+            .request_id = 21,
+            .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = 1},
             .product = snf::server::BASIC_PRODUCT,
         };
-
-        const auto committed =
-            actor.completePurchase(command,
-                                   snf::server::PurchaseTransactionResult{
-                                       .status = snf::server::PurchaseStatus::Committed,
-                                       .player = player,
-                                       .idempotency_key = command.idempotency_key,
-                                       .product = command.product,
-                                       .currency_balance = 900,
-                                       .purchased_item_count = 1,
-                                       .replayed = false,
-                                   });
+        const auto committed = run_handler(actor, first);
+        const auto* committed_send =
+            std::get_if<snf::server::SendResponse>(&committed.effects.front());
+        assert(committed_send != nullptr);
+        const auto* committed_response =
+            std::get_if<snf::server::PurchaseResponse>(&committed_send->response);
+        assert(committed_response != nullptr);
+        assert(committed_response->result.status == snf::server::PurchaseStatus::Committed);
         assert(actor.state().currencyBalance() == 900);
         assert(actor.state().purchasedItemCount() == 1);
-        const auto* send = std::get_if<snf::server::SendResponse>(&committed.effects.front());
-        assert(send != nullptr);
-        const auto* response = std::get_if<snf::server::PurchaseResponse>(&send->response);
-        assert(response != nullptr);
-        assert(response->result.currency_balance == 900);
+        assert((actor.dirtyComponents() &
+                snf::server::componentMask(snf::server::PlayerStateComponent::Economy)) != 0);
 
-        const auto unavailable =
-            actor.completePurchase(command,
-                                   snf::server::PurchaseTransactionResult{
-                                       .status = snf::server::PurchaseStatus::Unavailable,
-                                       .player = player,
-                                       .idempotency_key = command.idempotency_key,
-                                       .product = command.product,
-                                       .currency_balance = 0,
-                                       .purchased_item_count = 0,
-                                       .replayed = false,
-                                   });
+        snf::server::PlayerStateComponentMask cleared = 0;
+        const auto dirty_snapshot = actor.takeDirtySnapshot(&cleared);
+        assert(dirty_snapshot.has_value());
+        assert((cleared &
+                snf::server::componentMask(snf::server::PlayerStateComponent::Economy)) != 0);
+        assert(actor.dirtyComponents() == 0);
+
+        const auto replay = run_handler(actor, first);
+        const auto* replay_send = std::get_if<snf::server::SendResponse>(&replay.effects.front());
+        assert(replay_send != nullptr);
+        const auto* replay_response =
+            std::get_if<snf::server::PurchaseResponse>(&replay_send->response);
+        assert(replay_response != nullptr);
+        assert(replay_response->result.replayed);
         assert(actor.state().currencyBalance() == 900);
         assert(actor.state().purchasedItemCount() == 1);
-        const auto* unavailable_send =
-            std::get_if<snf::server::SendResponse>(&unavailable.effects.front());
-        assert(unavailable_send != nullptr);
-        const auto* unavailable_response =
-            std::get_if<snf::server::PurchaseResponse>(&unavailable_send->response);
-        assert(unavailable_response != nullptr);
-        assert(unavailable_response->result.currency_balance == 900);
-        assert(unavailable_response->result.purchased_item_count == 1);
-        assert(actor.state().handledCommandCount() == 2);
+
+        const snf::server::PurchaseCommand capacity{
+            .request_id = 22,
+            .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = 2},
+            .product = snf::server::BASIC_PRODUCT,
+        };
+        const auto rejected = run_handler(actor, capacity);
+        const auto* rejected_send =
+            std::get_if<snf::server::SendResponse>(&rejected.effects.front());
+        assert(rejected_send != nullptr);
+        const auto* rejected_response =
+            std::get_if<snf::server::PurchaseResponse>(&rejected_send->response);
+        assert(rejected_response != nullptr);
+        assert(rejected_response->result.status ==
+               snf::server::PurchaseStatus::IdempotencyCapacityExceeded);
+        assert(actor.state().currencyBalance() == 900);
     }
 
-    void test_trusted_score_award_updates_state_and_emits_an_absolute_event()
+    void test_live_purchase_rejects_unknown_and_reports_insufficient_funds()
     {
-        const snf::server::PlayerId player{.value = 91};
+        const snf::server::PlayerId player{.value = 890};
         snf::server::PlayerActor actor{snf::server::PlayerActorId{player}};
         actor.restore(snf::server::PlayerRecord{
             .player = player,
-            .handled_command_count = 4,
             .last_location = std::nullopt,
-            .currency_balance = 800,
-            .purchased_item_count = 2,
-            .ranking_score = 100,
-            .last_domain_event_sequence = 2,
+            .currency_balance = 50,
         });
-        const snf::server::PlayerCommand command = snf::server::AwardRankingScoreCommand{
-            .request_id = 40,
-            .award_id = snf::server::RankingAwardId{.value = 400},
-            .score_delta = 25,
+
+        const snf::server::PurchaseCommand insufficient{
+            .request_id = 23,
+            .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = 3},
+            .product = snf::server::BASIC_PRODUCT,
         };
+        const auto first = run_handler(actor, insufficient);
+        const auto* first_send = std::get_if<snf::server::SendResponse>(&first.effects.front());
+        assert(first_send != nullptr);
+        const auto* first_response =
+            std::get_if<snf::server::PurchaseResponse>(&first_send->response);
+        assert(first_response != nullptr);
+        assert(first_response->result.status == snf::server::PurchaseStatus::InsufficientFunds);
+        assert(!actor.hasFlushableDirtyState());
 
-        const auto& award = std::get<snf::server::AwardRankingScoreCommand>(command);
-        const auto result =
-            actor.completeRankingAward(award,
-                                       snf::server::RankingAwardTransactionResult{
-                                           .status = snf::server::RankingAwardStatus::Committed,
-                                           .player = player,
-                                           .award_id = award.award_id,
-                                           .score_delta = award.score_delta,
-                                           .event_sequence = 3,
-                                           .event_score = 125,
-                                           .global_offset = 9,
-                                           .authoritative_score = 125,
-                                           .authoritative_sequence = 3,
-                                           .replayed = false,
-                                       });
-        assert(result.effects.empty());
-        assert(actor.state().rankingScore() == 125);
-        assert(actor.state().lastDomainEventSequence() == 3);
-        assert(actor.state().handledCommandCount() == 5);
-        assert(actor.snapshot().ranking_score == 125);
-        assert(actor.snapshot().last_domain_event_sequence == 3);
+        const auto replay = run_handler(actor, insufficient);
+        const auto* replay_send = std::get_if<snf::server::SendResponse>(&replay.effects.front());
+        assert(replay_send != nullptr);
+        const auto* replay_response =
+            std::get_if<snf::server::PurchaseResponse>(&replay_send->response);
+        assert(replay_response != nullptr);
+        assert(replay_response->result.replayed);
 
-        const auto old_replay =
-            actor.completeRankingAward(award,
-                                       snf::server::RankingAwardTransactionResult{
-                                           .status = snf::server::RankingAwardStatus::Committed,
-                                           .player = player,
-                                           .award_id = award.award_id,
-                                           .score_delta = award.score_delta,
-                                           .event_sequence = 3,
-                                           .event_score = 125,
-                                           .global_offset = 9,
-                                           .authoritative_score = 140,
-                                           .authoritative_sequence = 4,
-                                           .replayed = true,
-                                       });
-        assert(old_replay.effects.empty());
-        assert(actor.state().rankingScore() == 140);
-        assert(actor.state().lastDomainEventSequence() == 4);
+        const snf::server::PurchaseCommand unknown{
+            .request_id = 24,
+            .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = 4},
+            .product = snf::server::ProductId{.value = 999},
+        };
+        const auto missing = run_handler(actor, unknown);
+        const auto* missing_send = std::get_if<snf::server::SendResponse>(&missing.effects.front());
+        assert(missing_send != nullptr);
+        const auto* missing_response =
+            std::get_if<snf::server::PurchaseResponse>(&missing_send->response);
+        assert(missing_response != nullptr);
+        assert(missing_response->result.status == snf::server::PurchaseStatus::ProductNotFound);
+
     }
 
-    void test_rejected_score_awards_are_request_outcomes_and_preserve_state()
-    {
-        const snf::server::PlayerId player{.value = 92};
-        snf::server::PlayerActor actor{snf::server::PlayerActorId{player}};
-        actor.restore(snf::server::PlayerRecord{
-            .player = player,
-            .handled_command_count = 7,
-            .last_location = std::nullopt,
-            .currency_balance = 800,
-            .purchased_item_count = 2,
-            .ranking_score = 125,
-            .last_domain_event_sequence = 3,
-        });
-        const snf::server::AwardRankingScoreCommand command{
-            .request_id = 41,
-            .award_id = snf::server::RankingAwardId{.value = 401},
-            .score_delta = 25,
-        };
-        constexpr std::array rejected_statuses{
-            snf::server::RankingAwardStatus::IdempotencyConflict,
-            snf::server::RankingAwardStatus::ScoreOverflow,
-            snf::server::RankingAwardStatus::SequenceOverflow,
-            snf::server::RankingAwardStatus::EventOffsetOverflow,
-            snf::server::RankingAwardStatus::CapacityExceeded,
-            snf::server::RankingAwardStatus::Unavailable,
-        };
-
-        for (const auto status : rejected_statuses)
-        {
-            const auto result =
-                actor.completeRankingAward(command,
-                                           snf::server::RankingAwardTransactionResult{
-                                               .status = status,
-                                               .player = player,
-                                               .award_id = command.award_id,
-                                               .score_delta = command.score_delta,
-                                           });
-            assert(result.effects.empty());
-            assert(actor.state().rankingScore() == 125);
-            assert(actor.state().lastDomainEventSequence() == 3);
-        }
-        assert(actor.state().handledCommandCount() == 7 + rejected_statuses.size());
-    }
 }
 
 void run_player_actor_tests()
@@ -293,7 +243,6 @@ void run_player_actor_tests()
     test_handler_body_does_not_run_before_the_first_resume();
     test_persistent_player_actor_acknowledges_its_identity();
     test_persistent_player_actor_restores_and_snapshots_state();
-    test_purchase_completion_updates_authoritative_state_and_preserves_it_on_unavailable();
-    test_trusted_score_award_updates_state_and_emits_an_absolute_event();
-    test_rejected_score_awards_are_request_outcomes_and_preserve_state();
+    test_live_purchase_is_memory_authoritative_and_bounded();
+    test_live_purchase_rejects_unknown_and_reports_insufficient_funds();
 }

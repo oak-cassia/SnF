@@ -91,64 +91,24 @@ namespace
     }
 
     snf::runtime::ActorTask<snf::server::PlayerSaveResult>
-    awaitPlayerSave(snf::server::PlayerRepository& repository,
+    awaitPlayerSave(snf::server::PlayerPersistenceService& persistence,
                     snf::runtime::ActorContext& context,
                     snf::server::PlayerRecord record)
     {
         auto result = co_await snf::runtime::awaitAsyncOperation<snf::server::PlayerSaveResult>(
             context,
-            [&repository, record = std::move(record)](
+            [&persistence, record = std::move(record)](
                 snf::runtime::AsyncOperationProducer<snf::server::PlayerSaveResult> producer)
             {
-                repository.asyncSave(record,
-                                     [producer = std::move(producer)](
-                                         snf::server::PlayerSaveResult result) mutable noexcept
-                                     { producer.complete(std::move(result)); });
+                persistence.asyncSave(
+                    std::move(record),
+                    [producer = std::move(producer)](
+                        snf::server::PlayerSaveResult result) mutable noexcept
+                    { producer.complete(std::move(result)); });
             });
         co_return std::move(result);
     }
 
-    snf::runtime::ActorTask<snf::server::PurchaseTransactionResult>
-    awaitPurchase(snf::server::PlayerRepository& repository,
-                  snf::runtime::ActorContext& context,
-                  snf::server::PurchaseRequest request)
-    {
-        auto result =
-            co_await snf::runtime::awaitAsyncOperation<snf::server::PurchaseTransactionResult>(
-                context,
-                [&repository, request](
-                    snf::runtime::AsyncOperationProducer<snf::server::PurchaseTransactionResult>
-                        producer)
-                {
-                    repository.asyncPurchase(
-                        request,
-                        [producer = std::move(producer)](
-                            snf::server::PurchaseTransactionResult result) mutable noexcept
-                        { producer.complete(std::move(result)); });
-                });
-        co_return std::move(result);
-    }
-
-    snf::runtime::ActorTask<snf::server::RankingAwardTransactionResult>
-    awaitRankingAward(snf::server::PlayerRepository& repository,
-                      snf::runtime::ActorContext& context,
-                      snf::server::RankingAwardRequest request)
-    {
-        auto result =
-            co_await snf::runtime::awaitAsyncOperation<snf::server::RankingAwardTransactionResult>(
-                context,
-                [&repository, request](
-                    snf::runtime::AsyncOperationProducer<snf::server::RankingAwardTransactionResult>
-                        producer)
-                {
-                    repository.asyncAwardRankingScore(
-                        request,
-                        [producer = std::move(producer)](
-                            snf::server::RankingAwardTransactionResult result) mutable noexcept
-                        { producer.complete(std::move(result)); });
-                });
-        co_return std::move(result);
-    }
 }
 
 namespace snf::server
@@ -162,14 +122,14 @@ namespace snf::server
             Idle,
             Loading,
             Handling,
-            Purchasing,
-            AwardingRankingScore,
             Reserving,
             Saving,
         };
 
-        PlayerActorSlot(PlayerActorId actor_id, std::function<void(PlayerActorId)> on_deactivated)
-            : actor(actor_id)
+        PlayerActorSlot(PlayerActorId actor_id,
+                        std::function<void(PlayerActorId)> on_deactivated,
+                        const std::size_t max_purchase_idempotency_records)
+            : actor(actor_id, max_purchase_idempotency_records)
             , identity(actor_id)
             , on_deactivated(std::move(on_deactivated))
         {
@@ -194,8 +154,6 @@ namespace snf::server
         // Keeping the frame in the slot is what confines resume and destruction to
         // the owning Worker.
         snf::runtime::ActorTask<PlayerResult> task;
-        snf::runtime::ActorTask<PurchaseTransactionResult> purchase_task;
-        snf::runtime::ActorTask<RankingAwardTransactionResult> ranking_award_task;
         // Started only when capacity was not immediately available, and owned by the
         // slot for the same reason.
         snf::runtime::ActorTask<OutboundReservation> reservation_task;
@@ -233,6 +191,9 @@ namespace snf::server
         , _on_before_command(std::move(config.on_before_command))
         , _on_actor_deactivated(std::move(config.on_actor_deactivated))
         , _on_record_loaded(std::move(config.on_record_loaded))
+        , _persistence_service(config.persistence_service)
+        , _max_purchase_idempotency_records_per_player(
+              config.max_purchase_idempotency_records_per_player)
     {
         if (_kind != snf::runtime::ActorKind::ProvisionalPlayer &&
             _kind != snf::runtime::ActorKind::Player)
@@ -243,6 +204,15 @@ namespace snf::server
         if (_kind == snf::runtime::ActorKind::Player && _repository == nullptr)
         {
             throw std::invalid_argument{"Persistent PlayerActorBinding requires a repository"};
+        }
+        if (_max_purchase_idempotency_records_per_player == 0)
+        {
+            throw std::invalid_argument{"Purchase idempotency capacity must be positive"};
+        }
+        if (_kind == snf::runtime::ActorKind::Player && _persistence_service == nullptr)
+        {
+            _owned_persistence_service = std::make_unique<PlayerPersistenceService>(*_repository);
+            _persistence_service = _owned_persistence_service.get();
         }
     }
 
@@ -304,7 +274,9 @@ namespace snf::server
         const PlayerActorId identity = kind() == snf::runtime::ActorKind::Player
                                            ? PlayerActorId{PlayerId{.value = entity}}
                                            : PlayerActorId{ProvisionalActorId{.value = entity}};
-        return std::make_unique<PlayerActorSlot>(identity, _on_actor_deactivated);
+        return std::make_unique<PlayerActorSlot>(identity,
+                                                 _on_actor_deactivated,
+                                                 _max_purchase_idempotency_records_per_player);
     }
 
     snf::runtime::ActorDispatchResult
@@ -339,7 +311,7 @@ namespace snf::server
 
             player_slot.stage = PlayerActorSlot::Stage::Saving;
             player_slot.save_task =
-                awaitPlayerSave(*_repository, context, player_slot.actor.snapshot());
+                awaitPlayerSave(*_persistence_service, context, player_slot.actor.snapshot());
             return advance(player_slot, context, stop_token);
         }
 
@@ -366,43 +338,17 @@ namespace snf::server
             return advance(player_slot, context, stop_token);
         }
 
-        if (const auto* purchase = std::get_if<PurchaseCommand>(&payload.command.command))
+        if (std::holds_alternative<PurchaseCommand>(payload.command.command))
         {
             if (kind() != snf::runtime::ActorKind::Player)
             {
                 throw std::logic_error{"PurchaseCommand reached a provisional Player actor"};
             }
-            player_slot.pending_command = *purchase;
-            player_slot.stage = PlayerActorSlot::Stage::Purchasing;
-            player_slot.purchase_task =
-                awaitPurchase(*_repository,
-                              context,
-                              PurchaseRequest{
-                                  .player = *player_slot.identity.playerId(),
-                                  .idempotency_key = purchase->idempotency_key,
-                                  .product = purchase->product,
-                              });
+            player_slot.pending_command = payload.command.command;
+            player_slot.stage = PlayerActorSlot::Stage::Handling;
+            player_slot.task = player_slot.actor.handle(*player_slot.pending_command);
             return advance(player_slot, context, stop_token);
         }
-        if (const auto* award = std::get_if<AwardRankingScoreCommand>(&payload.command.command))
-        {
-            if (kind() != snf::runtime::ActorKind::Player)
-            {
-                throw std::logic_error{"Ranking award reached a provisional Player actor"};
-            }
-            player_slot.pending_command = *award;
-            player_slot.stage = PlayerActorSlot::Stage::AwardingRankingScore;
-            player_slot.ranking_award_task =
-                awaitRankingAward(*_repository,
-                                  context,
-                                  RankingAwardRequest{
-                                      .player = *player_slot.identity.playerId(),
-                                      .award_id = award->award_id,
-                                      .score_delta = award->score_delta,
-                                  });
-            return advance(player_slot, context, stop_token);
-        }
-
         player_slot.stage = PlayerActorSlot::Stage::Handling;
         player_slot.task = player_slot.actor.handle(payload.command.command);
         return advance(player_slot, context, stop_token);
@@ -459,34 +405,8 @@ namespace snf::server
             {
                 throw std::logic_error{"Player load completed without a pending command"};
             }
-            if (const auto* purchase = std::get_if<PurchaseCommand>(&*slot.pending_command))
-            {
-                slot.stage = PlayerActorSlot::Stage::Purchasing;
-                slot.purchase_task = awaitPurchase(*_repository,
-                                                   context,
-                                                   PurchaseRequest{
-                                                       .player = *slot.identity.playerId(),
-                                                       .idempotency_key = purchase->idempotency_key,
-                                                       .product = purchase->product,
-                                                   });
-            }
-            else if (const auto* award =
-                         std::get_if<AwardRankingScoreCommand>(&*slot.pending_command))
-            {
-                slot.stage = PlayerActorSlot::Stage::AwardingRankingScore;
-                slot.ranking_award_task = awaitRankingAward(*_repository,
-                                                            context,
-                                                            RankingAwardRequest{
-                                                                .player = *slot.identity.playerId(),
-                                                                .award_id = award->award_id,
-                                                                .score_delta = award->score_delta,
-                                                            });
-            }
-            else
-            {
-                slot.stage = PlayerActorSlot::Stage::Handling;
-                slot.task = slot.actor.handle(*slot.pending_command);
-            }
+            slot.stage = PlayerActorSlot::Stage::Handling;
+            slot.task = slot.actor.handle(*slot.pending_command);
         }
 
         if (slot.stage == PlayerActorSlot::Stage::Handling)
@@ -502,48 +422,7 @@ namespace snf::server
             // same Worker.
             slot.pending_result = slot.task.takeResult();
             slot.task = {};
-            slot.pending_command.reset();
-            slot.stage = PlayerActorSlot::Stage::Reserving;
-        }
-
-        if (slot.stage == PlayerActorSlot::Stage::AwardingRankingScore)
-        {
-            if (slot.ranking_award_task.resume() == snf::runtime::ActorTaskStatus::Suspended)
-            {
-                return snf::runtime::ActorDispatchResult::Suspended;
-            }
-
-            RankingAwardTransactionResult result = slot.ranking_award_task.takeResult();
-            slot.ranking_award_task = {};
-            const auto* award = slot.pending_command
-                                    ? std::get_if<AwardRankingScoreCommand>(&*slot.pending_command)
-                                    : nullptr;
-            if (award == nullptr)
-            {
-                throw std::logic_error{"Ranking award completed without its pending command"};
-            }
-            slot.pending_result = slot.actor.completeRankingAward(*award, std::move(result));
-            slot.pending_command.reset();
-            slot.stage = PlayerActorSlot::Stage::Reserving;
-        }
-
-        if (slot.stage == PlayerActorSlot::Stage::Purchasing)
-        {
-            if (slot.purchase_task.resume() == snf::runtime::ActorTaskStatus::Suspended)
-            {
-                return snf::runtime::ActorDispatchResult::Suspended;
-            }
-
-            PurchaseTransactionResult result = slot.purchase_task.takeResult();
-            slot.purchase_task = {};
-            const auto* purchase = slot.pending_command
-                                       ? std::get_if<PurchaseCommand>(&*slot.pending_command)
-                                       : nullptr;
-            if (purchase == nullptr)
-            {
-                throw std::logic_error{"Purchase completed without its pending command"};
-            }
-            slot.pending_result = slot.actor.completePurchase(*purchase, std::move(result));
+            publishDirtySnapshot(slot);
             slot.pending_command.reset();
             slot.stage = PlayerActorSlot::Stage::Reserving;
         }
@@ -650,6 +529,32 @@ namespace snf::server
         }
 
         throw std::runtime_error{"Player effect emission failed while logic runtime was active"};
+    }
+
+    void PlayerActorBinding::publishDirtySnapshot(PlayerActorSlot& slot) noexcept
+    {
+        if (_persistence_service == nullptr || !slot.actor.hasFlushableDirtyState())
+        {
+            return;
+        }
+
+        PlayerStateComponentMask cleared_components = slot.actor.dirtyComponents();
+        try
+        {
+            auto snapshot = slot.actor.takeDirtySnapshot(&cleared_components);
+            if (!snapshot)
+            {
+                return;
+            }
+            if (!_persistence_service->tryEnqueue(std::move(*snapshot)))
+            {
+                slot.actor.restoreDirtyComponents(cleared_components);
+            }
+        }
+        catch (...)
+        {
+            slot.actor.restoreDirtyComponents(cleared_components);
+        }
     }
 
     snf::runtime::ActorDispatchResult

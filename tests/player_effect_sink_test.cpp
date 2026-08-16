@@ -1,6 +1,5 @@
 #include "outbound_reservation_test_support.hpp"
 #include "snf/server/protocol_player_effect_sink.hpp"
-#include "snf/server/ranking_projection.hpp"
 
 #include <cassert>
 #include <cstddef>
@@ -17,14 +16,12 @@ namespace
     // the wrong contract.
     struct EffectSinkFixture
     {
-        explicit EffectSinkFixture(const std::size_t capacity,
-                                   const std::size_t event_capacity = 16)
+        explicit EffectSinkFixture(const std::size_t capacity)
             : wake(snf::test::make_wake_descriptor())
             , channel(snf::server::OutboundChannelConfig{.capacity = capacity,
                                                          .max_slots_per_connection = capacity},
                       wake.getDescriptor())
-            , events(event_capacity)
-            , effects(channel, &events)
+            , effects(channel)
         {
         }
 
@@ -47,7 +44,6 @@ namespace
 
         snf::net::UniqueFileDescriptor wake;
         snf::server::OutboundChannel channel;
-        snf::server::InMemoryRankingEventPipeline events;
         snf::server::ProtocolPlayerEffectSink effects;
     };
 
@@ -62,25 +58,6 @@ namespace
                             snf::server::PongResponse{
                                 .request_id = request_id,
                                 .payload = std::move(payload),
-                            },
-                    },
-                },
-        };
-    }
-
-    snf::server::PlayerResult score_result(const snf::server::PlayerId player,
-                                           const std::uint64_t sequence,
-                                           const std::uint64_t score)
-    {
-        return snf::server::PlayerResult{
-            .effects =
-                {
-                    snf::server::PublishPlayerEvent{
-                        .event =
-                            snf::server::PlayerScoreChanged{
-                                .player = player,
-                                .sequence = sequence,
-                                .score = score,
                             },
                     },
                 },
@@ -145,38 +122,6 @@ namespace
         assert(fixture.channel.reservedSlotCount() == 0);
     }
 
-    void test_event_effect_uses_no_outbound_slot_and_advances_projection()
-    {
-        EffectSinkFixture fixture{1};
-        const snf::net::ConnectionId connection{.descriptor = 4, .generation = 9};
-        const snf::server::PlayerId player{.value = 72};
-        auto result = score_result(player, 1, 50);
-        assert(fixture.effects.requiredSlots(result) == 0);
-        auto reservation = fixture.reserve(connection, 0);
-
-        assert(fixture.effects.commit(connection, std::move(result), reservation));
-        assert(fixture.channel.size() == 0);
-        assert(fixture.channel.reservedSlotCount() == 0);
-        assert((fixture.events.standings() ==
-                std::vector<snf::server::RankingEntry>{
-                    {.player = player, .score = 50, .last_sequence = 1}}));
-    }
-
-    void test_event_projection_rejection_is_not_silently_accepted()
-    {
-        EffectSinkFixture fixture{1, 1};
-        const snf::net::ConnectionId connection{.descriptor = 4, .generation = 9};
-        const snf::server::PlayerId player{.value = 73};
-        auto reservation = fixture.reserve(connection, 0);
-        assert(fixture.effects.commit(connection, score_result(player, 1, 10), reservation));
-
-        auto second_reservation = fixture.reserve(connection, 0);
-        assert(
-            !fixture.effects.commit(connection, score_result(player, 2, 20), second_reservation));
-        assert(fixture.events.stats().rejected == 1);
-        assert(fixture.events.stats().event_count == 1);
-    }
-
     void test_a_cancelled_channel_rejects_the_emission()
     {
         EffectSinkFixture fixture{4};
@@ -223,8 +168,6 @@ void run_player_effect_sink_tests()
     test_maps_send_response_to_a_frame_for_the_same_connection();
     test_preserves_effect_order_and_request_ids();
     test_an_empty_result_consumes_no_capacity();
-    test_event_effect_uses_no_outbound_slot_and_advances_projection();
-    test_event_projection_rejection_is_not_silently_accepted();
     test_a_cancelled_channel_rejects_the_emission();
     test_an_underpriced_reservation_keeps_the_effects_it_already_emitted();
 }

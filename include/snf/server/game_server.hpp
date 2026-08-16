@@ -13,14 +13,13 @@
 #include "snf/server/party_coordinator.hpp"
 #include "snf/server/player_actor_binding.hpp"
 #include "snf/server/player_actor_ingress.hpp"
+#include "snf/server/player_persistence_service.hpp"
 #include "snf/server/player_repository.hpp"
 #include "snf/server/player_session_directory.hpp"
 #include "snf/server/protocol_gateway.hpp"
 #include "snf/server/protocol_party_result_sink.hpp"
 #include "snf/server/protocol_player_effect_sink.hpp"
 #include "snf/server/protocol_zone_result_sink.hpp"
-#include "snf/server/ranking_projection.hpp"
-#include "snf/server/repository_ranking_projector.hpp"
 #include "snf/server/route_coordinator.hpp"
 #include "snf/server/tcp_server.hpp"
 #include "snf/server/zone_actor_binding.hpp"
@@ -57,7 +56,6 @@ namespace snf::server
         ZoneHandoffGatewayStats zone_handoff_gateway;
         ZoneTransitionChannelStats zone_transition_channel;
         PartyActorBindingStats party_actors;
-        RankingPipelineStats ranking_projection;
         // Commands that were admitted and reached a final result, counted once each
         // whether or not they answered. If playable slow-command measurements justify
         // per-connection credit, its owner consumes this same terminal signal.
@@ -65,6 +63,7 @@ namespace snf::server
         // Posts the runtime refused. A different fact with a different cause, so it is
         // never folded into the count above.
         std::uint64_t command_admission_rejections{0};
+        PlayerPersistenceServiceStats player_persistence;
     };
 
     struct GameServerConfig
@@ -79,17 +78,10 @@ namespace snf::server
         // waiter registry is sized against: a Worker holds one of these while it waits
         // for capacity, so registration must never be the tighter limit.
         std::size_t actor_max_in_flight_operations_per_worker{1024};
-        std::size_t player_repository_worker_count{1};
-        std::size_t player_repository_queue_capacity{4096};
         std::size_t max_purchase_idempotency_records_per_player{1024};
         // Empty keeps the deterministic in-memory adapter. A value selects the
         // durable MySQL adapter and its own bounded Worker/queue configuration.
         std::optional<MySqlPlayerRepositoryConfig> mysql_player_repository{};
-        std::size_t max_player_domain_events{65536};
-        std::size_t ranking_projector_batch_size{1024};
-        std::size_t ranking_projector_max_batches_per_poll{8};
-        std::uint64_t ranking_checkpoint_every_events{1024};
-        std::chrono::milliseconds ranking_projector_poll_interval{100};
         std::size_t max_party_members{8};
         std::int32_t zone_aoi_radius{1000};
         std::chrono::milliseconds zone_tick_interval{50};
@@ -111,6 +103,8 @@ namespace snf::server
         // the reporter only posts to. Its cost is not part of
         // TcpServerMetrics::reactor_turn_nanoseconds.
         std::function<void(const ServerMetricsSnapshot&)> metrics_reporter{};
+        std::size_t player_persistence_queue_capacity{4096};
+        std::chrono::milliseconds player_persistence_flush_interval{100};
     };
 
     // Composes the reactor, Logic ActorRuntime, Player binding, outbound hand-off
@@ -137,8 +131,6 @@ namespace snf::server
         [[nodiscard]] ZoneTimerServiceStats getZoneTimerStats() const;
         [[nodiscard]] ZoneActorBindingStats getZoneActorStats() const noexcept;
         [[nodiscard]] PartyActorBindingStats getPartyActorStats() const noexcept;
-        [[nodiscard]] RankingPipelineStats getRankingStats() const;
-        [[nodiscard]] std::vector<RankingEntry> getRankingStandings() const;
         // Reads reactor state, so it belongs to the reactor thread: call it from
         // metrics_reporter or after run() has returned.
         [[nodiscard]] ServerMetricsSnapshot getMetricsSnapshot() const;
@@ -167,7 +159,7 @@ namespace snf::server
         RouteCoordinator _route_coordinator;
         PartyCoordinator _party_coordinator;
         std::unique_ptr<PlayerRepository> _player_repository;
-        RepositoryRankingProjector _ranking_projector;
+        PlayerPersistenceService _player_persistence_service;
         snf::runtime::RuntimeCompletionCoordinator _runtime_completion;
         // Bindings must outlive the generic runtime: the worker owns the
         // wrapper destruction, while this object owns Player dependencies.

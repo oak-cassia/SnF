@@ -20,13 +20,6 @@ namespace snf::server
         [[nodiscard]] bool operator==(const ProductId&) const noexcept = default;
     };
 
-    struct PurchaseRequest
-    {
-        PlayerId player;
-        PurchaseIdempotencyKey idempotency_key;
-        ProductId product;
-    };
-
     enum class PurchaseStatus : std::uint8_t
     {
         Committed = 0,

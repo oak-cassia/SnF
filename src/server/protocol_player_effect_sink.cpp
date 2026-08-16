@@ -11,10 +11,8 @@ namespace
 
 namespace snf::server
 {
-    ProtocolPlayerEffectSink::ProtocolPlayerEffectSink(OutboundSink& outbound,
-                                                       PlayerDomainEventSink* events) noexcept
+    ProtocolPlayerEffectSink::ProtocolPlayerEffectSink(OutboundSink& outbound) noexcept
         : _outbound(outbound)
-        , _events(events)
     {
     }
 
@@ -48,17 +46,6 @@ namespace snf::server
                                                     .connection = connection,
                                                     .frame = _response_mapper.map(value.response),
                                                 });
-                    }
-                    else if constexpr (std::is_same_v<Effect, PublishPlayerEvent>)
-                    {
-                        if (_events == nullptr)
-                        {
-                            return false;
-                        }
-                        const PlayerEventPublishResult status =
-                            _events->publish(std::move(value.event));
-                        return status == PlayerEventPublishResult::Published ||
-                               status == PlayerEventPublishResult::Duplicate;
                     }
                     else
                     {

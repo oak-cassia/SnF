@@ -858,7 +858,7 @@ namespace
         server.stop();
     }
 
-    void test_purchase_is_effectively_once_after_response_loss_and_reconnect()
+    void test_live_purchase_is_memory_authoritative_and_flushes()
     {
         RunningServer server;
         constexpr std::uint64_t player_id = 79;
@@ -893,8 +893,8 @@ namespace
                                  900,
                                  1);
 
-        // The transaction commits before response emission. Closing immediately
-        // after the send models a client that cannot know whether key 2 committed.
+        // The Actor commits before response emission. Closing immediately after the
+        // send models a client that cannot know whether key 2 was applied in memory.
         const auto lost_response = purchase_frame(113, 2);
         send_all(client.getDescriptor(), snf::protocol::encode_frame(lost_response));
         client.init();
@@ -937,33 +937,33 @@ namespace
         assert_purchase_response(receive_purchase_response(reconnected.getDescriptor()),
                                  retry.request_id,
                                  snf::server::PurchaseStatus::Committed,
-                                 true,
-                                 2,
-                                 1,
-                                 800,
-                                 2);
-
-        const auto conflict = purchase_frame(116, 2, 2);
-        send_all(reconnected.getDescriptor(), snf::protocol::encode_frame(conflict));
-        assert_purchase_response(receive_purchase_response(reconnected.getDescriptor()),
-                                 conflict.request_id,
-                                 snf::server::PurchaseStatus::IdempotencyConflict,
                                  false,
                                  2,
-                                 2,
-                                 800,
-                                 2);
+                                 1,
+                                 700,
+                                 3);
+
+        const auto unknown = purchase_frame(118, 4, 999);
+        send_all(reconnected.getDescriptor(), snf::protocol::encode_frame(unknown));
+        assert_purchase_response(receive_purchase_response(reconnected.getDescriptor()),
+                                 unknown.request_id,
+                                 snf::server::PurchaseStatus::ProductNotFound,
+                                 false,
+                                 4,
+                                 999,
+                                 700,
+                                 3);
 
         reconnected.init();
         server.stop();
         const auto metrics = server.getMetricsSnapshot();
-        assert(metrics.player_repository.purchase_committed == 2);
-        assert(metrics.player_repository.purchase_replayed == 2);
-        assert(metrics.player_repository.purchase_rejected == 1);
+        assert(metrics.player_persistence.snapshots_accepted >= 1);
+        assert(metrics.player_persistence.saves_succeeded >= 1);
+        assert(metrics.player_persistence.final_saves >= 1);
         const auto saved = server.getPlayerRecord(player);
         assert(saved.has_value());
-        assert(saved->currency_balance == 800);
-        assert(saved->purchased_item_count == 2);
+        assert(saved->currency_balance == 700);
+        assert(saved->purchased_item_count == 3);
     }
 
     void test_two_players_share_one_party_actor_and_passivate_it_when_empty()
@@ -1942,7 +1942,7 @@ int main()
 {
     test_returns_pong_for_ping();
     test_authenticates_one_session_and_allows_reconnect_after_passivation();
-    test_purchase_is_effectively_once_after_response_loss_and_reconnect();
+    test_live_purchase_is_memory_authoritative_and_flushes();
     test_two_players_share_one_party_actor_and_passivate_it_when_empty();
     test_authenticated_player_enters_moves_and_leaves_a_zone();
     test_authenticated_player_handoffs_between_zones_and_publishes_target_route();

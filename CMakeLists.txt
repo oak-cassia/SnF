@@ -97,10 +97,10 @@ add_library(snf_server_runtime STATIC
     src/server/player_actor.cpp
     src/server/player_actor_binding.cpp
     src/server/player_actor_ingress.cpp
+    src/server/player_persistence_service.cpp
+    src/server/product_catalog.cpp
     src/server/player_repository.cpp
     src/server/mysql_player_repository.cpp
-    src/server/ranking_projection.cpp
-    src/server/repository_ranking_projector.cpp
     src/server/player_session_directory.cpp
     src/server/zone_actor.cpp
     src/server/zone_actor_binding.cpp
@@ -137,12 +137,6 @@ add_executable(snf_load_client
 target_link_libraries(snf_load_client PRIVATE snf_load_client_runtime)
 snf_configure_target(snf_load_client)
 
-add_executable(snf_ranking_benchmark
-    tools/ranking_benchmark/ranking_benchmark_main.cpp
-)
-target_link_libraries(snf_ranking_benchmark PRIVATE snf_server_runtime)
-snf_configure_target(snf_ranking_benchmark)
-
 include(CTest)
 if(BUILD_TESTING)
     add_executable(snf_unit_tests
@@ -162,9 +156,9 @@ if(BUILD_TESTING)
         tests/outbound_channel_test.cpp
         tests/runtime_boundaries_test.cpp
         tests/player_actor_test.cpp
+        tests/player_persistence_service_test.cpp
         tests/player_session_directory_test.cpp
         tests/player_repository_test.cpp
-        tests/ranking_projection_test.cpp
         tests/actor_runtime_test.cpp
         tests/actor_coroutine_test.cpp
         tests/message_dispatcher_test.cpp

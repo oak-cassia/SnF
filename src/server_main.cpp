@@ -61,13 +61,9 @@ namespace
             .database = environment("SNF_MYSQL_DATABASE").value_or("snf"),
             .worker_count = 2,
             .queue_capacity = 4096,
-            .max_idempotency_records_per_player = 1024,
             .connect_timeout = std::chrono::seconds{5},
             .read_timeout = std::chrono::seconds{5},
             .write_timeout = std::chrono::seconds{5},
-            .purchase_fault_injector = {},
-            .ranking_award_fault_injector = {},
-            .ranking_checkpoint_fault_injector = {},
         };
     }
 
@@ -138,30 +134,12 @@ namespace
         std::cout << "Party actors: " << parties.commands << " commands, " << parties.rejected
                   << " rejected, " << parties.passivation_requests << " passivation requests\n";
 
-        const auto& ranking = metrics.ranking_projection;
-        std::cout << "Ranking projection: " << ranking.event_count << " events, offset "
-                  << ranking.projection_offset << '/' << ranking.committed_tail_offset << " (lag "
-                  << ranking.projection_lag << "), " << ranking.published << " published/"
-                  << ranking.duplicates << " duplicate/" << ranking.rejected << " rejected, "
-                  << ranking.poll_failures << " poll failures, " << ranking.checkpoint_failures
-                  << " checkpoint failures, checkpoint offset " << ranking.checkpoint_offset
-                  << ", poll latency ns " << format_distribution(ranking.poll_latency_nanoseconds)
-                  << ", checkpoint latency ns "
-                  << format_distribution(ranking.checkpoint_latency_nanoseconds) << '\n';
-
         const auto& repository = metrics.player_repository;
         std::cout << "Player repository: " << repository.queue_depth << " queued, "
                   << repository.queue_high_water_mark << " high-water, " << repository.accepted
-                  << " accepted, " << repository.rejected << " rejected, purchases "
-                  << repository.purchase_committed << " committed/" << repository.purchase_replayed
-                  << " replayed/" << repository.purchase_rejected << " rejected, "
-                  << "ranking awards " << repository.ranking_awards_committed << " committed/"
-                  << repository.ranking_awards_replayed << " replayed/"
-                  << repository.ranking_awards_rejected << " rejected, "
+                  << " accepted, " << repository.rejected << " rejected, "
                   << repository.operation_failures << " operation failures, latency ns "
-                  << format_distribution(repository.operation_latency_nanoseconds)
-                  << ", ranking award latency ns "
-                  << format_distribution(repository.ranking_award_latency_nanoseconds) << '\n';
+                  << format_distribution(repository.operation_latency_nanoseconds) << '\n';
 
         const auto& workers = metrics.actor_runtime.workers;
         for (std::size_t worker_index = 0; worker_index < workers.size(); ++worker_index)

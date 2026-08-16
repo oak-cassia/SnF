@@ -4,12 +4,15 @@
 #include "snf/server/command_terminal.hpp"
 #include "snf/server/connection_lifecycle.hpp"
 #include "snf/server/outbound_sink.hpp"
+#include "snf/server/player_actor.hpp"
 #include "snf/server/player_actor_id.hpp"
 #include "snf/server/player_effect_sink.hpp"
 #include "snf/server/player_inbound_command.hpp"
+#include "snf/server/player_persistence_service.hpp"
 #include "snf/server/player_repository.hpp"
 
 #include <functional>
+#include <memory>
 #include <optional>
 
 namespace snf::server
@@ -28,6 +31,12 @@ namespace snf::server
         // its first response is emitted. Session routing uses the immutable location
         // value to restore a Zone entry without reading Actor state cross-thread.
         std::function<void(snf::net::ConnectionId, std::optional<PlayerLocation>)> on_record_loaded;
+        // Production persistent bindings route every snapshot save through this
+        // service. When omitted, a standalone persistent binding creates an owned
+        // service so the repository is never called directly by the Actor binding.
+        PlayerPersistenceService* persistence_service{nullptr};
+        std::size_t max_purchase_idempotency_records_per_player{
+            DEFAULT_PURCHASE_IDEMPOTENCY_CAPACITY};
     };
 
     // Owns Player-specific type erasure at the edge of the generic scheduler.
@@ -74,6 +83,7 @@ namespace snf::server
                                                                 std::stop_token stop_token);
         [[nodiscard]] snf::runtime::ActorDispatchResult
         emit(PlayerActorSlot& slot, OutboundReservation& reservation, std::stop_token stop_token);
+        void publishDirtySnapshot(PlayerActorSlot& slot) noexcept;
         // Ends a command that could not acquire capacity at all, either because none
         // could be awaited or because the result asks for more than one connection may
         // ever hold. The connection is closed by the backend, so the command itself ends
@@ -91,5 +101,8 @@ namespace snf::server
         std::function<void(PlayerActorId)> _on_actor_deactivated;
         std::function<void(snf::net::ConnectionId, std::optional<PlayerLocation>)>
             _on_record_loaded;
+        std::unique_ptr<PlayerPersistenceService> _owned_persistence_service;
+        PlayerPersistenceService* _persistence_service;
+        std::size_t _max_purchase_idempotency_records_per_player;
     };
 }

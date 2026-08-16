@@ -20,14 +20,7 @@ namespace
             return std::make_unique<snf::server::MySqlPlayerRepository>(
                 *config.mysql_player_repository);
         }
-        return std::make_unique<snf::server::ThreadedPlayerRepository>(
-            snf::server::ThreadedPlayerRepositoryConfig{
-                .worker_count = config.player_repository_worker_count,
-                .queue_capacity = config.player_repository_queue_capacity,
-                .max_idempotency_records_per_player =
-                    config.max_purchase_idempotency_records_per_player,
-                .max_ranking_events = config.max_player_domain_events,
-            });
+        return std::make_unique<snf::server::InMemoryPlayerRepository>();
     }
 
     const snf::server::PlayerRepositoryDiagnostics&
@@ -40,16 +33,6 @@ namespace
             throw std::logic_error{"Configured Player repository has no diagnostics"};
         }
         return *diagnostics;
-    }
-
-    snf::server::RankingStore& ranking_store(snf::server::PlayerRepository& repository)
-    {
-        auto* store = dynamic_cast<snf::server::RankingStore*>(&repository);
-        if (store == nullptr)
-        {
-            throw std::logic_error{"Configured Player repository has no ranking store"};
-        }
-        return *store;
     }
 
     snf::net::UniqueFileDescriptor create_outbound_event()
@@ -162,13 +145,11 @@ namespace snf::server
               checked_zone_handoffs(config.max_zone_handoffs, config.connection_lifecycle_capacity))
         , _party_coordinator(checked_party_members(config.max_party_members))
         , _player_repository(make_player_repository(config))
-        , _ranking_projector(
-              ranking_store(*_player_repository),
-              RepositoryRankingProjectorConfig{
-                  .batch_size = config.ranking_projector_batch_size,
-                  .max_batches_per_poll = config.ranking_projector_max_batches_per_poll,
-                  .checkpoint_every_events = config.ranking_checkpoint_every_events,
-                  .poll_interval = config.ranking_projector_poll_interval,
+        , _player_persistence_service(
+              *_player_repository,
+              PlayerPersistenceServiceConfig{
+                  .queue_capacity = config.player_persistence_queue_capacity,
+                  .flush_interval = config.player_persistence_flush_interval,
               })
         , _runtime_completion(snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
                               _outbound_event.getDescriptor())
@@ -192,6 +173,9 @@ namespace snf::server
                   .on_record_loaded = [this](const snf::net::ConnectionId connection,
                                              std::optional<PlayerLocation> location)
                   { _player_sessions.noteLocation(connection, std::move(location)); },
+                  .persistence_service = &_player_persistence_service,
+                  .max_purchase_idempotency_records_per_player =
+                      config.max_purchase_idempotency_records_per_player,
               })
         , _zone_actor_binding(
               ZoneActorBindingConfig{
@@ -389,16 +373,6 @@ namespace snf::server
         return _party_actor_binding.stats();
     }
 
-    RankingPipelineStats GameServer::getRankingStats() const
-    {
-        return _ranking_projector.stats();
-    }
-
-    std::vector<RankingEntry> GameServer::getRankingStandings() const
-    {
-        return _ranking_projector.standings();
-    }
-
     ServerMetricsSnapshot GameServer::getMetricsSnapshot() const
     {
         return ServerMetricsSnapshot{
@@ -412,9 +386,9 @@ namespace snf::server
             .zone_handoff_gateway = _protocol_gateway.zoneHandoffStats(),
             .zone_transition_channel = _zone_transition_channel.stats(),
             .party_actors = _party_actor_binding.stats(),
-            .ranking_projection = _ranking_projector.stats(),
             .command_terminals = _command_lifecycle.terminalCount(),
             .command_admission_rejections = _command_lifecycle.admissionRejectionCount(),
+            .player_persistence = _player_persistence_service.stats(),
         };
     }
 
@@ -474,13 +448,24 @@ namespace snf::server
             actor_failure = std::current_exception();
         }
 
-        // No transaction can commit after the Actor runtime drains. Stop then
-        // performs one final durable-tail replay and checkpoint before run()
-        // returns, so post-run metrics and standings are authoritative.
-        _ranking_projector.stop();
+        std::exception_ptr persistence_failure;
+        try
+        {
+            _player_persistence_service.flush();
+        }
+        catch (...)
+        {
+            persistence_failure = std::current_exception();
+        }
+        _player_persistence_service.stop();
+
         if (actor_failure)
         {
             std::rethrow_exception(actor_failure);
+        }
+        if (persistence_failure)
+        {
+            std::rethrow_exception(persistence_failure);
         }
         _zone_timers.rethrowIfFailed();
     }

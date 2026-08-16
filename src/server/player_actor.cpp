@@ -1,44 +1,42 @@
 #include "snf/server/player_actor.hpp"
 
+#include "snf/server/product_catalog.hpp"
+
 #include <limits>
 #include <stdexcept>
+#include <utility>
 #include <variant>
 
 namespace snf::server
 {
     PlayerActorId PlayerState::identity() const noexcept
     {
-        return _identity;
+        return _session.identity;
     }
 
     std::uint64_t PlayerState::handledCommandCount() const noexcept
     {
-        return _handled_command_count;
+        return _session.handled_command_count;
     }
 
     std::optional<PlayerLocation> PlayerState::lastLocation() const noexcept
     {
-        return _last_location;
+        return _session.last_location;
     }
 
     std::uint64_t PlayerState::currencyBalance() const noexcept
     {
-        return _currency_balance;
+        return _economy.currency_balance;
     }
 
     std::uint64_t PlayerState::purchasedItemCount() const noexcept
     {
-        return _purchased_item_count;
+        return _economy.purchased_item_count;
     }
 
-    std::uint64_t PlayerState::rankingScore() const noexcept
+    PlayerStateComponentMask PlayerState::dirtyComponents() const noexcept
     {
-        return _ranking_score;
-    }
-
-    std::uint64_t PlayerState::lastDomainEventSequence() const noexcept
-    {
-        return _last_domain_event_sequence;
+        return _dirty_components;
     }
 
     const PlayerState& PlayerActor::state() const noexcept
@@ -48,65 +46,65 @@ namespace snf::server
 
     void PlayerActor::restore(const PlayerRecord& record)
     {
-        if (_state._identity != record.player)
+        if (_state._session.identity != record.player)
         {
             throw std::invalid_argument{"Player record identity does not match the Actor"};
         }
 
-        _state._handled_command_count = record.handled_command_count;
-        _state._last_location = record.last_location;
-        _state._currency_balance = record.currency_balance;
-        _state._purchased_item_count = record.purchased_item_count;
-        _state._ranking_score = record.ranking_score;
-        _state._last_domain_event_sequence = record.last_domain_event_sequence;
+        _state._session.handled_command_count = record.handled_command_count;
+        _state._session.last_location = record.last_location;
+        _state._economy.currency_balance = record.currency_balance;
+        _state._economy.purchased_item_count = record.purchased_item_count;
+        _state._dirty_components = 0;
+        _purchase_evidence.clear();
     }
 
     void PlayerActor::setLastLocation(std::optional<PlayerLocation> location) noexcept
     {
-        _state._last_location = location;
+        _state._session.last_location = std::move(location);
+        _state._dirty_components |= componentMask(PlayerStateComponent::Session);
     }
 
-    PlayerResult PlayerActor::completePurchase(const PurchaseCommand& command,
-                                               PurchaseTransactionResult result)
+    bool PlayerActor::hasFlushableDirtyState() const noexcept
     {
-        const auto player = _state._identity.playerId();
-        if (!player || result.player != *player ||
-            result.idempotency_key != command.idempotency_key || result.product != command.product)
+        return (_state._dirty_components & componentMask(PlayerStateComponent::Economy)) != 0;
+    }
+
+    PlayerStateComponentMask PlayerActor::dirtyComponents() const noexcept
+    {
+        return _state._dirty_components;
+    }
+
+    std::optional<PlayerRecord>
+    PlayerActor::takeDirtySnapshot(PlayerStateComponentMask* const cleared_components)
+    {
+        if (!hasFlushableDirtyState())
         {
-            throw std::logic_error{"Purchase completion does not match the Player command"};
+            if (cleared_components != nullptr)
+            {
+                *cleared_components = 0;
+            }
+            return std::nullopt;
         }
 
-        if (result.status == PurchaseStatus::Unavailable)
+        const PlayerStateComponentMask components = _state._dirty_components;
+        PlayerRecord record = snapshot();
+        _state._dirty_components = 0;
+        if (cleared_components != nullptr)
         {
-            // Queue admission failure has no authoritative storage snapshot. Keep
-            // the Actor state and report its current values instead of applying zeros.
-            result.currency_balance = _state._currency_balance;
-            result.purchased_item_count = _state._purchased_item_count;
+            *cleared_components = components;
         }
-        else
-        {
-            _state._currency_balance = result.currency_balance;
-            _state._purchased_item_count = result.purchased_item_count;
-        }
-        ++_state._handled_command_count;
+        return record;
+    }
 
-        return PlayerResult{
-            .effects =
-                {
-                    SendResponse{
-                        .response =
-                            PurchaseResponse{
-                                .request_id = command.request_id,
-                                .result = std::move(result),
-                            },
-                    },
-                },
-        };
+    void PlayerActor::restoreDirtyComponents(const PlayerStateComponentMask components) noexcept
+    {
+        _state._dirty_components |= components;
     }
 
     PlayerRecord PlayerActor::snapshot() const
     {
-        const auto player = _state._identity.playerId();
+        const auto player = _state._session.identity.playerId();
         if (!player)
         {
             throw std::logic_error{"A provisional Player actor has no persistent snapshot"};
@@ -114,73 +112,34 @@ namespace snf::server
 
         return PlayerRecord{
             .player = *player,
-            .handled_command_count = _state._handled_command_count,
-            .last_location = _state._last_location,
-            .currency_balance = _state._currency_balance,
-            .purchased_item_count = _state._purchased_item_count,
-            .ranking_score = _state._ranking_score,
-            .last_domain_event_sequence = _state._last_domain_event_sequence,
+            .handled_command_count = _state._session.handled_command_count,
+            .last_location = _state._session.last_location,
+            .currency_balance = _state._economy.currency_balance,
+            .purchased_item_count = _state._economy.purchased_item_count,
         };
-    }
-
-    PlayerResult PlayerActor::completeRankingAward(const AwardRankingScoreCommand& command,
-                                                   RankingAwardTransactionResult result)
-    {
-        const auto player = _state._identity.playerId();
-        if (!player || result.player != *player || result.award_id != command.award_id ||
-            result.score_delta != command.score_delta)
-        {
-            throw std::logic_error{"Ranking award completion does not match the Player command"};
-        }
-        if (result.status != RankingAwardStatus::Committed)
-        {
-            // Rejections and temporary repository failures are request outcomes, not
-            // runtime failures. The durable transaction did not change ranking state.
-            ++_state._handled_command_count;
-            return PlayerResult{};
-        }
-        if (result.event_sequence == 0 || result.global_offset == 0 ||
-            result.authoritative_sequence < result.event_sequence ||
-            result.authoritative_score < result.event_score ||
-            result.authoritative_sequence < _state._last_domain_event_sequence ||
-            result.authoritative_score < _state._ranking_score)
-        {
-            throw std::logic_error{"Ranking award completion would regress Player state"};
-        }
-        if ((!result.replayed && (result.authoritative_sequence != result.event_sequence ||
-                                  result.authoritative_score != result.event_score)) ||
-            (result.authoritative_sequence == result.event_sequence &&
-             result.authoritative_score != result.event_score))
-        {
-            throw std::logic_error{"Ranking award completion has inconsistent event state"};
-        }
-        if (result.authoritative_sequence == _state._last_domain_event_sequence &&
-            result.authoritative_score != _state._ranking_score)
-        {
-            throw std::logic_error{"Ranking award reused a Player sequence with a new score"};
-        }
-        if (result.authoritative_sequence > _state._last_domain_event_sequence &&
-            result.authoritative_score <= _state._ranking_score)
-        {
-            throw std::logic_error{"Ranking award advanced sequence without advancing score"};
-        }
-
-        _state._ranking_score = result.authoritative_score;
-        _state._last_domain_event_sequence = result.authoritative_sequence;
-        ++_state._handled_command_count;
-        return PlayerResult{};
     }
 
     PlayerActor::PlayerActor(const PlayerActorId identity) noexcept
     {
-        _state._identity = identity;
+        _state._session.identity = identity;
+    }
+
+    PlayerActor::PlayerActor(const PlayerActorId identity,
+                             const std::size_t max_purchase_idempotency_records)
+        : _max_purchase_idempotency_records(max_purchase_idempotency_records)
+    {
+        if (_max_purchase_idempotency_records == 0)
+        {
+            throw std::invalid_argument{"Purchase idempotency capacity must be positive"};
+        }
+        _state._session.identity = identity;
     }
 
     snf::runtime::ActorTask<PlayerResult> PlayerActor::handle(const PlayerCommand& command)
     {
         PlayerResult result =
             std::visit([this](const auto& value) { return handleCommand(value); }, command);
-        ++_state._handled_command_count;
+        ++_state._session.handled_command_count;
         co_return result;
     }
 
@@ -202,7 +161,7 @@ namespace snf::server
 
     PlayerResult PlayerActor::handleCommand(const AuthenticateCommand& command)
     {
-        if (_state._identity != command.player)
+        if (_state._session.identity != command.player)
         {
             throw std::logic_error{"AuthenticateCommand reached a different Player actor"};
         }
@@ -221,14 +180,94 @@ namespace snf::server
         };
     }
 
-    PlayerResult PlayerActor::handleCommand(const PurchaseCommand&)
+    PlayerResult PlayerActor::handleCommand(const PurchaseCommand& command)
     {
-        throw std::logic_error{"PurchaseCommand must be completed by PlayerActorBinding"};
+        const auto player = _state._session.identity.playerId();
+        if (!player)
+        {
+            throw std::logic_error{"PurchaseCommand reached a provisional Player actor"};
+        }
+
+        PurchaseTransactionResult result{
+            .status = PurchaseStatus::ProductNotFound,
+            .player = *player,
+            .idempotency_key = command.idempotency_key,
+            .product = command.product,
+            .currency_balance = _state._economy.currency_balance,
+            .purchased_item_count = _state._economy.purchased_item_count,
+            .replayed = false,
+        };
+
+        if (const auto existing = _purchase_evidence.find(command.idempotency_key.value);
+            existing != _purchase_evidence.end())
+        {
+            if (existing->second.product != command.product)
+            {
+                result.status = PurchaseStatus::IdempotencyConflict;
+            }
+            else
+            {
+                result = existing->second.result;
+                result.currency_balance = _state._economy.currency_balance;
+                result.purchased_item_count = _state._economy.purchased_item_count;
+                result.replayed = true;
+            }
+        }
+        else if (const auto definition = findProduct(command.product); !definition)
+        {
+            // Unknown products are rejected before any repository operation.
+        }
+        else if (_purchase_evidence.size() >= _max_purchase_idempotency_records)
+        {
+            result.status = PurchaseStatus::IdempotencyCapacityExceeded;
+        }
+        else
+        {
+            result.status = PurchaseStatus::Committed;
+            std::uint64_t next_balance = _state._economy.currency_balance;
+            std::uint64_t next_item_count = _state._economy.purchased_item_count;
+            if (next_balance < definition->price)
+            {
+                result.status = PurchaseStatus::InsufficientFunds;
+            }
+            else if (next_item_count >
+                     std::numeric_limits<std::uint64_t>::max() - definition->grant_count)
+            {
+                result.status = PurchaseStatus::InventoryCapacityExceeded;
+            }
+            else
+            {
+                next_balance -= definition->price;
+                next_item_count += definition->grant_count;
+            }
+
+            result.currency_balance = next_balance;
+            result.purchased_item_count = next_item_count;
+            _purchase_evidence.emplace(command.idempotency_key.value,
+                                       PurchaseEvidence{
+                                           .product = command.product,
+                                           .result = result,
+                                       });
+            if (result.status == PurchaseStatus::Committed)
+            {
+                _state._economy.currency_balance = next_balance;
+                _state._economy.purchased_item_count = next_item_count;
+                _state._dirty_components |= componentMask(PlayerStateComponent::Economy);
+            }
+        }
+
+        return PlayerResult{
+            .effects =
+                {
+                    SendResponse{
+                        .response =
+                            PurchaseResponse{
+                                .request_id = command.request_id,
+                                .result = std::move(result),
+                            },
+                    },
+                },
+        };
     }
 
-    PlayerResult PlayerActor::handleCommand(const AwardRankingScoreCommand& command)
-    {
-        static_cast<void>(command);
-        throw std::logic_error{"AwardRankingScoreCommand must be completed by PlayerActorBinding"};
-    }
 }
