@@ -37,14 +37,9 @@ namespace snf::server
     {
     public:
         explicit ProtocolGateway(RoutedCommandIngress& commands);
-        ProtocolGateway(RoutedCommandIngress& commands, PlayerSessionDirectory& sessions);
         ProtocolGateway(RoutedCommandIngress& commands,
                         PlayerSessionDirectory& sessions,
                         RouteCoordinator& routes);
-        ProtocolGateway(RoutedCommandIngress& commands,
-                        PlayerSessionDirectory& sessions,
-                        RouteCoordinator& routes,
-                        PartyCoordinator& parties);
         ProtocolGateway(RoutedCommandIngress& commands,
                         PlayerSessionDirectory& sessions,
                         RouteCoordinator& routes,
@@ -54,9 +49,6 @@ namespace snf::server
                         ProtocolZoneResultSink& zone_results,
                         std::size_t max_zone_completions_per_turn);
         ProtocolGateway(MessageDispatcher dispatcher, RoutedCommandIngress& commands);
-        ProtocolGateway(MessageDispatcher dispatcher,
-                        RoutedCommandIngress& commands,
-                        PlayerSessionDirectory& sessions);
         ProtocolGateway(MessageDispatcher dispatcher,
                         RoutedCommandIngress& commands,
                         PlayerSessionDirectory& sessions,

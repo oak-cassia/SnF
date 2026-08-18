@@ -44,31 +44,11 @@ namespace snf::server
     {
     }
 
-    ProtocolGateway::ProtocolGateway(RoutedCommandIngress& commands,
-                                     PlayerSessionDirectory& sessions)
-        : ProtocolGateway(MessageDispatcher{}, commands, sessions)
-    {
-    }
-
     ProtocolGateway::ProtocolGateway(MessageDispatcher dispatcher, RoutedCommandIngress& commands)
         : _dispatcher(std::move(dispatcher))
         , _commands(commands)
         , _owned_sessions()
         , _sessions(_owned_sessions)
-        , _owned_routes()
-        , _routes(_owned_routes)
-        , _owned_parties()
-        , _parties(_owned_parties)
-    {
-    }
-
-    ProtocolGateway::ProtocolGateway(MessageDispatcher dispatcher,
-                                     RoutedCommandIngress& commands,
-                                     PlayerSessionDirectory& sessions)
-        : _dispatcher(std::move(dispatcher))
-        , _commands(commands)
-        , _owned_sessions()
-        , _sessions(sessions)
         , _owned_routes()
         , _routes(_owned_routes)
         , _owned_parties()
@@ -95,14 +75,6 @@ namespace snf::server
         , _routes(routes)
         , _owned_parties()
         , _parties(_owned_parties)
-    {
-    }
-
-    ProtocolGateway::ProtocolGateway(RoutedCommandIngress& commands,
-                                     PlayerSessionDirectory& sessions,
-                                     RouteCoordinator& routes,
-                                     PartyCoordinator& parties)
-        : ProtocolGateway(MessageDispatcher{}, commands, sessions, routes, parties)
     {
     }
 
