@@ -5,9 +5,17 @@ void run_frame_codec_tests();
 void run_command_router_tests();
 void run_protocol_gateway_tests();
 void run_protocol_response_mapper_tests();
-void run_player_effect_sink_tests();
+void run_protocol_zone_result_sink_tests();
+void run_protocol_party_result_sink_tests();
+void run_route_coordinator_tests();
+void run_party_coordinator_tests();
+void run_player_follow_up_sink_tests();
+void run_outbound_channel_tests();
 void run_runtime_boundary_tests();
 void run_player_actor_tests();
+void run_player_persistence_service_tests();
+void run_player_session_directory_tests();
+void run_player_repository_tests();
 void run_actor_runtime_tests();
 void run_actor_coroutine_tests();
 void run_message_dispatcher_tests();
@@ -15,6 +23,11 @@ void run_session_tests();
 void run_socket_options_tests();
 void run_tcp_listener_tests();
 void run_unique_file_descriptor_tests();
+void run_zone_actor_tests();
+void run_zone_actor_binding_tests();
+void run_zone_transition_channel_tests();
+void run_party_actor_tests();
+void run_party_actor_binding_tests();
 
 int main()
 {
@@ -25,9 +38,17 @@ int main()
     run_command_router_tests();
     run_protocol_gateway_tests();
     run_protocol_response_mapper_tests();
-    run_player_effect_sink_tests();
+    run_protocol_zone_result_sink_tests();
+    run_protocol_party_result_sink_tests();
+    run_route_coordinator_tests();
+    run_party_coordinator_tests();
+    run_player_follow_up_sink_tests();
+    run_outbound_channel_tests();
     run_runtime_boundary_tests();
     run_player_actor_tests();
+    run_player_persistence_service_tests();
+    run_player_session_directory_tests();
+    run_player_repository_tests();
     run_actor_runtime_tests();
     run_actor_coroutine_tests();
     run_message_dispatcher_tests();
@@ -35,4 +56,9 @@ int main()
     run_socket_options_tests();
     run_tcp_listener_tests();
     run_unique_file_descriptor_tests();
+    run_zone_actor_tests();
+    run_zone_actor_binding_tests();
+    run_zone_transition_channel_tests();
+    run_party_actor_tests();
+    run_party_actor_binding_tests();
 }

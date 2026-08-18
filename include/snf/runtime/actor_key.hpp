@@ -14,6 +14,7 @@ namespace snf::runtime
         ProvisionalPlayer,
         Player,
         Zone,
+        Party,
     };
 
     using EntityId = std::uint64_t;

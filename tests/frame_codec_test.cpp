@@ -98,6 +98,69 @@ void test_decodes_two_frames_received_together()
     assert(result.frames[1].payload == pong.payload);
 }
 
+void test_pull_decoder_returns_one_frame_at_a_time()
+{
+    const Frame ping{
+        .type = MessageType::Ping,
+        .request_id = 11,
+        .payload = {std::byte{0xAA}},
+    };
+    const Frame pong{
+        .type = MessageType::Pong,
+        .request_id = 12,
+        .payload = {std::byte{0xBB}},
+    };
+
+    const auto encoded_ping = encode_frame(ping);
+    const auto encoded_pong = encode_frame(pong);
+    std::vector<std::byte> received;
+    received.insert(received.end(), encoded_ping.begin(), encoded_ping.end());
+    received.insert(received.end(), encoded_pong.begin(), encoded_pong.end());
+
+    FrameDecoder decoder{};
+    decoder.push(received);
+
+    const auto first = decoder.tryDecodeNext();
+    assert(first.hasFrame());
+    assert(!first.error.has_value());
+    assert(first.frame->type == ping.type);
+    assert(first.frame->request_id == ping.request_id);
+    assert(first.frame->payload == ping.payload);
+
+    const auto second = decoder.tryDecodeNext();
+    assert(second.hasFrame());
+    assert(!second.error.has_value());
+    assert(second.frame->type == pong.type);
+    assert(second.frame->request_id == pong.request_id);
+    assert(second.frame->payload == pong.payload);
+
+    const auto empty = decoder.tryDecodeNext();
+    assert(empty.needsMoreData());
+}
+
+void test_pull_decoder_keeps_a_partial_frame_until_more_data_arrives()
+{
+    const Frame ping{
+        .type = MessageType::Ping,
+        .request_id = 13,
+        .payload = {std::byte{0xAA}, std::byte{0xBB}},
+    };
+    const auto encoded = encode_frame(ping);
+    const std::span<const std::byte> encoded_view{encoded};
+    constexpr std::size_t first_chunk_size = 5;
+
+    FrameDecoder decoder{};
+    decoder.push(encoded_view.first(first_chunk_size));
+    assert(decoder.tryDecodeNext().needsMoreData());
+
+    decoder.push(encoded_view.subspan(first_chunk_size));
+    const auto decoded = decoder.tryDecodeNext();
+    assert(decoded.hasFrame());
+    assert(decoded.frame->type == ping.type);
+    assert(decoded.frame->request_id == ping.request_id);
+    assert(decoded.frame->payload == ping.payload);
+}
+
 void test_keeps_a_partial_second_frame_for_the_next_append()
 {
     const Frame ping{
@@ -225,7 +288,7 @@ void test_rejects_an_unknown_message_type()
         std::byte{0x00},
         std::byte{0x06},
         std::byte{0x00},
-        std::byte{0x03},
+        std::byte{0x11},
         std::byte{0x00},
         std::byte{0x00},
         std::byte{0x00},
@@ -242,15 +305,79 @@ void test_rejects_an_unknown_message_type()
     assert(*result.error == DecodeError::UnknownMessageType);
 }
 
+void test_append_preserves_valid_frames_before_an_error()
+{
+    const Frame ping{
+        .type = MessageType::Ping,
+        .request_id = 21,
+        .payload = {std::byte{0xAA}},
+    };
+    const auto encoded_ping = encode_frame(ping);
+    const std::vector<std::byte> invalid_length{
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x05},
+    };
+
+    std::vector<std::byte> received;
+    received.insert(received.end(), encoded_ping.begin(), encoded_ping.end());
+    received.insert(received.end(), invalid_length.begin(), invalid_length.end());
+
+    FrameDecoder decoder{};
+    const auto result = decoder.append(received);
+
+    assert(!result.ok());
+    assert(result.frames.size() == 1);
+    assert(result.frames.front().type == ping.type);
+    assert(result.frames.front().request_id == ping.request_id);
+    assert(result.frames.front().payload == ping.payload);
+    assert(result.error == DecodeError::InvalidBodyLength);
+}
+
+void test_decoder_can_be_reused_after_an_error()
+{
+    const std::vector<std::byte> invalid_length{
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x00},
+        std::byte{0x05},
+    };
+    const Frame pong{
+        .type = MessageType::Pong,
+        .request_id = 22,
+        .payload = {std::byte{0xCC}},
+    };
+
+    FrameDecoder decoder{};
+    decoder.push(invalid_length);
+    const auto error = decoder.tryDecodeNext();
+    assert(!error.hasFrame());
+    assert(error.error == DecodeError::InvalidBodyLength);
+
+    decoder.push(encode_frame(pong));
+    const auto decoded = decoder.tryDecodeNext();
+    assert(decoded.hasFrame());
+    assert(!decoded.error.has_value());
+    assert(decoded.frame->type == pong.type);
+    assert(decoded.frame->request_id == pong.request_id);
+    assert(decoded.frame->payload == pong.payload);
+    assert(decoder.tryDecodeNext().needsMoreData());
+}
+
 void run_frame_codec_tests()
 {
     test_encode_frame();
     test_decodes_a_frame_received_in_two_chunks();
     test_decodes_two_frames_received_together();
+    test_pull_decoder_returns_one_frame_at_a_time();
+    test_pull_decoder_keeps_a_partial_frame_until_more_data_arrives();
     test_keeps_a_partial_second_frame_for_the_next_append();
     test_decodes_the_minimum_body_size();
     test_decodes_the_maximum_body_size();
     test_rejects_a_body_smaller_than_minimum();
     test_rejects_a_body_larger_than_maximum();
     test_rejects_an_unknown_message_type();
+    test_append_preserves_valid_frames_before_an_error();
+    test_decoder_can_be_reused_after_an_error();
 }

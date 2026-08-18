@@ -42,6 +42,11 @@ namespace snf::runtime
     {
         KeepActive,
         Evict,
+        // Passivation request rather than a lifecycle fence. The scheduler evicts
+        // only if this actor's mailbox is empty at the decision point; otherwise it
+        // keeps the activation and processes the already accepted work. Unlike Evict,
+        // this never discards a mailbox tail.
+        PassivateIfIdle,
         Stopped,
         // The handler awaited an operation. The scheduler keeps the command's
         // capacity and turn accounting open until a terminal continuation or a
@@ -59,6 +64,14 @@ namespace snf::runtime
 
     class ActorBinding;
     class ActorRuntime;
+    class ActorSubmission;
+
+    struct TimerHandle
+    {
+        std::uint64_t id{0};
+
+        [[nodiscard]] bool operator==(const TimerHandle&) const noexcept = default;
+    };
 
     // Handed to a binding's dispatch/resume. Its address is stable for the
     // lifetime of one actor activation: an awaiter that suspends still uses it
@@ -84,6 +97,13 @@ namespace snf::runtime
         // Undoes tryBeginOperation when submitting the operation threw. The
         // operation never started, so no completion can arrive for it.
         virtual void abortOperation() noexcept = 0;
+
+        // 소유 Worker의 dispatch/resume 안에서만 호출 가능하다.
+        // nullopt = 용량 거부. 호출자는 타이머가 걸리지 않았음을 알고 대응해야 한다.
+        [[nodiscard]] virtual std::optional<TimerHandle>
+        trySchedule(std::chrono::milliseconds delay, ActorSubmission submission) = 0;
+
+        virtual void cancelTimer(TimerHandle handle) noexcept = 0;
 
     protected:
         ActorContext() = default;
@@ -339,12 +359,20 @@ namespace snf::runtime
         // condition. The runtime cannot see a binding's retained lifecycle
         // resources, so this is an observation and not a decision to passivate.
         std::size_t scheduler_passivatable_actor_count{0};
+        std::uint64_t timers_scheduled{0};
+        std::uint64_t timers_rejected_full{0};
+        std::uint64_t timers_fired{0};
+        std::uint64_t timers_cancelled{0};
+        std::uint64_t timers_discarded_stale{0};
+        std::size_t active_timers{0};
         // Nanoseconds from a command's acceptance to the start of its dispatch.
         // Control submissions are excluded, as they are in the counters above.
         // A resume is not a new acceptance, so it is not sampled again.
         DistributionSnapshot queue_wait_nanoseconds;
         // Nanoseconds from a task suspending to the owning Worker resuming it.
         DistributionSnapshot suspend_duration_nanoseconds;
+        // Nanoseconds from a timer's deadline to its dispatch.
+        DistributionSnapshot timer_lateness_nanoseconds;
     };
 
     struct ActorRuntimeStats
@@ -433,12 +461,14 @@ namespace snf::runtime
         [[nodiscard]] bool pumpWorker(Worker& worker);
         void applyCancelRequests(Worker& worker);
         [[nodiscard]] std::size_t drainContinuations(Worker& worker);
+        void dispatchDueTimers(Worker& worker);
         [[nodiscard]] bool routeToMailbox(Worker& worker, QueuedSubmission submission);
         [[nodiscard]] bool runReadyActorTurn(Worker& worker, std::size_t worker_index);
         [[nodiscard]] bool hasReadyActor(const Worker& worker) const;
         [[nodiscard]] bool isWorkerDrained(const Worker& worker) const;
         void cancelWorkerIngress(Worker& worker) noexcept;
         void discardWorkerSubmissions(Worker& worker) noexcept;
+        void discardWorkerTimers(Worker& worker) noexcept;
         void cancelSuspendedTasks(Worker& worker) noexcept;
         void destroyWorkerActors(Worker& worker) noexcept;
         [[nodiscard]] bool reserveOutstanding(Worker& worker) noexcept;

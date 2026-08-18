@@ -1,5 +1,6 @@
 #pragma once
 
+#include "snf/load/load_scenario.hpp"
 #include "snf/net/unique_file_descriptor.hpp"
 #include "snf/protocol/frame_codec.hpp"
 
@@ -29,12 +30,17 @@ namespace snf::load
     {
         bool connected{false};
         std::size_t sent_requests{0};
+        std::size_t sent_bootstrap_requests{0};
+        std::size_t sent_gameplay_requests{0};
         std::optional<ClientError> error;
     };
 
     struct ReadResult
     {
         std::vector<std::chrono::steady_clock::duration> round_trip_times;
+        std::vector<std::chrono::steady_clock::duration> gameplay_round_trip_times;
+        std::size_t bootstrap_responses{0};
+        std::size_t gameplay_responses{0};
         std::optional<ClientError> error;
     };
 
@@ -43,7 +49,8 @@ namespace snf::load
     public:
         ClientConnection(std::string_view host,
                          std::uint16_t port,
-                         std::chrono::milliseconds connect_timeout);
+                         std::chrono::milliseconds connect_timeout,
+                         ClientWorkload workload = {});
 
         ClientConnection(const ClientConnection&) = delete;
         ClientConnection& operator=(const ClientConnection&) = delete;
@@ -58,8 +65,9 @@ namespace snf::load
         [[nodiscard]] bool canStartRequest() const noexcept;
         [[nodiscard]] bool isIdle() const noexcept;
         [[nodiscard]] std::chrono::steady_clock::time_point getDeadline() const noexcept;
+        [[nodiscard]] bool hasCompletedBootstrap() const noexcept;
 
-        void enqueuePing(std::chrono::milliseconds request_timeout);
+        void enqueueNextRequest(std::chrono::milliseconds request_timeout);
         [[nodiscard]] WriteResult handleWritable();
         [[nodiscard]] ReadResult handleReadable();
         [[nodiscard]] std::optional<ClientError> getSocketError() const;
@@ -74,13 +82,26 @@ namespace snf::load
         struct OutstandingRequest
         {
             std::uint32_t request_id;
+            snf::protocol::MessageType request_type;
             std::vector<std::byte> payload;
+            std::int32_t expected_x{0};
+            std::int32_t expected_y{0};
+            bool bootstrap{false};
             std::chrono::steady_clock::time_point started_at;
             std::chrono::steady_clock::time_point deadline;
         };
 
         [[nodiscard]] std::optional<ClientError>
         validateResponse(const snf::protocol::Frame& response) const;
+        void completeRequest(snf::protocol::MessageType request_type) noexcept;
+
+        enum class WorkloadStage
+        {
+            Ping,
+            Authenticate,
+            EnterZone,
+            Move,
+        };
 
         snf::net::UniqueFileDescriptor _socket;
         State _state{State::Connecting};
@@ -90,5 +111,8 @@ namespace snf::load
         std::uint32_t _next_request_id{1};
         std::chrono::steady_clock::time_point _connect_deadline;
         std::optional<OutstandingRequest> _outstanding_request;
+        ClientWorkload _workload;
+        WorkloadStage _workload_stage{WorkloadStage::Ping};
+        std::uint64_t _move_sequence{0};
     };
 }

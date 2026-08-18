@@ -35,6 +35,7 @@ namespace
     constexpr std::uint64_t TERMINATION_SIGNAL_EVENT_TOKEN = OUTBOUND_EVENT_TOKEN - 1;
     constexpr std::uint64_t MAX_CONNECTION_GENERATION = TERMINATION_SIGNAL_EVENT_TOKEN - 1;
     constexpr std::size_t CONNECTION_CLOSE_RETRY_BUDGET = 64;
+    constexpr std::size_t OUTBOUND_DRAIN_BATCH_SIZE = 64;
     constexpr std::chrono::milliseconds CONNECTION_CLOSE_RETRY_INTERVAL{1};
 
     snf::net::UniqueFileDescriptor create_epoll_instance()
@@ -78,7 +79,7 @@ namespace snf::server
 {
     TcpServer::TcpServer(const TcpServerConfig& config,
                          FrameIngress& frame_ingress,
-                         OutboundActionQueue& outbound_actions,
+                         OutboundChannel& outbound,
                          snf::runtime::RuntimeCompletionSource& runtime_completion,
                          const int outbound_event_descriptor)
         : _listener(snf::net::create_tcp_listener(config.port))
@@ -91,8 +92,10 @@ namespace snf::server
         , _connection_lifecycle_capacity(config.connection_lifecycle_capacity)
         , _metrics_report_interval(config.metrics_report_interval)
         , _on_metrics_interval(config.on_metrics_interval)
+        , _on_control_wake(config.on_control_wake)
+        , _is_control_drained(config.is_control_drained)
         , _frame_ingress(frame_ingress)
-        , _outbound_actions(outbound_actions)
+        , _outbound(outbound)
         , _runtime_completion(runtime_completion)
         , _outbound_event_descriptor(outbound_event_descriptor)
     {
@@ -131,8 +134,11 @@ namespace snf::server
             .session_count = _sessions.size(),
             .sessions_with_pending_send = 0,
             .total_pending_send_bytes = 0,
-            .current_outbound_queue_depth = _outbound_actions.size(),
-            .outbound_queue_high_water_mark = _outbound_actions.highWaterMark(),
+            .current_outbound_queue_depth = _outbound.size(),
+            .outbound_queue_high_water_mark = _outbound.highWaterMark(),
+            .reserved_outbound_slots = _outbound.reservedSlotCount(),
+            .pending_outbound_reservations = _outbound.pendingWaiterCount(),
+            .tracked_outbound_connections = _outbound.trackedConnectionCount(),
         };
 
         for (const auto& [client_descriptor, session] : _sessions)
@@ -167,7 +173,7 @@ namespace snf::server
         {
             retryPendingConnectionCloses();
 
-            if (_is_stopping && _logic_runtime_drained && _sessions.empty())
+            if (_is_stopping && _logic_runtime_drained && isControlDrained() && _sessions.empty())
             {
                 break;
             }
@@ -383,6 +389,10 @@ namespace snf::server
                 snf::net::throw_system_error("epoll_ctl(EPOLL_CTL_ADD client)");
             }
 
+            // Creates this connection's outbound accounting once, so its commands do
+            // not each allocate one inside the channel lock.
+            _outbound.trackConnection(connection);
+
             ++_stats.accepted_connections;
             std::cout << "Accepted client FD: " << client_descriptor << '\n';
         }
@@ -537,7 +547,7 @@ namespace snf::server
 
     void TcpServer::handleOutboundActions()
     {
-        _outbound_queue_depth.record(static_cast<std::uint64_t>(_outbound_actions.size()));
+        _outbound_queue_depth.record(static_cast<std::uint64_t>(_outbound.size()));
 
         std::uint64_t wakeup_count = 0;
         while (::read(_outbound_event_descriptor, &wakeup_count, sizeof(wakeup_count)) == -1)
@@ -555,16 +565,80 @@ namespace snf::server
             snf::net::throw_system_error("read(outbound eventfd)");
         }
 
-        while (auto posted = _outbound_actions.tryPop())
+        if (_on_control_wake)
         {
-            _outbound_queue_wait_nanoseconds.record(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - posted->posted_at));
-            handleOutboundAction(std::move(posted->action));
+            _on_control_wake();
         }
 
+        while (true)
+        {
+            _outbound.drainInto(_drained_outbound_actions, OUTBOUND_DRAIN_BATCH_SIZE);
+            if (_drained_outbound_actions.empty())
+            {
+                break;
+            }
+
+            for (PostedOutboundAction& posted : _drained_outbound_actions)
+            {
+                _outbound_queue_wait_nanoseconds.record(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - posted.posted_at));
+                handleOutboundAction(std::move(posted.action));
+            }
+
+            _drained_outbound_actions.clear();
+        }
+
+        closeConnectionsWithFailedOutboundAdmission();
+
+        // Granting after the drain, so capacity freed in this turn reaches a waiting
+        // actor without costing it another reactor turn. The reactor is the only
+        // granter, which is what bounds this work per turn.
+        static_cast<void>(_outbound.grantPending());
+
         handleRuntimeCompletion();
+        if (_is_stopping && _logic_runtime_drained && isControlDrained())
+        {
+            completeShutdownAfterLogicRuntimeDrained();
+        }
         retryPendingConnectionCloses();
+    }
+
+    void TcpServer::closeConnectionsWithFailedOutboundAdmission()
+    {
+        const bool close_all_sessions =
+            _outbound.takePendingAdmissionFailures(_failed_outbound_admissions);
+
+        for (const snf::net::ConnectionId connection : _failed_outbound_admissions)
+        {
+            if (findCurrentSession(connection) == nullptr)
+            {
+                continue;
+            }
+
+            ++_stats.outbound_admission_failures;
+            std::cerr << "Closing client FD " << connection.descriptor
+                      << " because its response could not be admitted to the outbound channel\n";
+            removeSession(connection.descriptor, ConnectionCloseCause::Overflow);
+        }
+
+        _failed_outbound_admissions.clear();
+
+        if (!close_all_sessions)
+        {
+            return;
+        }
+
+        // The channel could not retain one exact connection ID without violating its
+        // fixed memory bound. Closing every current session is deliberately conservative:
+        // it guarantees the affected live connection is not left with a silently missing
+        // response, while the Worker that detected the condition remains healthy.
+        ++_stats.outbound_admission_failure_fallbacks;
+        while (!_sessions.empty())
+        {
+            ++_stats.outbound_admission_failures;
+            removeSession(_sessions.begin()->first, ConnectionCloseCause::Overflow);
+        }
     }
 
     void TcpServer::handleOutboundAction(OutboundAction action)
@@ -624,7 +698,7 @@ namespace snf::server
         if (!_logic_runtime_drained && _runtime_completion.allRequiredRuntimesDrained())
         {
             _logic_runtime_drained = true;
-            if (_is_stopping)
+            if (_is_stopping && isControlDrained())
             {
                 completeShutdownAfterLogicRuntimeDrained();
             }
@@ -684,10 +758,6 @@ namespace snf::server
 
         _is_stopping = true;
         _shutdown_deadline = std::chrono::steady_clock::now() + _shutdown_grace_period;
-        _frame_ingress.close();
-        // Closed ingress cannot accept lifecycle retries. Shutdown deliberately
-        // releases their retained slots instead of attempting reinjection.
-        _pending_connection_closes.clear();
 
         if (_listener.isValid())
         {
@@ -705,9 +775,24 @@ namespace snf::server
         {
             static_cast<void>(client_descriptor);
             updateClientEvents(session);
+
+            ConnectionClosed closed{
+                .connection = session.getConnectionId(),
+                .cause = ConnectionCloseCause::ServerShutdown,
+                .has_location_snapshot = false,
+                .last_location = std::nullopt,
+            };
+            if (_frame_ingress.tryPostConnectionClosed(closed) == PostResult::Full)
+            {
+                _pending_connection_closes.push_back(std::move(closed));
+            }
         }
 
-        if (_logic_runtime_drained)
+        _stats.pending_connection_closes_high_water_mark = std::max(
+            _stats.pending_connection_closes_high_water_mark, _pending_connection_closes.size());
+        retryPendingConnectionCloses();
+
+        if (_logic_runtime_drained && isControlDrained())
         {
             completeShutdownAfterLogicRuntimeDrained();
         }
@@ -745,7 +830,10 @@ namespace snf::server
     void TcpServer::cancelQueues()
     {
         _frame_ingress.cancel();
-        _outbound_actions.cancel();
+        // Cancelling releases every actor waiting for capacity. Without it a Logic
+        // Worker would wait for a grant this reactor can no longer make, and the
+        // Logic Runtime would never reach its drained state.
+        static_cast<void>(_outbound.cancel());
     }
 
     bool TcpServer::flushPendingSend(snf::net::Session& session)
@@ -825,6 +913,10 @@ namespace snf::server
         _client_descriptors_by_event_token.erase(connection.generation);
         _sessions.erase(session_iterator);
         ++_stats.closed_connections;
+        // Releases this connection's outbound accounting once whatever it still holds
+        // has drained. Until this point the channel keeps the entry alive so a live
+        // connection's commands do not allocate one each.
+        _outbound.forgetConnection(connection);
         std::cout << "Closed client FD: " << client_descriptor << '\n';
 
         if (!_is_stopping)
@@ -832,6 +924,8 @@ namespace snf::server
             notifyConnectionClosed(ConnectionClosed{
                 .connection = connection,
                 .cause = cause,
+                .has_location_snapshot = false,
+                .last_location = std::nullopt,
             });
         }
     }
@@ -884,6 +978,21 @@ namespace snf::server
                 _pending_connection_closes.push_back(std::move(closed));
             }
         }
+
+        closeFrameIngressAfterConnectionLifecyclesDrain();
+    }
+
+    void TcpServer::closeFrameIngressAfterConnectionLifecyclesDrain()
+    {
+        if (!_is_stopping || _frame_ingress_closed || !_pending_connection_closes.empty())
+        {
+            return;
+        }
+
+        // ConnectionClosed drives Player snapshot persistence and actor eviction.
+        // Close Logic ingress only after every retained lifecycle fact was admitted.
+        _frame_ingress_closed = true;
+        _frame_ingress.close();
     }
 
     void TcpServer::reportMetricsIfDue()
@@ -910,6 +1019,11 @@ namespace snf::server
                    _connection_lifecycle_capacity - _sessions.size();
     }
 
+    bool TcpServer::isControlDrained() const noexcept
+    {
+        return !_is_control_drained || _is_control_drained();
+    }
+
     bool TcpServer::hasMetricsReporting() const noexcept
     {
         return _on_metrics_interval != nullptr &&
@@ -928,8 +1042,8 @@ namespace snf::server
         {
             const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
                 _shutdown_deadline - std::chrono::steady_clock::now());
-            timeout = static_cast<int>(std::clamp<std::int64_t>(
-                remaining.count(), 0, std::numeric_limits<int>::max()));
+            timeout = static_cast<int>(
+                std::clamp<std::int64_t>(remaining.count(), 0, std::numeric_limits<int>::max()));
         }
 
         if (!_pending_connection_closes.empty())
@@ -942,8 +1056,8 @@ namespace snf::server
         {
             const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
                 _next_metrics_report - std::chrono::steady_clock::now());
-            const int report_timeout = static_cast<int>(std::clamp<std::int64_t>(
-                remaining.count(), 0, std::numeric_limits<int>::max()));
+            const int report_timeout = static_cast<int>(
+                std::clamp<std::int64_t>(remaining.count(), 0, std::numeric_limits<int>::max()));
             timeout = timeout == -1 ? report_timeout : std::min(timeout, report_timeout);
         }
 

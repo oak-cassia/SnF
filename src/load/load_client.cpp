@@ -210,11 +210,16 @@ namespace snf::load
             .maximum_active_connections = 0,
             .sent_requests = 0,
             .received_responses = 0,
+            .sent_bootstrap_requests = 0,
+            .received_bootstrap_responses = 0,
+            .sent_gameplay_requests = 0,
+            .received_gameplay_responses = 0,
             .request_timeouts = 0,
             .invalid_responses = 0,
             .socket_errors = 0,
             .load_duration = _config.duration,
             .round_trip_times = {},
+            .gameplay_round_trip_times = {},
         };
 
         try
@@ -235,6 +240,16 @@ namespace snf::load
                 result.error = "Requests per second is out of range";
                 return result;
             }
+            if (_config.players_per_zone == 0)
+            {
+                result.error = "Players per Zone must be positive";
+                return result;
+            }
+            if (_config.scenario != LoadScenario::Ping && _config.scenario != LoadScenario::Zone)
+            {
+                result.error = "Load scenario is invalid";
+                return result;
+            }
 
             if (_config.duration <= std::chrono::milliseconds::zero() ||
                 _config.connect_timeout <= std::chrono::milliseconds::zero() ||
@@ -252,10 +267,17 @@ namespace snf::load
             {
                 try
                 {
+                    const std::uint64_t player_id = connection_index + 1;
+                    const std::uint64_t zone_id = connection_index / _config.players_per_zone + 1;
                     ClientConnection connection{
                         _config.host,
                         _config.port,
                         _config.connect_timeout,
+                        ClientWorkload{
+                            .scenario = _config.scenario,
+                            .player_id = player_id,
+                            .zone_id = zone_id,
+                        },
                     };
 
                     const int connection_descriptor = connection.getDescriptor();
@@ -446,7 +468,7 @@ namespace snf::load
                                     continue;
                                 }
 
-                                connection.enqueuePing(_config.request_timeout);
+                                connection.enqueueNextRequest(_config.request_timeout);
                                 update_epoll_events(
                                     epoll.getDescriptor(), connection, EPOLL_CTL_MOD);
                             }
@@ -468,6 +490,8 @@ namespace snf::load
                     {
                         auto write_result = connection.handleWritable();
                         result.sent_requests += write_result.sent_requests;
+                        result.sent_bootstrap_requests += write_result.sent_bootstrap_requests;
+                        result.sent_gameplay_requests += write_result.sent_gameplay_requests;
                         connection_error = std::move(write_result.error);
                     }
 
@@ -476,9 +500,15 @@ namespace snf::load
                     {
                         auto read_result = connection.handleReadable();
                         result.received_responses += read_result.round_trip_times.size();
+                        result.received_bootstrap_responses += read_result.bootstrap_responses;
+                        result.received_gameplay_responses += read_result.gameplay_responses;
                         result.round_trip_times.insert(result.round_trip_times.end(),
                                                        read_result.round_trip_times.begin(),
                                                        read_result.round_trip_times.end());
+                        result.gameplay_round_trip_times.insert(
+                            result.gameplay_round_trip_times.end(),
+                            read_result.gameplay_round_trip_times.begin(),
+                            read_result.gameplay_round_trip_times.end());
                         connection_error = std::move(read_result.error);
                     }
 
@@ -525,11 +555,23 @@ namespace snf::load
                 }
             }
 
+            const bool workload_completed =
+                _config.scenario == LoadScenario::Ping
+                    ? result.received_gameplay_responses > 0
+                    : result.received_gameplay_responses > 0 &&
+                          std::ranges::all_of(
+                              connections,
+                              [](const auto& connection_entry)
+                              { return connection_entry.second.hasCompletedBootstrap(); });
             result.success = result.successful_connections == result.requested_connections &&
                              result.failed_connections == 0 && result.request_timeouts == 0 &&
                              result.invalid_responses == 0 && result.socket_errors == 0 &&
                              result.sent_requests == result.received_responses &&
-                             result.received_responses > 0;
+                             workload_completed;
+            if (!result.success && result.error.empty())
+            {
+                result.error = "Load workload did not complete";
+            }
             return result;
         }
         catch (const std::exception& error)

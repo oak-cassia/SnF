@@ -70,6 +70,8 @@ target_include_directories(snf_core
 snf_configure_target(snf_core)
 
 find_package(Threads REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(MySQL REQUIRED IMPORTED_TARGET mysqlclient)
 
 add_library(snf_runtime STATIC
     src/runtime/runtime_completion.cpp
@@ -87,15 +89,32 @@ add_library(snf_server_runtime STATIC
     src/server/protocol_gateway.cpp
     src/server/command_router.cpp
     src/server/protocol_response_mapper.cpp
-    src/server/protocol_player_effect_sink.cpp
+    src/server/protocol_player_follow_up_sink.cpp
+    src/server/protocol_zone_result_sink.cpp
+    src/server/protocol_party_result_sink.cpp
+    src/server/route_coordinator.cpp
+    src/server/party_coordinator.cpp
     src/server/player_actor.cpp
     src/server/player_actor_binding.cpp
     src/server/player_actor_ingress.cpp
-    src/server/outbound_sink.cpp
+    src/server/player_persistence_service.cpp
+    src/server/product_catalog.cpp
+    src/server/player_repository.cpp
+    src/server/mysql_player_repository.cpp
+    src/server/player_session_directory.cpp
+    src/server/zone_actor.cpp
+    src/server/zone_actor_binding.cpp
+    src/server/zone_actor_ingress.cpp
+    src/server/zone_transition_channel.cpp
+    src/server/party_actor.cpp
+    src/server/party_actor_binding.cpp
+    src/server/party_actor_ingress.cpp
+    src/server/outbound_channel.cpp
+    src/server/command_terminal.cpp
     src/server/game_server.cpp
     src/server/tcp_server.cpp
 )
-target_link_libraries(snf_server_runtime PUBLIC snf_core snf_runtime)
+target_link_libraries(snf_server_runtime PUBLIC snf_core snf_runtime PkgConfig::MySQL)
 snf_configure_target(snf_server_runtime)
 
 add_executable(snf_server
@@ -128,9 +147,17 @@ if(BUILD_TESTING)
         tests/command_router_test.cpp
         tests/protocol_gateway_test.cpp
         tests/protocol_response_mapper_test.cpp
-        tests/player_effect_sink_test.cpp
+        tests/protocol_zone_result_sink_test.cpp
+        tests/protocol_party_result_sink_test.cpp
+        tests/route_coordinator_test.cpp
+        tests/party_coordinator_test.cpp
+        tests/player_follow_up_sink_test.cpp
+        tests/outbound_channel_test.cpp
         tests/runtime_boundaries_test.cpp
         tests/player_actor_test.cpp
+        tests/player_persistence_service_test.cpp
+        tests/player_session_directory_test.cpp
+        tests/player_repository_test.cpp
         tests/actor_runtime_test.cpp
         tests/actor_coroutine_test.cpp
         tests/message_dispatcher_test.cpp
@@ -138,6 +165,11 @@ if(BUILD_TESTING)
         tests/socket_options_test.cpp
         tests/tcp_listener_test.cpp
         tests/unique_file_descriptor_test.cpp
+        tests/zone_actor_test.cpp
+        tests/zone_actor_binding_test.cpp
+        tests/zone_transition_channel_test.cpp
+        tests/party_actor_test.cpp
+        tests/party_actor_binding_test.cpp
     )
     target_link_libraries(snf_unit_tests PRIVATE snf_server_runtime)
     snf_configure_target(snf_unit_tests)
@@ -170,4 +202,21 @@ if(BUILD_TESTING)
 
     add_test(NAME snf_load_client_integration_tests COMMAND snf_load_client_integration_tests)
     set_tests_properties(snf_load_client_integration_tests PROPERTIES TIMEOUT 15)
+
+    add_executable(snf_mysql_integration_tests
+        tests/mysql_player_repository_integration_test.cpp
+    )
+    target_link_libraries(snf_mysql_integration_tests
+        PRIVATE
+            snf_server_runtime
+            snf_load_client_runtime
+            Threads::Threads
+    )
+    snf_configure_target(snf_mysql_integration_tests)
+
+    add_test(NAME snf_mysql_integration_tests COMMAND snf_mysql_integration_tests)
+    set_tests_properties(snf_mysql_integration_tests PROPERTIES
+        TIMEOUT 30
+        SKIP_RETURN_CODE 77
+    )
 endif()

@@ -66,10 +66,9 @@ namespace snf::runtime
             // the buckets first, so it can never report a max below a sample it
             // has already counted.
             std::uint64_t observed = _max.load(std::memory_order_relaxed);
-            while (observed < value && !_max.compare_exchange_weak(observed,
-                                                                   value,
-                                                                   std::memory_order_relaxed,
-                                                                   std::memory_order_relaxed))
+            while (observed < value &&
+                   !_max.compare_exchange_weak(
+                       observed, value, std::memory_order_relaxed, std::memory_order_relaxed))
             {
             }
 
@@ -113,8 +112,7 @@ namespace snf::runtime
                 return static_cast<std::size_t>(value);
             }
 
-            const auto scale =
-                static_cast<std::size_t>(std::bit_width(value)) - EXACT_BUCKET_BITS;
+            const auto scale = static_cast<std::size_t>(std::bit_width(value)) - EXACT_BUCKET_BITS;
             if (scale > MAX_SCALE)
             {
                 return BUCKET_COUNT - 1;

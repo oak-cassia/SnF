@@ -19,7 +19,7 @@ namespace
         }
 
         [[nodiscard]] snf::runtime::PostResult
-        tryPostConnectionClosed(snf::server::ProvisionalActorId actor,
+        tryPostConnectionClosed(snf::server::PlayerActorId actor,
                                 snf::server::ConnectionClosed closed) override
         {
             closed_actor = actor;
@@ -40,7 +40,7 @@ namespace
         snf::runtime::PostResult result{snf::runtime::PostResult::Accepted};
         snf::runtime::PostResult lifecycle_result{snf::runtime::PostResult::Accepted};
         std::optional<snf::server::PlayerInboundCommand> posted;
-        std::optional<snf::server::ProvisionalActorId> closed_actor;
+        std::optional<snf::server::PlayerActorId> closed_actor;
         std::optional<snf::server::ConnectionClosed> closed_connection;
         int close_count{0};
         int cancel_count{0};
@@ -95,6 +95,8 @@ namespace
                 snf::server::ConnectionClosedRoute{
                     .actor = snf::server::ProvisionalActorId{.value = 77},
                     .cause = snf::server::ConnectionCloseCause::ProtocolError,
+                    .has_location_snapshot = true,
+                    .last_location = std::nullopt,
                 },
         });
 
@@ -106,6 +108,8 @@ namespace
         assert(player_commands.closed_connection->connection.generation == 10);
         assert(player_commands.closed_connection->cause ==
                snf::server::ConnectionCloseCause::ProtocolError);
+        assert(player_commands.closed_connection->has_location_snapshot);
+        assert(!player_commands.closed_connection->last_location.has_value());
     }
 }
 

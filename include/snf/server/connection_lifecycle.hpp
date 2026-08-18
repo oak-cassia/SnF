@@ -1,7 +1,9 @@
 #pragma once
 
 #include "snf/net/connection_id.hpp"
+#include "snf/server/player_location.hpp"
 
+#include <optional>
 #include <string_view>
 
 namespace snf::server
@@ -18,6 +20,11 @@ namespace snf::server
     {
         snf::net::ConnectionId connection;
         ConnectionCloseCause cause;
+        // false means the session closed before its persistent location was loaded;
+        // the PlayerActor retains whatever its load restored. true + nullopt is an
+        // authoritative "not in a Zone" snapshot after explicit leave.
+        bool has_location_snapshot{false};
+        std::optional<PlayerLocation> last_location;
     };
 
     [[nodiscard]] constexpr std::string_view to_string(const ConnectionCloseCause cause) noexcept

@@ -130,10 +130,44 @@ namespace
         assert(result.successful_connections == 0);
         assert(result.failed_connections == 4);
     }
+
+    void test_completes_authenticated_zone_movement_workload()
+    {
+        RunningServer server;
+        const snf::load::LoadClient client{snf::load::LoadClientConfig{
+            .host = "127.0.0.1",
+            .port = server.getPort(),
+            .connections = 6,
+            .duration = 400ms,
+            .requests_per_second = 20,
+            .scenario = snf::load::LoadScenario::Zone,
+            .players_per_zone = 3,
+            .connect_timeout = 1s,
+            .request_timeout = 1s,
+        }};
+
+        const auto result = client.run();
+
+        assert(result.success);
+        assert(result.error.empty());
+        assert(result.successful_connections == 6);
+        assert(result.failed_connections == 0);
+        assert(result.sent_bootstrap_requests == 12);
+        assert(result.received_bootstrap_responses == 12);
+        assert(result.sent_gameplay_requests > 0);
+        assert(result.received_gameplay_responses == result.sent_gameplay_requests);
+        assert(result.gameplay_round_trip_times.size() == result.received_gameplay_responses);
+        assert(result.request_timeouts == 0);
+        assert(result.invalid_responses == 0);
+        assert(result.socket_errors == 0);
+
+        server.stop();
+    }
 }
 
 int main()
 {
     test_completes_non_blocking_ping_pong();
     test_reports_connection_failure();
+    test_completes_authenticated_zone_movement_workload();
 }
