@@ -146,7 +146,7 @@ namespace snf::server
     PlayerResult PlayerActor::handleCommand(const PingCommand& command)
     {
         return PlayerResult{
-            .effects =
+            .follow_ups =
                 {
                     SendResponse{
                         .response =
@@ -167,7 +167,7 @@ namespace snf::server
         }
 
         return PlayerResult{
-            .effects =
+            .follow_ups =
                 {
                     SendResponse{
                         .response =
@@ -257,7 +257,7 @@ namespace snf::server
         }
 
         return PlayerResult{
-            .effects =
+            .follow_ups =
                 {
                     SendResponse{
                         .response =

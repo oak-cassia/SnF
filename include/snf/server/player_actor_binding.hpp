@@ -6,7 +6,7 @@
 #include "snf/server/outbound_sink.hpp"
 #include "snf/server/player_actor.hpp"
 #include "snf/server/player_actor_id.hpp"
-#include "snf/server/player_effect_sink.hpp"
+#include "snf/server/player_follow_up_sink.hpp"
 #include "snf/server/player_inbound_command.hpp"
 #include "snf/server/player_persistence_service.hpp"
 #include "snf/server/player_repository.hpp"
@@ -44,12 +44,12 @@ namespace snf::server
     //
     // It also owns the outbound reservation, in two stages: the handler decides, and
     // only then does the binding acquire the capacity to emit. That keeps PlayerActor
-    // unaware that outbound capacity is finite while still emitting effects strictly
+    // unaware that outbound capacity is finite while still applying follow-ups strictly
     // after the handler has returned.
     class PlayerActorBinding final : public snf::runtime::ActorBinding
     {
     public:
-        PlayerActorBinding(PlayerEffectSink& effects,
+        PlayerActorBinding(PlayerFollowUpSink& follow_up_sink,
                            OutboundSink& outbound,
                            CommandLifecycleSink& lifecycle,
                            PlayerActorBindingConfig config = {});
@@ -77,22 +77,22 @@ namespace snf::server
         struct ConnectionClosedPayload;
 
         // Shared tail of dispatch and resume: drive whichever stage the command is in,
-        // and emit once its capacity is in hand.
+        // and apply its follow-ups once the capacity is in hand.
         [[nodiscard]] snf::runtime::ActorDispatchResult advance(PlayerActorSlot& slot,
                                                                 snf::runtime::ActorContext& context,
                                                                 std::stop_token stop_token);
-        [[nodiscard]] snf::runtime::ActorDispatchResult
-        emit(PlayerActorSlot& slot, OutboundReservation& reservation, std::stop_token stop_token);
+        [[nodiscard]] snf::runtime::ActorDispatchResult applyFollowUps(
+            PlayerActorSlot& slot, OutboundReservation& reservation, std::stop_token stop_token);
         void publishDirtySnapshot(PlayerActorSlot& slot) noexcept;
         // Ends a command that could not acquire capacity at all, either because none
         // could be awaited or because the result asks for more than one connection may
         // ever hold. The connection is closed by the backend, so the command itself ends
         // normally.
         [[nodiscard]] snf::runtime::ActorDispatchResult
-        abandonEmission(PlayerActorSlot& slot) noexcept;
+        abandonFollowUps(PlayerActorSlot& slot) noexcept;
         static void resetPendingCommand(PlayerActorSlot& slot) noexcept;
 
-        PlayerEffectSink& _effects;
+        PlayerFollowUpSink& _follow_up_sink;
         OutboundSink& _outbound;
         CommandLifecycleSink& _lifecycle;
         snf::runtime::ActorKind _kind;

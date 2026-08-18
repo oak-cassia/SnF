@@ -100,11 +100,10 @@ namespace
             [&persistence, record = std::move(record)](
                 snf::runtime::AsyncOperationProducer<snf::server::PlayerSaveResult> producer)
             {
-                persistence.asyncSave(
-                    std::move(record),
-                    [producer = std::move(producer)](
-                        snf::server::PlayerSaveResult result) mutable noexcept
-                    { producer.complete(std::move(result)); });
+                persistence.asyncSave(std::move(record),
+                                      [producer = std::move(producer)](
+                                          snf::server::PlayerSaveResult result) mutable noexcept
+                                      { producer.complete(std::move(result)); });
             });
         co_return std::move(result);
     }
@@ -115,7 +114,7 @@ namespace snf::server
 {
     struct PlayerActorBinding::PlayerActorSlot final : snf::runtime::ActorSlot
     {
-        // Emission needs capacity the handler must not know about, so a command runs
+        // Applying follow-ups needs capacity the handler must not know about, so a command runs
         // in two stages: the handler's own task, then the reservation's.
         enum class Stage
         {
@@ -158,11 +157,11 @@ namespace snf::server
         // slot for the same reason.
         snf::runtime::ActorTask<OutboundReservation> reservation_task;
         snf::runtime::ActorTask<PlayerSaveResult> save_task;
-        // The handler's decisions, held between its normal return and the emission
+        // The handler's decisions, held between its normal return and the application
         // whose capacity is still being awaited.
         PlayerResult pending_result;
         // Captured at dispatch because resume() does not carry the submission, and
-        // effects still have to reach the connection that issued the command.
+        // follow-ups still have to reach the connection that issued the command.
         snf::net::ConnectionId connection{};
     };
 
@@ -179,11 +178,11 @@ namespace snf::server
         ConnectionClosed closed;
     };
 
-    PlayerActorBinding::PlayerActorBinding(PlayerEffectSink& effects,
+    PlayerActorBinding::PlayerActorBinding(PlayerFollowUpSink& follow_up_sink,
                                            OutboundSink& outbound,
                                            CommandLifecycleSink& lifecycle,
                                            PlayerActorBindingConfig config)
-        : _effects(effects)
+        : _follow_up_sink(follow_up_sink)
         , _outbound(outbound)
         , _lifecycle(lifecycle)
         , _kind(config.actor_kind)
@@ -274,9 +273,8 @@ namespace snf::server
         const PlayerActorId identity = kind() == snf::runtime::ActorKind::Player
                                            ? PlayerActorId{PlayerId{.value = entity}}
                                            : PlayerActorId{ProvisionalActorId{.value = entity}};
-        return std::make_unique<PlayerActorSlot>(identity,
-                                                 _on_actor_deactivated,
-                                                 _max_purchase_idempotency_records_per_player);
+        return std::make_unique<PlayerActorSlot>(
+            identity, _on_actor_deactivated, _max_purchase_idempotency_records_per_player);
     }
 
     snf::runtime::ActorDispatchResult
@@ -416,7 +414,7 @@ namespace snf::server
                 return snf::runtime::ActorDispatchResult::Suspended;
             }
 
-            // Effects are applied only after the handler has returned normally, which
+            // Follow-ups are applied only after the handler has returned normally, which
             // is the same ordering the synchronous handler had. takeResult rethrows a
             // handler exception, and the frame is then destroyed with the slot on this
             // same Worker.
@@ -429,20 +427,20 @@ namespace snf::server
 
         if (slot.stage == PlayerActorSlot::Stage::Reserving && !slot.reservation_task.valid())
         {
-            const std::size_t required_slots = _effects.requiredSlots(slot.pending_result);
+            const std::size_t required_slots = _follow_up_sink.requiredSlots(slot.pending_result);
             if (!_outbound.canEverReserve(required_slots))
             {
                 // More than one connection may ever hold. Waiting would never end and
                 // throwing would take down every actor this Worker owns, so the command
                 // ends here and the backend closes the connection.
-                return abandonEmission(slot);
+                return abandonFollowUps(slot);
             }
 
             if (auto reservation = _outbound.tryReserve(slot.connection, required_slots))
             {
                 // Outside saturation this is the whole story: no operation is begun, so
                 // no in-flight slot, no continuation and no suspension.
-                return emit(slot, *reservation, stop_token);
+                return applyFollowUps(slot, *reservation, stop_token);
             }
 
             slot.reservation_task =
@@ -486,11 +484,11 @@ namespace snf::server
             // Outbound is saturated and this Worker's in-flight budget is exhausted, so
             // the response cannot be emitted. It is not dropped in silence: the backend
             // closes the connection under the same overflow policy inbound uses.
-            return abandonEmission(slot);
+            return abandonFollowUps(slot);
         }
         catch (const snf::runtime::AsyncOperationCancelled&)
         {
-            return abandonEmission(slot);
+            return abandonFollowUps(slot);
         }
 
         slot.reservation_task = {};
@@ -507,18 +505,17 @@ namespace snf::server
                 "Outbound channel was cancelled while the logic runtime was active"};
         }
 
-        return emit(slot, reservation, stop_token);
+        return applyFollowUps(slot, reservation, stop_token);
     }
 
-    snf::runtime::ActorDispatchResult PlayerActorBinding::emit(PlayerActorSlot& slot,
-                                                               OutboundReservation& reservation,
-                                                               const std::stop_token stop_token)
+    snf::runtime::ActorDispatchResult PlayerActorBinding::applyFollowUps(
+        PlayerActorSlot& slot, OutboundReservation& reservation, const std::stop_token stop_token)
     {
         PlayerResult result = std::move(slot.pending_result);
         const snf::net::ConnectionId connection = slot.connection;
         resetPendingCommand(slot);
 
-        if (_effects.commit(connection, std::move(result), reservation))
+        if (_follow_up_sink.applyFollowUps(connection, std::move(result), reservation))
         {
             return snf::runtime::ActorDispatchResult::KeepActive;
         }
@@ -528,7 +525,8 @@ namespace snf::server
             return snf::runtime::ActorDispatchResult::Stopped;
         }
 
-        throw std::runtime_error{"Player effect emission failed while logic runtime was active"};
+        throw std::runtime_error{
+            "Player follow-up application failed while logic runtime was active"};
     }
 
     void PlayerActorBinding::publishDirtySnapshot(PlayerActorSlot& slot) noexcept
@@ -558,7 +556,7 @@ namespace snf::server
     }
 
     snf::runtime::ActorDispatchResult
-    PlayerActorBinding::abandonEmission(PlayerActorSlot& slot) noexcept
+    PlayerActorBinding::abandonFollowUps(PlayerActorSlot& slot) noexcept
     {
         slot.reservation_task = {};
         resetPendingCommand(slot);

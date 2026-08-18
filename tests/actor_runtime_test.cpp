@@ -7,7 +7,7 @@
 #include "snf/server/outbound_sink.hpp"
 #include "snf/server/player_actor_binding.hpp"
 #include "snf/server/player_actor_ingress.hpp"
-#include "snf/server/protocol_player_effect_sink.hpp"
+#include "snf/server/protocol_player_follow_up_sink.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -83,7 +83,7 @@ namespace
 
         snf::net::UniqueFileDescriptor outbound_event;
         snf::server::OutboundChannel outbound;
-        snf::server::ProtocolPlayerEffectSink outbound_sink;
+        snf::server::ProtocolPlayerFollowUpSink outbound_sink;
         snf::server::CountingCommandLifecycleSink lifecycle;
         RecordingRuntimeCompletion completion;
     };
@@ -378,7 +378,7 @@ namespace
         runtime.join();
     }
 
-    void test_player_binding_preserves_ping_pong_fifo_and_effect_order()
+    void test_player_binding_preserves_ping_pong_fifo_and_follow_up_order()
     {
         RuntimeDependencies dependencies{8};
         PlayerRuntime player{dependencies, player_runtime_config()};
@@ -1036,7 +1036,7 @@ namespace
         }
         assert(dependencies.outbound.size() == 1);
 
-        // The channel is full, so this command's emission suspends its actor rather
+        // The channel is full, so applying this command's follow-ups suspends its actor rather
         // than parking the Worker. A registered waiter is the observable proof.
         assert(player.ingress.tryPost(make_command(1, 2)) == PostResult::Accepted);
         deadline = std::chrono::steady_clock::now() + 1s;
@@ -1137,12 +1137,12 @@ namespace
     }
 
     // Prices every result above what one connection may ever hold. This is the shape a
-    // future multi-effect result takes when the per-connection limit is smaller than the
-    // effect count.
-    class OversizedEffectSink final : public snf::server::PlayerEffectSink
+    // future multi-follow-up result takes when the per-connection limit is smaller than
+    // the follow-up count.
+    class OversizedFollowUpSink final : public snf::server::PlayerFollowUpSink
     {
     public:
-        explicit OversizedEffectSink(const std::size_t slots) noexcept
+        explicit OversizedFollowUpSink(const std::size_t slots) noexcept
             : _slots(slots)
         {
         }
@@ -1153,15 +1153,15 @@ namespace
             return _slots;
         }
 
-        [[nodiscard]] bool commit(snf::net::ConnectionId,
-                                  snf::server::PlayerResult,
-                                  snf::server::OutboundReservation&) override
+        [[nodiscard]] bool applyFollowUps(snf::net::ConnectionId,
+                                          snf::server::PlayerResult,
+                                          snf::server::OutboundReservation&) override
         {
-            committed = true;
+            applied = true;
             return true;
         }
 
-        bool committed{false};
+        bool applied{false};
 
     private:
         std::size_t _slots;
@@ -1170,9 +1170,9 @@ namespace
     void test_an_unsatisfiable_result_closes_the_connection_instead_of_failing_the_worker()
     {
         RuntimeDependencies dependencies{2};
-        OversizedEffectSink effects{3};
+        OversizedFollowUpSink follow_up_sink{3};
         snf::server::PlayerActorBinding binding{
-            effects, dependencies.outbound, dependencies.lifecycle};
+            follow_up_sink, dependencies.outbound, dependencies.lifecycle};
         ActorRuntime runtime{player_runtime_config(1, 8), dependencies.completion};
         runtime.registerBinding(binding);
         snf::server::PlayerActorIngress ingress{runtime, binding, dependencies.lifecycle};
@@ -1193,7 +1193,7 @@ namespace
         // Reported for closing, not thrown: one oversized result must not take down every
         // actor the Worker owns.
         assert(failures.size() == 1);
-        assert(!effects.committed);
+        assert(!follow_up_sink.applied);
 
         runtime.close();
         runtime.join();
@@ -1239,7 +1239,7 @@ namespace
         assert(stats.in_flight_operations == 0);
     }
 
-    void test_saturated_outbound_preserves_effect_order_and_handler_atomicity()
+    void test_saturated_outbound_preserves_follow_up_order_and_handler_atomicity()
     {
         RuntimeDependencies dependencies{1};
         PlayerRuntime player{dependencies, player_runtime_config(1, 8)};
@@ -1439,10 +1439,11 @@ namespace
         assert(ingress.tryPost(snf::server::PlayerInboundCommand{
                    .actor = player,
                    .connection = connection,
-                   .command = snf::server::AuthenticateCommand{
-                       .request_id = 1,
-                       .player = player,
-                   },
+                   .command =
+                       snf::server::AuthenticateCommand{
+                           .request_id = 1,
+                           .player = player,
+                       },
                }) == PostResult::Accepted);
         assert(repository.load_requested_future.wait_for(1s) == std::future_status::ready);
         repository.completeLoad(snf::server::PlayerRecord{
@@ -1721,9 +1722,7 @@ namespace
         runtime.start();
 
         state->on_dispatch_with_context = [&](ActorContext& context, const ActorKey&, int value)
-        {
-            static_cast<void>(context.trySchedule(5ms, binding.post(1, value + 1)));
-        };
+        { static_cast<void>(context.trySchedule(5ms, binding.post(1, value + 1))); };
 
         assert(runtime.tryPost(binding.post(1, 1)) == PostResult::Accepted);
 
@@ -1782,7 +1781,7 @@ namespace
 void run_actor_runtime_tests()
 {
     test_actor_key_affinity_and_registry_rules();
-    test_player_binding_preserves_ping_pong_fifo_and_effect_order();
+    test_player_binding_preserves_ping_pong_fifo_and_follow_up_order();
     test_same_actor_is_serial_and_different_shards_run_in_parallel();
     test_synthetic_bindings_share_capacity_fairness_and_cross_kind_slots();
     test_control_submissions_consume_the_turn_budget();
@@ -1795,7 +1794,7 @@ void run_actor_runtime_tests()
     test_capacity_and_lifecycle_control_accounting();
     test_cancel_and_failure_terminal_paths();
     test_cancel_releases_an_actor_suspended_on_outbound_capacity();
-    test_saturated_outbound_preserves_effect_order_and_handler_atomicity();
+    test_saturated_outbound_preserves_follow_up_order_and_handler_atomicity();
     test_exhausted_in_flight_budget_closes_the_connection_instead_of_dropping_a_response();
     test_an_unsatisfiable_result_closes_the_connection_instead_of_failing_the_worker();
     test_admitted_commands_and_refused_posts_are_counted_apart();

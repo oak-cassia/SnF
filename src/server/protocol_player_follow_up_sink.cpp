@@ -1,4 +1,4 @@
-#include "snf/server/protocol_player_effect_sink.hpp"
+#include "snf/server/protocol_player_follow_up_sink.hpp"
 
 #include <type_traits>
 #include <utility>
@@ -11,17 +11,17 @@ namespace
 
 namespace snf::server
 {
-    ProtocolPlayerEffectSink::ProtocolPlayerEffectSink(OutboundSink& outbound) noexcept
+    ProtocolPlayerFollowUpSink::ProtocolPlayerFollowUpSink(OutboundSink& outbound) noexcept
         : _outbound(outbound)
     {
     }
 
-    std::size_t ProtocolPlayerEffectSink::requiredSlots(const PlayerResult& result) const noexcept
+    std::size_t ProtocolPlayerFollowUpSink::requiredSlots(const PlayerResult& result) const noexcept
     {
         std::size_t slots = 0;
-        for (const PlayerEffect& effect : result.effects)
+        for (const FollowUpAction& follow_up : result.follow_ups)
         {
-            if (std::holds_alternative<SendResponse>(effect))
+            if (std::holds_alternative<SendResponse>(follow_up))
             {
                 ++slots;
             }
@@ -29,17 +29,17 @@ namespace snf::server
         return slots;
     }
 
-    bool ProtocolPlayerEffectSink::commit(const snf::net::ConnectionId connection,
-                                          PlayerResult result,
-                                          OutboundReservation& reservation)
+    bool ProtocolPlayerFollowUpSink::applyFollowUps(const snf::net::ConnectionId connection,
+                                                    PlayerResult result,
+                                                    OutboundReservation& reservation)
     {
-        for (const PlayerEffect& effect : result.effects)
+        for (const FollowUpAction& follow_up : result.follow_ups)
         {
             const bool emitted = std::visit(
                 [this, connection, &reservation](auto value) -> bool
                 {
-                    using Effect = std::decay_t<decltype(value)>;
-                    if constexpr (std::is_same_v<Effect, SendResponse>)
+                    using Action = std::decay_t<decltype(value)>;
+                    if constexpr (std::is_same_v<Action, SendResponse>)
                     {
                         return _outbound.commit(reservation,
                                                 SendFrame{
@@ -49,10 +49,11 @@ namespace snf::server
                     }
                     else
                     {
-                        static_assert(always_false_v<Effect>, "Unhandled PlayerEffect alternative");
+                        static_assert(always_false_v<Action>,
+                                      "Unhandled FollowUpAction alternative");
                     }
                 },
-                effect);
+                follow_up);
 
             if (!emitted)
             {

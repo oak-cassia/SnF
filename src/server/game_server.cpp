@@ -138,7 +138,7 @@ namespace snf::server
         , _zone_transition_channel(
               checked_zone_handoffs(config.max_zone_handoffs, config.connection_lifecycle_capacity),
               _outbound_event.getDescriptor())
-        , _player_effects(_outbound_channel)
+        , _player_follow_ups(_outbound_channel)
         , _zone_results(_outbound_channel)
         , _party_results(_outbound_channel)
         , _route_coordinator(
@@ -153,9 +153,9 @@ namespace snf::server
               })
         , _runtime_completion(snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
                               _outbound_event.getDescriptor())
-        , _player_actor_binding(_player_effects, _outbound_channel, _command_lifecycle)
+        , _player_actor_binding(_player_follow_ups, _outbound_channel, _command_lifecycle)
         , _persistent_player_actor_binding(
-              _player_effects,
+              _player_follow_ups,
               _outbound_channel,
               _command_lifecycle,
               PlayerActorBindingConfig{

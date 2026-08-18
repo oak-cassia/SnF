@@ -18,7 +18,7 @@
 #include "snf/server/player_session_directory.hpp"
 #include "snf/server/protocol_gateway.hpp"
 #include "snf/server/protocol_party_result_sink.hpp"
-#include "snf/server/protocol_player_effect_sink.hpp"
+#include "snf/server/protocol_player_follow_up_sink.hpp"
 #include "snf/server/protocol_zone_result_sink.hpp"
 #include "snf/server/route_coordinator.hpp"
 #include "snf/server/tcp_server.hpp"
@@ -143,11 +143,11 @@ namespace snf::server
         std::function<void(const ServerMetricsSnapshot&)> _metrics_reporter;
         // The channel signals this descriptor, so it has to outlive the channel.
         snf::net::UniqueFileDescriptor _outbound_event;
-        // The domain side takes it as an OutboundSink&, so the binding and the effect
+        // The domain side takes it as an OutboundSink&, so the binding and the follow-up
         // sink still cannot reach the reactor-only half.
         OutboundChannel _outbound_channel;
         ZoneTransitionChannel _zone_transition_channel;
-        ProtocolPlayerEffectSink _player_effects;
+        ProtocolPlayerFollowUpSink _player_follow_ups;
         ProtocolZoneResultSink _zone_results;
         ProtocolPartyResultSink _party_results;
         CountingCommandLifecycleSink _command_lifecycle;

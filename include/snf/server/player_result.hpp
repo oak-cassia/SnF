@@ -35,10 +35,10 @@ namespace snf::server
         PlayerResponse response;
     };
 
-    using PlayerEffect = std::variant<SendResponse>;
+    using FollowUpAction = std::variant<SendResponse>;
 
     struct PlayerResult
     {
-        std::vector<PlayerEffect> effects;
+        std::vector<FollowUpAction> follow_ups;
     };
 }
