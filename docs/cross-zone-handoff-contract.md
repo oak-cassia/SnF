@@ -37,13 +37,12 @@ Transferring(handoff_id,
 - `handoff_id`와 route epoch은 0이 아닌 단조 증가 값이다.
 - `Transferring` 동안 gameplay와 두 번째 Enter는 `TransitionInProgress`로 끝낸다.
 - completion은 connection generation, handoff ID, step과 epoch이 모두 일치할 때만 적용한다.
-- timer 회수 시 stable route뿐 아니라 transition이 점유할 수 있는 Zone도 센다.
 
 ## 3. 정상 전환
 
 ```text
 Stable source와 인증 Player 확인
-→ target timer, handoff와 completion slot 예약
+→ handoff와 completion slot 예약
 → route를 Transferring(LeaveSource)으로 변경
 → source Leave(source_epoch)
 → LeaveSource Applied 확인
@@ -75,7 +74,7 @@ queue 포화로 유실되지 않는다.
 
 ### Source 변경 전
 
-timer, handoff slot 또는 source command admission이 실패하면 source를 수정하지 않고 기존
+handoff slot 또는 source command admission이 실패하면 source를 수정하지 않고 기존
 `Stable(source)`를 유지한 채 failure를 응답한다.
 
 ### Source leave 뒤

@@ -1,7 +1,6 @@
 #pragma once
 
 #include "snf/server/player_id.hpp"
-#include "snf/server/timer_id.hpp"
 
 #include <cstdint>
 #include <variant>
@@ -38,24 +37,10 @@ namespace snf::server
 
     struct ZoneSimulationTick
     {
-        TimerId timer;
-        std::uint64_t tick{0};
-    };
-
-    struct ArmZoneSimulationTimer
-    {
-        TimerId timer;
-    };
-
-    struct CancelZoneSimulationTimer
-    {
-        TimerId timer;
     };
 
     using ZoneCommand = std::variant<EnterZoneCommand,
                                      LeaveZoneCommand,
                                      MoveInZoneCommand,
-                                     ArmZoneSimulationTimer,
-                                     CancelZoneSimulationTimer,
                                      ZoneSimulationTick>;
 }

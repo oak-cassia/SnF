@@ -8,7 +8,6 @@
 #include "snf/server/protocol_zone_result_sink.hpp"
 #include "snf/server/route_coordinator.hpp"
 #include "snf/server/routed_command_ingress.hpp"
-#include "snf/server/zone_timer_service.hpp"
 #include "snf/server/zone_transition_channel.hpp"
 
 #include "snf/runtime/distribution.hpp"
@@ -45,16 +44,10 @@ namespace snf::server
         ProtocolGateway(RoutedCommandIngress& commands,
                         PlayerSessionDirectory& sessions,
                         RouteCoordinator& routes,
-                        ZoneTimerService& zone_timers);
-        ProtocolGateway(RoutedCommandIngress& commands,
-                        PlayerSessionDirectory& sessions,
-                        RouteCoordinator& routes,
-                        ZoneTimerService& zone_timers,
                         PartyCoordinator& parties);
         ProtocolGateway(RoutedCommandIngress& commands,
                         PlayerSessionDirectory& sessions,
                         RouteCoordinator& routes,
-                        ZoneTimerService& zone_timers,
                         PartyCoordinator& parties,
                         ZoneTransitionChannel& zone_transitions,
                         CommandLifecycleSink& lifecycle,
@@ -72,12 +65,6 @@ namespace snf::server
                         RoutedCommandIngress& commands,
                         PlayerSessionDirectory& sessions,
                         RouteCoordinator& routes,
-                        ZoneTimerService& zone_timers);
-        ProtocolGateway(MessageDispatcher dispatcher,
-                        RoutedCommandIngress& commands,
-                        PlayerSessionDirectory& sessions,
-                        RouteCoordinator& routes,
-                        ZoneTimerService& zone_timers,
                         PartyCoordinator& parties);
 
         [[nodiscard]] FramePostResult tryPost(FrameEnvelope envelope) override;
@@ -93,7 +80,6 @@ namespace snf::server
         {
             ZoneTransitionTicket ticket;
             CommandReleaseToken release;
-            bool target_timer_created{false};
             bool disconnecting{false};
             std::chrono::steady_clock::time_point started_at;
         };
@@ -115,7 +101,6 @@ namespace snf::server
         void finishDisconnectedHandoff(const ZoneHandoff& handoff);
         void finishFatalHandoff(const ZoneHandoff& handoff);
         void finishActiveHandoff(snf::net::ConnectionId connection);
-        void cancelUnusedTimer(ZoneId zone, bool created);
         void replyZoneStatus(snf::net::ConnectionId connection,
                              PlayerId player,
                              ZoneId zone,
@@ -136,7 +121,6 @@ namespace snf::server
         RouteCoordinator& _routes;
         PartyCoordinator _owned_parties;
         PartyCoordinator& _parties;
-        ZoneTimerService* _zone_timers{nullptr};
         ZoneTransitionChannel* _zone_transitions{nullptr};
         CommandLifecycleSink* _lifecycle{nullptr};
         ProtocolZoneResultSink* _zone_results{nullptr};

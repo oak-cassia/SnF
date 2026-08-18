@@ -171,11 +171,6 @@ namespace
             return _server.getPlayerRecord(player);
         }
 
-        [[nodiscard]] snf::server::ZoneTimerServiceStats getZoneTimerStats() const
-        {
-            return _server.getZoneTimerStats();
-        }
-
         [[nodiscard]] snf::server::ZoneActorBindingStats getZoneActorStats() const noexcept
         {
             return _server.getZoneActorStats();
@@ -1126,14 +1121,11 @@ namespace
         assert(static_cast<std::int32_t>(read_u32(entered.payload, 21)) == 20);
 
         const auto tick_deadline = std::chrono::steady_clock::now() + 1s;
-        while ((server.getZoneTimerStats().fired == 0 ||
-                server.getZoneActorStats().tick_execution_nanoseconds.sample_count == 0) &&
+        while (server.getZoneActorStats().tick_execution_nanoseconds.sample_count == 0 &&
                std::chrono::steady_clock::now() < tick_deadline)
         {
             std::this_thread::sleep_for(1ms);
         }
-        assert(server.getZoneTimerStats().scheduled == 1);
-        assert(server.getZoneTimerStats().fired >= 1);
         assert(server.getZoneActorStats().tick_execution_nanoseconds.sample_count >= 1);
 
         std::vector<std::byte> move_payload;
@@ -1164,13 +1156,25 @@ namespace
         assert(read_u64(left.payload, 9) == route_epoch);
 
         const auto cancellation_deadline = std::chrono::steady_clock::now() + 1s;
-        while (server.getZoneTimerStats().cancelled == 0 &&
-               std::chrono::steady_clock::now() < cancellation_deadline)
+        while (std::chrono::steady_clock::now() < cancellation_deadline)
         {
+            std::size_t active = 0;
+            for (const auto& w : server.getActorRuntimeStats().workers)
+            {
+                active += w.active_timers;
+            }
+            if (active == 0)
+            {
+                break;
+            }
             std::this_thread::sleep_for(1ms);
         }
-        assert(server.getZoneTimerStats().cancelled == 1);
-        assert(server.getZoneTimerStats().active_timers == 0);
+        std::size_t total_active = 0;
+        for (const auto& w : server.getActorRuntimeStats().workers)
+        {
+            total_active += w.active_timers;
+        }
+        assert(total_active == 0);
 
         server.stop();
     }

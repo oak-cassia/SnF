@@ -5,6 +5,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <map>
 #include <optional>
 #include <shared_mutex>
 #include <stdexcept>
@@ -45,6 +46,19 @@ namespace
             std::unique_lock lock{_mutex};
             _condition.wait(lock, [this] { return _signalled; });
             _signalled = false;
+        }
+
+        bool waitUntil(const std::chrono::steady_clock::time_point deadline)
+        {
+            std::unique_lock lock{_mutex};
+            const bool triggered =
+                _condition.wait_until(lock, deadline, [this] { return _signalled; });
+            if (triggered)
+            {
+                _signalled = false;
+                return true;
+            }
+            return false;
         }
 
     private:
@@ -163,6 +177,11 @@ namespace snf::runtime
 
         void abortOperation() noexcept override;
 
+        [[nodiscard]] std::optional<TimerHandle>
+        trySchedule(std::chrono::milliseconds delay, ActorSubmission submission) override;
+
+        void cancelTimer(TimerHandle handle) noexcept override;
+
     private:
         ActorRuntime* _runtime{nullptr};
         Worker* _worker{nullptr};
@@ -196,6 +215,7 @@ namespace snf::runtime
         std::atomic<std::uint64_t> evicted_actors{0};
         Distribution queue_wait;
         Distribution suspend_duration;
+        Distribution timer_lateness;
         std::atomic<std::uint64_t> outstanding_high_water_mark{0};
         std::atomic<std::uint64_t> mailbox_depth{0};
         std::atomic<std::uint64_t> mailbox_high_water_mark{0};
@@ -206,6 +226,19 @@ namespace snf::runtime
         std::atomic<std::uint64_t> discarded_late_completions{0};
         std::atomic<std::uint64_t> cancelled_operations{0};
         std::atomic<std::uint64_t> in_flight_high_water_mark{0};
+        std::atomic<std::uint64_t> timers_scheduled{0};
+        std::atomic<std::uint64_t> timers_rejected_full{0};
+        std::atomic<std::uint64_t> timers_fired{0};
+        std::atomic<std::uint64_t> timers_cancelled{0};
+        std::atomic<std::uint64_t> timers_discarded_stale{0};
+    };
+
+    struct TimerEntry
+    {
+        ActorKey target;
+        ActorIncarnation incarnation;
+        std::uint64_t id{0};
+        ActorSubmission submission;
     };
 
     struct ActorRuntime::Worker
@@ -231,6 +264,8 @@ namespace snf::runtime
         WorkerCounters counters;
         WorkerWakeup wakeup;
         mutable std::mutex scheduling_mutex;
+        std::multimap<std::chrono::steady_clock::time_point, TimerEntry> timers;
+        std::uint64_t next_timer_id{1};
         std::unordered_map<ActorKey, ActorSlotEntry, ActorKeyHash> actors;
         std::deque<ActorKey> ready_actors;
         std::uint64_t next_incarnation{1};
@@ -337,6 +372,66 @@ namespace snf::runtime
         _slot->active_operation.reset();
         _slot->expected_task.reset();
         _runtime->releaseOperation(*_worker);
+    }
+
+    std::optional<TimerHandle>
+    ActorRuntime::SlotContext::trySchedule(const std::chrono::milliseconds delay,
+                                           ActorSubmission submission)
+    {
+        if (submission.target() != _key)
+        {
+            throw std::invalid_argument{"ActorContext received a submission for another actor"};
+        }
+
+        if (!_runtime->reserveOutstanding(*_worker))
+        {
+            _worker->counters.timers_rejected_full.fetch_add(1, std::memory_order_relaxed);
+            return std::nullopt;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        const auto deadline = now + delay;
+
+        std::lock_guard lock{_worker->scheduling_mutex};
+        const std::uint64_t timer_id = _worker->next_timer_id++;
+        _worker->timers.emplace(deadline,
+                                TimerEntry{
+                                    .target = _key,
+                                    .incarnation = _slot->incarnation,
+                                    .id = timer_id,
+                                    .submission = std::move(submission),
+                                });
+        _worker->counters.timers_scheduled.fetch_add(1, std::memory_order_relaxed);
+
+        return TimerHandle{.id = timer_id};
+    }
+
+    void ActorRuntime::SlotContext::cancelTimer(const TimerHandle handle) noexcept
+    {
+        if (handle.id == 0)
+        {
+            return;
+        }
+
+        bool erased = false;
+        {
+            std::lock_guard lock{_worker->scheduling_mutex};
+            for (auto it = _worker->timers.begin(); it != _worker->timers.end(); ++it)
+            {
+                if (it->second.id == handle.id && it->second.target == _key)
+                {
+                    _worker->timers.erase(it);
+                    erased = true;
+                    break;
+                }
+            }
+        }
+
+        if (erased)
+        {
+            _worker->counters.timers_cancelled.fetch_add(1, std::memory_order_relaxed);
+            _runtime->releaseOutstanding(*_worker);
+        }
     }
 
     const ActorKey& ActorSubmission::target() const noexcept
@@ -618,10 +713,12 @@ namespace snf::runtime
             std::size_t ready_actor_count = 0;
             std::size_t suspended_task_count = 0;
             std::size_t passivatable_actor_count = 0;
+            std::size_t active_timers = 0;
             {
                 std::lock_guard lock{worker->scheduling_mutex};
                 actor_count = worker->actors.size();
                 ready_actor_count = worker->ready_actors.size();
+                active_timers = worker->timers.size();
                 for (const auto& [key, slot] : worker->actors)
                 {
                     static_cast<void>(key);
@@ -671,8 +768,19 @@ namespace snf::runtime
                     worker->counters.in_flight_high_water_mark.load(std::memory_order_relaxed)),
                 .continuation_queue_depth = worker->continuations.size(),
                 .scheduler_passivatable_actor_count = passivatable_actor_count,
+                .timers_scheduled =
+                    worker->counters.timers_scheduled.load(std::memory_order_relaxed),
+                .timers_rejected_full =
+                    worker->counters.timers_rejected_full.load(std::memory_order_relaxed),
+                .timers_fired = worker->counters.timers_fired.load(std::memory_order_relaxed),
+                .timers_cancelled =
+                    worker->counters.timers_cancelled.load(std::memory_order_relaxed),
+                .timers_discarded_stale =
+                    worker->counters.timers_discarded_stale.load(std::memory_order_relaxed),
+                .active_timers = active_timers,
                 .queue_wait_nanoseconds = worker->counters.queue_wait.snapshot(),
                 .suspend_duration_nanoseconds = worker->counters.suspend_duration.snapshot(),
+                .timer_lateness_nanoseconds = worker->counters.timer_lateness.snapshot(),
             });
         }
 
@@ -705,6 +813,7 @@ namespace snf::runtime
             // A cancelled Worker cleans up after itself: the thread that requested
             // the cancel only asked. On the drained path these are all no-ops.
             discardWorkerSubmissions(worker);
+            discardWorkerTimers(worker);
             cancelSuspendedTasks(worker);
             destroyWorkerActors(worker);
             workerFinished();
@@ -714,6 +823,7 @@ namespace snf::runtime
             recordWorkerFailure(std::current_exception());
             // A failed Worker never returns to the pump, so it must transition its
             // own operations and destroy its own frames right here.
+            discardWorkerTimers(worker);
             cancelSuspendedTasks(worker);
             destroyWorkerActors(worker);
         }
@@ -747,9 +857,16 @@ namespace snf::runtime
                 ++routed;
             }
 
+            dispatchDueTimers(worker);
+
             if (hasReadyActor(worker))
             {
                 return true;
+            }
+
+            if (worker.ingress.isClosed())
+            {
+                discardWorkerTimers(worker);
             }
 
             if (isWorkerDrained(worker))
@@ -757,7 +874,23 @@ namespace snf::runtime
                 return false;
             }
 
-            worker.wakeup.wait();
+            std::optional<std::chrono::steady_clock::time_point> earliest_deadline;
+            {
+                std::lock_guard lock{worker.scheduling_mutex};
+                if (!worker.timers.empty())
+                {
+                    earliest_deadline = worker.timers.begin()->first;
+                }
+            }
+
+            if (earliest_deadline)
+            {
+                worker.wakeup.waitUntil(*earliest_deadline);
+            }
+            else
+            {
+                worker.wakeup.wait();
+            }
         }
     }
 
@@ -852,6 +985,63 @@ namespace snf::runtime
         }
 
         return handled;
+    }
+
+    void ActorRuntime::dispatchDueTimers(Worker& worker)
+    {
+        std::vector<TimerEntry> due_entries;
+        std::vector<std::chrono::steady_clock::time_point> due_deadlines;
+
+        const auto now = std::chrono::steady_clock::now();
+        {
+            std::lock_guard lock{worker.scheduling_mutex};
+            while (!worker.timers.empty() && worker.timers.begin()->first <= now)
+            {
+                auto it = worker.timers.begin();
+                due_deadlines.push_back(it->first);
+                due_entries.push_back(std::move(it->second));
+                worker.timers.erase(it);
+            }
+
+            for (std::size_t i = 0; i < due_entries.size(); ++i)
+            {
+                auto& entry = due_entries[i];
+                const auto deadline = due_deadlines[i];
+
+                const auto actor_it = worker.actors.find(entry.target);
+                if (actor_it == worker.actors.end() ||
+                    actor_it->second.incarnation != entry.incarnation)
+                {
+                    // Stale timer
+                    releaseOutstanding(worker);
+                    worker.counters.timers_discarded_stale.fetch_add(1, std::memory_order_relaxed);
+                    continue;
+                }
+
+                ActorSlotEntry& slot = actor_it->second;
+                slot.mailbox.push_back(QueuedSubmission{
+                    .submission = std::move(entry.submission),
+                    .enqueued_at = now,
+                });
+                worker.counters.timers_fired.fetch_add(1, std::memory_order_relaxed);
+
+                const auto depth =
+                    worker.counters.mailbox_depth.fetch_add(1, std::memory_order_relaxed) + 1;
+                updateMaximum(worker.counters.mailbox_high_water_mark, depth);
+
+                if (slot.state == ActorExecutionState::Idle)
+                {
+                    slot.state = ActorExecutionState::Ready;
+                    worker.ready_actors.push_back(entry.target);
+                }
+
+                const auto lateness =
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(now - deadline);
+                const auto lateness_ns =
+                    lateness.count() > 0 ? static_cast<std::uint64_t>(lateness.count()) : 0;
+                worker.counters.timer_lateness.record(lateness_ns);
+            }
+        }
     }
 
     bool ActorRuntime::routeToMailbox(Worker& worker, QueuedSubmission submission)
@@ -1179,6 +1369,26 @@ namespace snf::runtime
                             releaseOutstanding(worker, discarded_mailbox_submissions);
                         }
 
+                        std::size_t purged_timers = 0;
+                        for (auto it = worker.timers.begin(); it != worker.timers.end();)
+                        {
+                            if (it->second.target == key)
+                            {
+                                it = worker.timers.erase(it);
+                                ++purged_timers;
+                            }
+                            else
+                            {
+                                ++it;
+                            }
+                        }
+                        if (purged_timers != 0)
+                        {
+                            worker.counters.timers_cancelled.fetch_add(purged_timers,
+                                                                       std::memory_order_relaxed);
+                            releaseOutstanding(worker, purged_timers);
+                        }
+
                         const auto actor_iterator = worker.actors.find(key);
                         if (actor_iterator == worker.actors.end() ||
                             &actor_iterator->second != slot)
@@ -1289,6 +1499,21 @@ namespace snf::runtime
             worker.counters.mailbox_depth.fetch_sub(discarded_mailbox_submissions,
                                                     std::memory_order_relaxed);
             releaseOutstanding(worker, discarded_mailbox_submissions);
+        }
+    }
+
+    void ActorRuntime::discardWorkerTimers(Worker& worker) noexcept
+    {
+        std::size_t discarded_timers = 0;
+        {
+            std::lock_guard lock{worker.scheduling_mutex};
+            discarded_timers = worker.timers.size();
+            worker.timers.clear();
+        }
+
+        if (discarded_timers != 0)
+        {
+            releaseOutstanding(worker, discarded_timers);
         }
     }
 

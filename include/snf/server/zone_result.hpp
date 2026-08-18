@@ -3,6 +3,7 @@
 #include "snf/server/player_id.hpp"
 #include "snf/server/zone_command.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <vector>
@@ -15,10 +16,13 @@ namespace snf::server
         AlreadyPresent,
         PlayerMissing,
         StaleRoute,
-        StaleTimer,
-        StaleTick,
         TransitionInProgress,
         TransferFailed,
+    };
+
+    struct TimerRequest
+    {
+        std::chrono::milliseconds delay{0};
     };
 
     struct ZoneResult
@@ -30,5 +34,6 @@ namespace snf::server
         std::uint64_t tick{0};
         // Deterministic ascending PlayerId order, excluding the requesting player.
         std::vector<PlayerId> visible_players;
+        std::optional<TimerRequest> timer;
     };
 }

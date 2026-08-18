@@ -47,25 +47,6 @@ namespace
         int cancel_count{0};
     };
 
-    class FixedTimerClock final : public snf::server::TimerClock
-    {
-    public:
-        [[nodiscard]] snf::server::TimerTimePoint now() const noexcept override
-        {
-            return {};
-        }
-    };
-
-    class AcceptingTimerSink final : public snf::server::ZoneTimerSink
-    {
-    public:
-        [[nodiscard]] snf::runtime::PostResult
-        tryPostTimerCommand(snf::server::ZoneId, snf::server::ZoneCommand) override
-        {
-            return snf::runtime::PostResult::Accepted;
-        }
-    };
-
     snf::server::FrameEnvelope make_frame(const snf::protocol::MessageType type)
     {
         return snf::server::FrameEnvelope{
@@ -547,18 +528,6 @@ namespace
         snf::server::PlayerSessionDirectory sessions;
         snf::server::RouteCoordinator routes{2};
         snf::server::PartyCoordinator parties{4};
-        AcceptingTimerSink timer_sink;
-        FixedTimerClock timer_clock;
-        snf::server::ZoneTimerService timers{
-            timer_sink,
-            timer_clock,
-            snf::server::ZoneTimerServiceConfig{
-                .tick_interval = std::chrono::milliseconds{0},
-                .cancellation_retry_interval = std::chrono::milliseconds{1},
-                .max_timers = 2,
-                .on_failure = {},
-            },
-        };
         const auto wake = snf::test::make_wake_descriptor();
         snf::server::ZoneTransitionChannel transitions{2, wake.getDescriptor()};
         snf::server::OutboundChannel outbound{
@@ -567,7 +536,7 @@ namespace
         snf::server::ProtocolZoneResultSink zone_results{outbound};
         snf::server::CountingCommandLifecycleSink lifecycle;
         snf::server::ProtocolGateway gateway{
-            commands, sessions, routes, timers, parties, transitions, lifecycle, zone_results, 1};
+            commands, sessions, routes, parties, transitions, lifecycle, zone_results, 1};
         const snf::net::ConnectionId connection{.descriptor = 62, .generation = 32};
         const snf::server::PlayerId player{.value = 103};
         const snf::server::ZoneId source_zone{.value = 10};
@@ -769,18 +738,6 @@ namespace
         snf::server::PlayerSessionDirectory sessions;
         snf::server::RouteCoordinator routes{2};
         snf::server::PartyCoordinator parties{4};
-        AcceptingTimerSink timer_sink;
-        FixedTimerClock timer_clock;
-        snf::server::ZoneTimerService timers{
-            timer_sink,
-            timer_clock,
-            snf::server::ZoneTimerServiceConfig{
-                .tick_interval = std::chrono::milliseconds{0},
-                .cancellation_retry_interval = std::chrono::milliseconds{1},
-                .max_timers = 4,
-                .on_failure = {},
-            },
-        };
         const auto wake = snf::test::make_wake_descriptor();
         snf::server::ZoneTransitionChannel transitions{2, wake.getDescriptor()};
         snf::server::OutboundChannel outbound{
@@ -789,7 +746,7 @@ namespace
         snf::server::ProtocolZoneResultSink zone_results{outbound};
         snf::server::CountingCommandLifecycleSink lifecycle;
         snf::server::ProtocolGateway gateway{
-            commands, sessions, routes, timers, parties, transitions, lifecycle, zone_results, 1};
+            commands, sessions, routes, parties, transitions, lifecycle, zone_results, 1};
         const snf::server::ZoneId source_zone{.value = 20};
         const snf::server::ZoneId target_zone{.value = 21};
 

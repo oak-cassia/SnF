@@ -36,7 +36,8 @@ Network Runtime
 
 상세한 현재 구조와 트레이드오프는 [서버 아키텍처](docs/server-architecture-draft.md), coroutine
 수명과 경합 규칙은 [Coroutine Actor 계약](docs/coroutine-actor-contract.md), 전체 종료 순서는
-[Runtime Lifecycle 계약](docs/runtime-lifecycle-contract.md)을 기준으로 한다.
+[Runtime Lifecycle 계약](docs/runtime-lifecycle-contract.md), Actor의 tick·timeout 예약 정책은
+[Actor 주도 Timer Scheduling](docs/actor-driven-timer-scheduling.md)을 기준으로 한다.
 
 ## 구현된 vertical slice
 
@@ -52,7 +53,7 @@ Network Runtime
 ### Zone
 
 - enter/move/leave, route epoch, periodic tick과 AOI
-- stale timer와 stale route 폐기, 빈 Zone passivation
+- stale route 폐기, 빈 Zone passivation
 - source leave → target enter → route publish 순서의 cross-zone handoff
 - target 실패 시 source 복구, disconnect·shutdown 중 cleanup
 

@@ -6,10 +6,13 @@
 
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <future>
 #include <mutex>
 #include <thread>
 #include <vector>
+
+using namespace std::chrono_literals;
 
 namespace
 {
@@ -111,7 +114,7 @@ namespace
 
         {
             std::lock_guard lock{recorded.mutex};
-            assert(recorded.results.size() == 2);
+            assert(recorded.results.size() >= 2);
             assert((recorded.results[0].position == snf::server::ZonePosition{.x = 1, .y = 2}));
             assert((recorded.results[1].position == snf::server::ZonePosition{.x = 3, .y = 4}));
             assert(recorded.threads[0] != caller);
@@ -119,9 +122,9 @@ namespace
         }
 
         const auto stats = runtime.getStats().workers.front();
-        assert(stats.accepted == 2);
-        assert(stats.processed == 2);
-        assert(stats.evicted_actors == 1);
+        assert(stats.accepted >= 2);
+        assert(stats.processed >= 2);
+        assert(stats.evicted_actors >= 1);
         assert(completion.drained.load() == 1);
         assert(completion.failed.load() == 0);
         assert(lifecycle.releaseCount() == 2);
@@ -129,7 +132,7 @@ namespace
         assert(lifecycle.admissionRejectionCount() == 0);
     }
 
-    void test_empty_zone_passivates_after_its_timer_is_cancelled()
+    void test_empty_zone_passivates_automatically_when_last_player_leaves()
     {
         snf::server::ZoneActorBinding binding;
         RecordingCompletion completion;
@@ -148,10 +151,6 @@ namespace
 
         const snf::server::ZoneId zone{.value = 12};
         const snf::server::PlayerId player{.value = 22};
-        const snf::server::TimerId timer{.value = 32};
-        assert(ingress.tryPostTimerCommand(zone,
-                                           snf::server::ArmZoneSimulationTimer{.timer = timer}) ==
-               snf::runtime::PostResult::Accepted);
         assert(ingress.tryPost(snf::server::ZoneInboundCommand{
                    .zone = zone,
                    .command =
@@ -173,14 +172,11 @@ namespace
                    .reply = std::nullopt,
                    .handoff = std::nullopt,
                }) == snf::runtime::PostResult::Accepted);
-        assert(ingress.tryPostTimerCommand(
-                   zone, snf::server::CancelZoneSimulationTimer{.timer = timer}) ==
-               snf::runtime::PostResult::Accepted);
         runtime.close();
         runtime.join();
 
         const auto stats = runtime.getStats().workers.front();
-        assert(stats.processed == 4);
+        assert(stats.processed >= 2);
         assert(stats.evicted_actors == 1);
         assert(stats.actor_count == 0);
         assert(completion.drained.load() == 1);
@@ -222,12 +218,6 @@ namespace
 
         const snf::server::ZoneId zone{.value = 13};
         const snf::server::PlayerId player{.value = 23};
-        const snf::server::TimerId first_timer{.value = 33};
-        const snf::server::TimerId second_timer{.value = 34};
-        assert(ingress.tryPostTimerCommand(
-                   zone, snf::server::ArmZoneSimulationTimer{.timer = first_timer}) ==
-               snf::runtime::PostResult::Accepted);
-        assert(first_dispatch.wait_for(std::chrono::seconds{1}) == std::future_status::ready);
 
         const auto post_player = [&ingress, zone](snf::server::ZoneCommand command)
         {
@@ -238,21 +228,18 @@ namespace
                 .handoff = std::nullopt,
             });
         };
+
         assert(post_player(snf::server::EnterZoneCommand{
                    .player = player,
                    .route_epoch = 1,
                    .position = {.x = 1, .y = 2},
                }) == snf::runtime::PostResult::Accepted);
+        assert(first_dispatch.wait_for(std::chrono::seconds{1}) == std::future_status::ready);
+
         assert(post_player(snf::server::LeaveZoneCommand{
                    .player = player,
                    .route_epoch = 1,
                }) == snf::runtime::PostResult::Accepted);
-        assert(ingress.tryPostTimerCommand(
-                   zone, snf::server::CancelZoneSimulationTimer{.timer = first_timer}) ==
-               snf::runtime::PostResult::Accepted);
-        assert(ingress.tryPostTimerCommand(
-                   zone, snf::server::ArmZoneSimulationTimer{.timer = second_timer}) ==
-               snf::runtime::PostResult::Accepted);
         assert(post_player(snf::server::EnterZoneCommand{
                    .player = player,
                    .route_epoch = 2,
@@ -262,35 +249,35 @@ namespace
                    .player = player,
                    .route_epoch = 2,
                }) == snf::runtime::PostResult::Accepted);
-        assert(ingress.tryPostTimerCommand(
-                   zone, snf::server::CancelZoneSimulationTimer{.timer = second_timer}) ==
-               snf::runtime::PostResult::Accepted);
 
         release_first_dispatch.set_value();
         runtime.close();
         runtime.join();
 
         const auto stats = runtime.getStats().workers.front();
-        assert(stats.accepted == 8);
-        assert(stats.processed == 8);
+        assert(stats.processed >= 4);
         assert(stats.evicted_actors == 1);
         assert(stats.actor_count == 0);
         assert(completion.drained.load() == 1);
         assert(completion.failed.load() == 0);
     }
 
-    void test_zone_binding_records_tick_execution_and_budget_overrun()
+    void test_zone_binding_schedules_ticks_and_records_execution()
     {
         snf::server::ZoneActorBinding binding{snf::server::ZoneActorBindingConfig{
-            .actor = {},
+            .actor =
+                snf::server::ZoneActorConfig{
+                    .aoi_radius = 100,
+                    .tick_interval = 10ms,
+                },
             .tick_budget = std::chrono::nanoseconds::zero(),
             .on_result = {},
         }};
         RecordingCompletion completion;
         snf::runtime::ActorRuntime runtime{snf::runtime::ActorRuntimeConfig{
                                                .worker_count = 1,
-                                               .queue_capacity_per_worker = 4,
-                                               .max_in_flight_operations_per_worker = 1,
+                                               .queue_capacity_per_worker = 16,
+                                               .max_in_flight_operations_per_worker = 2,
                                                .on_worker_start = {},
                                                .on_before_dispatch = {},
                                                .on_worker_failure = {},
@@ -301,32 +288,48 @@ namespace
         runtime.start();
 
         const snf::server::ZoneId zone{.value = 14};
-        const snf::server::TimerId timer{.value = 35};
-        assert(ingress.tryPostTimerCommand(zone,
-                                           snf::server::ArmZoneSimulationTimer{.timer = timer}) ==
-               snf::runtime::PostResult::Accepted);
-        assert(ingress.tryPostTimerCommand(zone,
-                                           snf::server::ZoneSimulationTick{
-                                               .timer = timer,
-                                               .tick = 1,
-                                           }) == snf::runtime::PostResult::Accepted);
-        assert(ingress.tryPostTimerCommand(
-                   zone, snf::server::CancelZoneSimulationTimer{.timer = timer}) ==
-               snf::runtime::PostResult::Accepted);
+        const snf::server::PlayerId player{.value = 24};
+
+        assert(ingress.tryPost(snf::server::ZoneInboundCommand{
+                   .zone = zone,
+                   .command =
+                       snf::server::EnterZoneCommand{
+                           .player = player,
+                           .route_epoch = 1,
+                           .position = {.x = 1, .y = 2},
+                       },
+                   .reply = std::nullopt,
+                   .handoff = std::nullopt,
+               }) == snf::runtime::PostResult::Accepted);
+
+        // Let simulation tick several times
+        std::this_thread::sleep_for(50ms);
+
+        assert(ingress.tryPost(snf::server::ZoneInboundCommand{
+                   .zone = zone,
+                   .command =
+                       snf::server::LeaveZoneCommand{
+                           .player = player,
+                           .route_epoch = 1,
+                       },
+                   .reply = std::nullopt,
+                   .handoff = std::nullopt,
+               }) == snf::runtime::PostResult::Accepted);
+
         runtime.close();
         runtime.join();
 
         const auto stats = binding.stats();
-        assert(stats.command_execution_nanoseconds.sample_count == 3);
-        assert(stats.tick_execution_nanoseconds.sample_count == 1);
-        assert(stats.tick_overruns == 1);
+        assert(stats.command_execution_nanoseconds.sample_count >= 2);
+        assert(stats.tick_execution_nanoseconds.sample_count >= 2);
+        assert(stats.tick_overruns >= 2);
     }
 }
 
 void run_zone_actor_binding_tests()
 {
     test_zone_binding_runs_typed_commands_on_its_owning_worker();
-    test_empty_zone_passivates_after_its_timer_is_cancelled();
+    test_empty_zone_passivates_automatically_when_last_player_leaves();
     test_passivation_never_discards_an_already_accepted_reentry();
-    test_zone_binding_records_tick_execution_and_budget_overrun();
+    test_zone_binding_schedules_ticks_and_records_execution();
 }

@@ -43,6 +43,7 @@ namespace
                 .route_epoch = 5,
                 .tick = 0,
                 .visible_players = {snf::server::PlayerId{.value = 8}},
+                .timer = std::nullopt,
             });
 
         const auto posted = outbound.tryPop();
@@ -69,11 +70,7 @@ namespace
         sink.accept(
             snf::server::ZoneInboundCommand{
                 .zone = snf::server::ZoneId{.value = 3},
-                .command =
-                    snf::server::ZoneSimulationTick{
-                        .timer = snf::server::TimerId{.value = 1},
-                        .tick = 1,
-                    },
+                .command = snf::server::ZoneSimulationTick{},
                 .reply = std::nullopt,
                 .handoff = std::nullopt,
             },
@@ -85,11 +82,7 @@ namespace
         sink.accept(
             snf::server::ZoneInboundCommand{
                 .zone = snf::server::ZoneId{.value = 3},
-                .command =
-                    snf::server::ZoneSimulationTick{
-                        .timer = snf::server::TimerId{.value = 1},
-                        .tick = 2,
-                    },
+                .command = snf::server::ZoneSimulationTick{},
                 .reply =
                     snf::server::ZoneReplyContext{
                         .connection = connection,

@@ -105,7 +105,6 @@ add_library(snf_server_runtime STATIC
     src/server/zone_actor.cpp
     src/server/zone_actor_binding.cpp
     src/server/zone_actor_ingress.cpp
-    src/server/zone_timer_service.cpp
     src/server/zone_transition_channel.cpp
     src/server/party_actor.cpp
     src/server/party_actor_binding.cpp
@@ -168,7 +167,6 @@ if(BUILD_TESTING)
         tests/unique_file_descriptor_test.cpp
         tests/zone_actor_test.cpp
         tests/zone_actor_binding_test.cpp
-        tests/zone_timer_service_test.cpp
         tests/zone_transition_channel_test.cpp
         tests/party_actor_test.cpp
         tests/party_actor_binding_test.cpp

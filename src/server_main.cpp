@@ -115,14 +115,6 @@ namespace
                   << "Commands: " << metrics.command_terminals << " reached a result, "
                   << metrics.command_admission_rejections << " refused admission\n";
 
-        const auto& timers = metrics.zone_timers;
-        std::cout << "Zone timers: " << timers.active_timers << " active, "
-                  << timers.pending_cancellations << " cancelling, " << timers.scheduled
-                  << " scheduled, " << timers.cancelled << " cancelled, " << timers.fired
-                  << " ticks posted, " << timers.dropped_full << " dropped-full, "
-                  << timers.skipped_intervals << " intervals skipped, " << timers.failures
-                  << " failures\n";
-
         const auto& zones = metrics.zone_actors;
         std::cout << "Zone command execution ns: "
                   << format_distribution(zones.command_execution_nanoseconds) << '\n'
@@ -165,6 +157,14 @@ namespace
                       << worker.double_completions << ", discarded late completions "
                       << worker.discarded_late_completions << ", suspend duration ns "
                       << format_distribution(worker.suspend_duration_nanoseconds) << '\n';
+            std::cout << "Actor worker " << worker_index
+                      << " timers: " << worker.active_timers << " active, "
+                      << worker.timers_scheduled << " scheduled, "
+                      << worker.timers_rejected_full << " rejected-full, "
+                      << worker.timers_fired << " fired, "
+                      << worker.timers_cancelled << " cancelled, "
+                      << worker.timers_discarded_stale << " discarded stale, lateness ns "
+                      << format_distribution(worker.timer_lateness_nanoseconds) << '\n';
         }
     }
 }

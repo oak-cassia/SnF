@@ -66,7 +66,15 @@ Actor 종료 순서는 [Runtime Lifecycle 계약](./runtime-lifecycle-contract.m
 - frame 파괴 뒤 도착한 결과는 operation state만 정리한다.
 - Worker failure는 해당 Worker의 suspended task를 terminal cancel하고 새 completion 적용을 차단한다.
 
-## 5. Drain과 passivation
+## 5. Scheduling과 Timer
+ 
+- Actor는 `ActorContext::trySchedule(delay, submission)`으로 미래 시점의 자기 mailbox 알람을 예약할 수 있다.
+- 예약 시점에 `reserveOutstanding()`으로 mailbox 자리를 선점하므로, 만료 시 발화 실패나 drop이 발생하지 않는다.
+- 알람 힙은 Worker별로 독립적으로 관리되며, Worker는 가장 이른 알람 시점까지만 대기(`waitUntil`)한다.
+- 만료된 알람은 Worker 스레드 안에서 actor mailbox로 직접 push되어 `Ready` 전이를 일으킨다.
+- Actor eviction 또는 worker shutdown 시 pending timer는 즉시 discard되며 선점된 outstanding reservation도 안전하게 반환된다.
+
+## 6. Drain과 passivation
 
 ```text
 ActorRuntimeDrained =
@@ -82,7 +90,7 @@ Actor passivation은 `Idle`, mailbox empty, task·operation·continuation 없음
 참일 때만 가능하다. 일반 비활성화는 `PassivateIfIdle`을 사용한다. mailbox tail을 버릴 수 있는 `Evict`는
 lifecycle fence에만 사용한다.
 
-## 6. 검증 조건
+## 7. 검증 조건
 
 - completion과 cancel/shutdown 동시 경합
 - suspend 직전·직후 immediate completion

@@ -10,6 +10,7 @@ namespace snf::server
     ZoneActor::ZoneActor(const ZoneId zone, const ZoneActorConfig config)
         : _zone(zone)
         , _aoi_radius(config.aoi_radius)
+        , _tick_interval(config.tick_interval)
     {
         if (_zone.value == 0)
         {
@@ -18,6 +19,10 @@ namespace snf::server
         if (_aoi_radius < 0)
         {
             throw std::invalid_argument{"Zone AOI radius cannot be negative"};
+        }
+        if (_tick_interval <= std::chrono::milliseconds::zero())
+        {
+            throw std::invalid_argument{"Zone tick interval must be positive"};
         }
     }
 
@@ -36,9 +41,9 @@ namespace snf::server
         return _last_tick;
     }
 
-    std::optional<TimerId> ZoneActor::activeTimer() const noexcept
+    std::chrono::milliseconds ZoneActor::tickInterval() const noexcept
     {
-        return _active_timer;
+        return _tick_interval;
     }
 
     std::optional<ZonePosition> ZoneActor::positionOf(const PlayerId player) const
@@ -96,6 +101,7 @@ namespace snf::server
                     .route_epoch = existing->second.route_epoch,
                     .tick = _last_tick,
                     .visible_players = visiblePlayers(command.player),
+                    .timer = std::nullopt,
                 };
             }
             if (command.route_epoch == existing->second.route_epoch)
@@ -107,15 +113,24 @@ namespace snf::server
                     .route_epoch = existing->second.route_epoch,
                     .tick = _last_tick,
                     .visible_players = visiblePlayers(command.player),
+                    .timer = std::nullopt,
                 };
             }
         }
 
+        const bool was_empty = _players.empty();
         _players.insert_or_assign(command.player,
                                   Entity{
                                       .position = command.position,
                                       .route_epoch = command.route_epoch,
                                   });
+
+        std::optional<TimerRequest> timer;
+        if (was_empty && !_players.empty())
+        {
+            timer = TimerRequest{.delay = _tick_interval};
+        }
+
         return ZoneResult{
             .status = ZoneCommandStatus::Applied,
             .player = command.player,
@@ -123,6 +138,7 @@ namespace snf::server
             .route_epoch = command.route_epoch,
             .tick = _last_tick,
             .visible_players = visiblePlayers(command.player),
+            .timer = timer,
         };
     }
 
@@ -138,6 +154,7 @@ namespace snf::server
                 .route_epoch = command.route_epoch,
                 .tick = _last_tick,
                 .visible_players = {},
+                .timer = std::nullopt,
             };
         }
         if (command.route_epoch != existing->second.route_epoch)
@@ -149,6 +166,7 @@ namespace snf::server
                 .route_epoch = existing->second.route_epoch,
                 .tick = _last_tick,
                 .visible_players = visiblePlayers(command.player),
+                .timer = std::nullopt,
             };
         }
 
@@ -161,6 +179,7 @@ namespace snf::server
             .route_epoch = command.route_epoch,
             .tick = _last_tick,
             .visible_players = {},
+            .timer = std::nullopt,
         };
     }
 
@@ -176,6 +195,7 @@ namespace snf::server
                 .route_epoch = command.route_epoch,
                 .tick = _last_tick,
                 .visible_players = {},
+                .timer = std::nullopt,
             };
         }
         if (command.route_epoch != existing->second.route_epoch)
@@ -187,6 +207,7 @@ namespace snf::server
                 .route_epoch = existing->second.route_epoch,
                 .tick = _last_tick,
                 .visible_players = visiblePlayers(command.player),
+                .timer = std::nullopt,
             };
         }
 
@@ -198,62 +219,19 @@ namespace snf::server
             .route_epoch = command.route_epoch,
             .tick = _last_tick,
             .visible_players = visiblePlayers(command.player),
+            .timer = std::nullopt,
         };
     }
 
-    ZoneResult ZoneActor::handleCommand(const ArmZoneSimulationTimer& command)
+    ZoneResult ZoneActor::handleCommand(const ZoneSimulationTick&)
     {
-        if (command.timer.value == 0)
+        ++_last_tick;
+        std::optional<TimerRequest> timer;
+        if (!_players.empty())
         {
-            return ZoneResult{
-                .status = ZoneCommandStatus::StaleTimer,
-                .player = std::nullopt,
-                .position = std::nullopt,
-                .route_epoch = 0,
-                .tick = _last_tick,
-                .visible_players = {},
-            };
+            timer = TimerRequest{.delay = _tick_interval};
         }
 
-        if (_active_timer == command.timer)
-        {
-            return ZoneResult{
-                .status = ZoneCommandStatus::AlreadyPresent,
-                .player = std::nullopt,
-                .position = std::nullopt,
-                .route_epoch = 0,
-                .tick = _last_tick,
-                .visible_players = {},
-            };
-        }
-
-        _active_timer = command.timer;
-        _last_tick = 0;
-        return ZoneResult{
-            .status = ZoneCommandStatus::Applied,
-            .player = std::nullopt,
-            .position = std::nullopt,
-            .route_epoch = 0,
-            .tick = 0,
-            .visible_players = {},
-        };
-    }
-
-    ZoneResult ZoneActor::handleCommand(const CancelZoneSimulationTimer& command)
-    {
-        if (_active_timer != command.timer)
-        {
-            return ZoneResult{
-                .status = ZoneCommandStatus::StaleTimer,
-                .player = std::nullopt,
-                .position = std::nullopt,
-                .route_epoch = 0,
-                .tick = _last_tick,
-                .visible_players = {},
-            };
-        }
-
-        _active_timer.reset();
         return ZoneResult{
             .status = ZoneCommandStatus::Applied,
             .player = std::nullopt,
@@ -261,42 +239,7 @@ namespace snf::server
             .route_epoch = 0,
             .tick = _last_tick,
             .visible_players = {},
-        };
-    }
-
-    ZoneResult ZoneActor::handleCommand(const ZoneSimulationTick& command)
-    {
-        if (_active_timer != command.timer)
-        {
-            return ZoneResult{
-                .status = ZoneCommandStatus::StaleTimer,
-                .player = std::nullopt,
-                .position = std::nullopt,
-                .route_epoch = 0,
-                .tick = _last_tick,
-                .visible_players = {},
-            };
-        }
-        if (command.tick <= _last_tick)
-        {
-            return ZoneResult{
-                .status = ZoneCommandStatus::StaleTick,
-                .player = std::nullopt,
-                .position = std::nullopt,
-                .route_epoch = 0,
-                .tick = _last_tick,
-                .visible_players = {},
-            };
-        }
-
-        _last_tick = command.tick;
-        return ZoneResult{
-            .status = ZoneCommandStatus::Applied,
-            .player = std::nullopt,
-            .position = std::nullopt,
-            .route_epoch = 0,
-            .tick = _last_tick,
-            .visible_players = {},
+            .timer = timer,
         };
     }
 

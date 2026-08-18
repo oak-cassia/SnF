@@ -122,7 +122,6 @@ namespace snf::server
                                snf::runtime::ActorContext& context,
                                const std::stop_token stop_token)
     {
-        static_cast<void>(context);
         static_cast<void>(stop_token);
         if (submission.accounting() == snf::runtime::ActorAccounting::Control)
         {
@@ -150,7 +149,27 @@ namespace snf::server
             _on_result(payload.command, result);
         }
 
-        if (zone_slot.actor.playerCount() == 0 && !zone_slot.actor.activeTimer())
+        if (result.timer.has_value())
+        {
+            ZoneInboundCommand tick_command{
+                .zone = payload.command.zone,
+                .command = ZoneSimulationTick{},
+                .reply = std::nullopt,
+                .handoff = std::nullopt,
+            };
+            auto timer_submission = makeSubmission(
+                submission.target(),
+                snf::runtime::ActorActivation::ExistingOnly,
+                snf::runtime::ActorAccounting::Command,
+                CommandPayload{
+                    .command = std::move(tick_command),
+                    .release = {},
+                });
+            auto handle = context.trySchedule(result.timer->delay, std::move(timer_submission));
+            static_cast<void>(handle);
+        }
+
+        if (zone_slot.actor.playerCount() == 0)
         {
             return snf::runtime::ActorDispatchResult::PassivateIfIdle;
         }

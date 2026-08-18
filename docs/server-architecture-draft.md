@@ -155,8 +155,9 @@ DB Worker는 Actor 상태를 다시 판정하지 않고 immutable snapshot만 �
 
 ### Zone
 
-ZoneActor는 participant position과 tick을 직렬화한다. TimerService는 stale `TimerId`를 폐기하고
-tick을 일반 Actor command로 게시한다. 빈 Zone은 route와 mailbox가 모두 정리된 후 passivate된다.
+ZoneActor는 participant position과 tick을 직렬화한다. 주기적 tick은 별도 외부 서비스가 아니라
+ActorRuntime Worker의 스케줄러(`trySchedule`)가 예약 시점에 mailbox capacity를 확보한 뒤 같은 Worker
+스레드에서 직접 게시한다. 빈 Zone은 route와 mailbox가 모두 정리된 후 `PassivateIfIdle`로 passivate된다.
 
 cross-zone 이동의 control state는 reactor의 `RouteCoordinator`가 소유한다. source leave, target
 enter와 route publish를 단계적으로 진행하며 Worker completion은 bounded value channel로 돌아온다.

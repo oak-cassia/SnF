@@ -23,6 +23,10 @@ ActorRuntimeDrained =
     ∧ continuation queue empty
 ```
 
+pending timer는 `ActorRuntimeDrained`의 항이 아니다. 승인된 작업이 아니라 아직 일어나지 않은
+작업이므로 ingress close 시점에 폐기하고 선점된 outstanding reservation을 반납한다. drain 조건에
+넣으면 스스로 재무장하는 주기적 tick이 predicate를 영원히 거짓으로 만든다.
+
 ```text
 NetworkRuntimeDrained =
     listener stopped
@@ -57,6 +61,7 @@ listener와 새 gameplay ingress 차단
 → active Session의 ConnectionClosed 게시
 → lifecycle retry queue drain
 → Actor Runtime close
+→ pending timer 폐기와 reservation 반납
 → Actor mailbox와 continuation drain
 → PlayerPersistenceService flush와 join
 → remaining outbound와 pending send drain

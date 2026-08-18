@@ -24,7 +24,6 @@
 #include "snf/server/tcp_server.hpp"
 #include "snf/server/zone_actor_binding.hpp"
 #include "snf/server/zone_actor_ingress.hpp"
-#include "snf/server/zone_timer_service.hpp"
 #include "snf/server/zone_transition_channel.hpp"
 
 #include <chrono>
@@ -50,7 +49,6 @@ namespace snf::server
         TcpServerMetrics network;
         snf::runtime::ActorRuntimeStats actor_runtime;
         PlayerRepositoryStats player_repository;
-        ZoneTimerServiceStats zone_timers;
         ZoneActorBindingStats zone_actors;
         RouteCoordinatorStats zone_handoffs;
         ZoneHandoffGatewayStats zone_handoff_gateway;
@@ -86,7 +84,6 @@ namespace snf::server
         std::int32_t zone_aoi_radius{1000};
         std::chrono::milliseconds zone_tick_interval{50};
         std::chrono::nanoseconds zone_tick_budget{std::chrono::milliseconds{5}};
-        std::size_t max_zone_timers{4096};
         std::size_t max_zone_handoffs{4096};
         std::size_t max_zone_handoff_completions_per_turn{64};
         std::size_t outbound_queue_capacity{4096};
@@ -128,7 +125,6 @@ namespace snf::server
         [[nodiscard]] const GameServerStats& getStats() const noexcept;
         [[nodiscard]] snf::runtime::ActorRuntimeStats getActorRuntimeStats() const;
         [[nodiscard]] std::optional<PlayerRecord> getPlayerRecord(PlayerId player) const;
-        [[nodiscard]] ZoneTimerServiceStats getZoneTimerStats() const;
         [[nodiscard]] ZoneActorBindingStats getZoneActorStats() const noexcept;
         [[nodiscard]] PartyActorBindingStats getPartyActorStats() const noexcept;
         // Reads reactor state, so it belongs to the reactor thread: call it from
@@ -171,8 +167,6 @@ namespace snf::server
         PlayerActorIngress _player_actor_ingress;
         ZoneActorIngress _zone_actor_ingress;
         PartyActorIngress _party_actor_ingress;
-        SteadyTimerClock _zone_timer_clock;
-        ZoneTimerService _zone_timers;
         CommandRouter _command_router;
         ProtocolGateway _protocol_gateway;
         TcpServer _tcp_server;

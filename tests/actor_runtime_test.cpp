@@ -207,6 +207,7 @@ namespace
             std::vector<std::pair<ActorKey, int>> dispatched;
             std::function<void(EntityId)> on_activate;
             std::function<void(const ActorKey&, int)> on_dispatch;
+            std::function<void(ActorContext&, const ActorKey&, int)> on_dispatch_with_context;
             bool throw_on_dispatch{false};
         };
 
@@ -262,7 +263,7 @@ namespace
 
         [[nodiscard]] ActorDispatchResult dispatch(ActorSlot& slot,
                                                    const ActorSubmission& submission,
-                                                   ActorContext&,
+                                                   ActorContext& context,
                                                    std::stop_token) override
         {
             static_cast<void>(dynamic_cast<Slot&>(slot));
@@ -273,6 +274,7 @@ namespace
             }
 
             std::function<void(const ActorKey&, int)> on_dispatch;
+            std::function<void(ActorContext&, const ActorKey&, int)> on_dispatch_with_context;
             {
                 std::lock_guard lock{_state->mutex};
                 _state->dispatched.emplace_back(submission.target(), payload.value);
@@ -281,10 +283,15 @@ namespace
                     throw std::runtime_error{"synthetic binding failure"};
                 }
                 on_dispatch = _state->on_dispatch;
+                on_dispatch_with_context = _state->on_dispatch_with_context;
             }
             if (on_dispatch)
             {
                 on_dispatch(submission.target(), payload.value);
+            }
+            if (on_dispatch_with_context)
+            {
+                on_dispatch_with_context(context, submission.target(), payload.value);
             }
             return ActorDispatchResult::KeepActive;
         }
@@ -1499,6 +1506,277 @@ namespace
         assert(repository.saved->purchased_item_count == 1);
     }
 
+    void test_scheduled_alarm_fires_and_executes_handler()
+    {
+        auto state = std::make_shared<SyntheticBinding::State>();
+        SyntheticBinding binding{ActorKind::Zone, state};
+        RecordingRuntimeCompletion completion;
+        ActorRuntime runtime{player_runtime_config(1, 16), completion};
+        runtime.registerBinding(binding);
+        runtime.start();
+
+        std::optional<snf::runtime::TimerHandle> handle;
+        state->on_dispatch_with_context = [&](ActorContext& context, const ActorKey&, int value)
+        {
+            if (value == 1)
+            {
+                handle = context.trySchedule(10ms, binding.post(1, 2));
+                assert(handle.has_value());
+            }
+        };
+
+        assert(runtime.tryPost(binding.post(1, 1)) == PostResult::Accepted);
+
+        const auto deadline = std::chrono::steady_clock::now() + 1s;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            {
+                std::lock_guard lock{state->mutex};
+                if (state->dispatched.size() >= 2)
+                {
+                    break;
+                }
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+
+        runtime.close();
+        runtime.join();
+
+        {
+            std::lock_guard lock{state->mutex};
+            assert(state->dispatched.size() == 2);
+            assert(state->dispatched[0].second == 1);
+            assert(state->dispatched[1].second == 2);
+        }
+
+        const auto stats = runtime.getStats().workers.front();
+        assert(stats.timers_scheduled == 1);
+        assert(stats.timers_fired == 1);
+        assert(stats.timers_cancelled == 0);
+        assert(stats.timer_lateness_nanoseconds.sample_count == 1);
+    }
+
+    void test_cancelled_timer_does_not_fire()
+    {
+        auto state = std::make_shared<SyntheticBinding::State>();
+        SyntheticBinding binding{ActorKind::Zone, state};
+        RecordingRuntimeCompletion completion;
+        ActorRuntime runtime{player_runtime_config(1, 16), completion};
+        runtime.registerBinding(binding);
+        runtime.start();
+
+        std::optional<snf::runtime::TimerHandle> handle;
+        state->on_dispatch_with_context = [&](ActorContext& context, const ActorKey&, int value)
+        {
+            if (value == 1)
+            {
+                handle = context.trySchedule(100ms, binding.post(1, 2));
+                assert(handle.has_value());
+            }
+            else if (value == 3)
+            {
+                assert(handle.has_value());
+                context.cancelTimer(*handle);
+            }
+        };
+
+        assert(runtime.tryPost(binding.post(1, 1)) == PostResult::Accepted);
+        assert(runtime.tryPost(binding.post(1, 3)) == PostResult::Accepted);
+
+        std::this_thread::sleep_for(150ms);
+
+        runtime.close();
+        runtime.join();
+
+        {
+            std::lock_guard lock{state->mutex};
+            assert(state->dispatched.size() == 2);
+            assert(state->dispatched[0].second == 1);
+            assert(state->dispatched[1].second == 3);
+        }
+
+        const auto stats = runtime.getStats().workers.front();
+        assert(stats.timers_scheduled == 1);
+        assert(stats.timers_cancelled == 1);
+        assert(stats.timers_fired == 0);
+    }
+
+    void test_evicted_and_reactivated_actor_ignores_or_purges_old_alarm()
+    {
+        auto state = std::make_shared<SyntheticBinding::State>();
+        SyntheticBinding binding{ActorKind::Zone, state};
+        RecordingRuntimeCompletion completion;
+        ActorRuntime runtime{player_runtime_config(1, 16), completion};
+        runtime.registerBinding(binding);
+        runtime.start();
+
+        state->on_dispatch_with_context = [&](ActorContext& context, const ActorKey&, int value)
+        {
+            if (value == 1)
+            {
+                auto handle = context.trySchedule(100ms, binding.post(1, 2));
+                assert(handle.has_value());
+            }
+        };
+
+        assert(runtime.tryPost(binding.post(1, 1)) == PostResult::Accepted);
+
+        const auto first_deadline = std::chrono::steady_clock::now() + 1s;
+        while (std::chrono::steady_clock::now() < first_deadline)
+        {
+            {
+                std::lock_guard lock{state->mutex};
+                if (!state->dispatched.empty())
+                {
+                    break;
+                }
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+
+        assert(runtime.tryPost(binding.evict(1)) == PostResult::Accepted);
+
+        const auto evict_deadline = std::chrono::steady_clock::now() + 1s;
+        while (std::chrono::steady_clock::now() < evict_deadline)
+        {
+            if (runtime.getStats().workers.front().evicted_actors >= 1)
+            {
+                break;
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+
+        assert(runtime.tryPost(binding.post(1, 3)) == PostResult::Accepted);
+
+        std::this_thread::sleep_for(150ms);
+
+        runtime.close();
+        runtime.join();
+
+        {
+            std::lock_guard lock{state->mutex};
+            assert(state->dispatched.size() == 2);
+            assert(state->dispatched[0].second == 1);
+            assert(state->dispatched[1].second == 3);
+        }
+
+        const auto stats = runtime.getStats().workers.front();
+        assert(stats.timers_scheduled == 1);
+        assert(stats.timers_cancelled == 1);
+        assert(stats.timers_fired == 0);
+    }
+
+    void test_timer_capacity_rejection_returns_nullopt()
+    {
+        auto state = std::make_shared<SyntheticBinding::State>();
+        SyntheticBinding binding{ActorKind::Zone, state};
+        RecordingRuntimeCompletion completion;
+        ActorRuntime runtime{player_runtime_config(1, 2), completion};
+        runtime.registerBinding(binding);
+        runtime.start();
+
+        std::optional<bool> schedule_succeeded;
+        std::promise<void> first_dispatch_started;
+        auto first_dispatch = first_dispatch_started.get_future();
+        std::promise<void> release_first_dispatch;
+        auto release = release_first_dispatch.get_future().share();
+        std::atomic<bool> first{true};
+
+        state->on_dispatch_with_context = [&](ActorContext& context, const ActorKey&, int value)
+        {
+            if (value == 1 && first.exchange(false))
+            {
+                first_dispatch_started.set_value();
+                release.wait();
+                auto handle = context.trySchedule(10ms, binding.post(1, 99));
+                schedule_succeeded = handle.has_value();
+            }
+        };
+
+        assert(runtime.tryPost(binding.post(1, 1)) == PostResult::Accepted);
+        first_dispatch.wait();
+
+        assert(runtime.tryPost(binding.post(1, 2)) == PostResult::Accepted);
+
+        release_first_dispatch.set_value();
+
+        runtime.close();
+        runtime.join();
+
+        assert(schedule_succeeded.has_value());
+        assert(!*schedule_succeeded);
+
+        const auto stats = runtime.getStats().workers.front();
+        assert(stats.timers_rejected_full == 1);
+    }
+
+    void test_repeating_timer_drains_cleanly_on_close()
+    {
+        auto state = std::make_shared<SyntheticBinding::State>();
+        SyntheticBinding binding{ActorKind::Zone, state};
+        RecordingRuntimeCompletion completion;
+        ActorRuntime runtime{player_runtime_config(1, 16), completion};
+        runtime.registerBinding(binding);
+        runtime.start();
+
+        state->on_dispatch_with_context = [&](ActorContext& context, const ActorKey&, int value)
+        {
+            static_cast<void>(context.trySchedule(5ms, binding.post(1, value + 1)));
+        };
+
+        assert(runtime.tryPost(binding.post(1, 1)) == PostResult::Accepted);
+
+        const auto deadline = std::chrono::steady_clock::now() + 100ms;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::sleep_for(5ms);
+        }
+
+        runtime.close();
+        runtime.join();
+
+        assert(completion.drained_count.load() == 1);
+        const auto stats = runtime.getStats().workers.front();
+        assert(stats.timers_fired >= 3);
+        assert(stats.queue_depth == 0);
+    }
+
+    void test_timer_accounting_invariants_and_cross_actor_rejection()
+    {
+        auto state = std::make_shared<SyntheticBinding::State>();
+        SyntheticBinding binding{ActorKind::Zone, state};
+        RecordingRuntimeCompletion completion;
+        ActorRuntime runtime{player_runtime_config(1, 16), completion};
+        runtime.registerBinding(binding);
+        runtime.start();
+
+        bool cross_actor_threw = false;
+        state->on_dispatch_with_context = [&](ActorContext& context, const ActorKey&, int value)
+        {
+            if (value == 1)
+            {
+                try
+                {
+                    static_cast<void>(context.trySchedule(10ms, binding.post(2, 99)));
+                }
+                catch (const std::invalid_argument&)
+                {
+                    cross_actor_threw = true;
+                }
+            }
+        };
+
+        assert(runtime.tryPost(binding.post(1, 1)) == PostResult::Accepted);
+
+        runtime.close();
+        runtime.join();
+
+        assert(cross_actor_threw);
+        const auto stats = runtime.getStats().workers.front();
+        assert(stats.queue_depth == 0);
+    }
+
 }
 
 void run_actor_runtime_tests()
@@ -1523,4 +1801,10 @@ void run_actor_runtime_tests()
     test_admitted_commands_and_refused_posts_are_counted_apart();
     test_player_repository_wait_suspends_only_the_loading_actor();
     test_live_purchase_does_not_suspend_on_repository();
+    test_scheduled_alarm_fires_and_executes_handler();
+    test_cancelled_timer_does_not_fire();
+    test_evicted_and_reactivated_actor_ignores_or_purges_old_alarm();
+    test_timer_capacity_rejection_returns_nullopt();
+    test_repeating_timer_drains_cleanly_on_close();
+    test_timer_accounting_invariants_and_cross_actor_rejection();
 }

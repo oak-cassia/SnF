@@ -101,8 +101,8 @@ namespace snf::server
     ProtocolGateway::ProtocolGateway(RoutedCommandIngress& commands,
                                      PlayerSessionDirectory& sessions,
                                      RouteCoordinator& routes,
-                                     ZoneTimerService& zone_timers)
-        : ProtocolGateway(MessageDispatcher{}, commands, sessions, routes, zone_timers)
+                                     PartyCoordinator& parties)
+        : ProtocolGateway(MessageDispatcher{}, commands, sessions, routes, parties)
     {
     }
 
@@ -110,7 +110,7 @@ namespace snf::server
                                      RoutedCommandIngress& commands,
                                      PlayerSessionDirectory& sessions,
                                      RouteCoordinator& routes,
-                                     ZoneTimerService& zone_timers)
+                                     PartyCoordinator& parties)
         : _dispatcher(std::move(dispatcher))
         , _commands(commands)
         , _owned_sessions()
@@ -118,21 +118,19 @@ namespace snf::server
         , _owned_routes()
         , _routes(routes)
         , _owned_parties()
-        , _parties(_owned_parties)
-        , _zone_timers(&zone_timers)
+        , _parties(parties)
     {
     }
 
     ProtocolGateway::ProtocolGateway(RoutedCommandIngress& commands,
                                      PlayerSessionDirectory& sessions,
                                      RouteCoordinator& routes,
-                                     ZoneTimerService& zone_timers,
                                      PartyCoordinator& parties,
                                      ZoneTransitionChannel& zone_transitions,
                                      CommandLifecycleSink& lifecycle,
                                      ProtocolZoneResultSink& zone_results,
                                      const std::size_t max_zone_completions_per_turn)
-        : ProtocolGateway(MessageDispatcher{}, commands, sessions, routes, zone_timers, parties)
+        : ProtocolGateway(MessageDispatcher{}, commands, sessions, routes, parties)
     {
         if (max_zone_completions_per_turn == 0 ||
             max_zone_completions_per_turn > zone_transitions.capacity())
@@ -147,33 +145,6 @@ namespace snf::server
         _active_zone_handoffs.reserve(zone_transitions.capacity());
     }
 
-    ProtocolGateway::ProtocolGateway(RoutedCommandIngress& commands,
-                                     PlayerSessionDirectory& sessions,
-                                     RouteCoordinator& routes,
-                                     ZoneTimerService& zone_timers,
-                                     PartyCoordinator& parties)
-        : ProtocolGateway(MessageDispatcher{}, commands, sessions, routes, zone_timers, parties)
-    {
-    }
-
-    ProtocolGateway::ProtocolGateway(MessageDispatcher dispatcher,
-                                     RoutedCommandIngress& commands,
-                                     PlayerSessionDirectory& sessions,
-                                     RouteCoordinator& routes,
-                                     ZoneTimerService& zone_timers,
-                                     PartyCoordinator& parties)
-        : _dispatcher(std::move(dispatcher))
-        , _commands(commands)
-        , _owned_sessions()
-        , _sessions(sessions)
-        , _owned_routes()
-        , _routes(routes)
-        , _owned_parties()
-        , _parties(parties)
-        , _zone_timers(&zone_timers)
-    {
-    }
-
     FramePostResult ProtocolGateway::tryStartZoneHandoff(const FrameEnvelope& envelope,
                                                          const PlayerId player,
                                                          const ZoneId target_zone,
@@ -181,7 +152,7 @@ namespace snf::server
                                                          const SessionRoute& source)
     {
         if (_zone_transitions == nullptr || _lifecycle == nullptr || _zone_results == nullptr ||
-            _zone_timers == nullptr || _handoff_admission_closed)
+            _handoff_admission_closed)
         {
             return FramePostResult::InvalidPayload;
         }
@@ -193,20 +164,6 @@ namespace snf::server
         }
 
         CommandReleaseToken release{*_lifecycle, envelope.connection};
-        const ZoneTimerRegistration timer = _zone_timers->tryEnsureTimer(target_zone);
-        if (timer.result != snf::runtime::PostResult::Accepted)
-        {
-            replyZoneStatus(envelope.connection,
-                            player,
-                            source.zone,
-                            source.route_epoch,
-                            source_location->position,
-                            envelope.frame.request_id,
-                            ZoneReplyKind::Entered,
-                            ZoneCommandStatus::TransferFailed);
-            ++_handoff_failures_before_source_leave;
-            return FramePostResult::Accepted;
-        }
 
         const auto handoff = _routes.tryBeginHandoff(envelope.connection,
                                                      player,
@@ -216,10 +173,6 @@ namespace snf::server
                                                      envelope.frame.request_id);
         if (!handoff)
         {
-            if (timer.created)
-            {
-                static_cast<void>(_zone_timers->tryCancelTimer(target_zone));
-            }
             replyZoneStatus(envelope.connection,
                             player,
                             source.zone,
@@ -236,10 +189,6 @@ namespace snf::server
         if (!ticket)
         {
             static_cast<void>(_routes.rollbackHandoffBeforeLeave(envelope.connection, handoff->id));
-            if (timer.created)
-            {
-                static_cast<void>(_zone_timers->tryCancelTimer(target_zone));
-            }
             replyZoneStatus(envelope.connection,
                             player,
                             source.zone,
@@ -260,7 +209,6 @@ namespace snf::server
                 ActiveZoneHandoff{
                     .ticket = *ticket,
                     .release = std::move(release),
-                    .target_timer_created = timer.created,
                     .started_at = std::chrono::steady_clock::now(),
                 });
             static_cast<void>(active);
@@ -290,10 +238,6 @@ namespace snf::server
                 _zone_transitions->release(*ticket);
             }
             static_cast<void>(_routes.rollbackHandoffBeforeLeave(envelope.connection, handoff->id));
-            if (timer.created)
-            {
-                static_cast<void>(_zone_timers->tryCancelTimer(target_zone));
-            }
             throw;
         }
 
@@ -398,17 +342,11 @@ namespace snf::server
             throw std::logic_error{"Zone handoff rollback identity diverged"};
         }
 
-        const bool target_timer_created = active->second.target_timer_created;
         const ZoneTransitionTicket ticket = active->second.ticket;
         const auto started_at = active->second.started_at;
         if (!_routes.rollbackHandoffBeforeLeave(connection, handoff_id))
         {
             throw std::logic_error{"Zone handoff could not roll back before source leave"};
-        }
-        if (target_timer_created && _zone_timers != nullptr &&
-            _routes.routeCountFor(handoff->target_zone) == 0)
-        {
-            static_cast<void>(_zone_timers->tryCancelTimer(handoff->target_zone));
         }
         _zone_transitions->release(ticket);
         replyZoneStatus(connection,
@@ -423,14 +361,6 @@ namespace snf::server
             std::chrono::steady_clock::now() - started_at));
         ++_handoff_failures_before_source_leave;
         _active_zone_handoffs.erase(active);
-    }
-
-    void ProtocolGateway::cancelUnusedTimer(const ZoneId zone, const bool created)
-    {
-        if (created && _zone_timers != nullptr && _routes.routeCountFor(zone) == 0)
-        {
-            static_cast<void>(_zone_timers->tryCancelTimer(zone));
-        }
     }
 
     void ProtocolGateway::finishActiveHandoff(const snf::net::ConnectionId connection)
@@ -487,7 +417,6 @@ namespace snf::server
                                    .zone = route->zone,
                                    .position = position,
                                });
-        cancelUnusedTimer(handoff.target_zone, active->second.target_timer_created);
         replyZoneStatus(handoff.source.connection,
                         route->player,
                         route->zone,
@@ -522,17 +451,8 @@ namespace snf::server
         {
             return;
         }
-        const bool target_timer_created = active->second.target_timer_created;
         _sessions.noteLocation(handoff.source.connection, std::nullopt);
         _routes.abandon(handoff.source.connection);
-        if (_zone_timers != nullptr)
-        {
-            if (_routes.routeCountFor(handoff.source.zone) == 0)
-            {
-                static_cast<void>(_zone_timers->tryCancelTimer(handoff.source.zone));
-            }
-            cancelUnusedTimer(handoff.target_zone, target_timer_created);
-        }
         ++_disconnect_handoff_cleanups;
         finishActiveHandoff(handoff.source.connection);
     }
@@ -545,17 +465,8 @@ namespace snf::server
             return;
         }
         const bool disconnecting = active->second.disconnecting;
-        const bool target_timer_created = active->second.target_timer_created;
         _sessions.noteLocation(handoff.source.connection, std::nullopt);
         _routes.abandon(handoff.source.connection);
-        if (_zone_timers != nullptr)
-        {
-            if (_routes.routeCountFor(handoff.source.zone) == 0)
-            {
-                static_cast<void>(_zone_timers->tryCancelTimer(handoff.source.zone));
-            }
-            cancelUnusedTimer(handoff.target_zone, target_timer_created);
-        }
         if (!disconnecting && _zone_results != nullptr)
         {
             _zone_results->reportAdmissionFailure(handoff.source.connection);
@@ -601,6 +512,7 @@ namespace snf::server
                 .route_epoch = route_epoch,
                 .tick = 0,
                 .visible_players = {},
+                .timer = std::nullopt,
             });
     }
 
@@ -710,10 +622,6 @@ namespace snf::server
                                        .zone = route->zone,
                                        .position = *completion.position,
                                    });
-            if (_zone_timers != nullptr && _routes.routeCountFor(handoff->source.zone) == 0)
-            {
-                static_cast<void>(_zone_timers->tryCancelTimer(handoff->source.zone));
-            }
 
             replyZoneStatus(completion.connection,
                             route->player,
@@ -942,21 +850,6 @@ namespace snf::server
                 return FramePostResult::InvalidPayload;
             }
 
-            ZoneTimerRegistration timer_registration{
-                .result = snf::runtime::PostResult::Accepted,
-                .timer = std::nullopt,
-                .created = false,
-            };
-            if (_zone_timers != nullptr)
-            {
-                timer_registration = _zone_timers->tryEnsureTimer(zone);
-                if (timer_registration.result != snf::runtime::PostResult::Accepted)
-                {
-                    _routes.rollbackEnter(*admission);
-                    return frame_post_result(timer_registration.result);
-                }
-            }
-
             FramePostResult result;
             try
             {
@@ -975,31 +868,65 @@ namespace snf::server
             catch (...)
             {
                 _routes.rollbackEnter(*admission);
-                if (_zone_timers != nullptr && timer_registration.created)
-                {
-                    try
-                    {
-                        static_cast<void>(_zone_timers->tryCancelTimer(zone));
-                    }
-                    catch (...)
-                    {
-                        // Preserve the command-post failure that started cleanup.
-                    }
-                }
                 throw;
             }
             if (result != FramePostResult::Accepted)
             {
                 _routes.rollbackEnter(*admission);
-                if (_zone_timers != nullptr && timer_registration.created)
-                {
-                    static_cast<void>(_zone_timers->tryCancelTimer(zone));
-                }
             }
             else if (admission->created)
             {
                 _sessions.noteLocation(envelope.connection,
                                        PlayerLocation{.zone = zone, .position = position});
+            }
+            return result;
+        }
+
+        if (envelope.frame.type == snf::protocol::MessageType::LeaveZone)
+        {
+            if (!envelope.frame.payload.empty())
+            {
+                return FramePostResult::InvalidPayload;
+            }
+
+            if (const auto handoff = _routes.handoffFor(envelope.connection))
+            {
+                if (_lifecycle == nullptr || _zone_results == nullptr)
+                {
+                    return FramePostResult::InvalidPayload;
+                }
+                CommandReleaseToken release{*_lifecycle, envelope.connection};
+                replyZoneStatus(envelope.connection,
+                                handoff->source.player,
+                                handoff->target_zone,
+                                handoff->target_epoch,
+                                handoff->requested_target_position,
+                                envelope.frame.request_id,
+                                ZoneReplyKind::Left,
+                                ZoneCommandStatus::TransitionInProgress);
+                ++_transition_busy_replies;
+                return FramePostResult::Accepted;
+            }
+            const auto route = _routes.routeFor(envelope.connection);
+            if (!route)
+            {
+                return FramePostResult::InvalidPayload;
+            }
+
+            const FramePostResult result = post_zone(ZoneCommandRoute{
+                .zone = route->zone,
+                .command =
+                    LeaveZoneCommand{
+                        .player = route->player,
+                        .route_epoch = route->route_epoch,
+                    },
+                .reply_kind = ZoneReplyKind::Left,
+                .request_id = envelope.frame.request_id,
+            });
+            if (result != FramePostResult::Full)
+            {
+                _routes.completeLeave(*route);
+                _sessions.noteLocation(envelope.connection, std::nullopt);
             }
             return result;
         }
@@ -1105,10 +1032,6 @@ namespace snf::server
             {
                 _routes.completeLeave(*route);
                 _sessions.noteLocation(envelope.connection, std::nullopt);
-                if (_zone_timers != nullptr && _routes.routeCountFor(route->zone) == 0)
-                {
-                    static_cast<void>(_zone_timers->tryCancelTimer(route->zone));
-                }
             }
             return result;
         }
@@ -1275,10 +1198,6 @@ namespace snf::server
                 return PostResult::Full;
             }
             _routes.completeLeave(*route);
-            if (_zone_timers != nullptr && _routes.routeCountFor(route->zone) == 0)
-            {
-                static_cast<void>(_zone_timers->tryCancelTimer(route->zone));
-            }
         }
 
         const std::optional<PlayerId> player = _sessions.playerFor(closed.connection);

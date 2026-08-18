@@ -179,7 +179,11 @@ namespace snf::server
               })
         , _zone_actor_binding(
               ZoneActorBindingConfig{
-                  .actor = ZoneActorConfig{.aoi_radius = config.zone_aoi_radius},
+                  .actor =
+                      ZoneActorConfig{
+                          .aoi_radius = config.zone_aoi_radius,
+                          .tick_interval = config.zone_tick_interval,
+                      },
                   .tick_budget = config.zone_tick_budget,
                   .on_result =
                       [this](const ZoneInboundCommand& command, const ZoneResult& result)
@@ -258,21 +262,10 @@ namespace snf::server
                                 _command_lifecycle)
         , _zone_actor_ingress(_logic_runtime, _zone_actor_binding, _command_lifecycle)
         , _party_actor_ingress(_logic_runtime, _party_actor_binding, _command_lifecycle)
-        , _zone_timer_clock()
-        , _zone_timers(_zone_actor_ingress,
-                       _zone_timer_clock,
-                       ZoneTimerServiceConfig{
-                           .tick_interval = config.zone_tick_interval,
-                           .cancellation_retry_interval = std::chrono::milliseconds{1},
-                           .max_timers = config.max_zone_timers,
-                           .on_failure = [this]
-                           { _runtime_completion.notifyFailed(snf::runtime::RuntimeId::Logic); },
-                       })
         , _command_router(_player_actor_ingress, _zone_actor_ingress, _party_actor_ingress)
         , _protocol_gateway(_command_router,
                             _player_sessions,
                             _route_coordinator,
-                            _zone_timers,
                             _party_coordinator,
                             _zone_transition_channel,
                             _command_lifecycle,
@@ -320,13 +313,6 @@ namespace snf::server
     GameServer::~GameServer()
     {
         requestStop();
-        try
-        {
-            _zone_timers.stop();
-        }
-        catch (...)
-        {
-        }
         cancelActorRuntime();
         try
         {
@@ -358,11 +344,6 @@ namespace snf::server
         return repository_diagnostics(*_player_repository).find(player);
     }
 
-    ZoneTimerServiceStats GameServer::getZoneTimerStats() const
-    {
-        return _zone_timers.stats();
-    }
-
     ZoneActorBindingStats GameServer::getZoneActorStats() const noexcept
     {
         return _zone_actor_binding.stats();
@@ -380,7 +361,6 @@ namespace snf::server
             .network = _tcp_server.getMetrics(),
             .actor_runtime = _logic_runtime.getStats(),
             .player_repository = repository_diagnostics(*_player_repository).stats(),
-            .zone_timers = _zone_timers.stats(),
             .zone_actors = _zone_actor_binding.stats(),
             .zone_handoffs = _route_coordinator.stats(),
             .zone_handoff_gateway = _protocol_gateway.zoneHandoffStats(),
@@ -432,12 +412,10 @@ namespace snf::server
         _has_run = true;
 
         _logic_runtime.start();
-        _zone_timers.start();
     }
 
     void GameServer::joinActorRuntime()
     {
-        _zone_timers.stop();
         std::exception_ptr actor_failure;
         try
         {
@@ -467,18 +445,10 @@ namespace snf::server
         {
             std::rethrow_exception(persistence_failure);
         }
-        _zone_timers.rethrowIfFailed();
     }
 
     void GameServer::cancelActorRuntime() noexcept
     {
-        try
-        {
-            _zone_timers.stop();
-        }
-        catch (...)
-        {
-        }
         _protocol_gateway.cancel();
         _zone_transition_channel.cancel();
         // Also the path a reactor failure takes, and the reason a Worker suspended on
