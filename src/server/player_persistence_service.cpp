@@ -5,8 +5,8 @@
 
 namespace snf::server
 {
-    PlayerPersistenceService::PlayerPersistenceService(
-        PlayerRepository& repository, PlayerPersistenceServiceConfig config)
+    PlayerPersistenceService::PlayerPersistenceService(PlayerRepository& repository,
+                                                       PlayerPersistenceServiceConfig config)
         : _repository(repository)
         , _flush_interval(config.flush_interval)
         , _snapshots(config.queue_capacity)
@@ -51,8 +51,7 @@ namespace snf::server
         return false;
     }
 
-    void PlayerPersistenceService::asyncSave(PlayerRecord record,
-                                              PlayerSaveCompletion completion)
+    void PlayerPersistenceService::asyncSave(PlayerRecord record, PlayerSaveCompletion completion)
     {
         if (!completion)
         {
@@ -69,8 +68,7 @@ namespace snf::server
             else
             {
                 _final_requests[record.player].push_back(
-                    FinalRequest{.record = std::move(record),
-                                 .completion = std::move(completion)});
+                    FinalRequest{.record = std::move(record), .completion = std::move(completion)});
             }
         }
 
@@ -147,9 +145,10 @@ namespace snf::server
         std::unique_lock lock{_mutex};
         while (!_stopping)
         {
-            _wake.wait_for(lock, _flush_interval, [this] {
-                return _stopping || _flush_requested || _snapshots.size() != 0;
-            });
+            _wake.wait_for(lock,
+                           _flush_interval,
+                           [this]
+                           { return _stopping || _flush_requested || _snapshots.size() != 0; });
             lock.unlock();
             try
             {
@@ -231,8 +230,7 @@ namespace snf::server
         }
     }
 
-    std::vector<PlayerPersistenceService::StartSave>
-    PlayerPersistenceService::selectSaves()
+    std::vector<PlayerPersistenceService::StartSave> PlayerPersistenceService::selectSaves()
     {
         std::vector<StartSave> saves;
         std::lock_guard lock{_mutex};
@@ -378,7 +376,7 @@ namespace snf::server
     }
 
     void PlayerPersistenceService::notifyCompletion(PlayerSaveCompletion& completion,
-                                                     PlayerSaveResult result) noexcept
+                                                    PlayerSaveResult result) noexcept
     {
         try
         {

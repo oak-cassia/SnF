@@ -5,8 +5,7 @@
 
 namespace snf::server
 {
-    void InMemoryPlayerRepository::asyncLoad(const PlayerId player,
-                                             PlayerLoadCompletion completion)
+    void InMemoryPlayerRepository::asyncLoad(const PlayerId player, PlayerLoadCompletion completion)
     {
         if (!completion)
         {
@@ -30,8 +29,7 @@ namespace snf::server
         });
     }
 
-    void InMemoryPlayerRepository::asyncSave(PlayerRecord record,
-                                             PlayerSaveCompletion completion)
+    void InMemoryPlayerRepository::asyncSave(PlayerRecord record, PlayerSaveCompletion completion)
     {
         if (!completion)
         {

@@ -192,8 +192,8 @@ namespace
         if (has_zone)
         {
             location = snf::server::PlayerLocation{
-                .zone = snf::server::ZoneId{
-                    .value = parse_integer<std::uint64_t>(row[1], "zone_id")},
+                .zone =
+                    snf::server::ZoneId{.value = parse_integer<std::uint64_t>(row[1], "zone_id")},
                 .position =
                     {
                         .x = parse_integer<std::int32_t>(row[2], "position_x"),
@@ -214,8 +214,7 @@ namespace
     class MySqlStore final
     {
     public:
-        MySqlStore(const snf::server::MySqlPlayerRepositoryConfig& config,
-                   const bool ensure_schema)
+        MySqlStore(const snf::server::MySqlPlayerRepositoryConfig& config, const bool ensure_schema)
             : _connection(config)
         {
             if (ensure_schema)
@@ -244,8 +243,7 @@ namespace
             };
         }
 
-        [[nodiscard]] snf::server::PlayerSaveResult
-        save(const snf::server::PlayerRecord& record)
+        [[nodiscard]] snf::server::PlayerSaveResult save(const snf::server::PlayerRecord& record)
         {
             const std::string zone =
                 record.last_location ? std::to_string(record.last_location->zone.value) : "NULL";
@@ -259,7 +257,8 @@ namespace
                 std::to_string(record.player.value) + "," +
                 std::to_string(record.handled_command_count) + "," + zone + "," + position_x + "," +
                 position_y + "," + std::to_string(record.currency_balance) + "," +
-                std::to_string(record.purchased_item_count) + ") ON DUPLICATE KEY UPDATE "
+                std::to_string(record.purchased_item_count) +
+                ") ON DUPLICATE KEY UPDATE "
                 "handled_command_count=VALUES(handled_command_count), "
                 "zone_id=VALUES(zone_id), position_x=VALUES(position_x), "
                 "position_y=VALUES(position_y), currency_balance=VALUES(currency_balance), "
@@ -586,14 +585,12 @@ namespace snf::server
 
     MySqlPlayerRepository::~MySqlPlayerRepository() = default;
 
-    void MySqlPlayerRepository::asyncLoad(const PlayerId player,
-                                          PlayerLoadCompletion completion)
+    void MySqlPlayerRepository::asyncLoad(const PlayerId player, PlayerLoadCompletion completion)
     {
         _impl->asyncLoad(player, std::move(completion));
     }
 
-    void MySqlPlayerRepository::asyncSave(PlayerRecord record,
-                                          PlayerSaveCompletion completion)
+    void MySqlPlayerRepository::asyncSave(PlayerRecord record, PlayerSaveCompletion completion)
     {
         _impl->asyncSave(std::move(record), std::move(completion));
     }

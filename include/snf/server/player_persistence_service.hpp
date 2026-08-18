@@ -98,8 +98,7 @@ namespace snf::server
 
         using SnapshotQueue = snf::runtime::BoundedQueue<SnapshotJob>;
         using PendingMap = std::unordered_map<PlayerId, PlayerRecord, PlayerIdHash>;
-        using FinalMap =
-            std::unordered_map<PlayerId, std::deque<FinalRequest>, PlayerIdHash>;
+        using FinalMap = std::unordered_map<PlayerId, std::deque<FinalRequest>, PlayerIdHash>;
         using InFlightMap = std::unordered_map<PlayerId, InFlight, PlayerIdHash>;
 
         void run() noexcept;
@@ -107,10 +106,8 @@ namespace snf::server
         void drainSnapshots();
         [[nodiscard]] std::vector<StartSave> selectSaves();
         void startSave(StartSave save) noexcept;
-        void completeSave(PlayerId player,
-                          PlayerSaveResult result) noexcept;
-        void notifyCompletion(PlayerSaveCompletion& completion,
-                              PlayerSaveResult result) noexcept;
+        void completeSave(PlayerId player, PlayerSaveResult result) noexcept;
+        void notifyCompletion(PlayerSaveCompletion& completion, PlayerSaveResult result) noexcept;
         [[nodiscard]] bool isFlushCompleteLocked() const noexcept;
 
         PlayerRepository& _repository;

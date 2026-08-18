@@ -157,12 +157,10 @@ namespace
                       << worker.double_completions << ", discarded late completions "
                       << worker.discarded_late_completions << ", suspend duration ns "
                       << format_distribution(worker.suspend_duration_nanoseconds) << '\n';
-            std::cout << "Actor worker " << worker_index
-                      << " timers: " << worker.active_timers << " active, "
-                      << worker.timers_scheduled << " scheduled, "
-                      << worker.timers_rejected_full << " rejected-full, "
-                      << worker.timers_fired << " fired, "
-                      << worker.timers_cancelled << " cancelled, "
+            std::cout << "Actor worker " << worker_index << " timers: " << worker.active_timers
+                      << " active, " << worker.timers_scheduled << " scheduled, "
+                      << worker.timers_rejected_full << " rejected-full, " << worker.timers_fired
+                      << " fired, " << worker.timers_cancelled << " cancelled, "
                       << worker.timers_discarded_stale << " discarded stale, lateness ns "
                       << format_distribution(worker.timer_lateness_nanoseconds) << '\n';
         }

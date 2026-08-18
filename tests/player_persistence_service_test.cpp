@@ -94,8 +94,7 @@ namespace
         std::size_t _maximum_active_saves{0};
     };
 
-    snf::server::PlayerRecord record(const std::uint64_t player,
-                                     const std::uint64_t handled)
+    snf::server::PlayerRecord record(const std::uint64_t player, const std::uint64_t handled)
     {
         return snf::server::PlayerRecord{
             .player = snf::server::PlayerId{.value = player},
@@ -107,12 +106,11 @@ namespace
     void test_persistence_coalesces_and_serializes_per_player()
     {
         RecordingRepository repository;
-        snf::server::PlayerPersistenceService service{
-            repository,
-            snf::server::PlayerPersistenceServiceConfig{
-                .queue_capacity = 8,
-                .flush_interval = 1ms,
-            }};
+        snf::server::PlayerPersistenceService service{repository,
+                                                      snf::server::PlayerPersistenceServiceConfig{
+                                                          .queue_capacity = 8,
+                                                          .flush_interval = 1ms,
+                                                      }};
 
         assert(service.tryEnqueue(record(1, 1)));
         repository.waitForSaveCalls(1);
@@ -135,12 +133,11 @@ namespace
     void test_persistence_retries_failed_background_snapshot_and_final_save_waits()
     {
         RecordingRepository repository;
-        snf::server::PlayerPersistenceService service{
-            repository,
-            snf::server::PlayerPersistenceServiceConfig{
-                .queue_capacity = 4,
-                .flush_interval = 1ms,
-            }};
+        snf::server::PlayerPersistenceService service{repository,
+                                                      snf::server::PlayerPersistenceServiceConfig{
+                                                          .queue_capacity = 4,
+                                                          .flush_interval = 1ms,
+                                                      }};
 
         assert(service.tryEnqueue(record(2, 10)));
         repository.waitForSaveCalls(1);
@@ -169,12 +166,11 @@ namespace
     void test_persistence_queue_rejection_is_bounded_and_counted()
     {
         RecordingRepository repository;
-        snf::server::PlayerPersistenceService service{
-            repository,
-            snf::server::PlayerPersistenceServiceConfig{
-                .queue_capacity = 1,
-                .flush_interval = 1s,
-            }};
+        snf::server::PlayerPersistenceService service{repository,
+                                                      snf::server::PlayerPersistenceServiceConfig{
+                                                          .queue_capacity = 1,
+                                                          .flush_interval = 1s,
+                                                      }};
 
         assert(service.tryEnqueue(record(3, 1)));
         repository.waitForSaveCalls(1);

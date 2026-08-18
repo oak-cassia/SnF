@@ -157,14 +157,13 @@ namespace snf::server
                 .reply = std::nullopt,
                 .handoff = std::nullopt,
             };
-            auto timer_submission = makeSubmission(
-                submission.target(),
-                snf::runtime::ActorActivation::ExistingOnly,
-                snf::runtime::ActorAccounting::Command,
-                CommandPayload{
-                    .command = std::move(tick_command),
-                    .release = {},
-                });
+            auto timer_submission = makeSubmission(submission.target(),
+                                                   snf::runtime::ActorActivation::ExistingOnly,
+                                                   snf::runtime::ActorAccounting::Command,
+                                                   CommandPayload{
+                                                       .command = std::move(tick_command),
+                                                       .release = {},
+                                                   });
             auto handle = context.trySchedule(result.timer->delay, std::move(timer_submission));
             static_cast<void>(handle);
         }

@@ -26,8 +26,7 @@ namespace snf::server
 
     // Durable blocking adapter. Its bounded queue is non-blocking at the Actor
     // boundary and each repository Worker owns one MySQL connection at a time.
-    class MySqlPlayerRepository final : public PlayerRepository,
-                                        public PlayerRepositoryDiagnostics
+    class MySqlPlayerRepository final : public PlayerRepository, public PlayerRepositoryDiagnostics
     {
     public:
         explicit MySqlPlayerRepository(MySqlPlayerRepositoryConfig config);

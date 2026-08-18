@@ -177,8 +177,8 @@ namespace snf::runtime
 
         void abortOperation() noexcept override;
 
-        [[nodiscard]] std::optional<TimerHandle>
-        trySchedule(std::chrono::milliseconds delay, ActorSubmission submission) override;
+        [[nodiscard]] std::optional<TimerHandle> trySchedule(std::chrono::milliseconds delay,
+                                                             ActorSubmission submission) override;
 
         void cancelTimer(TimerHandle handle) noexcept override;
 

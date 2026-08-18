@@ -124,8 +124,10 @@ namespace
         assert(zone.lastTick() == 2);
 
         // Remove all players
-        static_cast<void>(zone.handle(snf::server::LeaveZoneCommand{.player = low, .route_epoch = 1}));
-        static_cast<void>(zone.handle(snf::server::LeaveZoneCommand{.player = high, .route_epoch = 1}));
+        static_cast<void>(
+            zone.handle(snf::server::LeaveZoneCommand{.player = low, .route_epoch = 1}));
+        static_cast<void>(
+            zone.handle(snf::server::LeaveZoneCommand{.player = high, .route_epoch = 1}));
         assert(zone.playerCount() == 0);
 
         // Tick when zone is empty should not request another timer

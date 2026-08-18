@@ -39,8 +39,6 @@ namespace snf::server
     {
     };
 
-    using ZoneCommand = std::variant<EnterZoneCommand,
-                                     LeaveZoneCommand,
-                                     MoveInZoneCommand,
-                                     ZoneSimulationTick>;
+    using ZoneCommand =
+        std::variant<EnterZoneCommand, LeaveZoneCommand, MoveInZoneCommand, ZoneSimulationTick>;
 }
