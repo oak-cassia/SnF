@@ -44,6 +44,7 @@ namespace
     using snf::runtime::ActorSubmission;
     using snf::runtime::EntityId;
     using snf::runtime::PostResult;
+    using snf::runtime::TellPayload;
 
     class RecordingRuntimeCompletion final : public snf::runtime::RuntimeCompletionSink
     {
@@ -247,6 +248,23 @@ namespace
         }
 
     protected:
+        // Restores the int a sender handed to tryTell and wraps it in this
+        // binding's own payload, which is what the runtime cannot do itself.
+        [[nodiscard]] std::optional<ActorSubmission> makeTell(const ActorKey target,
+                                                              TellPayload payload) override
+        {
+            auto value = payload.take<int>();
+            if (!value)
+            {
+                return std::nullopt;
+            }
+
+            return makeSubmission(target,
+                                  ActorActivation::ActivateIfMissing,
+                                  ActorAccounting::Command,
+                                  Payload{.value = *value, .evict = false});
+        }
+
         [[nodiscard]] std::unique_ptr<ActorSlot> activate(const EntityId entity) override
         {
             std::function<void(EntityId)> on_activate;
@@ -1776,6 +1794,232 @@ namespace
         assert(stats.queue_depth == 0);
     }
 
+    ActorKey key_on_worker(const ActorRuntime& runtime,
+                           const ActorKind kind,
+                           const std::size_t worker_index,
+                           const EntityId first_entity)
+    {
+        for (EntityId entity = first_entity; entity < first_entity + 4096; ++entity)
+        {
+            const ActorKey key{.kind = kind, .entity = entity};
+            if (runtime.workerIndexFor(key) == worker_index)
+            {
+                return key;
+            }
+        }
+
+        throw std::logic_error{"No entity hashes to the requested worker"};
+    }
+
+    bool wait_for_dispatch(SyntheticBinding::State& state, const ActorKey& key, const int value)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            {
+                std::lock_guard lock{state.mutex};
+                for (const auto& [dispatched_key, dispatched_value] : state.dispatched)
+                {
+                    if (dispatched_key == key && dispatched_value == value)
+                    {
+                        return true;
+                    }
+                }
+            }
+            std::this_thread::yield();
+        }
+
+        return false;
+    }
+
+    // Sends one tell from inside a dispatch and reports whether it arrived. The
+    // guard on the sentinel value is what keeps the target's own dispatch from
+    // telling again.
+    bool tell_arrives(const std::size_t worker_count,
+                      const bool same_worker,
+                      RecordingRuntimeCompletion& completion)
+    {
+        auto state = std::make_shared<SyntheticBinding::State>();
+        SyntheticBinding binding{ActorKind::Zone, state};
+        ActorRuntime runtime{player_runtime_config(worker_count, 8), completion};
+        runtime.registerBinding(binding);
+
+        const ActorKey sender = key_on_worker(runtime, ActorKind::Zone, 0, 1);
+        const ActorKey target = key_on_worker(
+            runtime, ActorKind::Zone, same_worker ? 0 : worker_count - 1, sender.entity + 1);
+        assert((runtime.workerIndexFor(sender) == runtime.workerIndexFor(target)) == same_worker);
+
+        state->on_dispatch_with_context =
+            [target](ActorContext& context, const ActorKey&, const int value)
+        {
+            if (value != 1)
+            {
+                return;
+            }
+            assert(context.tryTell(target, TellPayload::of(2)) == PostResult::Accepted);
+        };
+
+        runtime.start();
+        assert(runtime.tryPost(binding.post(sender.entity, 1)) == PostResult::Accepted);
+
+        const bool arrived = wait_for_dispatch(*state, target, 2);
+        runtime.close();
+        runtime.join();
+        return arrived;
+    }
+
+    void test_a_tell_reaches_a_target_on_the_same_worker()
+    {
+        RecordingRuntimeCompletion completion;
+        assert(tell_arrives(1, true, completion));
+    }
+
+    void test_a_tell_reaches_a_target_on_another_worker()
+    {
+        RecordingRuntimeCompletion completion;
+        assert(tell_arrives(4, false, completion));
+    }
+
+    void test_a_tell_is_refused_when_the_target_worker_is_full()
+    {
+        RecordingRuntimeCompletion completion;
+        auto state = std::make_shared<SyntheticBinding::State>();
+        SyntheticBinding binding{ActorKind::Zone, state};
+        // One worker, one outstanding slot: the command being dispatched still holds
+        // it, so a tell to that same worker cannot reserve one.
+        ActorRuntime runtime{player_runtime_config(1, 1), completion};
+        runtime.registerBinding(binding);
+
+        std::promise<PostResult> tell_result;
+        state->on_dispatch_with_context =
+            [&tell_result](ActorContext& context, const ActorKey& key, const int value)
+        {
+            if (value != 1)
+            {
+                return;
+            }
+            tell_result.set_value(context.tryTell(
+                ActorKey{.kind = ActorKind::Zone, .entity = key.entity + 1}, TellPayload::of(2)));
+        };
+
+        runtime.start();
+        assert(runtime.tryPost(binding.post(1, 1)) == PostResult::Accepted);
+
+        auto result = tell_result.get_future();
+        assert(result.wait_for(2s) == std::future_status::ready);
+        assert(result.get() == PostResult::Full);
+
+        runtime.close();
+        runtime.join();
+    }
+
+    void test_tells_sent_in_one_turn_arrive_in_order()
+    {
+        RecordingRuntimeCompletion completion;
+        auto state = std::make_shared<SyntheticBinding::State>();
+        SyntheticBinding binding{ActorKind::Zone, state};
+        ActorRuntime runtime{player_runtime_config(2, 16), completion};
+        runtime.registerBinding(binding);
+
+        const ActorKey sender = key_on_worker(runtime, ActorKind::Zone, 0, 1);
+        const ActorKey target = key_on_worker(runtime, ActorKind::Zone, 1, sender.entity + 1);
+
+        state->on_dispatch_with_context =
+            [target](ActorContext& context, const ActorKey&, const int value)
+        {
+            if (value != 1)
+            {
+                return;
+            }
+            for (const int payload : {10, 20, 30})
+            {
+                assert(context.tryTell(target, TellPayload::of(payload)) == PostResult::Accepted);
+            }
+        };
+
+        runtime.start();
+        assert(runtime.tryPost(binding.post(sender.entity, 1)) == PostResult::Accepted);
+        assert(wait_for_dispatch(*state, target, 30));
+
+        // FIFO holds for one sender's turn, which is the only ordering a mailbox
+        // can promise. Two senders on different Workers interleave by design.
+        std::vector<int> seen;
+        {
+            std::lock_guard lock{state->mutex};
+            for (const auto& [key, value] : state->dispatched)
+            {
+                if (key == target)
+                {
+                    seen.push_back(value);
+                }
+            }
+        }
+        assert((seen == std::vector<int>{10, 20, 30}));
+
+        runtime.close();
+        runtime.join();
+    }
+
+    void test_a_tell_activates_a_target_that_is_not_resident()
+    {
+        RecordingRuntimeCompletion completion;
+        auto state = std::make_shared<SyntheticBinding::State>();
+        SyntheticBinding binding{ActorKind::Zone, state};
+        ActorRuntime runtime{player_runtime_config(2, 8), completion};
+        runtime.registerBinding(binding);
+
+        const ActorKey sender = key_on_worker(runtime, ActorKind::Zone, 0, 1);
+        const ActorKey target = key_on_worker(runtime, ActorKind::Zone, 1, sender.entity + 1);
+
+        std::mutex activated_mutex;
+        std::vector<EntityId> activated;
+        state->on_activate = [&](const EntityId entity)
+        {
+            std::lock_guard lock{activated_mutex};
+            activated.push_back(entity);
+        };
+        state->on_dispatch_with_context =
+            [target](ActorContext& context, const ActorKey&, const int value)
+        {
+            if (value != 1)
+            {
+                return;
+            }
+            assert(context.tryTell(target, TellPayload::of(2)) == PostResult::Accepted);
+        };
+
+        runtime.start();
+        assert(runtime.tryPost(binding.post(sender.entity, 1)) == PostResult::Accepted);
+        assert(wait_for_dispatch(*state, target, 2));
+
+        // ActivateIfMissing: a reward for a passivated actor must still arrive.
+        {
+            std::lock_guard lock{activated_mutex};
+            assert(std::find(activated.begin(), activated.end(), target.entity) != activated.end());
+        }
+
+        runtime.close();
+        runtime.join();
+    }
+
+    void test_a_tell_is_closed_after_the_runtime_stops_accepting_input()
+    {
+        RecordingRuntimeCompletion completion;
+        auto state = std::make_shared<SyntheticBinding::State>();
+        SyntheticBinding binding{ActorKind::Zone, state};
+        ActorRuntime runtime{player_runtime_config(2, 8), completion};
+        runtime.registerBinding(binding);
+
+        runtime.start();
+        runtime.close();
+
+        // The target binding still assembles the submission; tryPost is what refuses
+        // it, so a tell and a reactor command report the same shutdown state.
+        assert(runtime.tryTell(ActorKey{.kind = ActorKind::Zone, .entity = 1},
+                               TellPayload::of(7)) == PostResult::Closed);
+
+        runtime.join();
+    }
 }
 
 void run_actor_runtime_tests()
@@ -1806,4 +2050,10 @@ void run_actor_runtime_tests()
     test_timer_capacity_rejection_returns_nullopt();
     test_repeating_timer_drains_cleanly_on_close();
     test_timer_accounting_invariants_and_cross_actor_rejection();
+    test_a_tell_reaches_a_target_on_the_same_worker();
+    test_a_tell_reaches_a_target_on_another_worker();
+    test_a_tell_is_refused_when_the_target_worker_is_full();
+    test_tells_sent_in_one_turn_arrive_in_order();
+    test_a_tell_activates_a_target_that_is_not_resident();
+    test_a_tell_is_closed_after_the_runtime_stops_accepting_input();
 }

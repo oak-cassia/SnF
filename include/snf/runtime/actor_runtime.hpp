@@ -5,6 +5,7 @@
 #include "snf/runtime/distribution.hpp"
 #include "snf/runtime/post_result.hpp"
 #include "snf/runtime/runtime_completion.hpp"
+#include "snf/runtime/tell_payload.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -97,6 +98,16 @@ namespace snf::runtime
         // Undoes tryBeginOperation when submitting the operation threw. The
         // operation never started, so no completion can arrive for it.
         virtual void abortOperation() noexcept = 0;
+
+        // Posts a domain payload to another actor's mailbox. It is deliberately
+        // not awaitable: an actor that waited for another actor's reply could
+        // form a cycle, and this runtime has no way to detect or break one, so
+        // suspended tasks would outlive every drain predicate.
+        //
+        // The payload is assembled into a submission by the *target* binding, so
+        // the sender never learns the target's command type. ActivateIfMissing is
+        // used: a tell whose target is passivated must still arrive.
+        [[nodiscard]] virtual PostResult tryTell(ActorKey target, TellPayload payload) = 0;
 
         // 소유 Worker의 dispatch/resume 안에서만 호출 가능하다.
         // nullopt = 용량 거부. 호출자는 타이머가 걸리지 않았음을 알고 대응해야 한다.
@@ -313,6 +324,23 @@ namespace snf::runtime
                                                            ActorContext& context,
                                                            std::stop_token stop_token) = 0;
 
+        // Builds this binding's submission for a tell addressed to one of its
+        // actors. Only the binding that owns the payload type can restore it, which
+        // is what lets the runtime route a tell without knowing any domain type.
+        // std::nullopt means this kind does not accept the payload; the default
+        // accepts none, so a kind that is never told needs no override.
+        //
+        // Unlike the other factories this one runs on any Worker, concurrently, so
+        // it must stay a read-only conversion. Do not add a cache, a sequence
+        // counter or any other mutable state to an implementation.
+        [[nodiscard]] virtual std::optional<ActorSubmission> makeTell(ActorKey target,
+                                                                      TellPayload payload)
+        {
+            static_cast<void>(target);
+            static_cast<void>(payload);
+            return std::nullopt;
+        }
+
         // Called only after a previous dispatch/resume returned Suspended, and
         // only on the owning Worker. Returning Suspended again is allowed: a
         // handler may await more than once in sequence.
@@ -412,6 +440,16 @@ namespace snf::runtime
         void join();
 
         [[nodiscard]] PostResult tryPost(ActorSubmission submission);
+
+        // Routes a tell to the target kind's registered binding, which assembles
+        // the submission, and then reuses tryPost. A tell therefore lands in the
+        // same bounded ingress and mailbox as a reactor-issued command, so ordering
+        // and backpressure do not depend on who sent it.
+        //
+        // Throws std::logic_error when the target binding refuses the payload:
+        // like a payloadAs mismatch that is a wiring bug, not a runtime condition.
+        [[nodiscard]] PostResult tryTell(ActorKey target, TellPayload payload);
+
         void close() noexcept;
 
         // Requests cancellation. It never touches a coroutine frame or a mailbox
