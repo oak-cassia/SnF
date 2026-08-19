@@ -143,6 +143,7 @@ if(BUILD_TESTING)
         tests/build_info_test.cpp
         tests/frame_codec_test.cpp
         tests/bounded_queue_test.cpp
+        tests/tell_payload_test.cpp
         tests/distribution_test.cpp
         tests/command_router_test.cpp
         tests/protocol_gateway_test.cpp
