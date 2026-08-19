@@ -101,6 +101,9 @@ add_library(snf_server_runtime STATIC
     src/server/product_catalog.cpp
     src/server/player_repository.cpp
     src/server/street_progression.cpp
+    src/server/room_actor.cpp
+    src/server/room_actor_binding.cpp
+    src/server/room_actor_ingress.cpp
     src/server/mysql_player_repository.cpp
     src/server/player_session_directory.cpp
     src/server/zone_actor.cpp
@@ -146,6 +149,9 @@ if(BUILD_TESTING)
         tests/bounded_queue_test.cpp
         tests/tell_payload_test.cpp
         tests/street_progression_test.cpp
+        tests/room_actor_test.cpp
+        tests/room_actor_binding_test.cpp
+        tests/player_tell_test.cpp
         tests/distribution_test.cpp
         tests/command_router_test.cpp
         tests/protocol_gateway_test.cpp

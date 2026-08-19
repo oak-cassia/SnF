@@ -120,11 +120,7 @@ namespace snf::server
                                       .route_epoch = command.route_epoch,
                                   });
 
-        std::vector<FollowUpAction> follow_ups;
-        if (was_empty && !_players.empty())
-        {
-            follow_ups.push_back(ScheduleTimer{.delay = _tick_interval});
-        }
+        const std::optional<std::chrono::milliseconds> tick_after = was_empty && !_players.empty() ? std::optional{_tick_interval} : std::nullopt;
 
         return ZoneResult{
             .status = ZoneCommandStatus::Applied,
@@ -133,7 +129,7 @@ namespace snf::server
             .route_epoch = command.route_epoch,
             .tick = _last_tick,
             .visible_players = visiblePlayers(command.player),
-            .follow_ups = std::move(follow_ups),
+            .tick_after = tick_after,
         };
     }
 
@@ -215,11 +211,7 @@ namespace snf::server
     ZoneResult ZoneActor::handleCommand(const ZoneSimulationTick&)
     {
         ++_last_tick;
-        std::vector<FollowUpAction> follow_ups;
-        if (!_players.empty())
-        {
-            follow_ups.push_back(ScheduleTimer{.delay = _tick_interval});
-        }
+        const std::optional<std::chrono::milliseconds> tick_after = _players.empty() ? std::nullopt : std::optional{_tick_interval};
 
         return ZoneResult{
             .status = ZoneCommandStatus::Applied,
@@ -228,7 +220,7 @@ namespace snf::server
             .route_epoch = 0,
             .tick = _last_tick,
             .visible_players = {},
-            .follow_ups = std::move(follow_ups),
+            .tick_after = tick_after,
         };
     }
 

@@ -1,14 +1,8 @@
 #include "snf/server/zone_actor_binding.hpp"
 
 #include <stdexcept>
-#include <type_traits>
 #include <utility>
 #include <variant>
-
-namespace
-{
-    template <typename> inline constexpr bool always_false_v = false;
-}
 
 namespace snf::server
 {
@@ -150,41 +144,24 @@ namespace snf::server
             _on_result(payload.command, result);
         }
 
-        for (FollowUpAction& action : result.follow_ups)
+        if (result.tick_after)
         {
-            std::visit(
-                [&](auto& follow_up)
-                {
-                    using Action = std::decay_t<decltype(follow_up)>;
-                    if constexpr (std::is_same_v<Action, ScheduleTimer>)
-                    {
-                        ZoneInboundCommand tick_command{
-                            .zone = payload.command.zone,
-                            .command = ZoneSimulationTick{},
-                            .reply = std::nullopt,
-                            .handoff = std::nullopt,
-                        };
-                        // ExistingOnly: a tick must not resurrect a Zone that was
-                        // evicted between the request and the deadline.
-                        auto timer_submission = makeSubmission(submission.target(),
-                                                               snf::runtime::ActorActivation::ExistingOnly,
-                                                               snf::runtime::ActorAccounting::Command,
-                                                               CommandPayload{
-                                                                   .command = std::move(tick_command),
-                                                                   .release = {},
-                                                               });
-                        static_cast<void>(context.trySchedule(follow_up.delay, std::move(timer_submission)));
-                    }
-                    else if constexpr (std::is_same_v<Action, TellActor>)
-                    {
-                        static_cast<void>(context.tryTell(follow_up.target, std::move(follow_up.payload)));
-                    }
-                    else
-                    {
-                        static_assert(always_false_v<Action>, "Unhandled FollowUpAction alternative");
-                    }
-                },
-                action);
+            ZoneInboundCommand tick_command{
+                .zone = payload.command.zone,
+                .command = ZoneSimulationTick{},
+                .reply = std::nullopt,
+                .handoff = std::nullopt,
+            };
+            // ExistingOnly: a tick must not resurrect a Zone that was evicted between
+            // the request and the deadline.
+            auto timer_submission = makeSubmission(submission.target(),
+                                                   snf::runtime::ActorActivation::ExistingOnly,
+                                                   snf::runtime::ActorAccounting::Command,
+                                                   CommandPayload{
+                                                       .command = std::move(tick_command),
+                                                       .release = {},
+                                                   });
+            static_cast<void>(context.trySchedule(*result.tick_after, std::move(timer_submission)));
         }
 
         if (zone_slot.actor.playerCount() == 0)

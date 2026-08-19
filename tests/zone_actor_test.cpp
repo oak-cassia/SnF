@@ -12,17 +12,11 @@ using namespace std::chrono_literals;
 
 namespace
 {
-    // The Zone asks for its next tick through the shared follow-up channel, so a
-    // test reads the request the same way the binding does.
+    // The Zone asks for its next tick as a duration; the binding is what turns it
+    // into a timer.
     std::optional<std::chrono::milliseconds> scheduled_delay(const snf::server::ZoneResult& result)
     {
-        if (result.follow_ups.size() != 1)
-        {
-            return std::nullopt;
-        }
-
-        const auto* timer = std::get_if<snf::server::ScheduleTimer>(&result.follow_ups.front());
-        return timer == nullptr ? std::nullopt : std::optional{timer->delay};
+        return result.tick_after;
     }
 
     void test_zone_owns_enter_move_leave_and_deterministic_aoi()
@@ -52,7 +46,7 @@ namespace
             .position = {.x = 0, .y = 0},
         });
         assert(entered.status == snf::server::ZoneCommandStatus::Applied);
-        assert(entered.follow_ups.empty());
+        assert(!entered.tick_after);
         assert(entered.visible_players == std::vector<snf::server::PlayerId>{second});
 
         assert(zone.handle(snf::server::EnterZoneCommand{
@@ -145,7 +139,7 @@ namespace
         const auto tick3 = zone.handle(snf::server::ZoneSimulationTick{});
         assert(tick3.status == snf::server::ZoneCommandStatus::Applied);
         assert(tick3.tick == 3);
-        assert(tick3.follow_ups.empty());
+        assert(!tick3.tick_after);
     }
 }
 

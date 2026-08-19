@@ -1,8 +1,9 @@
 #pragma once
 
-#include "snf/server/follow_up_action.hpp"
 #include "snf/server/player_id.hpp"
 #include "snf/server/zone_command.hpp"
+
+#include <chrono>
 
 #include <cstdint>
 #include <optional>
@@ -29,6 +30,8 @@ namespace snf::server
         std::uint64_t tick{0};
         // Deterministic ascending PlayerId order, excluding the requesting player.
         std::vector<PlayerId> visible_players;
-        std::vector<FollowUpAction> follow_ups;
+        // How long until this Zone wants its next tick. The binding turns it into a
+        // timer; the Zone itself never names one.
+        std::optional<std::chrono::milliseconds> tick_after;
     };
 }
