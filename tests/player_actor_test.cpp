@@ -16,16 +16,6 @@ namespace
         };
     }
 
-    // The command has to outlive the task, so it is always a named local here.
-    // Handing handle() a temporary would leave the lazy body reading a destroyed
-    // command on its first resume.
-    snf::server::PlayerResult run_handler(snf::server::PlayerActor& actor, const snf::server::PlayerCommand& command)
-    {
-        auto task = actor.handle(command);
-        assert(task.resume() == snf::runtime::ActorTaskStatus::Completed);
-        return task.takeResult();
-    }
-
     void test_player_actor_owns_state_and_dispatches_ping()
     {
         snf::server::PlayerActor actor;
@@ -33,8 +23,8 @@ namespace
 
         const auto first_command = make_ping(100);
         const auto second_command = make_ping(101);
-        const auto first = run_handler(actor, first_command);
-        const auto second = run_handler(actor, second_command);
+        const auto first = actor.handle(first_command);
+        const auto second = actor.handle(second_command);
 
         assert(first.responses.size() == 1);
         assert(second.responses.size() == 1);
@@ -49,21 +39,6 @@ namespace
         assert(actor.state().handledCommandCount() == 2);
     }
 
-    // A lazy task is what lets the scheduler own the first resume. Without it a
-    // handler would start running on whichever thread happened to create the task.
-    void test_handler_body_does_not_run_before_the_first_resume()
-    {
-        snf::server::PlayerActor actor;
-        const auto command = make_ping(1);
-
-        auto task = actor.handle(command);
-        assert(task.valid());
-        assert(actor.state().handledCommandCount() == 0);
-
-        assert(task.resume() == snf::runtime::ActorTaskStatus::Completed);
-        assert(actor.state().handledCommandCount() == 1);
-    }
-
     void test_persistent_player_actor_acknowledges_its_identity()
     {
         const snf::server::PlayerId player{.value = 77};
@@ -72,7 +47,7 @@ namespace
             .player = player,
         };
 
-        const auto result = run_handler(actor, command);
+        const auto result = actor.handle(command);
         assert(actor.state().identity() == player);
         assert(result.responses.size() == 1);
         const auto* send = &result.responses.front();
@@ -99,7 +74,7 @@ namespace
         });
 
         const auto command = make_ping(20);
-        static_cast<void>(run_handler(actor, command));
+        static_cast<void>(actor.handle(command));
         const auto record = actor.snapshot();
         assert(record.player == player);
         assert(record.handled_command_count == 11);
@@ -201,7 +176,7 @@ namespace
             .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = 1},
             .product = snf::server::BASIC_PRODUCT,
         };
-        const auto committed = run_handler(actor, first);
+        const auto committed = actor.handle(first);
         const auto* committed_send = &committed.responses.front();
         assert(committed_send != nullptr);
         const auto* committed_response = std::get_if<snf::server::PurchaseResponse>(&committed_send->response);
@@ -214,10 +189,14 @@ namespace
         snf::server::PlayerStateComponentMask cleared = 0;
         const auto dirty_snapshot = actor.takeDirtySnapshot(&cleared);
         assert(dirty_snapshot.has_value());
+        // The snapshot has to carry what the handler just decided, not the balance it
+        // started the turn with.
+        assert(dirty_snapshot->currency_balance == 900);
+        assert(dirty_snapshot->purchased_item_count == 1);
         assert((cleared & snf::server::componentMask(snf::server::PlayerStateComponent::Economy)) != 0);
         assert(actor.dirtyComponents() == 0);
 
-        const auto replay = run_handler(actor, first);
+        const auto replay = actor.handle(first);
         const auto* replay_send = &replay.responses.front();
         assert(replay_send != nullptr);
         const auto* replay_response = std::get_if<snf::server::PurchaseResponse>(&replay_send->response);
@@ -230,7 +209,7 @@ namespace
             .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = 2},
             .product = snf::server::BASIC_PRODUCT,
         };
-        const auto rejected = run_handler(actor, capacity);
+        const auto rejected = actor.handle(capacity);
         const auto* rejected_send = &rejected.responses.front();
         assert(rejected_send != nullptr);
         const auto* rejected_response = std::get_if<snf::server::PurchaseResponse>(&rejected_send->response);
@@ -253,7 +232,7 @@ namespace
             .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = 3},
             .product = snf::server::BASIC_PRODUCT,
         };
-        const auto first = run_handler(actor, insufficient);
+        const auto first = actor.handle(insufficient);
         const auto* first_send = &first.responses.front();
         assert(first_send != nullptr);
         const auto* first_response = std::get_if<snf::server::PurchaseResponse>(&first_send->response);
@@ -261,7 +240,7 @@ namespace
         assert(first_response->result.status == snf::server::PurchaseStatus::InsufficientFunds);
         assert(!actor.hasFlushableDirtyState());
 
-        const auto replay = run_handler(actor, insufficient);
+        const auto replay = actor.handle(insufficient);
         const auto* replay_send = &replay.responses.front();
         assert(replay_send != nullptr);
         const auto* replay_response = std::get_if<snf::server::PurchaseResponse>(&replay_send->response);
@@ -272,7 +251,7 @@ namespace
             .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = 4},
             .product = snf::server::ProductId{.value = 999},
         };
-        const auto missing = run_handler(actor, unknown);
+        const auto missing = actor.handle(unknown);
         const auto* missing_send = &missing.responses.front();
         assert(missing_send != nullptr);
         const auto* missing_response = std::get_if<snf::server::PurchaseResponse>(&missing_send->response);
@@ -284,7 +263,6 @@ namespace
 void run_player_actor_tests()
 {
     test_player_actor_owns_state_and_dispatches_ping();
-    test_handler_body_does_not_run_before_the_first_resume();
     test_persistent_player_actor_acknowledges_its_identity();
     test_persistent_player_actor_restores_and_snapshots_state();
     test_street_experience_grant_marks_progression_dirty();

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "snf/runtime/actor_runtime.hpp"
+#include "snf/runtime/actor_task.hpp"
 #include "snf/server/command_terminal.hpp"
 #include "snf/server/connection_lifecycle.hpp"
 #include "snf/server/outbound_sink.hpp"
@@ -73,6 +74,10 @@ namespace snf::server
         // and apply its follow-ups once the capacity is in hand.
         [[nodiscard]] snf::runtime::ActorDispatchResult advance(PlayerActorSlot& slot, snf::runtime::ActorContext& context, std::stop_token stop_token);
         [[nodiscard]] snf::runtime::ActorDispatchResult applyResponses(PlayerActorSlot& slot, OutboundReservation& reservation, std::stop_token stop_token);
+        // Runs the handler and leaves the slot ready to reserve outbound capacity.
+        // The handler cannot suspend, so its decisions are complete before any of
+        // them is applied -- a throw emits nothing.
+        void runHandler(PlayerActorSlot& slot, const PlayerCommand& command);
         void publishDirtySnapshot(PlayerActorSlot& slot) noexcept;
         // Ends a command that could not acquire capacity at all, either because none
         // could be awaited or because the result asks for more than one connection may
