@@ -1,4 +1,4 @@
-#include "snf/server/zone_actor.hpp"
+#include "snf/game/zone_actor.hpp"
 
 #include <cassert>
 #include <chrono>

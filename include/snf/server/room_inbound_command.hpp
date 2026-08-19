@@ -1,8 +1,8 @@
 #pragma once
 
+#include "snf/game/room_command.hpp"
+#include "snf/game/room_id.hpp"
 #include "snf/net/connection_id.hpp"
-#include "snf/server/room_command.hpp"
-#include "snf/server/room_id.hpp"
 
 #include <cstdint>
 #include <optional>

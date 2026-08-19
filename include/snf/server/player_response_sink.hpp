@@ -1,8 +1,8 @@
 #pragma once
 
+#include "snf/game/player_result.hpp"
 #include "snf/net/connection_id.hpp"
 #include "snf/server/outbound_reservation.hpp"
-#include "snf/server/player_result.hpp"
 
 #include <cstddef>
 #include <cstdint>

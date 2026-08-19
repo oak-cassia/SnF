@@ -1,7 +1,7 @@
 #pragma once
 
+#include "snf/game/player_location.hpp"
 #include "snf/net/connection_id.hpp"
-#include "snf/server/player_location.hpp"
 
 #include <optional>
 #include <string_view>

@@ -1,8 +1,8 @@
 #pragma once
 
+#include "snf/game/player_id.hpp"
+#include "snf/game/player_location.hpp"
 #include "snf/net/connection_id.hpp"
-#include "snf/server/player_id.hpp"
-#include "snf/server/player_location.hpp"
 
 #include <mutex>
 #include <optional>

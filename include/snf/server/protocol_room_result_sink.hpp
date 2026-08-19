@@ -1,9 +1,9 @@
 #pragma once
 
+#include "snf/game/room_result.hpp"
 #include "snf/server/outbound_sink.hpp"
 #include "snf/server/player_session_directory.hpp"
 #include "snf/server/room_inbound_command.hpp"
-#include "snf/server/room_result.hpp"
 
 namespace snf::server
 {

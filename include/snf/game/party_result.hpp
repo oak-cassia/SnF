@@ -1,7 +1,7 @@
 #pragma once
 
-#include "snf/server/party_id.hpp"
-#include "snf/server/player_id.hpp"
+#include "snf/game/party_id.hpp"
+#include "snf/game/player_id.hpp"
 
 #include <cstddef>
 #include <cstdint>

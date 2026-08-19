@@ -1,9 +1,9 @@
 #pragma once
 
+#include "snf/game/room.hpp"
 #include "snf/runtime/actor_runtime.hpp"
 #include "snf/runtime/distribution.hpp"
 #include "snf/server/command_terminal.hpp"
-#include "snf/server/room.hpp"
 #include "snf/server/room_inbound_command.hpp"
 
 #include <chrono>

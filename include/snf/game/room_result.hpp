@@ -1,7 +1,7 @@
 #pragma once
 
-#include "snf/server/player_id.hpp"
-#include "snf/server/street_experience_grant.hpp"
+#include "snf/game/player_id.hpp"
+#include "snf/game/street_experience_grant.hpp"
 
 #include <chrono>
 #include <cstdint>

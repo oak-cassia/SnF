@@ -1,8 +1,8 @@
 #pragma once
 
-#include "snf/server/player_command.hpp"
-#include "snf/server/player_record.hpp"
-#include "snf/server/player_result.hpp"
+#include "snf/game/player_command.hpp"
+#include "snf/game/player_record.hpp"
+#include "snf/game/player_result.hpp"
 
 #include <cstddef>
 #include <cstdint>

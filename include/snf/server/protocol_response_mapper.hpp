@@ -1,7 +1,7 @@
 #pragma once
 
+#include "snf/game/player_result.hpp"
 #include "snf/protocol/frame.hpp"
-#include "snf/server/player_result.hpp"
 
 #include <cstdint>
 

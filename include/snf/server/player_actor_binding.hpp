@@ -1,11 +1,11 @@
 #pragma once
 
+#include "snf/game/player_actor.hpp"
 #include "snf/runtime/actor_runtime.hpp"
 #include "snf/runtime/actor_task.hpp"
 #include "snf/server/command_terminal.hpp"
 #include "snf/server/connection_lifecycle.hpp"
 #include "snf/server/outbound_sink.hpp"
-#include "snf/server/player_actor.hpp"
 #include "snf/server/player_actor_id.hpp"
 #include "snf/server/player_inbound_command.hpp"
 #include "snf/server/player_persistence_service.hpp"

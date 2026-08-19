@@ -1,7 +1,7 @@
 #pragma once
 
-#include "snf/server/player_id.hpp"
-#include "snf/server/zone_command.hpp"
+#include "snf/game/player_id.hpp"
+#include "snf/game/zone_command.hpp"
 
 #include <chrono>
 

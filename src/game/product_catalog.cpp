@@ -1,4 +1,4 @@
-#include "snf/server/product_catalog.hpp"
+#include "snf/game/product_catalog.hpp"
 
 namespace snf::server
 {

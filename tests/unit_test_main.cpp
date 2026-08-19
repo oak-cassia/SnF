@@ -1,8 +1,6 @@
 void run_build_info_tests();
 void run_bounded_queue_tests();
 void run_tell_payload_tests();
-void run_street_progression_tests();
-void run_room_tests();
 void run_room_actor_binding_tests();
 void run_player_tell_tests();
 void run_distribution_tests();
@@ -18,7 +16,6 @@ void run_party_coordinator_tests();
 void run_player_response_sink_tests();
 void run_outbound_channel_tests();
 void run_runtime_boundary_tests();
-void run_player_actor_tests();
 void run_player_persistence_service_tests();
 void run_player_session_directory_tests();
 void run_player_repository_tests();
@@ -29,10 +26,8 @@ void run_session_tests();
 void run_socket_options_tests();
 void run_tcp_listener_tests();
 void run_unique_file_descriptor_tests();
-void run_zone_actor_tests();
 void run_zone_actor_binding_tests();
 void run_zone_transition_channel_tests();
-void run_party_actor_tests();
 void run_party_actor_binding_tests();
 
 int main()
@@ -40,8 +35,6 @@ int main()
     run_build_info_tests();
     run_bounded_queue_tests();
     run_tell_payload_tests();
-    run_street_progression_tests();
-    run_room_tests();
     run_room_actor_binding_tests();
     run_player_tell_tests();
     run_distribution_tests();
@@ -57,7 +50,6 @@ int main()
     run_player_response_sink_tests();
     run_outbound_channel_tests();
     run_runtime_boundary_tests();
-    run_player_actor_tests();
     run_player_persistence_service_tests();
     run_player_session_directory_tests();
     run_player_repository_tests();
@@ -68,9 +60,7 @@ int main()
     run_socket_options_tests();
     run_tcp_listener_tests();
     run_unique_file_descriptor_tests();
-    run_zone_actor_tests();
     run_zone_actor_binding_tests();
     run_zone_transition_channel_tests();
-    run_party_actor_tests();
     run_party_actor_binding_tests();
 }

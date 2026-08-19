@@ -1,6 +1,6 @@
-#include "snf/server/player_actor.hpp"
+#include "snf/game/player_actor.hpp"
 
-#include "snf/server/product_catalog.hpp"
+#include "snf/game/product_catalog.hpp"
 
 #include <limits>
 #include <stdexcept>

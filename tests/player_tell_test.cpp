@@ -1,4 +1,5 @@
 #include "outbound_reservation_test_support.hpp"
+#include "snf/game/street_experience_grant.hpp"
 #include "snf/runtime/actor_key.hpp"
 #include "snf/runtime/actor_runtime.hpp"
 #include "snf/runtime/runtime_completion.hpp"
@@ -6,7 +7,6 @@
 #include "snf/server/player_actor_binding.hpp"
 #include "snf/server/player_repository.hpp"
 #include "snf/server/protocol_player_response_sink.hpp"
-#include "snf/server/street_experience_grant.hpp"
 
 #include <atomic>
 #include <cassert>

@@ -1,4 +1,4 @@
-#include "snf/server/room.hpp"
+#include "snf/game/room.hpp"
 
 #include <algorithm>
 #include <stdexcept>

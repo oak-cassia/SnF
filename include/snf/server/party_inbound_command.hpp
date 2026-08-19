@@ -1,8 +1,8 @@
 #pragma once
 
+#include "snf/game/party_command.hpp"
+#include "snf/game/party_id.hpp"
 #include "snf/net/connection_id.hpp"
-#include "snf/server/party_command.hpp"
-#include "snf/server/party_id.hpp"
 
 #include <cstdint>
 #include <optional>

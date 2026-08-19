@@ -1,6 +1,6 @@
-#include "snf/server/player_actor.hpp"
+#include "snf/game/player_actor.hpp"
 
-#include "snf/server/street_progression.hpp"
+#include "snf/game/street_progression.hpp"
 
 #include <cassert>
 #include <cstdint>

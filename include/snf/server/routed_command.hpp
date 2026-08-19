@@ -1,15 +1,15 @@
 #pragma once
 
+#include "snf/game/party_command.hpp"
+#include "snf/game/party_id.hpp"
+#include "snf/game/player_command.hpp"
+#include "snf/game/zone_command.hpp"
+#include "snf/game/zone_id.hpp"
 #include "snf/net/connection_id.hpp"
 #include "snf/server/connection_lifecycle.hpp"
-#include "snf/server/party_command.hpp"
-#include "snf/server/party_id.hpp"
 #include "snf/server/party_inbound_command.hpp"
 #include "snf/server/player_actor_id.hpp"
-#include "snf/server/player_command.hpp"
 #include "snf/server/room_inbound_command.hpp"
-#include "snf/server/zone_command.hpp"
-#include "snf/server/zone_id.hpp"
 #include "snf/server/zone_inbound_command.hpp"
 
 #include <cstdint>

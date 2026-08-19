@@ -1,0 +1,19 @@
+# Fails when a game translation unit names the server, the runtime, the network or
+# the protocol. The link gate in snf_game_tests catches anything that needs a
+# symbol; this catches a header-only reach that would still compile.
+string(REPLACE ":" ";" roots "${GAME_ROOTS}")
+set(offenders "")
+foreach(root IN LISTS roots)
+    file(GLOB_RECURSE sources "${root}/*.hpp" "${root}/*.cpp")
+    foreach(source IN LISTS sources)
+        file(STRINGS "${source}" hits REGEX "#[ \t]*include[ \t]*[\"<]snf/(server|runtime|net|protocol|core)/")
+        if(hits)
+            list(APPEND offenders "${source}: ${hits}")
+        endif()
+    endforeach()
+endforeach()
+if(offenders)
+    string(REPLACE ";" "\n  " report "${offenders}")
+    message(FATAL_ERROR "The game layer must not depend on the server:\n  ${report}")
+endif()
+message(STATUS "Game layer is clean")

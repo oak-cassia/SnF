@@ -1,8 +1,8 @@
 #include "snf/server/player_actor_binding.hpp"
 
-#include "snf/server/street_experience_grant.hpp"
+#include "snf/game/street_experience_grant.hpp"
 
-#include "snf/server/player_actor.hpp"
+#include "snf/game/player_actor.hpp"
 
 #include <cstddef>
 #include <stdexcept>
