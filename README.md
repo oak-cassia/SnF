@@ -5,6 +5,19 @@ SnF는 C++20 Actor 모델로 온라인 게임 콘텐츠의 상태 소유권, 명
 vertical slice를 끝까지 연결하고, 과부하·재접속·저장·종료 상황에서도 상태가 어떻게
 종결되는지를 명시하는 데 집중한다.
 
+## 계층
+
+```text
+snf_game                       Player / Zone / Party / Room 상태 기계와 값
+  ↑ 아무것도 링크하지 않는다
+snf_server_runtime             Binding, ingress, routing, persistence, protocol
+  ↑
+snf_mysql_player_repository    MySQL을 아는 유일한 target
+```
+
+의존은 항상 바깥에서 안쪽으로 간다. `snf_game_tests`가 `snf_game`만 링크하고,
+`snf_game_layer`가 게임 트리의 include를 검사해 이를 강제한다.
+
 ## 핵심 구조
 
 ```text
