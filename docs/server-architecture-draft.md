@@ -73,6 +73,12 @@ post command
 - turn budget을 사용해 ready Actor 사이 cooperative fairness를 제공한다.
 - suspend된 Actor의 다음 command는 기다리지만 같은 Worker의 다른 Actor는 진행한다.
 - passivation은 active task, operation, continuation과 mailbox가 모두 없을 때만 가능하다.
+- Actor는 `ActorContext::tryTell`로 다른 Actor에게 명령을 보낼 수 있으나 응답을 기다리지 않는다.
+  submission은 대상 kind의 Binding이 조립하므로 송신자는 대상의 command 타입을 알지 않고,
+  전송은 reactor가 쓰는 것과 같은 ingress 경로를 통과한다.
+
+Actor 간 메시지, 후속 작업의 목적지 분기와 게임 시간 기준은
+[Actor 간 메시지와 게임 시간 결정](./actor-messaging-and-game-time.md)이 소유한다.
 
 한 hot Actor는 한 Worker보다 빠르게 처리될 수 없다. 이는 숨기는 문제가 아니라 Zone/Room 분할이나
 배치 정책을 검토하게 하는 관측 대상이다.

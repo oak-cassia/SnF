@@ -22,6 +22,7 @@
 - completion, cancel, late completion과 shutdown 경합 처리
 - queue wait, suspension, depth와 high-water metric
 - Worker 소유 일회성 timer와 incarnation 기반 stale 폐기
+- Actor 간 비동기 tell과 대상 Binding의 submission 조립
 
 ### Player
 
