@@ -40,7 +40,9 @@ namespace
         struct Recorded
         {
             std::mutex mutex;
-            std::vector<snf::server::ZoneResult> results;
+            // ZoneResult carries a move-only TellActor payload, so the recorder
+            // keeps the field this test asserts on rather than the whole result.
+            std::vector<std::optional<snf::server::ZonePosition>> positions;
             std::vector<std::thread::id> threads;
         } recorded;
 
@@ -55,7 +57,7 @@ namespace
                                 const snf::server::ZoneResult& result)
                 {
                     std::lock_guard lock{recorded.mutex};
-                    recorded.results.push_back(result);
+                    recorded.positions.push_back(result.position);
                     recorded.threads.push_back(std::this_thread::get_id());
                 },
             },
@@ -114,9 +116,9 @@ namespace
 
         {
             std::lock_guard lock{recorded.mutex};
-            assert(recorded.results.size() >= 2);
-            assert((recorded.results[0].position == snf::server::ZonePosition{.x = 1, .y = 2}));
-            assert((recorded.results[1].position == snf::server::ZonePosition{.x = 3, .y = 4}));
+            assert(recorded.positions.size() >= 2);
+            assert((recorded.positions[0] == snf::server::ZonePosition{.x = 1, .y = 2}));
+            assert((recorded.positions[1] == snf::server::ZonePosition{.x = 3, .y = 4}));
             assert(recorded.threads[0] != caller);
             assert(recorded.threads[0] == recorded.threads[1]);
         }

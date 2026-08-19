@@ -1,5 +1,5 @@
 #include "outbound_reservation_test_support.hpp"
-#include "snf/server/protocol_player_follow_up_sink.hpp"
+#include "snf/server/protocol_player_response_sink.hpp"
 
 #include <cassert>
 #include <cstddef>
@@ -14,14 +14,14 @@ namespace
     // The real channel, because a reservation can only come from one: a follow-up sink
     // consumes capacity it did not create, and a stub that mints capacity would test
     // the wrong contract.
-    struct FollowUpSinkFixture
+    struct ResponseSinkFixture
     {
-        explicit FollowUpSinkFixture(const std::size_t capacity)
+        explicit ResponseSinkFixture(const std::size_t capacity)
             : wake(snf::test::make_wake_descriptor())
             , channel(snf::server::OutboundChannelConfig{.capacity = capacity,
                                                          .max_slots_per_connection = capacity},
                       wake.getDescriptor())
-            , follow_up_sink(channel)
+            , response_sink(channel)
         {
         }
 
@@ -44,14 +44,14 @@ namespace
 
         snf::net::UniqueFileDescriptor wake;
         snf::server::OutboundChannel channel;
-        snf::server::ProtocolPlayerFollowUpSink follow_up_sink;
+        snf::server::ProtocolPlayerResponseSink response_sink;
     };
 
     snf::server::PlayerResult pong_result(const std::uint32_t request_id,
                                           std::vector<std::byte> payload = {})
     {
         return snf::server::PlayerResult{
-            .follow_ups =
+            .responses =
                 {
                     snf::server::SendResponse{
                         .response =
@@ -66,24 +66,24 @@ namespace
 
     void test_prices_a_result_by_the_actions_it_emits()
     {
-        FollowUpSinkFixture fixture{4};
+        ResponseSinkFixture fixture{4};
         auto result = pong_result(1);
-        assert(fixture.follow_up_sink.requiredSlots(result) == 1);
+        assert(fixture.response_sink.requiredSlots(result) == 1);
 
-        result.follow_ups.push_back(snf::server::SendResponse{
+        result.responses.push_back(snf::server::SendResponse{
             .response = snf::server::PongResponse{.request_id = 2, .payload = {}},
         });
-        assert(fixture.follow_up_sink.requiredSlots(result) == 2);
-        assert(fixture.follow_up_sink.requiredSlots(snf::server::PlayerResult{}) == 0);
+        assert(fixture.response_sink.requiredSlots(result) == 2);
+        assert(fixture.response_sink.requiredSlots(snf::server::PlayerResult{}) == 0);
     }
 
     void test_maps_send_response_to_a_frame_for_the_same_connection()
     {
-        FollowUpSinkFixture fixture{4};
+        ResponseSinkFixture fixture{4};
         const snf::net::ConnectionId connection{.descriptor = 4, .generation = 9};
         auto reservation = fixture.reserve(connection, 1);
 
-        assert(fixture.follow_up_sink.applyFollowUps(
+        assert(fixture.response_sink.applyResponses(
             connection, pong_result(42, {std::byte{0xAB}}), reservation));
         assert(reservation.remainingSlots() == 0);
 
@@ -99,27 +99,26 @@ namespace
 
     void test_preserves_follow_up_order_and_request_ids()
     {
-        FollowUpSinkFixture fixture{4};
+        ResponseSinkFixture fixture{4};
         const snf::net::ConnectionId connection{.descriptor = 4, .generation = 9};
         auto result = pong_result(1);
-        result.follow_ups.push_back(snf::server::SendResponse{
+        result.responses.push_back(snf::server::SendResponse{
             .response = snf::server::PongResponse{.request_id = 2, .payload = {}},
         });
 
-        auto reservation =
-            fixture.reserve(connection, fixture.follow_up_sink.requiredSlots(result));
-        assert(fixture.follow_up_sink.applyFollowUps(connection, std::move(result), reservation));
+        auto reservation = fixture.reserve(connection, fixture.response_sink.requiredSlots(result));
+        assert(fixture.response_sink.applyResponses(connection, std::move(result), reservation));
         assert(fixture.popRequestId() == 1);
         assert(fixture.popRequestId() == 2);
     }
 
     void test_an_empty_result_consumes_no_capacity()
     {
-        FollowUpSinkFixture fixture{1};
+        ResponseSinkFixture fixture{1};
         const snf::net::ConnectionId connection{.descriptor = 4, .generation = 9};
         auto reservation = fixture.reserve(connection, 0);
 
-        assert(fixture.follow_up_sink.applyFollowUps(
+        assert(fixture.response_sink.applyResponses(
             connection, snf::server::PlayerResult{}, reservation));
         assert(fixture.channel.size() == 0);
         assert(fixture.channel.reservedSlotCount() == 0);
@@ -127,21 +126,21 @@ namespace
 
     void test_a_cancelled_channel_rejects_the_emission()
     {
-        FollowUpSinkFixture fixture{4};
+        ResponseSinkFixture fixture{4};
         const snf::net::ConnectionId connection{.descriptor = 4, .generation = 9};
         auto reservation = fixture.reserve(connection, 1);
         static_cast<void>(fixture.channel.cancel());
 
-        assert(!fixture.follow_up_sink.applyFollowUps(connection, pong_result(1), reservation));
+        assert(!fixture.response_sink.applyResponses(connection, pong_result(1), reservation));
         assert(fixture.channel.size() == 0);
     }
 
-    void test_an_underpriced_reservation_keeps_the_follow_ups_it_already_applied()
+    void test_an_underpriced_reservation_keeps_the_responses_it_already_applied()
     {
-        FollowUpSinkFixture fixture{4};
+        ResponseSinkFixture fixture{4};
         const snf::net::ConnectionId connection{.descriptor = 4, .generation = 9};
         auto result = pong_result(1);
-        result.follow_ups.push_back(snf::server::SendResponse{
+        result.responses.push_back(snf::server::SendResponse{
             .response = snf::server::PongResponse{.request_id = 2, .payload = {}},
         });
 
@@ -153,7 +152,7 @@ namespace
         try
         {
             static_cast<void>(
-                fixture.follow_up_sink.applyFollowUps(connection, std::move(result), reservation));
+                fixture.response_sink.applyResponses(connection, std::move(result), reservation));
         }
         catch (const std::logic_error&)
         {
@@ -166,12 +165,12 @@ namespace
     }
 }
 
-void run_player_follow_up_sink_tests()
+void run_player_response_sink_tests()
 {
     test_prices_a_result_by_the_actions_it_emits();
     test_maps_send_response_to_a_frame_for_the_same_connection();
     test_preserves_follow_up_order_and_request_ids();
     test_an_empty_result_consumes_no_capacity();
     test_a_cancelled_channel_rejects_the_emission();
-    test_an_underpriced_reservation_keeps_the_follow_ups_it_already_applied();
+    test_an_underpriced_reservation_keeps_the_responses_it_already_applied();
 }

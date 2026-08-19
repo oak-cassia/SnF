@@ -178,11 +178,11 @@ namespace snf::server
         ConnectionClosed closed;
     };
 
-    PlayerActorBinding::PlayerActorBinding(PlayerFollowUpSink& follow_up_sink,
+    PlayerActorBinding::PlayerActorBinding(PlayerResponseSink& response_sink,
                                            OutboundSink& outbound,
                                            CommandLifecycleSink& lifecycle,
                                            PlayerActorBindingConfig config)
-        : _follow_up_sink(follow_up_sink)
+        : _response_sink(response_sink)
         , _outbound(outbound)
         , _lifecycle(lifecycle)
         , _kind(config.actor_kind)
@@ -427,20 +427,20 @@ namespace snf::server
 
         if (slot.stage == PlayerActorSlot::Stage::Reserving && !slot.reservation_task.valid())
         {
-            const std::size_t required_slots = _follow_up_sink.requiredSlots(slot.pending_result);
+            const std::size_t required_slots = _response_sink.requiredSlots(slot.pending_result);
             if (!_outbound.canEverReserve(required_slots))
             {
                 // More than one connection may ever hold. Waiting would never end and
                 // throwing would take down every actor this Worker owns, so the command
                 // ends here and the backend closes the connection.
-                return abandonFollowUps(slot);
+                return abandonResponses(slot);
             }
 
             if (auto reservation = _outbound.tryReserve(slot.connection, required_slots))
             {
                 // Outside saturation this is the whole story: no operation is begun, so
                 // no in-flight slot, no continuation and no suspension.
-                return applyFollowUps(slot, *reservation, stop_token);
+                return applyResponses(slot, *reservation, stop_token);
             }
 
             slot.reservation_task =
@@ -484,11 +484,11 @@ namespace snf::server
             // Outbound is saturated and this Worker's in-flight budget is exhausted, so
             // the response cannot be emitted. It is not dropped in silence: the backend
             // closes the connection under the same overflow policy inbound uses.
-            return abandonFollowUps(slot);
+            return abandonResponses(slot);
         }
         catch (const snf::runtime::AsyncOperationCancelled&)
         {
-            return abandonFollowUps(slot);
+            return abandonResponses(slot);
         }
 
         slot.reservation_task = {};
@@ -505,17 +505,17 @@ namespace snf::server
                 "Outbound channel was cancelled while the logic runtime was active"};
         }
 
-        return applyFollowUps(slot, reservation, stop_token);
+        return applyResponses(slot, reservation, stop_token);
     }
 
-    snf::runtime::ActorDispatchResult PlayerActorBinding::applyFollowUps(
+    snf::runtime::ActorDispatchResult PlayerActorBinding::applyResponses(
         PlayerActorSlot& slot, OutboundReservation& reservation, const std::stop_token stop_token)
     {
         PlayerResult result = std::move(slot.pending_result);
         const snf::net::ConnectionId connection = slot.connection;
         resetPendingCommand(slot);
 
-        if (_follow_up_sink.applyFollowUps(connection, std::move(result), reservation))
+        if (_response_sink.applyResponses(connection, std::move(result), reservation))
         {
             return snf::runtime::ActorDispatchResult::KeepActive;
         }
@@ -556,7 +556,7 @@ namespace snf::server
     }
 
     snf::runtime::ActorDispatchResult
-    PlayerActorBinding::abandonFollowUps(PlayerActorSlot& slot) noexcept
+    PlayerActorBinding::abandonResponses(PlayerActorSlot& slot) noexcept
     {
         slot.reservation_task = {};
         resetPendingCommand(slot);

@@ -43,7 +43,6 @@ namespace
                 .route_epoch = 5,
                 .tick = 0,
                 .visible_players = {snf::server::PlayerId{.value = 8}},
-                .timer = std::nullopt,
             });
 
         const auto posted = outbound.tryPop();

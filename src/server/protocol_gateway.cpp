@@ -428,7 +428,6 @@ namespace snf::server
                 .route_epoch = route_epoch,
                 .tick = 0,
                 .visible_players = {},
-                .timer = std::nullopt,
             });
     }
 

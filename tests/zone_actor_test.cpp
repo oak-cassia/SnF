@@ -4,12 +4,27 @@
 #include <chrono>
 #include <cstdint>
 #include <limits>
+#include <optional>
+#include <variant>
 #include <vector>
 
 using namespace std::chrono_literals;
 
 namespace
 {
+    // The Zone asks for its next tick through the shared follow-up channel, so a
+    // test reads the request the same way the binding does.
+    std::optional<std::chrono::milliseconds> scheduled_delay(const snf::server::ZoneResult& result)
+    {
+        if (result.follow_ups.size() != 1)
+        {
+            return std::nullopt;
+        }
+
+        const auto* timer = std::get_if<snf::server::ScheduleTimer>(&result.follow_ups.front());
+        return timer == nullptr ? std::nullopt : std::optional{timer->delay};
+    }
+
     void test_zone_owns_enter_move_leave_and_deterministic_aoi()
     {
         snf::server::ZoneActor zone{
@@ -29,8 +44,7 @@ namespace
             .position = {.x = 6, .y = 8},
         });
         assert(second_entered.status == snf::server::ZoneCommandStatus::Applied);
-        assert(second_entered.timer.has_value());
-        assert(second_entered.timer->delay == 50ms);
+        assert(scheduled_delay(second_entered) == 50ms);
 
         const auto entered = zone.handle(snf::server::EnterZoneCommand{
             .player = first,
@@ -38,7 +52,7 @@ namespace
             .position = {.x = 0, .y = 0},
         });
         assert(entered.status == snf::server::ZoneCommandStatus::Applied);
-        assert(!entered.timer.has_value());
+        assert(entered.follow_ups.empty());
         assert(entered.visible_players == std::vector<snf::server::PlayerId>{second});
 
         assert(zone.handle(snf::server::EnterZoneCommand{
@@ -115,8 +129,7 @@ namespace
         assert(tick1.status == snf::server::ZoneCommandStatus::Applied);
         assert(tick1.tick == 1);
         assert(zone.lastTick() == 1);
-        assert(tick1.timer.has_value());
-        assert(tick1.timer->delay == 100ms);
+        assert(scheduled_delay(tick1) == 100ms);
 
         const auto tick2 = zone.handle(snf::server::ZoneSimulationTick{});
         assert(tick2.status == snf::server::ZoneCommandStatus::Applied);
@@ -134,7 +147,7 @@ namespace
         const auto tick3 = zone.handle(snf::server::ZoneSimulationTick{});
         assert(tick3.status == snf::server::ZoneCommandStatus::Applied);
         assert(tick3.tick == 3);
-        assert(!tick3.timer.has_value());
+        assert(tick3.follow_ups.empty());
     }
 }
 

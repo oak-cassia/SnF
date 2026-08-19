@@ -7,7 +7,7 @@
 #include "snf/server/outbound_sink.hpp"
 #include "snf/server/player_actor_binding.hpp"
 #include "snf/server/player_actor_ingress.hpp"
-#include "snf/server/protocol_player_follow_up_sink.hpp"
+#include "snf/server/protocol_player_response_sink.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -84,7 +84,7 @@ namespace
 
         snf::net::UniqueFileDescriptor outbound_event;
         snf::server::OutboundChannel outbound;
-        snf::server::ProtocolPlayerFollowUpSink outbound_sink;
+        snf::server::ProtocolPlayerResponseSink outbound_sink;
         snf::server::CountingCommandLifecycleSink lifecycle;
         RecordingRuntimeCompletion completion;
     };
@@ -1157,10 +1157,10 @@ namespace
     // Prices every result above what one connection may ever hold. This is the shape a
     // future multi-follow-up result takes when the per-connection limit is smaller than
     // the follow-up count.
-    class OversizedFollowUpSink final : public snf::server::PlayerFollowUpSink
+    class OversizedResponseSink final : public snf::server::PlayerResponseSink
     {
     public:
-        explicit OversizedFollowUpSink(const std::size_t slots) noexcept
+        explicit OversizedResponseSink(const std::size_t slots) noexcept
             : _slots(slots)
         {
         }
@@ -1171,7 +1171,7 @@ namespace
             return _slots;
         }
 
-        [[nodiscard]] bool applyFollowUps(snf::net::ConnectionId,
+        [[nodiscard]] bool applyResponses(snf::net::ConnectionId,
                                           snf::server::PlayerResult,
                                           snf::server::OutboundReservation&) override
         {
@@ -1188,9 +1188,9 @@ namespace
     void test_an_unsatisfiable_result_closes_the_connection_instead_of_failing_the_worker()
     {
         RuntimeDependencies dependencies{2};
-        OversizedFollowUpSink follow_up_sink{3};
+        OversizedResponseSink response_sink{3};
         snf::server::PlayerActorBinding binding{
-            follow_up_sink, dependencies.outbound, dependencies.lifecycle};
+            response_sink, dependencies.outbound, dependencies.lifecycle};
         ActorRuntime runtime{player_runtime_config(1, 8), dependencies.completion};
         runtime.registerBinding(binding);
         snf::server::PlayerActorIngress ingress{runtime, binding, dependencies.lifecycle};
@@ -1211,7 +1211,7 @@ namespace
         // Reported for closing, not thrown: one oversized result must not take down every
         // actor the Worker owns.
         assert(failures.size() == 1);
-        assert(!follow_up_sink.applied);
+        assert(!response_sink.applied);
 
         runtime.close();
         runtime.join();

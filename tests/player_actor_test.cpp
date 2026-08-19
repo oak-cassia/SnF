@@ -36,11 +36,10 @@ namespace
         const auto first = run_handler(actor, first_command);
         const auto second = run_handler(actor, second_command);
 
-        assert(first.follow_ups.size() == 1);
-        assert(second.follow_ups.size() == 1);
-        const auto* first_send = std::get_if<snf::server::SendResponse>(&first.follow_ups.front());
-        const auto* second_send =
-            std::get_if<snf::server::SendResponse>(&second.follow_ups.front());
+        assert(first.responses.size() == 1);
+        assert(second.responses.size() == 1);
+        const auto* first_send = &first.responses.front();
+        const auto* second_send = &second.responses.front();
         assert(first_send != nullptr);
         assert(second_send != nullptr);
         const auto* first_pong = std::get_if<snf::server::PongResponse>(&first_send->response);
@@ -78,8 +77,8 @@ namespace
 
         const auto result = run_handler(actor, command);
         assert(actor.state().identity() == player);
-        assert(result.follow_ups.size() == 1);
-        const auto* send = std::get_if<snf::server::SendResponse>(&result.follow_ups.front());
+        assert(result.responses.size() == 1);
+        const auto* send = &result.responses.front();
         assert(send != nullptr);
         const auto* authenticated =
             std::get_if<snf::server::AuthenticatedResponse>(&send->response);
@@ -143,8 +142,7 @@ namespace
             .product = snf::server::BASIC_PRODUCT,
         };
         const auto committed = run_handler(actor, first);
-        const auto* committed_send =
-            std::get_if<snf::server::SendResponse>(&committed.follow_ups.front());
+        const auto* committed_send = &committed.responses.front();
         assert(committed_send != nullptr);
         const auto* committed_response =
             std::get_if<snf::server::PurchaseResponse>(&committed_send->response);
@@ -163,8 +161,7 @@ namespace
         assert(actor.dirtyComponents() == 0);
 
         const auto replay = run_handler(actor, first);
-        const auto* replay_send =
-            std::get_if<snf::server::SendResponse>(&replay.follow_ups.front());
+        const auto* replay_send = &replay.responses.front();
         assert(replay_send != nullptr);
         const auto* replay_response =
             std::get_if<snf::server::PurchaseResponse>(&replay_send->response);
@@ -179,8 +176,7 @@ namespace
             .product = snf::server::BASIC_PRODUCT,
         };
         const auto rejected = run_handler(actor, capacity);
-        const auto* rejected_send =
-            std::get_if<snf::server::SendResponse>(&rejected.follow_ups.front());
+        const auto* rejected_send = &rejected.responses.front();
         assert(rejected_send != nullptr);
         const auto* rejected_response =
             std::get_if<snf::server::PurchaseResponse>(&rejected_send->response);
@@ -206,7 +202,7 @@ namespace
             .product = snf::server::BASIC_PRODUCT,
         };
         const auto first = run_handler(actor, insufficient);
-        const auto* first_send = std::get_if<snf::server::SendResponse>(&first.follow_ups.front());
+        const auto* first_send = &first.responses.front();
         assert(first_send != nullptr);
         const auto* first_response =
             std::get_if<snf::server::PurchaseResponse>(&first_send->response);
@@ -215,8 +211,7 @@ namespace
         assert(!actor.hasFlushableDirtyState());
 
         const auto replay = run_handler(actor, insufficient);
-        const auto* replay_send =
-            std::get_if<snf::server::SendResponse>(&replay.follow_ups.front());
+        const auto* replay_send = &replay.responses.front();
         assert(replay_send != nullptr);
         const auto* replay_response =
             std::get_if<snf::server::PurchaseResponse>(&replay_send->response);
@@ -229,8 +224,7 @@ namespace
             .product = snf::server::ProductId{.value = 999},
         };
         const auto missing = run_handler(actor, unknown);
-        const auto* missing_send =
-            std::get_if<snf::server::SendResponse>(&missing.follow_ups.front());
+        const auto* missing_send = &missing.responses.front();
         assert(missing_send != nullptr);
         const auto* missing_response =
             std::get_if<snf::server::PurchaseResponse>(&missing_send->response);

@@ -35,10 +35,11 @@ namespace snf::server
         PlayerResponse response;
     };
 
-    using FollowUpAction = std::variant<SendResponse>;
-
+    // The outbound leg only. Runtime-bound follow-ups live in FollowUpAction,
+    // which is shared across actor kinds because its destinations are the
+    // runtime's own; a response type is per-kind, so it stays here.
     struct PlayerResult
     {
-        std::vector<FollowUpAction> follow_ups;
+        std::vector<SendResponse> responses;
     };
 }

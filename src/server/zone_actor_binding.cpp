@@ -1,7 +1,14 @@
 #include "snf/server/zone_actor_binding.hpp"
 
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
+#include <variant>
+
+namespace
+{
+    template <typename> inline constexpr bool always_false_v = false;
+}
 
 namespace snf::server
 {
@@ -132,7 +139,7 @@ namespace snf::server
         auto& zone_slot = dynamic_cast<ZoneActorSlot&>(slot);
         const CommandPayload& payload = payloadAs<CommandPayload>(submission);
         const auto started_at = std::chrono::steady_clock::now();
-        const ZoneResult result = zone_slot.actor.handle(payload.command.command);
+        ZoneResult result = zone_slot.actor.handle(payload.command.command);
         const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - started_at);
         _command_execution_nanoseconds.record(elapsed);
@@ -149,23 +156,45 @@ namespace snf::server
             _on_result(payload.command, result);
         }
 
-        if (result.timer.has_value())
+        for (FollowUpAction& action : result.follow_ups)
         {
-            ZoneInboundCommand tick_command{
-                .zone = payload.command.zone,
-                .command = ZoneSimulationTick{},
-                .reply = std::nullopt,
-                .handoff = std::nullopt,
-            };
-            auto timer_submission = makeSubmission(submission.target(),
-                                                   snf::runtime::ActorActivation::ExistingOnly,
-                                                   snf::runtime::ActorAccounting::Command,
-                                                   CommandPayload{
-                                                       .command = std::move(tick_command),
-                                                       .release = {},
-                                                   });
-            auto handle = context.trySchedule(result.timer->delay, std::move(timer_submission));
-            static_cast<void>(handle);
+            std::visit(
+                [&](auto& follow_up)
+                {
+                    using Action = std::decay_t<decltype(follow_up)>;
+                    if constexpr (std::is_same_v<Action, ScheduleTimer>)
+                    {
+                        ZoneInboundCommand tick_command{
+                            .zone = payload.command.zone,
+                            .command = ZoneSimulationTick{},
+                            .reply = std::nullopt,
+                            .handoff = std::nullopt,
+                        };
+                        // ExistingOnly: a tick must not resurrect a Zone that was
+                        // evicted between the request and the deadline.
+                        auto timer_submission =
+                            makeSubmission(submission.target(),
+                                           snf::runtime::ActorActivation::ExistingOnly,
+                                           snf::runtime::ActorAccounting::Command,
+                                           CommandPayload{
+                                               .command = std::move(tick_command),
+                                               .release = {},
+                                           });
+                        static_cast<void>(
+                            context.trySchedule(follow_up.delay, std::move(timer_submission)));
+                    }
+                    else if constexpr (std::is_same_v<Action, TellActor>)
+                    {
+                        static_cast<void>(
+                            context.tryTell(follow_up.target, std::move(follow_up.payload)));
+                    }
+                    else
+                    {
+                        static_assert(always_false_v<Action>,
+                                      "Unhandled FollowUpAction alternative");
+                    }
+                },
+                action);
         }
 
         if (zone_slot.actor.playerCount() == 0)
