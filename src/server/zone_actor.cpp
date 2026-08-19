@@ -101,7 +101,6 @@ namespace snf::server
                     .route_epoch = existing->second.route_epoch,
                     .tick = _last_tick,
                     .visible_players = visiblePlayers(command.player),
-                    .timer = std::nullopt,
                 };
             }
             if (command.route_epoch == existing->second.route_epoch)
@@ -113,7 +112,6 @@ namespace snf::server
                     .route_epoch = existing->second.route_epoch,
                     .tick = _last_tick,
                     .visible_players = visiblePlayers(command.player),
-                    .timer = std::nullopt,
                 };
             }
         }
@@ -125,10 +123,10 @@ namespace snf::server
                                       .route_epoch = command.route_epoch,
                                   });
 
-        std::optional<TimerRequest> timer;
+        std::vector<FollowUpAction> follow_ups;
         if (was_empty && !_players.empty())
         {
-            timer = TimerRequest{.delay = _tick_interval};
+            follow_ups.push_back(ScheduleTimer{.delay = _tick_interval});
         }
 
         return ZoneResult{
@@ -138,7 +136,7 @@ namespace snf::server
             .route_epoch = command.route_epoch,
             .tick = _last_tick,
             .visible_players = visiblePlayers(command.player),
-            .timer = timer,
+            .follow_ups = std::move(follow_ups),
         };
     }
 
@@ -154,7 +152,6 @@ namespace snf::server
                 .route_epoch = command.route_epoch,
                 .tick = _last_tick,
                 .visible_players = {},
-                .timer = std::nullopt,
             };
         }
         if (command.route_epoch != existing->second.route_epoch)
@@ -166,7 +163,6 @@ namespace snf::server
                 .route_epoch = existing->second.route_epoch,
                 .tick = _last_tick,
                 .visible_players = visiblePlayers(command.player),
-                .timer = std::nullopt,
             };
         }
 
@@ -179,7 +175,6 @@ namespace snf::server
             .route_epoch = command.route_epoch,
             .tick = _last_tick,
             .visible_players = {},
-            .timer = std::nullopt,
         };
     }
 
@@ -195,7 +190,6 @@ namespace snf::server
                 .route_epoch = command.route_epoch,
                 .tick = _last_tick,
                 .visible_players = {},
-                .timer = std::nullopt,
             };
         }
         if (command.route_epoch != existing->second.route_epoch)
@@ -207,7 +201,6 @@ namespace snf::server
                 .route_epoch = existing->second.route_epoch,
                 .tick = _last_tick,
                 .visible_players = visiblePlayers(command.player),
-                .timer = std::nullopt,
             };
         }
 
@@ -219,17 +212,16 @@ namespace snf::server
             .route_epoch = command.route_epoch,
             .tick = _last_tick,
             .visible_players = visiblePlayers(command.player),
-            .timer = std::nullopt,
         };
     }
 
     ZoneResult ZoneActor::handleCommand(const ZoneSimulationTick&)
     {
         ++_last_tick;
-        std::optional<TimerRequest> timer;
+        std::vector<FollowUpAction> follow_ups;
         if (!_players.empty())
         {
-            timer = TimerRequest{.delay = _tick_interval};
+            follow_ups.push_back(ScheduleTimer{.delay = _tick_interval});
         }
 
         return ZoneResult{
@@ -239,7 +231,7 @@ namespace snf::server
             .route_epoch = 0,
             .tick = _last_tick,
             .visible_players = {},
-            .timer = timer,
+            .follow_ups = std::move(follow_ups),
         };
     }
 

@@ -74,6 +74,19 @@ Actor 종료 순서는 [Runtime Lifecycle 계약](./runtime-lifecycle-contract.m
 - 만료된 알람은 Worker 스레드 안에서 actor mailbox로 직접 push되어 `Ready` 전이를 일으킨다.
 - Actor eviction 또는 worker shutdown 시 pending timer는 즉시 discard되며 선점된 outstanding reservation도 안전하게 반환된다.
 
+Actor 간 메시지도 같은 자리에서 다룬다.
+
+- Actor는 `ActorContext::tryTell(target, payload)`으로 다른 Actor의 mailbox에 명령을 보낼 수 있다.
+- `tryTell`은 awaitable이 아니다. **Actor가 다른 Actor의 응답을 기다리는 것은 런타임 계약으로 금지한다.**
+  불가능해서가 아니라, 순환 대기가 생겼을 때 이를 탐지하거나 해소하는 장치가 현재 런타임에 없기 때문이다.
+  순환이 생기면 `Suspended` task가 영구히 남아 아래 drain predicate가 영원히 거짓이 된다.
+- submission은 대상 kind에 등록된 Binding이 조립한다. 송신자는 대상의 command 타입을 알지 않는다.
+- tell은 기존 `tryPost` 경로를 그대로 쓰므로 ingress 상한, 포화 정책과 FIFO 보장이 송신자에 따라 갈리지 않는다.
+- FIFO는 한 송신자가 한 turn에 보낸 tell 사이에서만 보장된다.
+- `makeTell`은 모든 Worker에서 동시에 호출되므로 읽기 전용 변환이어야 한다.
+
+상세는 [Actor 간 메시지와 게임 시간 결정](./actor-messaging-and-game-time.md)에 있다.
+
 ## 6. Drain과 passivation
 
 ```text

@@ -18,7 +18,7 @@
 #include "snf/server/player_session_directory.hpp"
 #include "snf/server/protocol_gateway.hpp"
 #include "snf/server/protocol_party_result_sink.hpp"
-#include "snf/server/protocol_player_follow_up_sink.hpp"
+#include "snf/server/protocol_player_response_sink.hpp"
 #include "snf/server/protocol_zone_result_sink.hpp"
 #include "snf/server/route_coordinator.hpp"
 #include "snf/server/tcp_server.hpp"
@@ -147,7 +147,7 @@ namespace snf::server
         // sink still cannot reach the reactor-only half.
         OutboundChannel _outbound_channel;
         ZoneTransitionChannel _zone_transition_channel;
-        ProtocolPlayerFollowUpSink _player_follow_ups;
+        ProtocolPlayerResponseSink _player_responses;
         ProtocolZoneResultSink _zone_results;
         ProtocolPartyResultSink _party_results;
         CountingCommandLifecycleSink _command_lifecycle;

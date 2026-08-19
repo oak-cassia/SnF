@@ -89,7 +89,7 @@ add_library(snf_server_runtime STATIC
     src/server/protocol_gateway.cpp
     src/server/command_router.cpp
     src/server/protocol_response_mapper.cpp
-    src/server/protocol_player_follow_up_sink.cpp
+    src/server/protocol_player_response_sink.cpp
     src/server/protocol_zone_result_sink.cpp
     src/server/protocol_party_result_sink.cpp
     src/server/route_coordinator.cpp
@@ -143,6 +143,7 @@ if(BUILD_TESTING)
         tests/build_info_test.cpp
         tests/frame_codec_test.cpp
         tests/bounded_queue_test.cpp
+        tests/tell_payload_test.cpp
         tests/distribution_test.cpp
         tests/command_router_test.cpp
         tests/protocol_gateway_test.cpp
@@ -151,7 +152,7 @@ if(BUILD_TESTING)
         tests/protocol_party_result_sink_test.cpp
         tests/route_coordinator_test.cpp
         tests/party_coordinator_test.cpp
-        tests/player_follow_up_sink_test.cpp
+        tests/player_response_sink_test.cpp
         tests/outbound_channel_test.cpp
         tests/runtime_boundaries_test.cpp
         tests/player_actor_test.cpp

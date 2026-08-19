@@ -37,7 +37,8 @@ Network Runtime
 상세한 현재 구조와 트레이드오프는 [서버 아키텍처](docs/server-architecture-draft.md), coroutine
 수명과 경합 규칙은 [Coroutine Actor 계약](docs/coroutine-actor-contract.md), 전체 종료 순서는
 [Runtime Lifecycle 계약](docs/runtime-lifecycle-contract.md), Actor의 tick·timeout 예약 정책은
-[Actor 주도 Timer Scheduling](docs/actor-driven-timer-scheduling.md)을 기준으로 한다.
+[Actor 주도 Timer Scheduling](docs/actor-driven-timer-scheduling.md), Actor 간 메시지와 게임
+시간 기준은 [Actor 간 메시지와 게임 시간 결정](docs/actor-messaging-and-game-time.md)을 기준으로 한다.
 
 ## 구현된 vertical slice
 
@@ -49,6 +50,9 @@ Network Runtime
 - dirty snapshot을 bounded queue로 제출하고 Player별 save를 coalesce·직렬화
 - disconnect/save/reconnect 뒤 economy와 마지막 Zone 위치 복원
 - 기본 in-memory adapter와 bounded Worker Pool을 사용하는 MySQL 8 adapter
+
+상세 소유권 규칙과 durability 한계는
+[Player 상태 소유권과 persistence 계약](docs/player-state-ownership-contract.md)에 있다.
 
 ### Zone
 

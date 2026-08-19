@@ -182,6 +182,8 @@ namespace snf::runtime
 
         void cancelTimer(TimerHandle handle) noexcept override;
 
+        [[nodiscard]] PostResult tryTell(ActorKey target, TellPayload payload) override;
+
     private:
         ActorRuntime* _runtime{nullptr};
         Worker* _worker{nullptr};
@@ -434,6 +436,11 @@ namespace snf::runtime
         }
     }
 
+    PostResult ActorRuntime::SlotContext::tryTell(const ActorKey target, TellPayload payload)
+    {
+        return _runtime->tryTell(target, std::move(payload));
+    }
+
     const ActorKey& ActorSubmission::target() const noexcept
     {
         return _target;
@@ -618,6 +625,26 @@ namespace snf::runtime
         // a push has to announce itself.
         target_worker->wakeup.notify();
         return PostResult::Accepted;
+    }
+
+    PostResult ActorRuntime::tryTell(const ActorKey target, TellPayload payload)
+    {
+        // registerBinding refuses to run once the runtime has started, so the
+        // registry is immutable here and needs no lock. tryPost still takes the
+        // state mutex and re-validates, which is what decides Accepted/Full/Closed.
+        const auto binding_iterator = _bindings.find(target.kind);
+        if (binding_iterator == _bindings.end())
+        {
+            throw std::logic_error{"ActorRuntime has no binding for the tell target's kind"};
+        }
+
+        auto submission = binding_iterator->second->makeTell(target, std::move(payload));
+        if (!submission)
+        {
+            throw std::logic_error{"Tell target binding refused the payload type"};
+        }
+
+        return tryPost(std::move(*submission));
     }
 
     void ActorRuntime::close() noexcept

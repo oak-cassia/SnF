@@ -6,10 +6,10 @@
 #include "snf/server/outbound_sink.hpp"
 #include "snf/server/player_actor.hpp"
 #include "snf/server/player_actor_id.hpp"
-#include "snf/server/player_follow_up_sink.hpp"
 #include "snf/server/player_inbound_command.hpp"
 #include "snf/server/player_persistence_service.hpp"
 #include "snf/server/player_repository.hpp"
+#include "snf/server/player_response_sink.hpp"
 
 #include <functional>
 #include <memory>
@@ -49,7 +49,7 @@ namespace snf::server
     class PlayerActorBinding final : public snf::runtime::ActorBinding
     {
     public:
-        PlayerActorBinding(PlayerFollowUpSink& follow_up_sink,
+        PlayerActorBinding(PlayerResponseSink& response_sink,
                            OutboundSink& outbound,
                            CommandLifecycleSink& lifecycle,
                            PlayerActorBindingConfig config = {});
@@ -81,7 +81,7 @@ namespace snf::server
         [[nodiscard]] snf::runtime::ActorDispatchResult advance(PlayerActorSlot& slot,
                                                                 snf::runtime::ActorContext& context,
                                                                 std::stop_token stop_token);
-        [[nodiscard]] snf::runtime::ActorDispatchResult applyFollowUps(
+        [[nodiscard]] snf::runtime::ActorDispatchResult applyResponses(
             PlayerActorSlot& slot, OutboundReservation& reservation, std::stop_token stop_token);
         void publishDirtySnapshot(PlayerActorSlot& slot) noexcept;
         // Ends a command that could not acquire capacity at all, either because none
@@ -89,10 +89,10 @@ namespace snf::server
         // ever hold. The connection is closed by the backend, so the command itself ends
         // normally.
         [[nodiscard]] snf::runtime::ActorDispatchResult
-        abandonFollowUps(PlayerActorSlot& slot) noexcept;
+        abandonResponses(PlayerActorSlot& slot) noexcept;
         static void resetPendingCommand(PlayerActorSlot& slot) noexcept;
 
-        PlayerFollowUpSink& _follow_up_sink;
+        PlayerResponseSink& _response_sink;
         OutboundSink& _outbound;
         CommandLifecycleSink& _lifecycle;
         snf::runtime::ActorKind _kind;
