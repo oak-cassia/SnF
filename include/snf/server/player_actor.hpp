@@ -1,6 +1,5 @@
 #pragma once
 
-#include "snf/server/player_actor_id.hpp"
 #include "snf/server/player_command.hpp"
 #include "snf/server/player_record.hpp"
 #include "snf/server/player_result.hpp"
@@ -33,7 +32,10 @@ namespace snf::server
     class PlayerState
     {
     public:
-        [[nodiscard]] PlayerActorId identity() const noexcept;
+        // Absent before authentication. The Actor does not name the pre-auth
+        // namespace it is running in -- that is a routing fact, and the binding
+        // holds it.
+        [[nodiscard]] std::optional<PlayerId> identity() const noexcept;
         [[nodiscard]] std::uint64_t handledCommandCount() const noexcept;
         [[nodiscard]] std::optional<PlayerLocation> lastLocation() const noexcept;
         [[nodiscard]] std::uint64_t currencyBalance() const noexcept;
@@ -46,7 +48,7 @@ namespace snf::server
 
         struct Session
         {
-            PlayerActorId identity;
+            std::optional<PlayerId> identity;
             std::uint64_t handled_command_count{0};
             std::optional<PlayerLocation> last_location;
         } _session;
@@ -69,8 +71,8 @@ namespace snf::server
     {
     public:
         PlayerActor() = default;
-        explicit PlayerActor(PlayerActorId identity) noexcept;
-        PlayerActor(PlayerActorId identity, std::size_t max_purchase_idempotency_records);
+        explicit PlayerActor(std::optional<PlayerId> identity) noexcept;
+        PlayerActor(std::optional<PlayerId> identity, std::size_t max_purchase_idempotency_records);
 
         PlayerActor(const PlayerActor&) = delete;
         PlayerActor& operator=(const PlayerActor&) = delete;
