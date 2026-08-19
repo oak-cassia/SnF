@@ -1,5 +1,6 @@
 #include "snf/server/zone_actor_ingress.hpp"
 
+#include <stdexcept>
 #include <utility>
 
 namespace snf::server

@@ -39,89 +39,6 @@ namespace
 
 namespace snf::server
 {
-    ProtocolGateway::ProtocolGateway(RoutedCommandIngress& commands)
-        : ProtocolGateway(MessageDispatcher{}, commands)
-    {
-    }
-
-    ProtocolGateway::ProtocolGateway(RoutedCommandIngress& commands,
-                                     PlayerSessionDirectory& sessions)
-        : ProtocolGateway(MessageDispatcher{}, commands, sessions)
-    {
-    }
-
-    ProtocolGateway::ProtocolGateway(MessageDispatcher dispatcher, RoutedCommandIngress& commands)
-        : _dispatcher(std::move(dispatcher))
-        , _commands(commands)
-        , _owned_sessions()
-        , _sessions(_owned_sessions)
-        , _owned_routes()
-        , _routes(_owned_routes)
-        , _owned_parties()
-        , _parties(_owned_parties)
-    {
-    }
-
-    ProtocolGateway::ProtocolGateway(MessageDispatcher dispatcher,
-                                     RoutedCommandIngress& commands,
-                                     PlayerSessionDirectory& sessions)
-        : _dispatcher(std::move(dispatcher))
-        , _commands(commands)
-        , _owned_sessions()
-        , _sessions(sessions)
-        , _owned_routes()
-        , _routes(_owned_routes)
-        , _owned_parties()
-        , _parties(_owned_parties)
-    {
-    }
-
-    ProtocolGateway::ProtocolGateway(RoutedCommandIngress& commands,
-                                     PlayerSessionDirectory& sessions,
-                                     RouteCoordinator& routes)
-        : ProtocolGateway(MessageDispatcher{}, commands, sessions, routes)
-    {
-    }
-
-    ProtocolGateway::ProtocolGateway(MessageDispatcher dispatcher,
-                                     RoutedCommandIngress& commands,
-                                     PlayerSessionDirectory& sessions,
-                                     RouteCoordinator& routes)
-        : _dispatcher(std::move(dispatcher))
-        , _commands(commands)
-        , _owned_sessions()
-        , _sessions(sessions)
-        , _owned_routes()
-        , _routes(routes)
-        , _owned_parties()
-        , _parties(_owned_parties)
-    {
-    }
-
-    ProtocolGateway::ProtocolGateway(RoutedCommandIngress& commands,
-                                     PlayerSessionDirectory& sessions,
-                                     RouteCoordinator& routes,
-                                     PartyCoordinator& parties)
-        : ProtocolGateway(MessageDispatcher{}, commands, sessions, routes, parties)
-    {
-    }
-
-    ProtocolGateway::ProtocolGateway(MessageDispatcher dispatcher,
-                                     RoutedCommandIngress& commands,
-                                     PlayerSessionDirectory& sessions,
-                                     RouteCoordinator& routes,
-                                     PartyCoordinator& parties)
-        : _dispatcher(std::move(dispatcher))
-        , _commands(commands)
-        , _owned_sessions()
-        , _sessions(sessions)
-        , _owned_routes()
-        , _routes(routes)
-        , _owned_parties()
-        , _parties(parties)
-    {
-    }
-
     ProtocolGateway::ProtocolGateway(RoutedCommandIngress& commands,
                                      PlayerSessionDirectory& sessions,
                                      RouteCoordinator& routes,
@@ -129,19 +46,23 @@ namespace snf::server
                                      ZoneTransitionChannel& zone_transitions,
                                      CommandLifecycleSink& lifecycle,
                                      ProtocolZoneResultSink& zone_results,
-                                     const std::size_t max_zone_completions_per_turn)
-        : ProtocolGateway(MessageDispatcher{}, commands, sessions, routes, parties)
+                                     ProtocolGatewayConfig config)
+        : _dispatcher(std::move(config.dispatcher))
+        , _commands(commands)
+        , _sessions(sessions)
+        , _routes(routes)
+        , _parties(parties)
+        , _zone_transitions(zone_transitions)
+        , _lifecycle(lifecycle)
+        , _zone_results(zone_results)
+        , _max_zone_completions_per_turn(config.max_zone_completions_per_turn)
     {
-        if (max_zone_completions_per_turn == 0 ||
-            max_zone_completions_per_turn > zone_transitions.capacity())
+        if (_max_zone_completions_per_turn == 0 ||
+            _max_zone_completions_per_turn > zone_transitions.capacity())
         {
             throw std::invalid_argument{
                 "Zone completion turn budget must be positive and no greater than capacity"};
         }
-        _zone_transitions = &zone_transitions;
-        _lifecycle = &lifecycle;
-        _zone_results = &zone_results;
-        _max_zone_completions_per_turn = max_zone_completions_per_turn;
         _active_zone_handoffs.reserve(zone_transitions.capacity());
     }
 
@@ -151,8 +72,7 @@ namespace snf::server
                                                          const ZonePosition requested_position,
                                                          const SessionRoute& source)
     {
-        if (_zone_transitions == nullptr || _lifecycle == nullptr || _zone_results == nullptr ||
-            _handoff_admission_closed)
+        if (_handoff_admission_closed)
         {
             return FramePostResult::InvalidPayload;
         }
@@ -163,7 +83,7 @@ namespace snf::server
             return FramePostResult::InvalidPayload;
         }
 
-        CommandReleaseToken release{*_lifecycle, envelope.connection};
+        CommandReleaseToken release{_lifecycle, envelope.connection};
 
         const auto handoff = _routes.tryBeginHandoff(envelope.connection,
                                                      player,
@@ -185,7 +105,7 @@ namespace snf::server
             return FramePostResult::Accepted;
         }
 
-        const auto ticket = _zone_transitions->tryReserve(handoff->id);
+        const auto ticket = _zone_transitions.tryReserve(handoff->id);
         if (!ticket)
         {
             static_cast<void>(_routes.rollbackHandoffBeforeLeave(envelope.connection, handoff->id));
@@ -230,12 +150,12 @@ namespace snf::server
             if (const auto active = _active_zone_handoffs.find(envelope.connection);
                 inserted_active && active != _active_zone_handoffs.end())
             {
-                _zone_transitions->release(active->second.ticket);
+                _zone_transitions.release(active->second.ticket);
                 _active_zone_handoffs.erase(active);
             }
             else
             {
-                _zone_transitions->release(*ticket);
+                _zone_transitions.release(*ticket);
             }
             static_cast<void>(_routes.rollbackHandoffBeforeLeave(envelope.connection, handoff->id));
             throw;
@@ -348,7 +268,7 @@ namespace snf::server
         {
             throw std::logic_error{"Zone handoff could not roll back before source leave"};
         }
-        _zone_transitions->release(ticket);
+        _zone_transitions.release(ticket);
         replyZoneStatus(connection,
                         handoff->source.player,
                         handoff->source.zone,
@@ -370,7 +290,7 @@ namespace snf::server
         {
             return;
         }
-        _zone_transitions->release(active->second.ticket);
+        _zone_transitions.release(active->second.ticket);
         _zone_transition_nanoseconds.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - active->second.started_at));
         _active_zone_handoffs.erase(active);
@@ -467,9 +387,9 @@ namespace snf::server
         const bool disconnecting = active->second.disconnecting;
         _sessions.noteLocation(handoff.source.connection, std::nullopt);
         _routes.abandon(handoff.source.connection);
-        if (!disconnecting && _zone_results != nullptr)
+        if (!disconnecting)
         {
-            _zone_results->reportAdmissionFailure(handoff.source.connection);
+            _zone_results.reportAdmissionFailure(handoff.source.connection);
         }
         ++_fatal_handoffs;
         finishActiveHandoff(handoff.source.connection);
@@ -484,11 +404,7 @@ namespace snf::server
                                           const ZoneReplyKind kind,
                                           const ZoneCommandStatus status)
     {
-        if (_zone_results == nullptr)
-        {
-            return;
-        }
-        _zone_results->accept(
+        _zone_results.accept(
             ZoneInboundCommand{
                 .zone = zone,
                 .command =
@@ -663,26 +579,21 @@ namespace snf::server
 
     void ProtocolGateway::drainZoneTransitions()
     {
-        if (_zone_transitions == nullptr)
-        {
-            return;
-        }
         for (std::size_t index = 0; index < _max_zone_completions_per_turn; ++index)
         {
-            auto completion = _zone_transitions->tryPop();
+            auto completion = _zone_transitions.tryPop();
             if (!completion)
             {
                 break;
             }
             handleZoneHandoffCompletion(std::move(*completion));
         }
-        _zone_transitions->wakeIfPending();
+        _zone_transitions.wakeIfPending();
     }
 
     bool ProtocolGateway::zoneTransitionsDrained() const noexcept
     {
-        return _active_zone_handoffs.empty() &&
-               (_zone_transitions == nullptr || _zone_transitions->drained());
+        return _active_zone_handoffs.empty() && _zone_transitions.drained();
     }
 
     ZoneHandoffGatewayStats ProtocolGateway::zoneHandoffStats() const noexcept
@@ -823,11 +734,7 @@ namespace snf::server
 
             if (const auto handoff = _routes.handoffFor(envelope.connection))
             {
-                if (_lifecycle == nullptr || _zone_results == nullptr)
-                {
-                    return FramePostResult::InvalidPayload;
-                }
-                CommandReleaseToken release{*_lifecycle, envelope.connection};
+                CommandReleaseToken release{_lifecycle, envelope.connection};
                 replyZoneStatus(envelope.connection,
                                 handoff->source.player,
                                 handoff->target_zone,
@@ -891,11 +798,7 @@ namespace snf::server
 
             if (const auto handoff = _routes.handoffFor(envelope.connection))
             {
-                if (_lifecycle == nullptr || _zone_results == nullptr)
-                {
-                    return FramePostResult::InvalidPayload;
-                }
-                CommandReleaseToken release{*_lifecycle, envelope.connection};
+                CommandReleaseToken release{_lifecycle, envelope.connection};
                 replyZoneStatus(envelope.connection,
                                 handoff->source.player,
                                 handoff->target_zone,
@@ -941,11 +844,7 @@ namespace snf::server
 
             if (const auto handoff = _routes.handoffFor(envelope.connection))
             {
-                if (_lifecycle == nullptr || _zone_results == nullptr)
-                {
-                    return FramePostResult::InvalidPayload;
-                }
-                CommandReleaseToken release{*_lifecycle, envelope.connection};
+                CommandReleaseToken release{_lifecycle, envelope.connection};
                 replyZoneStatus(envelope.connection,
                                 handoff->source.player,
                                 handoff->target_zone,
@@ -996,11 +895,7 @@ namespace snf::server
 
             if (const auto handoff = _routes.handoffFor(envelope.connection))
             {
-                if (_lifecycle == nullptr || _zone_results == nullptr)
-                {
-                    return FramePostResult::InvalidPayload;
-                }
-                CommandReleaseToken release{*_lifecycle, envelope.connection};
+                CommandReleaseToken release{_lifecycle, envelope.connection};
                 replyZoneStatus(envelope.connection,
                                 handoff->source.player,
                                 handoff->target_zone,
@@ -1259,10 +1154,7 @@ namespace snf::server
     void ProtocolGateway::cancel() noexcept
     {
         _handoff_admission_closed = true;
-        if (_zone_transitions != nullptr)
-        {
-            _zone_transitions->cancel();
-        }
+        _zone_transitions.cancel();
         _shutdown_handoff_cancels += _active_zone_handoffs.size();
         for (const auto& [connection, active] : _active_zone_handoffs)
         {

@@ -17,13 +17,6 @@ namespace snf::server
     }
 
     CommandRouter::CommandRouter(PlayerCommandIngress& player_commands,
-                                 ZoneActorIngress& zone_commands) noexcept
-        : _player_commands(player_commands)
-        , _zone_commands(&zone_commands)
-    {
-    }
-
-    CommandRouter::CommandRouter(PlayerCommandIngress& player_commands,
                                  ZoneActorIngress& zone_commands,
                                  PartyActorIngress& party_commands) noexcept
         : _player_commands(player_commands)

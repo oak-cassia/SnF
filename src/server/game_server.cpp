@@ -263,14 +263,17 @@ namespace snf::server
         , _zone_actor_ingress(_logic_runtime, _zone_actor_binding, _command_lifecycle)
         , _party_actor_ingress(_logic_runtime, _party_actor_binding, _command_lifecycle)
         , _command_router(_player_actor_ingress, _zone_actor_ingress, _party_actor_ingress)
-        , _protocol_gateway(_command_router,
-                            _player_sessions,
-                            _route_coordinator,
-                            _party_coordinator,
-                            _zone_transition_channel,
-                            _command_lifecycle,
-                            _zone_results,
-                            config.max_zone_handoff_completions_per_turn)
+        , _protocol_gateway(
+              _command_router,
+              _player_sessions,
+              _route_coordinator,
+              _party_coordinator,
+              _zone_transition_channel,
+              _command_lifecycle,
+              _zone_results,
+              ProtocolGatewayConfig{
+                  .max_zone_completions_per_turn = config.max_zone_handoff_completions_per_turn,
+              })
         , _tcp_server(
               TcpServerConfig{
                   .port = config.port,

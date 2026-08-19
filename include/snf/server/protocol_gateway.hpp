@@ -33,18 +33,22 @@ namespace snf::server
         std::size_t pending{0};
     };
 
+    struct ProtocolGatewayConfig
+    {
+        // Bounds the completions one reactor turn drains. It must be positive and no
+        // greater than the transition channel capacity. It has no usable default: a
+        // caller that leaves it unset gets zero and the constructor rejects it, which
+        // is louder than a value that only fails on a channel smaller than itself.
+        std::size_t max_zone_completions_per_turn{0};
+        MessageDispatcher dispatcher{};
+    };
+
+    // Every dependency is injected, so the gateway can only exist fully assembled.
+    // Nothing here is optional: a half-wired gateway used to answer a wiring mistake
+    // with a wire-visible protocol error, which is no longer representable.
     class ProtocolGateway final : public FrameIngress
     {
     public:
-        explicit ProtocolGateway(RoutedCommandIngress& commands);
-        ProtocolGateway(RoutedCommandIngress& commands, PlayerSessionDirectory& sessions);
-        ProtocolGateway(RoutedCommandIngress& commands,
-                        PlayerSessionDirectory& sessions,
-                        RouteCoordinator& routes);
-        ProtocolGateway(RoutedCommandIngress& commands,
-                        PlayerSessionDirectory& sessions,
-                        RouteCoordinator& routes,
-                        PartyCoordinator& parties);
         ProtocolGateway(RoutedCommandIngress& commands,
                         PlayerSessionDirectory& sessions,
                         RouteCoordinator& routes,
@@ -52,20 +56,7 @@ namespace snf::server
                         ZoneTransitionChannel& zone_transitions,
                         CommandLifecycleSink& lifecycle,
                         ProtocolZoneResultSink& zone_results,
-                        std::size_t max_zone_completions_per_turn);
-        ProtocolGateway(MessageDispatcher dispatcher, RoutedCommandIngress& commands);
-        ProtocolGateway(MessageDispatcher dispatcher,
-                        RoutedCommandIngress& commands,
-                        PlayerSessionDirectory& sessions);
-        ProtocolGateway(MessageDispatcher dispatcher,
-                        RoutedCommandIngress& commands,
-                        PlayerSessionDirectory& sessions,
-                        RouteCoordinator& routes);
-        ProtocolGateway(MessageDispatcher dispatcher,
-                        RoutedCommandIngress& commands,
-                        PlayerSessionDirectory& sessions,
-                        RouteCoordinator& routes,
-                        PartyCoordinator& parties);
+                        ProtocolGatewayConfig config);
 
         [[nodiscard]] FramePostResult tryPost(FrameEnvelope envelope) override;
         [[nodiscard]] PostResult tryPostConnectionClosed(ConnectionClosed closed) override;
@@ -115,16 +106,13 @@ namespace snf::server
 
         MessageDispatcher _dispatcher;
         RoutedCommandIngress& _commands;
-        PlayerSessionDirectory _owned_sessions;
         PlayerSessionDirectory& _sessions;
-        RouteCoordinator _owned_routes;
         RouteCoordinator& _routes;
-        PartyCoordinator _owned_parties;
         PartyCoordinator& _parties;
-        ZoneTransitionChannel* _zone_transitions{nullptr};
-        CommandLifecycleSink* _lifecycle{nullptr};
-        ProtocolZoneResultSink* _zone_results{nullptr};
-        std::size_t _max_zone_completions_per_turn{0};
+        ZoneTransitionChannel& _zone_transitions;
+        CommandLifecycleSink& _lifecycle;
+        ProtocolZoneResultSink& _zone_results;
+        std::size_t _max_zone_completions_per_turn;
         std::unordered_map<snf::net::ConnectionId, ActiveZoneHandoff, snf::net::ConnectionIdHash>
             _active_zone_handoffs;
         snf::runtime::Distribution _zone_transition_nanoseconds;

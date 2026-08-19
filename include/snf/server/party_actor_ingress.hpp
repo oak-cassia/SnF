@@ -5,7 +5,7 @@
 
 namespace snf::server
 {
-    class PartyActorIngress
+    class PartyActorIngress final
     {
     public:
         PartyActorIngress(snf::runtime::ActorRuntime& runtime,
