@@ -17,6 +17,7 @@ namespace snf::server
     {
         Session = 1U << 0U,
         Economy = 1U << 1U,
+        Progression = 1U << 2U,
     };
 
     using PlayerStateComponentMask = std::uint8_t;
@@ -38,6 +39,7 @@ namespace snf::server
         [[nodiscard]] std::optional<PlayerLocation> lastLocation() const noexcept;
         [[nodiscard]] std::uint64_t currencyBalance() const noexcept;
         [[nodiscard]] std::uint64_t purchasedItemCount() const noexcept;
+        [[nodiscard]] std::uint64_t streetExperience() const noexcept;
         [[nodiscard]] PlayerStateComponentMask dirtyComponents() const noexcept;
 
     private:
@@ -55,6 +57,11 @@ namespace snf::server
             std::uint64_t currency_balance{INITIAL_CURRENCY_BALANCE};
             std::uint64_t purchased_item_count{0};
         } _economy;
+
+        struct Progression
+        {
+            std::uint64_t street_experience{0};
+        } _progression;
 
         PlayerStateComponentMask _dirty_components{0};
     };
@@ -77,6 +84,7 @@ namespace snf::server
         [[nodiscard]] const PlayerState& state() const noexcept;
         void restore(const PlayerRecord& record);
         void setLastLocation(std::optional<PlayerLocation> location) noexcept;
+        void grantStreetExperience(std::uint64_t experience) noexcept;
         [[nodiscard]] bool hasFlushableDirtyState() const noexcept;
         [[nodiscard]] PlayerStateComponentMask dirtyComponents() const noexcept;
         // Must be called on the owning Worker. It clears all currently dirty

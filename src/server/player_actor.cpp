@@ -34,6 +34,11 @@ namespace snf::server
         return _economy.purchased_item_count;
     }
 
+    std::uint64_t PlayerState::streetExperience() const noexcept
+    {
+        return _progression.street_experience;
+    }
+
     PlayerStateComponentMask PlayerState::dirtyComponents() const noexcept
     {
         return _dirty_components;
@@ -55,6 +60,7 @@ namespace snf::server
         _state._session.last_location = record.last_location;
         _state._economy.currency_balance = record.currency_balance;
         _state._economy.purchased_item_count = record.purchased_item_count;
+        _state._progression.street_experience = record.street_experience;
         _state._dirty_components = 0;
         _purchase_evidence.clear();
     }
@@ -65,9 +71,17 @@ namespace snf::server
         _state._dirty_components |= componentMask(PlayerStateComponent::Session);
     }
 
+    void PlayerActor::grantStreetExperience(const std::uint64_t experience) noexcept
+    {
+        std::uint64_t& total = _state._progression.street_experience;
+        total = experience > std::numeric_limits<std::uint64_t>::max() - total ? std::numeric_limits<std::uint64_t>::max() : total + experience;
+        _state._dirty_components |= componentMask(PlayerStateComponent::Progression);
+    }
+
     bool PlayerActor::hasFlushableDirtyState() const noexcept
     {
-        return (_state._dirty_components & componentMask(PlayerStateComponent::Economy)) != 0;
+        constexpr PlayerStateComponentMask flushable = componentMask(PlayerStateComponent::Economy) | componentMask(PlayerStateComponent::Progression);
+        return (_state._dirty_components & flushable) != 0;
     }
 
     PlayerStateComponentMask PlayerActor::dirtyComponents() const noexcept
@@ -115,6 +129,7 @@ namespace snf::server
             .last_location = _state._session.last_location,
             .currency_balance = _state._economy.currency_balance,
             .purchased_item_count = _state._economy.purchased_item_count,
+            .street_experience = _state._progression.street_experience,
         };
     }
 

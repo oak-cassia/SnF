@@ -28,6 +28,7 @@ namespace
                     },
                 .currency_balance = 600,
                 .purchased_item_count = 4,
+                .street_experience = 2500,
             },
             [&save](snf::server::PlayerSaveResult result) { save = result; });
         assert(save.has_value());
@@ -41,6 +42,7 @@ namespace
         assert(loaded->record->handled_command_count == 42);
         assert(loaded->record->currency_balance == 600);
         assert(loaded->record->purchased_item_count == 4);
+        assert(loaded->record->street_experience == 2500);
         assert((loaded->record->last_location == snf::server::PlayerLocation{
                                                      .zone = snf::server::ZoneId{.value = 3},
                                                      .position = {.x = -4, .y = 5},

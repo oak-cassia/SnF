@@ -1,8 +1,10 @@
 #include "snf/server/player_actor.hpp"
 
-#include <array>
+#include "snf/server/street_progression.hpp"
+
 #include <cassert>
 #include <cstdint>
+#include <limits>
 #include <variant>
 
 namespace
@@ -123,6 +125,72 @@ namespace
                                                   }));
     }
 
+    void test_street_experience_grant_marks_progression_dirty()
+    {
+        const snf::server::PlayerId player{.value = 91};
+        snf::server::PlayerActor actor{snf::server::PlayerActorId{player}};
+        assert(!actor.hasFlushableDirtyState());
+
+        actor.grantStreetExperience(300);
+        assert(actor.state().streetExperience() == 300);
+        // Progression owns a persisted value, so a grant on its own is reason enough
+        // to hand a snapshot to the persistence queue.
+        assert(actor.hasFlushableDirtyState());
+
+        snf::server::PlayerStateComponentMask cleared = 0;
+        const auto record = actor.takeDirtySnapshot(&cleared);
+        assert(record && record->street_experience == 300);
+        assert((cleared & componentMask(snf::server::PlayerStateComponent::Progression)) != 0);
+        assert(!actor.hasFlushableDirtyState());
+    }
+
+    void test_street_experience_grants_accumulate_and_saturate()
+    {
+        const snf::server::PlayerId player{.value = 92};
+        snf::server::PlayerActor actor{snf::server::PlayerActorId{player}};
+
+        actor.grantStreetExperience(300);
+        actor.grantStreetExperience(400);
+        // A grant adds to the total rather than replacing it.
+        assert(actor.state().streetExperience() == 700);
+
+        actor.grantStreetExperience(std::numeric_limits<std::uint64_t>::max());
+        assert(actor.state().streetExperience() == std::numeric_limits<std::uint64_t>::max());
+        // Already at the ceiling, so a further grant must not wrap back to nearly zero.
+        actor.grantStreetExperience(1);
+        assert(actor.state().streetExperience() == std::numeric_limits<std::uint64_t>::max());
+    }
+
+    void test_street_experience_survives_the_record_round_trip()
+    {
+        const snf::server::PlayerId player{.value = 93};
+        snf::server::PlayerActor actor{snf::server::PlayerActorId{player}};
+        actor.restore(snf::server::PlayerRecord{
+            .player = player,
+            .street_experience = 29500,
+        });
+
+        assert(actor.state().streetExperience() == 29500);
+        // A restore is not a change, so it must not leave the actor asking to be saved.
+        assert(!actor.hasFlushableDirtyState());
+        assert(actor.snapshot().street_experience == 29500);
+    }
+
+    void test_street_experience_keeps_accumulating_past_the_level_cap()
+    {
+        const snf::server::PlayerId player{.value = 94};
+        snf::server::PlayerActor actor{snf::server::PlayerActorId{player}};
+
+        const std::uint64_t at_cap = snf::server::EXPERIENCE_PER_STREET_LEVEL * (snf::server::MAX_STREET_LEVEL - 1);
+        actor.grantStreetExperience(at_cap + 5000);
+
+        // The level is clamped, the stored experience is not: raising the cap later
+        // has to grant the levels that were already earned, with no backfill.
+        assert(snf::server::streetLevel(actor.state().streetExperience()) == snf::server::MAX_STREET_LEVEL);
+        assert(actor.state().streetExperience() == at_cap + 5000);
+        assert(actor.snapshot().street_experience == at_cap + 5000);
+    }
+
     void test_live_purchase_is_memory_authoritative_and_bounded()
     {
         const snf::server::PlayerId player{.value = 89};
@@ -228,6 +296,10 @@ void run_player_actor_tests()
     test_handler_body_does_not_run_before_the_first_resume();
     test_persistent_player_actor_acknowledges_its_identity();
     test_persistent_player_actor_restores_and_snapshots_state();
+    test_street_experience_grant_marks_progression_dirty();
+    test_street_experience_grants_accumulate_and_saturate();
+    test_street_experience_survives_the_record_round_trip();
+    test_street_experience_keeps_accumulating_past_the_level_cap();
     test_live_purchase_is_memory_authoritative_and_bounded();
     test_live_purchase_rejects_unknown_and_reports_insufficient_funds();
 }
