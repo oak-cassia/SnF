@@ -157,6 +157,9 @@ DB Worker는 Actor 상태를 다시 판정하지 않고 immutable snapshot만 �
 마지막 변경과 Actor 수명 범위 idempotency evidence가 사라질 수 있다. 이 위험을 허용할 수 없는
 거래는 같은 경로에 옵션을 추가하지 않고 별도 요구사항과 authority를 정의해야 한다.
 
+상세 소유권 규칙과 durability 한계는
+[Player 상태 소유권과 persistence 계약](./player-state-ownership-contract.md)이 소유한다.
+
 ## 9. Shared Actor
 
 ### Zone

@@ -51,6 +51,9 @@ Network Runtime
 - disconnect/save/reconnect 뒤 economy와 마지막 Zone 위치 복원
 - 기본 in-memory adapter와 bounded Worker Pool을 사용하는 MySQL 8 adapter
 
+상세 소유권 규칙과 durability 한계는
+[Player 상태 소유권과 persistence 계약](docs/player-state-ownership-contract.md)에 있다.
+
 ### Zone
 
 - enter/move/leave, route epoch, periodic tick과 AOI
