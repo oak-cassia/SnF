@@ -90,6 +90,25 @@ namespace snf::server
         return iterator->second.player;
     }
 
+    std::optional<snf::net::ConnectionId> PlayerSessionDirectory::connectionFor(const PlayerId player) const
+    {
+        const std::lock_guard lock{_mutex};
+        const auto entry = _connections_by_player.find(player);
+        if (entry == _connections_by_player.end())
+        {
+            return std::nullopt;
+        }
+
+        // A Closing session still holds its indexes so a reconnect is not lost, but a
+        // notification posted to it would go to a connection on its way out.
+        const auto session = _sessions_by_connection.find(entry->second);
+        if (session == _sessions_by_connection.end() || session->second.state != State::Active)
+        {
+            return std::nullopt;
+        }
+        return entry->second;
+    }
+
     std::optional<PlayerLocation> PlayerSessionDirectory::locationFor(const snf::net::ConnectionId connection) const
     {
         std::lock_guard lock{_mutex};

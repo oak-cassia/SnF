@@ -77,9 +77,11 @@ Network Runtime
 - 중복 완료가 보상을 두 번 지급하지 않음
 - clear 시 참가자마다 `tryTell`로 street 경험치 전달, 미상주 Player는 레코드를 먼저 로드
 - 누적 경험치만 저장하고 레벨과 공격/체력은 파생 (레벨당 +10% 선형, 상한 30)
+- `RoomJoin`/`BattleStart` 요청과, 요청 없이 나가는 `BattleCleared` 알림
 
 전투 자체는 5초 뒤 무조건 clear되는 placeholder다. 이 slice의 목적은 전투 수치가 아니라
 Actor 수명주기, timer, Actor 간 전달과 영속 필드가 끝까지 이어지는지 확인하는 것이다.
+matchmaking은 없다. 클라이언트가 room id를 지정한다.
 
 ## Actor 모델로 검증하는 것
 

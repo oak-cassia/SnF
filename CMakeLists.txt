@@ -92,6 +92,7 @@ add_library(snf_server_runtime STATIC
     src/server/protocol_player_response_sink.cpp
     src/server/protocol_zone_result_sink.cpp
     src/server/protocol_party_result_sink.cpp
+    src/server/protocol_room_result_sink.cpp
     src/server/route_coordinator.cpp
     src/server/party_coordinator.cpp
     src/server/player_actor.cpp
@@ -158,6 +159,7 @@ if(BUILD_TESTING)
         tests/protocol_response_mapper_test.cpp
         tests/protocol_zone_result_sink_test.cpp
         tests/protocol_party_result_sink_test.cpp
+        tests/protocol_room_result_sink_test.cpp
         tests/route_coordinator_test.cpp
         tests/party_coordinator_test.cpp
         tests/player_response_sink_test.cpp

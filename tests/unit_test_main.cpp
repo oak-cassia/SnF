@@ -12,6 +12,7 @@ void run_protocol_gateway_tests();
 void run_protocol_response_mapper_tests();
 void run_protocol_zone_result_sink_tests();
 void run_protocol_party_result_sink_tests();
+void run_protocol_room_result_sink_tests();
 void run_route_coordinator_tests();
 void run_party_coordinator_tests();
 void run_player_response_sink_tests();
@@ -50,6 +51,7 @@ int main()
     run_protocol_response_mapper_tests();
     run_protocol_zone_result_sink_tests();
     run_protocol_party_result_sink_tests();
+    run_protocol_room_result_sink_tests();
     run_route_coordinator_tests();
     run_party_coordinator_tests();
     run_player_response_sink_tests();

@@ -41,6 +41,7 @@
 - Party membership, capacity, stale leave 차단과 passivation
 - Room `Waiting → Running → Cleared`, 자기 timer로 끝나는 placeholder 전투, clear 시 참가자
   보상 tell과 passivation
+- Room 입장·시작 요청과, 요청 없이 나가는 clear 알림 (`request_id = 0`)
 
 ## 현재 정리 기준
 
@@ -54,9 +55,9 @@
 Party가 입장하는 작은 협동 보스 인스턴스다. MMORPG 월드 기능을 넓히지 않고, Actor 상태
 소유권이 공유 콘텐츠에서 주는 장점과 비용을 보여주는 것이 목적이다.
 
-> **진행 중.** 상태 기계와 보상 경로는 placeholder 전투(5초 후 무조건 clear)로 동작한다.
-> 아직 클라이언트가 Room에 입장할 경로가 없고, damage가 없어 아래 완료 조건 중 request
-> sequence와 관련된 항목은 검증할 대상 자체가 없다.
+> **진행 중.** 상태 기계와 보상 경로가 placeholder 전투(5초 후 무조건 clear)로 동작하고,
+> 클라이언트가 실제 TCP로 입장·시작하고 clear 알림을 받는다. damage가 없어 아래 완료 조건
+> 중 request sequence와 관련된 항목은 아직 검증할 대상 자체가 없다.
 
 ### 상태와 명령
 
@@ -81,7 +82,7 @@ Waiting → Running → Cleared
 - clear/fail 결과는 한 번만 생성되고 Room은 timer와 mailbox를 정리한 뒤 passivate된다. (충족)
 - 여러 Room 분산 부하와 하나의 hot Room 부하를 비교한다.
 - queue 포화, shutdown 중 tick과 late completion 테스트를 포함한다.
-- Debug, TCP integration, ASan·UBSan과 TSan을 통과한다.
+- Debug, TCP integration, ASan·UBSan과 TSan을 통과한다. (충족)
 
 ### 비범위
 

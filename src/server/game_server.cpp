@@ -216,6 +216,7 @@ namespace snf::server
                   },
               },
               _command_lifecycle)
+        , _room_result_sink(_outbound_channel, _player_sessions)
         , _room_actor_binding(
               RoomActorBindingConfig{
                   .actor =
@@ -224,7 +225,7 @@ namespace snf::server
                           .max_participants = config.max_room_participants,
                           .clear_experience = config.room_clear_experience,
                       },
-                  .on_result = {},
+                  .on_result = [this](const RoomInboundCommand& command, const RoomResult& result) { _room_result_sink.accept(command, result); },
               },
               _command_lifecycle)
         , _logic_runtime(

@@ -40,6 +40,10 @@ namespace snf::server
         void clearProvisionalActivity(snf::net::ConnectionId connection) noexcept;
 
         [[nodiscard]] std::optional<PlayerId> playerFor(snf::net::ConnectionId connection) const;
+        // The reverse lookup, for a notification the server sends on its own: a
+        // cleared Room names its participants, not their connections. Absent when
+        // the player has no live session, in which case there is nothing to send to.
+        [[nodiscard]] std::optional<snf::net::ConnectionId> connectionFor(PlayerId player) const;
         [[nodiscard]] std::optional<PlayerLocation> locationFor(snf::net::ConnectionId connection) const;
         [[nodiscard]] PlayerLocationSnapshot locationSnapshotFor(snf::net::ConnectionId connection) const;
         void noteLocation(snf::net::ConnectionId connection, std::optional<PlayerLocation> location) noexcept;

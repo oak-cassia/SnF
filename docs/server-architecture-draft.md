@@ -141,6 +141,10 @@ Session은 partial frame과 pending send를 보존한다.
 - decoder는 incomplete input과 invalid input을 구분한다.
 - connection generation이 이전 연결의 늦은 outbound를 차단한다.
 - protocol layer가 frame을 typed command로 바꾸므로 Actor는 wire format을 모른다.
+- `request_id`는 요청과 응답을 짝짓는다. 한 command가 응답을 여러 개 만들면 **전부 같은
+  `request_id`를 갖는다** — 요청이 하나이기 때문이며, 구분은 payload로 한다.
+- `request_id = 0`은 서버가 요청 없이 먼저 보낸 알림이다. `BattleCleared`가 처음이며,
+  전투는 Room 자신의 timer로 끝나므로 짝지을 client frame이 없다.
 
 ## 8. Player persistence
 
