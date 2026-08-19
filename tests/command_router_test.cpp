@@ -54,7 +54,8 @@ namespace
             .route =
                 snf::server::PlayerCommandRoute{
                     .actor = snf::server::ProvisionalActorId{.value = 77},
-                    .command = snf::server::PingCommand{.request_id = 5, .payload = {}},
+                    .command = snf::server::PingCommand{.payload = {}},
+                    .request_id = 5,
                 },
         });
 
@@ -65,7 +66,7 @@ namespace
         assert(player_commands.posted->connection.generation == 9);
         const auto* ping = std::get_if<snf::server::PingCommand>(&player_commands.posted->command);
         assert(ping != nullptr);
-        assert(ping->request_id == 5);
+        assert(player_commands.posted->request_id == 5);
     }
 
     void test_forwards_lifecycle()

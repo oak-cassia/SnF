@@ -3,6 +3,8 @@
 #include "snf/protocol/frame.hpp"
 #include "snf/server/player_result.hpp"
 
+#include <cstdint>
+
 namespace snf::server
 {
     // The outbound protocol boundary. PlayerActor returns domain responses and
@@ -10,6 +12,8 @@ namespace snf::server
     class ProtocolResponseMapper
     {
     public:
-        [[nodiscard]] snf::protocol::Frame map(const PlayerResponse& response) const;
+        // The request id comes from the envelope of the command being answered, not
+        // from the response, which is why it is a separate argument.
+        [[nodiscard]] snf::protocol::Frame map(const PlayerResponse& response, std::uint32_t request_id) const;
     };
 }

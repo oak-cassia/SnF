@@ -130,7 +130,7 @@ namespace
         snf::server::CountingCommandLifecycleSink lifecycle;
         snf::server::RoomActorBinding binding{snf::server::RoomActorBindingConfig{
                                                   .actor =
-                                                      snf::server::RoomActorConfig{
+                                                      snf::server::RoomConfig{
                                                           .battle_duration = 30ms,
                                                           .max_participants = 4,
                                                           .clear_experience = 300,

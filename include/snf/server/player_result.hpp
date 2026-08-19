@@ -10,21 +10,20 @@
 
 namespace snf::server
 {
+    // The request id is stamped on at the protocol boundary, from the envelope the
+    // command arrived in, so a handler never carries one through.
     struct PongResponse
     {
-        std::uint32_t request_id{0};
         std::vector<std::byte> payload;
     };
 
     struct AuthenticatedResponse
     {
-        std::uint32_t request_id{0};
         PlayerId player;
     };
 
     struct PurchaseResponse
     {
-        std::uint32_t request_id{0};
         PurchaseTransactionResult result;
     };
 

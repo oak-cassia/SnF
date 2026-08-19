@@ -35,6 +35,7 @@ namespace snf::server
                         .actor = route.actor,
                         .connection = connection,
                         .command = std::move(route.command),
+                        .request_id = route.request_id,
                     });
                 }
                 else if constexpr (std::is_same_v<Route, ConnectionClosedRoute>)

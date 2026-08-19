@@ -220,7 +220,7 @@ namespace
         assert(route->actor.value == 11);
         const auto* ping = std::get_if<snf::server::PingCommand>(&route->command);
         assert(ping != nullptr);
-        assert(ping->request_id == 7);
+        assert(route->request_id == 7);
         assert(ping->payload == std::vector<std::byte>{std::byte{0xAA}});
     }
 
@@ -316,7 +316,7 @@ namespace
         assert(route->actor == player);
         const auto* purchase = std::get_if<snf::server::PurchaseCommand>(&route->command);
         assert(purchase != nullptr);
-        assert(purchase->request_id == 9);
+        assert(route->request_id == 9);
         assert(purchase->idempotency_key.value == 3);
         assert(purchase->product == snf::server::BASIC_PRODUCT);
     }

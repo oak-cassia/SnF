@@ -889,6 +889,7 @@ namespace snf::server
                     PlayerCommandRoute{
                         .actor = actor,
                         .command = std::move(*dispatch_result.command),
+                        .request_id = envelope.frame.request_id,
                     },
             });
         }

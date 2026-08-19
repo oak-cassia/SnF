@@ -148,11 +148,11 @@ namespace snf::server
         _state._session.identity = identity;
     }
 
-    snf::runtime::ActorTask<PlayerResult> PlayerActor::handle(const PlayerCommand& command)
+    PlayerResult PlayerActor::handle(const PlayerCommand& command)
     {
         PlayerResult result = std::visit([this](const auto& value) { return handleCommand(value); }, command);
         ++_state._session.handled_command_count;
-        co_return result;
+        return result;
     }
 
     PlayerResult PlayerActor::handleCommand(const PingCommand& command)
@@ -163,7 +163,6 @@ namespace snf::server
                     SendResponse{
                         .response =
                             PongResponse{
-                                .request_id = command.request_id,
                                 .payload = command.payload,
                             },
                     },
@@ -184,7 +183,6 @@ namespace snf::server
                     SendResponse{
                         .response =
                             AuthenticatedResponse{
-                                .request_id = command.request_id,
                                 .player = command.player,
                             },
                     },
@@ -272,7 +270,6 @@ namespace snf::server
                     SendResponse{
                         .response =
                             PurchaseResponse{
-                                .request_id = command.request_id,
                                 .result = std::move(result),
                             },
                     },

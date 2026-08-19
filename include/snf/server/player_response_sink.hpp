@@ -5,6 +5,7 @@
 #include "snf/server/player_result.hpp"
 
 #include <cstddef>
+#include <cstdint>
 
 namespace snf::server
 {
@@ -23,6 +24,6 @@ namespace snf::server
         // Applies the follow-ups in order, consuming one reserved slot each. false means
         // the outbound backend was cancelled; follow-ups applied before that stay
         // applied, because this is not a transaction.
-        [[nodiscard]] virtual bool applyResponses(snf::net::ConnectionId connection, PlayerResult result, OutboundReservation& reservation) = 0;
+        [[nodiscard]] virtual bool applyResponses(snf::net::ConnectionId connection, std::uint32_t request_id, PlayerResult result, OutboundReservation& reservation) = 0;
     };
 }

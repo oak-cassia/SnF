@@ -2,7 +2,7 @@ void run_build_info_tests();
 void run_bounded_queue_tests();
 void run_tell_payload_tests();
 void run_street_progression_tests();
-void run_room_actor_tests();
+void run_room_tests();
 void run_room_actor_binding_tests();
 void run_player_tell_tests();
 void run_distribution_tests();
@@ -40,7 +40,7 @@ int main()
     run_bounded_queue_tests();
     run_tell_payload_tests();
     run_street_progression_tests();
-    run_room_actor_tests();
+    run_room_tests();
     run_room_actor_binding_tests();
     run_player_tell_tests();
     run_distribution_tests();

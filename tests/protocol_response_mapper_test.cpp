@@ -7,10 +7,11 @@ namespace
     void test_maps_typed_pong_response_to_wire_frame()
     {
         const snf::server::ProtocolResponseMapper mapper;
-        const auto frame = mapper.map(snf::server::PongResponse{
-            .request_id = 19,
-            .payload = {std::byte{0xAB}},
-        });
+        const auto frame = mapper.map(
+            snf::server::PongResponse{
+                .payload = {std::byte{0xAB}},
+            },
+            19);
 
         assert(frame.type == snf::protocol::MessageType::Pong);
         assert(frame.request_id == 19);
@@ -20,10 +21,11 @@ namespace
     void test_maps_authenticated_response_with_persistent_player_id()
     {
         const snf::server::ProtocolResponseMapper mapper;
-        const auto frame = mapper.map(snf::server::AuthenticatedResponse{
-            .request_id = 20,
-            .player = snf::server::PlayerId{.value = 0x0102030405060708ULL},
-        });
+        const auto frame = mapper.map(
+            snf::server::AuthenticatedResponse{
+                .player = snf::server::PlayerId{.value = 0x0102030405060708ULL},
+            },
+            20);
 
         assert(frame.type == snf::protocol::MessageType::Authenticated);
         assert(frame.request_id == 20);
@@ -42,19 +44,20 @@ namespace
     void test_maps_purchase_result_with_stable_wire_layout()
     {
         const snf::server::ProtocolResponseMapper mapper;
-        const auto frame = mapper.map(snf::server::PurchaseResponse{
-            .request_id = 21,
-            .result =
-                snf::server::PurchaseTransactionResult{
-                    .status = snf::server::PurchaseStatus::IdempotencyConflict,
-                    .player = snf::server::PlayerId{.value = 9},
-                    .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = 0x0102030405060708ULL},
-                    .product = snf::server::ProductId{.value = 0x11223344U},
-                    .currency_balance = 0x1011121314151617ULL,
-                    .purchased_item_count = 0x2021222324252627ULL,
-                    .replayed = true,
-                },
-        });
+        const auto frame = mapper.map(
+            snf::server::PurchaseResponse{
+                .result =
+                    snf::server::PurchaseTransactionResult{
+                        .status = snf::server::PurchaseStatus::IdempotencyConflict,
+                        .player = snf::server::PlayerId{.value = 9},
+                        .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = 0x0102030405060708ULL},
+                        .product = snf::server::ProductId{.value = 0x11223344U},
+                        .currency_balance = 0x1011121314151617ULL,
+                        .purchased_item_count = 0x2021222324252627ULL,
+                        .replayed = true,
+                    },
+            },
+            21);
 
         assert(frame.type == snf::protocol::MessageType::PurchaseResult);
         assert(frame.request_id == 21);

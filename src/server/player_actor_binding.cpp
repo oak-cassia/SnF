@@ -94,7 +94,6 @@ namespace snf::server
         {
             Idle,
             Loading,
-            Handling,
             Reserving,
             Saving,
         };
@@ -127,10 +126,6 @@ namespace snf::server
         // has no session keeping it resident, so it passivates once the grant is saved.
         bool activated_by_tell{false};
         snf::runtime::ActorTask<PlayerLoadResult> load_task;
-        // Holds the handler's task while it runs, including across a suspension.
-        // Keeping the frame in the slot is what confines resume and destruction to
-        // the owning Worker.
-        snf::runtime::ActorTask<PlayerResult> task;
         // Started only when capacity was not immediately available, and owned by the
         // slot for the same reason.
         snf::runtime::ActorTask<OutboundReservation> reservation_task;
@@ -139,8 +134,9 @@ namespace snf::server
         // whose capacity is still being awaited.
         PlayerResult pending_result;
         // Captured at dispatch because resume() does not carry the submission, and
-        // follow-ups still have to reach the connection that issued the command.
+        // responses still have to reach the connection and answer the frame that asked.
         snf::net::ConnectionId connection{};
+        std::uint32_t request_id{0};
     };
 
     struct PlayerActorBinding::CommandPayload
@@ -342,6 +338,7 @@ namespace snf::server
         }
 
         player_slot.connection = payload.command.connection;
+        player_slot.request_id = payload.command.request_id;
 
         if (kind() == snf::runtime::ActorKind::Player && !player_slot.loaded)
         {
@@ -357,13 +354,9 @@ namespace snf::server
             {
                 throw std::logic_error{"PurchaseCommand reached a provisional Player actor"};
             }
-            player_slot.pending_command = payload.command.command;
-            player_slot.stage = PlayerActorSlot::Stage::Handling;
-            player_slot.task = player_slot.actor.handle(*player_slot.pending_command);
-            return advance(player_slot, context, stop_token);
         }
-        player_slot.stage = PlayerActorSlot::Stage::Handling;
-        player_slot.task = player_slot.actor.handle(payload.command.command);
+
+        runHandler(player_slot, payload.command.command);
         return advance(player_slot, context, stop_token);
     }
 
@@ -423,26 +416,8 @@ namespace snf::server
             {
                 throw std::logic_error{"Player load completed without a pending command"};
             }
-            slot.stage = PlayerActorSlot::Stage::Handling;
-            slot.task = slot.actor.handle(*slot.pending_command);
-        }
-
-        if (slot.stage == PlayerActorSlot::Stage::Handling)
-        {
-            if (slot.task.resume() == snf::runtime::ActorTaskStatus::Suspended)
-            {
-                return snf::runtime::ActorDispatchResult::Suspended;
-            }
-
-            // Follow-ups are applied only after the handler has returned normally, which
-            // is the same ordering the synchronous handler had. takeResult rethrows a
-            // handler exception, and the frame is then destroyed with the slot on this
-            // same Worker.
-            slot.pending_result = slot.task.takeResult();
-            slot.task = {};
-            publishDirtySnapshot(slot);
-            slot.pending_command.reset();
-            slot.stage = PlayerActorSlot::Stage::Reserving;
+            const PlayerCommand command = *slot.pending_command;
+            runHandler(slot, command);
         }
 
         if (slot.stage == PlayerActorSlot::Stage::Reserving && !slot.reservation_task.valid())
@@ -530,9 +505,10 @@ namespace snf::server
     {
         PlayerResult result = std::move(slot.pending_result);
         const snf::net::ConnectionId connection = slot.connection;
+        const std::uint32_t request_id = slot.request_id;
         resetPendingCommand(slot);
 
-        if (_response_sink.applyResponses(connection, std::move(result), reservation))
+        if (_response_sink.applyResponses(connection, request_id, std::move(result), reservation))
         {
             return snf::runtime::ActorDispatchResult::KeepActive;
         }
@@ -543,6 +519,14 @@ namespace snf::server
         }
 
         throw std::runtime_error{"Player follow-up application failed while logic runtime was active"};
+    }
+
+    void PlayerActorBinding::runHandler(PlayerActorSlot& slot, const PlayerCommand& command)
+    {
+        slot.pending_result = slot.actor.handle(command);
+        publishDirtySnapshot(slot);
+        slot.pending_command.reset();
+        slot.stage = PlayerActorSlot::Stage::Reserving;
     }
 
     void PlayerActorBinding::publishDirtySnapshot(PlayerActorSlot& slot) noexcept

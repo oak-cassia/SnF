@@ -1,6 +1,5 @@
 #pragma once
 
-#include "snf/runtime/actor_task.hpp"
 #include "snf/server/player_actor_id.hpp"
 #include "snf/server/player_command.hpp"
 #include "snf/server/player_record.hpp"
@@ -93,17 +92,11 @@ namespace snf::server
         void restoreDirtyComponents(PlayerStateComponentMask components) noexcept;
         [[nodiscard]] PlayerRecord snapshot() const;
 
-        // The caller must keep the command alive until the returned task
-        // completes, not merely until this call returns: the task is lazy, so the
-        // body has not run yet, and it may later suspend. Passing a temporary
-        // therefore dangles. In the server the runtime owns the submission for
-        // exactly that long, which is why this takes a reference instead of
-        // copying the payload on every command.
-        //
-        // PING has nothing to await, so this task always completes on its first
-        // resume. The first handler that actually suspends arrives with the
-        // outbound reservation awaiter.
-        [[nodiscard]] snf::runtime::ActorTask<PlayerResult> handle(const PlayerCommand& command);
+        // Synchronous, and returns only decisions. Everything that has to wait --
+        // loading a record, saving one, acquiring outbound capacity -- is awaited by
+        // PlayerActorBinding around this call, which is what lets the handler stay a
+        // plain function of its command and the state it owns.
+        [[nodiscard]] PlayerResult handle(const PlayerCommand& command);
 
     private:
         struct PurchaseEvidence
