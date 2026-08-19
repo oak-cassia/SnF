@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <future>
 #include <mutex>
 #include <numeric>
@@ -24,6 +25,7 @@
 #include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <thread>
+#include <tuple>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -395,6 +397,26 @@ namespace
             .request_id = request_id,
             .payload = player_id_payload(party),
         };
+    }
+
+    snf::protocol::Frame room_frame(const snf::protocol::MessageType type, const std::uint32_t request_id, const std::uint64_t room)
+    {
+        return snf::protocol::Frame{
+            .type = type,
+            .request_id = request_id,
+            .payload = player_id_payload(room),
+        };
+    }
+
+    // status + phase + room id
+    snf::protocol::Frame receive_room_frame(const int socket_descriptor, const std::size_t payload_size)
+    {
+        const std::size_t frame_size = snf::protocol::FRAME_LENGTH_FIELD_SIZE + snf::protocol::MIN_BODY_SIZE + payload_size;
+        snf::protocol::FrameDecoder decoder;
+        const auto decoded = decoder.append(receive_exact(socket_descriptor, frame_size));
+        assert(decoded.ok());
+        assert(decoded.frames.size() == 1);
+        return decoded.frames[0];
     }
 
     void assert_authenticated(const std::vector<std::byte>& response, const std::uint32_t request_id, const std::uint64_t player_id)
@@ -945,6 +967,59 @@ namespace
         }
         assert(actor_count(server.getActorRuntimeStats()) == 0);
         server.stop();
+    }
+
+    void test_two_players_clear_a_room_and_are_told_without_asking()
+    {
+        RunningServer server{snf::server::GameServerConfig{
+            .port = 0,
+            .shutdown_grace_period = 200ms,
+            .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
+            .client_send_buffer_size = std::nullopt,
+            // Short enough that the test does not sit through a real battle.
+            .room_battle_duration = 40ms,
+            .room_clear_experience = 300,
+        }};
+        constexpr std::uint64_t room = 77;
+        constexpr std::uint64_t first_player = 610;
+        constexpr std::uint64_t second_player = 611;
+
+        auto first = connect_client(server.getPort());
+        auto second = connect_client(server.getPort());
+        for (const auto& [socket, player, request_id] : {std::tuple{std::ref(first), first_player, std::uint32_t{300}}, std::tuple{std::ref(second), second_player, std::uint32_t{301}}})
+        {
+            const auto frame = authentication_frame(request_id, player);
+            const auto bytes = snf::protocol::encode_frame(frame);
+            send_all(socket.get().getDescriptor(), bytes);
+            assert_authenticated(receive_exact(socket.get().getDescriptor(), bytes.size()), request_id, player);
+        }
+
+        constexpr std::size_t ROOM_REPLY_PAYLOAD_SIZE = 1 + 1 + 8;
+        for (const auto& [socket, request_id] : {std::pair{std::ref(first), std::uint32_t{302}}, std::pair{std::ref(second), std::uint32_t{303}}})
+        {
+            send_all(socket.get().getDescriptor(), snf::protocol::encode_frame(room_frame(snf::protocol::MessageType::RoomJoin, request_id, room)));
+            const auto joined = receive_room_frame(socket.get().getDescriptor(), ROOM_REPLY_PAYLOAD_SIZE);
+            assert(joined.type == snf::protocol::MessageType::RoomJoined);
+            assert(joined.request_id == request_id);
+            assert(joined.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::Applied));
+            assert(joined.payload[1] == static_cast<std::byte>(snf::server::RoomPhase::Waiting));
+        }
+
+        send_all(first.getDescriptor(), snf::protocol::encode_frame(room_frame(snf::protocol::MessageType::BattleStart, 304, room)));
+        const auto started = receive_room_frame(first.getDescriptor(), ROOM_REPLY_PAYLOAD_SIZE);
+        assert(started.type == snf::protocol::MessageType::BattleStarted);
+        assert(started.request_id == 304);
+        assert(started.payload[1] == static_cast<std::byte>(snf::server::RoomPhase::Running));
+
+        // Nobody asks for this one. The Room's own timer ends the battle, and both
+        // participants are told -- including the one that never sent BattleStart.
+        for (auto* socket : {&first, &second})
+        {
+            const auto cleared = receive_room_frame(socket->getDescriptor(), 8);
+            assert(cleared.type == snf::protocol::MessageType::BattleCleared);
+            assert(cleared.request_id == snf::protocol::UNSOLICITED_REQUEST_ID);
+            assert(cleared.payload == player_id_payload(300));
+        }
     }
 
     void test_authenticated_player_enters_moves_and_leaves_a_zone()
@@ -1767,6 +1842,7 @@ int main()
     test_authenticates_one_session_and_allows_reconnect_after_passivation();
     test_live_purchase_is_memory_authoritative_and_flushes();
     test_two_players_share_one_party_actor_and_passivate_it_when_empty();
+    test_two_players_clear_a_room_and_are_told_without_asking();
     test_authenticated_player_enters_moves_and_leaves_a_zone();
     test_authenticated_player_handoffs_between_zones_and_publishes_target_route();
     test_zone_position_survives_disconnect_save_and_reconnect();

@@ -19,6 +19,7 @@
 #include "snf/server/protocol_gateway.hpp"
 #include "snf/server/protocol_party_result_sink.hpp"
 #include "snf/server/protocol_player_response_sink.hpp"
+#include "snf/server/protocol_room_result_sink.hpp"
 #include "snf/server/protocol_zone_result_sink.hpp"
 #include "snf/server/room_actor_binding.hpp"
 #include "snf/server/room_actor_ingress.hpp"
@@ -166,6 +167,9 @@ namespace snf::server
         PlayerActorBinding _persistent_player_actor_binding;
         ZoneActorBinding _zone_actor_binding;
         PartyActorBinding _party_actor_binding;
+        // Declared here rather than beside the other sinks: it reads the session
+        // directory, so it has to be constructed after one.
+        ProtocolRoomResultSink _room_result_sink;
         RoomActorBinding _room_actor_binding;
         snf::runtime::ActorRuntime _logic_runtime;
         PlayerActorIngress _player_actor_ingress;

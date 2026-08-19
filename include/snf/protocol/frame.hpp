@@ -32,7 +32,17 @@ namespace snf::protocol
         PartyJoined = 14,
         PartyLeave = 15,
         PartyLeft = 16,
+        RoomJoin = 17,
+        RoomJoined = 18,
+        BattleStart = 19,
+        BattleStarted = 20,
+        BattleCleared = 21,
     };
+
+    // A request id of zero marks a frame the server sent on its own rather than in
+    // answer to a request. BattleCleared is the first: a battle ends on the Room's
+    // own timer, so there is no client frame to correlate it with.
+    inline constexpr std::uint32_t UNSOLICITED_REQUEST_ID = 0;
 
     struct Frame
     {
