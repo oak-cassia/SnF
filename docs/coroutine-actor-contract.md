@@ -48,6 +48,8 @@ Idle + command
 ```
 
 - 같은 Actor의 handler는 동시에 실행되지 않는다.
+- `co_await`는 Binding이 소유한 단계(record load/save, outbound reservation)에서만 일어난다.
+  도메인 handler 자체는 동기 함수이며 기다리지 않는다.
 - suspend 중 일반 command는 mailbox FIFO에 남고 continuation이 먼저 Actor를 재개한다.
 - ready queue에는 Actor당 token이 최대 하나다.
 - 한 Actor는 한 시점에 외부 operation 하나만 기다린다. 한 command 안의 순차 await는 허용한다.
