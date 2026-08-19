@@ -241,7 +241,7 @@ namespace snf::server
         , _zone_actor_ingress(_logic_runtime, _zone_actor_binding, _command_lifecycle)
         , _party_actor_ingress(_logic_runtime, _party_actor_binding, _command_lifecycle)
         , _room_actor_ingress(_logic_runtime, _room_actor_binding, _command_lifecycle)
-        , _command_router(_player_actor_ingress, _zone_actor_ingress, _party_actor_ingress)
+        , _command_router(_player_actor_ingress, _zone_actor_ingress, _party_actor_ingress, _room_actor_ingress)
         , _protocol_gateway(_command_router,
                             _player_sessions,
                             _route_coordinator,

@@ -16,10 +16,11 @@ namespace snf::server
     {
     }
 
-    CommandRouter::CommandRouter(PlayerCommandIngress& player_commands, ZoneActorIngress& zone_commands, PartyActorIngress& party_commands) noexcept
+    CommandRouter::CommandRouter(PlayerCommandIngress& player_commands, ZoneActorIngress& zone_commands, PartyActorIngress& party_commands, RoomActorIngress& room_commands) noexcept
         : _player_commands(player_commands)
         , _zone_commands(&zone_commands)
         , _party_commands(&party_commands)
+        , _room_commands(&room_commands)
     {
     }
 
@@ -91,6 +92,28 @@ namespace snf::server
                     return _party_commands->tryPost(PartyInboundCommand{
                         .party = route.party,
                         .connection = connection,
+                        .command = std::move(route.command),
+                        .reply = std::move(reply),
+                    });
+                }
+                else if constexpr (std::is_same_v<Route, RoomCommandRoute>)
+                {
+                    if (_room_commands == nullptr)
+                    {
+                        return PostResult::Closed;
+                    }
+
+                    std::optional<RoomReplyContext> reply;
+                    if (route.reply_kind)
+                    {
+                        reply = RoomReplyContext{
+                            .connection = connection,
+                            .request_id = route.request_id,
+                            .kind = *route.reply_kind,
+                        };
+                    }
+                    return _room_commands->tryPost(RoomInboundCommand{
+                        .room = route.room,
                         .command = std::move(route.command),
                         .reply = std::move(reply),
                     });

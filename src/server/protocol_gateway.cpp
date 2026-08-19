@@ -551,6 +551,64 @@ namespace snf::server
                 .route = std::move(route),
             }));
         };
+        const auto post_room = [this, connection = envelope.connection](RoomCommandRoute route) -> FramePostResult
+        {
+            return frame_post_result(_commands.tryPost(RoutedCommand{
+                .connection = connection,
+                .route = std::move(route),
+            }));
+        };
+
+        if (envelope.frame.type == snf::protocol::MessageType::RoomJoin)
+        {
+            constexpr std::size_t ROOM_JOIN_PAYLOAD_SIZE = 8;
+            const auto player = _sessions.playerFor(envelope.connection);
+            if (!player || envelope.frame.payload.size() != ROOM_JOIN_PAYLOAD_SIZE)
+            {
+                return FramePostResult::InvalidPayload;
+            }
+
+            // The client names the room. There is no matchmaking, which is why nothing
+            // here allocates or looks one up.
+            const RoomId room{
+                .value = read_u64(std::span<const std::byte>{envelope.frame.payload}, 0),
+            };
+            if (room.value == 0)
+            {
+                return FramePostResult::InvalidPayload;
+            }
+            return post_room(RoomCommandRoute{
+                .room = room,
+                .command = JoinRoom{.player = *player},
+                .reply_kind = RoomReplyKind::Joined,
+                .request_id = envelope.frame.request_id,
+            });
+        }
+
+        if (envelope.frame.type == snf::protocol::MessageType::BattleStart)
+        {
+            constexpr std::size_t BATTLE_START_PAYLOAD_SIZE = 8;
+            if (!_sessions.playerFor(envelope.connection) || envelope.frame.payload.size() != BATTLE_START_PAYLOAD_SIZE)
+            {
+                return FramePostResult::InvalidPayload;
+            }
+
+            const RoomId room{
+                .value = read_u64(std::span<const std::byte>{envelope.frame.payload}, 0),
+            };
+            if (room.value == 0)
+            {
+                return FramePostResult::InvalidPayload;
+            }
+            // Any participant may start it. The Room answers WrongPhase to whoever is
+            // second, so there is nothing to arbitrate here.
+            return post_room(RoomCommandRoute{
+                .room = room,
+                .command = StartBattle{},
+                .reply_kind = RoomReplyKind::BattleStarted,
+                .request_id = envelope.frame.request_id,
+            });
+        }
 
         if (envelope.frame.type == snf::protocol::MessageType::PartyJoin)
         {

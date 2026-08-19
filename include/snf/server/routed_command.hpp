@@ -7,6 +7,7 @@
 #include "snf/server/party_inbound_command.hpp"
 #include "snf/server/player_actor_id.hpp"
 #include "snf/server/player_command.hpp"
+#include "snf/server/room_inbound_command.hpp"
 #include "snf/server/zone_command.hpp"
 #include "snf/server/zone_id.hpp"
 #include "snf/server/zone_inbound_command.hpp"
@@ -58,7 +59,15 @@ namespace snf::server
         ZoneInboundCommand command;
     };
 
-    using CommandRoute = std::variant<PlayerCommandRoute, ConnectionClosedRoute, ZoneCommandRoute, PartyCommandRoute, ZoneHandoffCommandRoute>;
+    struct RoomCommandRoute
+    {
+        RoomId room;
+        RoomCommand command;
+        std::optional<RoomReplyKind> reply_kind;
+        std::uint32_t request_id{0};
+    };
+
+    using CommandRoute = std::variant<PlayerCommandRoute, ConnectionClosedRoute, ZoneCommandRoute, PartyCommandRoute, ZoneHandoffCommandRoute, RoomCommandRoute>;
 
     struct RoutedCommand
     {
