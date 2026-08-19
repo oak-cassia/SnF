@@ -29,8 +29,7 @@ namespace snf::server
     private:
         [[nodiscard]] PartyResult handleCommand(const JoinPartyCommand& command);
         [[nodiscard]] PartyResult handleCommand(const LeavePartyCommand& command);
-        [[nodiscard]] PartyResult
-        result(PartyCommandStatus status, PlayerId player, std::uint64_t membership_epoch) const;
+        [[nodiscard]] PartyResult result(PartyCommandStatus status, PlayerId player, std::uint64_t membership_epoch) const;
 
         PartyId _party;
         std::size_t _max_members;

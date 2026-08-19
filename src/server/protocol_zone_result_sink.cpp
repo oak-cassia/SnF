@@ -65,14 +65,12 @@ namespace snf::server
         }
     }
 
-    void
-    ProtocolZoneResultSink::reportAdmissionFailure(const snf::net::ConnectionId connection) noexcept
+    void ProtocolZoneResultSink::reportAdmissionFailure(const snf::net::ConnectionId connection) noexcept
     {
         _outbound.reportAdmissionFailure(connection);
     }
 
-    snf::protocol::Frame ProtocolZoneResultSink::map(const ZoneInboundCommand& command,
-                                                     const ZoneResult& result) const
+    snf::protocol::Frame ProtocolZoneResultSink::map(const ZoneInboundCommand& command, const ZoneResult& result) const
     {
         snf::protocol::MessageType type = snf::protocol::MessageType::Moved;
         switch (command.reply->kind)
@@ -90,12 +88,8 @@ namespace snf::server
 
         const ZonePosition position = result.position.value_or(ZonePosition{});
         constexpr std::size_t FIXED_PAYLOAD_SIZE = 1 + 8 + 8 + 4 + 4 + 2;
-        constexpr std::size_t MAX_VISIBLE_BY_PAYLOAD =
-            (snf::protocol::MAX_PAYLOAD_SIZE - FIXED_PAYLOAD_SIZE) / 8;
-        const std::size_t visible_count =
-            std::min(result.visible_players.size(),
-                     std::min(static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()),
-                              MAX_VISIBLE_BY_PAYLOAD));
+        constexpr std::size_t MAX_VISIBLE_BY_PAYLOAD = (snf::protocol::MAX_PAYLOAD_SIZE - FIXED_PAYLOAD_SIZE) / 8;
+        const std::size_t visible_count = std::min(result.visible_players.size(), std::min(static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()), MAX_VISIBLE_BY_PAYLOAD));
 
         std::vector<std::byte> payload;
         payload.reserve(1 + 8 + 8 + 4 + 4 + 2 + visible_count * 8);

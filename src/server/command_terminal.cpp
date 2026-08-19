@@ -4,8 +4,7 @@
 
 namespace snf::server
 {
-    CommandReleaseToken::CommandReleaseToken(CommandLifecycleSink& sink,
-                                             const snf::net::ConnectionId connection) noexcept
+    CommandReleaseToken::CommandReleaseToken(CommandLifecycleSink& sink, const snf::net::ConnectionId connection) noexcept
         : _sink(&sink)
         , _connection(connection)
     {
@@ -48,8 +47,7 @@ namespace snf::server
         }
     }
 
-    void CountingCommandLifecycleSink::onCommandReleased(
-        const snf::net::ConnectionId connection) noexcept
+    void CountingCommandLifecycleSink::onCommandReleased(const snf::net::ConnectionId connection) noexcept
     {
         static_cast<void>(connection);
         _releases.fetch_add(1, std::memory_order_relaxed);
@@ -59,8 +57,7 @@ namespace snf::server
         _terminals.fetch_add(1, std::memory_order_relaxed);
     }
 
-    void CountingCommandLifecycleSink::onCommandAdmissionRejected(
-        const snf::net::ConnectionId connection) noexcept
+    void CountingCommandLifecycleSink::onCommandAdmissionRejected(const snf::net::ConnectionId connection) noexcept
     {
         static_cast<void>(connection);
         _admission_rejections.fetch_add(1, std::memory_order_relaxed);

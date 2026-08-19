@@ -12,9 +12,7 @@ namespace
         const snf::server::PlayerId player{.value = 77};
 
         std::optional<snf::server::PlayerLoadResult> missing;
-        repository.asyncLoad(player,
-                             [&missing](snf::server::PlayerLoadResult result)
-                             { missing = std::move(result); });
+        repository.asyncLoad(player, [&missing](snf::server::PlayerLoadResult result) { missing = std::move(result); });
         assert(missing.has_value());
         assert(!missing->record.has_value());
 
@@ -30,21 +28,21 @@ namespace
                     },
                 .currency_balance = 600,
                 .purchased_item_count = 4,
+                .street_experience = 2500,
             },
             [&save](snf::server::PlayerSaveResult result) { save = result; });
         assert(save.has_value());
         assert(save->saved());
 
         std::optional<snf::server::PlayerLoadResult> loaded;
-        repository.asyncLoad(player,
-                             [&loaded](snf::server::PlayerLoadResult result)
-                             { loaded = std::move(result); });
+        repository.asyncLoad(player, [&loaded](snf::server::PlayerLoadResult result) { loaded = std::move(result); });
         assert(loaded.has_value());
         assert(loaded->record.has_value());
         assert(loaded->record->player == player);
         assert(loaded->record->handled_command_count == 42);
         assert(loaded->record->currency_balance == 600);
         assert(loaded->record->purchased_item_count == 4);
+        assert(loaded->record->street_experience == 2500);
         assert((loaded->record->last_location == snf::server::PlayerLocation{
                                                      .zone = snf::server::ZoneId{.value = 3},
                                                      .position = {.x = -4, .y = 5},

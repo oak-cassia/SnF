@@ -19,8 +19,7 @@ namespace
     std::uint64_t read_wakeup_count(const int descriptor)
     {
         std::uint64_t wakeup_count = 0;
-        assert(::read(descriptor, &wakeup_count, sizeof(wakeup_count)) ==
-               static_cast<ssize_t>(sizeof(wakeup_count)));
+        assert(::read(descriptor, &wakeup_count, sizeof(wakeup_count)) == static_cast<ssize_t>(sizeof(wakeup_count)));
         return wakeup_count;
     }
 
@@ -40,9 +39,7 @@ namespace
     void test_outbound_sink_hides_queue_and_wakeup()
     {
         const auto wake = make_wake_descriptor();
-        snf::server::OutboundChannel channel{
-            snf::server::OutboundChannelConfig{.capacity = 2, .max_slots_per_connection = 2},
-            wake.getDescriptor()};
+        snf::server::OutboundChannel channel{snf::server::OutboundChannelConfig{.capacity = 2, .max_slots_per_connection = 2}, wake.getDescriptor()};
         // The domain's view of the same object: reserving and committing are reachable
         // through it, draining and granting are not.
         snf::server::OutboundSink& sink = channel;
@@ -65,17 +62,14 @@ namespace
     void test_runtime_completion_is_authoritative_and_independent_from_outbound_capacity()
     {
         const auto outbound_wake = make_wake_descriptor();
-        snf::server::OutboundChannel full_outbound{
-            snf::server::OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1},
-            outbound_wake.getDescriptor()};
+        snf::server::OutboundChannel full_outbound{snf::server::OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1}, outbound_wake.getDescriptor()};
         snf::server::OutboundSink& sink = full_outbound;
         auto reservation = sink.tryReserve(CONNECTION, 1);
         assert(reservation);
         assert(sink.commit(*reservation, pong_action(1)));
 
         const auto event = make_wake_descriptor();
-        constexpr std::uint64_t required =
-            snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic);
+        constexpr std::uint64_t required = snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic);
         snf::runtime::RuntimeCompletionCoordinator completion{required, event.getDescriptor()};
 
         completion.notifyDrained(snf::runtime::RuntimeId::Logic);
@@ -92,9 +86,7 @@ namespace
     void test_outbound_saturation_defers_instead_of_blocking()
     {
         const auto wake = make_wake_descriptor();
-        snf::server::OutboundChannel channel{
-            snf::server::OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1},
-            wake.getDescriptor()};
+        snf::server::OutboundChannel channel{snf::server::OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1}, wake.getDescriptor()};
         snf::server::OutboundSink& sink = channel;
         const auto endpoint = std::make_shared<RecordingEndpoint>();
 
@@ -123,9 +115,7 @@ namespace
     void test_cancelling_outbound_releases_waiters_so_a_worker_can_drain()
     {
         const auto wake = make_wake_descriptor();
-        snf::server::OutboundChannel channel{
-            snf::server::OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1},
-            wake.getDescriptor()};
+        snf::server::OutboundChannel channel{snf::server::OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1}, wake.getDescriptor()};
         snf::server::OutboundSink& sink = channel;
         const auto endpoint = std::make_shared<RecordingEndpoint>();
 
@@ -150,9 +140,7 @@ namespace
         bool invalid_outbound_descriptor_rejected = false;
         try
         {
-            [[maybe_unused]] snf::server::OutboundChannel channel{
-                snf::server::OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1},
-                -1};
+            [[maybe_unused]] snf::server::OutboundChannel channel{snf::server::OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1}, -1};
         }
         catch (const std::invalid_argument&)
         {
@@ -164,8 +152,7 @@ namespace
         bool empty_required_mask_rejected = false;
         try
         {
-            [[maybe_unused]] snf::runtime::RuntimeCompletionCoordinator completion{
-                0, event.getDescriptor()};
+            [[maybe_unused]] snf::runtime::RuntimeCompletionCoordinator completion{0, event.getDescriptor()};
         }
         catch (const std::invalid_argument&)
         {

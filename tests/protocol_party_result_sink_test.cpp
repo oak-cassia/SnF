@@ -10,9 +10,7 @@ namespace
     void test_party_result_maps_sorted_members_to_wire()
     {
         const auto wake = snf::test::make_wake_descriptor();
-        snf::server::OutboundChannel outbound{
-            snf::server::OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1},
-            wake.getDescriptor()};
+        snf::server::OutboundChannel outbound{snf::server::OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1}, wake.getDescriptor()};
         snf::server::ProtocolPartyResultSink sink{outbound};
         const snf::net::ConnectionId connection{.descriptor = 4, .generation = 5};
 

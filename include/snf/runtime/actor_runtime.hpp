@@ -92,8 +92,7 @@ namespace snf::runtime
         // slot -- allocates a TaskId, and registers the operation on the actor
         // slot so the owning Worker can cancel it later. std::nullopt means the
         // reservation failed and the operation must not be started at all.
-        [[nodiscard]] virtual std::optional<ActorCompletionHandle>
-        tryBeginOperation(std::shared_ptr<AsyncOperationControl> operation) = 0;
+        [[nodiscard]] virtual std::optional<ActorCompletionHandle> tryBeginOperation(std::shared_ptr<AsyncOperationControl> operation) = 0;
 
         // Undoes tryBeginOperation when submitting the operation threw. The
         // operation never started, so no completion can arrive for it.
@@ -111,8 +110,7 @@ namespace snf::runtime
 
         // 소유 Worker의 dispatch/resume 안에서만 호출 가능하다.
         // nullopt = 용량 거부. 호출자는 타이머가 걸리지 않았음을 알고 대응해야 한다.
-        [[nodiscard]] virtual std::optional<TimerHandle>
-        trySchedule(std::chrono::milliseconds delay, ActorSubmission submission) = 0;
+        [[nodiscard]] virtual std::optional<TimerHandle> trySchedule(std::chrono::milliseconds delay, ActorSubmission submission) = 0;
 
         virtual void cancelTimer(TimerHandle handle) noexcept = 0;
 
@@ -196,12 +194,9 @@ namespace snf::runtime
     // co_await awaitAsyncOperation<Result>(context, [&](auto producer) {
     //     service.submit(request, std::move(producer));
     // });
-    template <typename T, typename Submit>
-    [[nodiscard]] AsyncOperationAwaiter<T, std::decay_t<Submit>>
-    awaitAsyncOperation(ActorContext& context, Submit&& submit)
+    template <typename T, typename Submit> [[nodiscard]] AsyncOperationAwaiter<T, std::decay_t<Submit>> awaitAsyncOperation(ActorContext& context, Submit&& submit)
     {
-        return AsyncOperationAwaiter<T, std::decay_t<Submit>>{context,
-                                                              std::forward<Submit>(submit)};
+        return AsyncOperationAwaiter<T, std::decay_t<Submit>>{context, std::forward<Submit>(submit)};
     }
 
     // A move-only, type-erased binding submission. Its constructor is private:
@@ -238,17 +233,12 @@ namespace snf::runtime
         };
 
         template <typename Payload>
-        ActorSubmission(const ActorBinding* binding,
-                        ActorKey target,
-                        ActorActivation activation,
-                        ActorAccounting accounting,
-                        Payload&& payload)
+        ActorSubmission(const ActorBinding* binding, ActorKey target, ActorActivation activation, ActorAccounting accounting, Payload&& payload)
             : _binding(binding)
             , _target(target)
             , _activation(activation)
             , _accounting(accounting)
-            , _payload(std::make_unique<TypedPayload<std::decay_t<Payload>>>(
-                  std::forward<Payload>(payload)))
+            , _payload(std::make_unique<TypedPayload<std::decay_t<Payload>>>(std::forward<Payload>(payload)))
         {
         }
 
@@ -284,26 +274,19 @@ namespace snf::runtime
         [[nodiscard]] virtual ActorKind kind() const noexcept = 0;
 
     protected:
-        template <typename Payload>
-        [[nodiscard]] ActorSubmission makeSubmission(const ActorKey target,
-                                                     const ActorActivation activation,
-                                                     const ActorAccounting accounting,
-                                                     Payload&& payload) const
+        template <typename Payload> [[nodiscard]] ActorSubmission makeSubmission(const ActorKey target, const ActorActivation activation, const ActorAccounting accounting, Payload&& payload) const
         {
             if (target.kind != kind())
             {
                 throw std::invalid_argument{"ActorBinding factory received another actor kind"};
             }
 
-            return ActorSubmission{
-                this, target, activation, accounting, std::forward<Payload>(payload)};
+            return ActorSubmission{this, target, activation, accounting, std::forward<Payload>(payload)};
         }
 
-        template <typename Payload>
-        [[nodiscard]] static const Payload& payloadAs(const ActorSubmission& submission)
+        template <typename Payload> [[nodiscard]] static const Payload& payloadAs(const ActorSubmission& submission)
         {
-            const auto* payload = dynamic_cast<const ActorSubmission::TypedPayload<Payload>*>(
-                submission._payload.get());
+            const auto* payload = dynamic_cast<const ActorSubmission::TypedPayload<Payload>*>(submission._payload.get());
             if (payload == nullptr)
             {
                 throw std::logic_error{"ActorBinding received an incompatible submission payload"};
@@ -319,10 +302,7 @@ namespace snf::runtime
         // Returning Suspended means the handler's task is parked on an operation
         // begun through the context. The binding keeps the task in its own slot
         // until resume() finishes it.
-        [[nodiscard]] virtual ActorDispatchResult dispatch(ActorSlot& slot,
-                                                           const ActorSubmission& submission,
-                                                           ActorContext& context,
-                                                           std::stop_token stop_token) = 0;
+        [[nodiscard]] virtual ActorDispatchResult dispatch(ActorSlot& slot, const ActorSubmission& submission, ActorContext& context, std::stop_token stop_token) = 0;
 
         // Builds this binding's submission for a tell addressed to one of its
         // actors. Only the binding that owns the payload type can restore it, which
@@ -333,8 +313,7 @@ namespace snf::runtime
         // Unlike the other factories this one runs on any Worker, concurrently, so
         // it must stay a read-only conversion. Do not add a cache, a sequence
         // counter or any other mutable state to an implementation.
-        [[nodiscard]] virtual std::optional<ActorSubmission> makeTell(ActorKey target,
-                                                                      TellPayload payload)
+        [[nodiscard]] virtual std::optional<ActorSubmission> makeTell(ActorKey target, TellPayload payload)
         {
             static_cast<void>(target);
             static_cast<void>(payload);
@@ -344,8 +323,7 @@ namespace snf::runtime
         // Called only after a previous dispatch/resume returned Suspended, and
         // only on the owning Worker. Returning Suspended again is allowed: a
         // handler may await more than once in sequence.
-        [[nodiscard]] virtual ActorDispatchResult
-        resume(ActorSlot& slot, ActorContext& context, std::stop_token stop_token) = 0;
+        [[nodiscard]] virtual ActorDispatchResult resume(ActorSlot& slot, ActorContext& context, std::stop_token stop_token) = 0;
 
         friend class ActorRuntime;
     };
@@ -419,8 +397,7 @@ namespace snf::runtime
         // Diagnostic hooks run on the owning Worker. Production leaves them
         // empty; tests can use them for deterministic scheduling/failures.
         std::function<void(std::size_t)> on_worker_start;
-        std::function<void(std::size_t, const ActorKey&, const ActorSubmission&)>
-            on_before_dispatch;
+        std::function<void(std::size_t, const ActorKey&, const ActorSubmission&)> on_before_dispatch;
         std::function<void()> on_worker_failure;
     };
 
@@ -517,13 +494,11 @@ namespace snf::runtime
         // whichever of success, failure or cancellation ended it.
         void finishActiveCommand(Worker& worker, ActorSlotEntry& slot, bool succeeded) noexcept;
         [[nodiscard]] bool publishContinuation(const ActorContinuation& continuation) noexcept;
-        void reportRejectedCompletion(const ActorContinuation& continuation,
-                                      ContinuationRejection rejection) noexcept;
+        void reportRejectedCompletion(const ActorContinuation& continuation, ContinuationRejection rejection) noexcept;
         void workerFinished() noexcept;
         void recordWorkerFailure(std::exception_ptr error) noexcept;
         void joinWorkers() noexcept;
-        static void updateMaximum(std::atomic<std::uint64_t>& target,
-                                  std::uint64_t candidate) noexcept;
+        static void updateMaximum(std::atomic<std::uint64_t>& target, std::uint64_t candidate) noexcept;
 
         const std::size_t _worker_count;
         const std::size_t _max_in_flight_operations;
@@ -533,8 +508,7 @@ namespace snf::runtime
         std::shared_ptr<WorkerContinuationEndpoint> _continuation_endpoint;
         RuntimeCompletionSink& _runtime_completion;
         std::function<void(std::size_t)> _on_worker_start;
-        std::function<void(std::size_t, const ActorKey&, const ActorSubmission&)>
-            _on_before_dispatch;
+        std::function<void(std::size_t, const ActorKey&, const ActorSubmission&)> _on_before_dispatch;
         std::function<void()> _on_worker_failure;
         std::stop_source _dispatch_stop_source;
 

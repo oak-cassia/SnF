@@ -111,11 +111,7 @@ namespace snf::server
     class TcpServer
     {
     public:
-        TcpServer(const TcpServerConfig& config,
-                  FrameIngress& frame_ingress,
-                  OutboundChannel& outbound,
-                  snf::runtime::RuntimeCompletionSource& runtime_completion,
-                  int outbound_event_descriptor);
+        TcpServer(const TcpServerConfig& config, FrameIngress& frame_ingress, OutboundChannel& outbound, snf::runtime::RuntimeCompletionSource& runtime_completion, int outbound_event_descriptor);
 
         TcpServer(const TcpServer&) = delete;
         TcpServer& operator=(const TcpServer&) = delete;

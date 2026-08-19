@@ -47,10 +47,7 @@ namespace snf::load
     class ClientConnection
     {
     public:
-        ClientConnection(std::string_view host,
-                         std::uint16_t port,
-                         std::chrono::milliseconds connect_timeout,
-                         ClientWorkload workload = {});
+        ClientConnection(std::string_view host, std::uint16_t port, std::chrono::milliseconds connect_timeout, ClientWorkload workload = {});
 
         ClientConnection(const ClientConnection&) = delete;
         ClientConnection& operator=(const ClientConnection&) = delete;
@@ -91,8 +88,7 @@ namespace snf::load
             std::chrono::steady_clock::time_point deadline;
         };
 
-        [[nodiscard]] std::optional<ClientError>
-        validateResponse(const snf::protocol::Frame& response) const;
+        [[nodiscard]] std::optional<ClientError> validateResponse(const snf::protocol::Frame& response) const;
         void completeRequest(snf::protocol::MessageType request_type) noexcept;
 
         enum class WorkloadStage

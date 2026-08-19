@@ -24,8 +24,7 @@ namespace
         return snf::net::ConnectionId{.descriptor = descriptor, .generation = 1};
     }
 
-    snf::server::OutboundAction send_action(const snf::net::ConnectionId connection,
-                                            const std::uint32_t request_id)
+    snf::server::OutboundAction send_action(const snf::net::ConnectionId connection, const std::uint32_t request_id)
     {
         return snf::server::SendFrame{
             .connection = connection,
@@ -46,8 +45,7 @@ namespace
     void test_reserve_then_commit_moves_capacity_from_reserved_to_queued()
     {
         const auto wake = make_wake_descriptor();
-        OutboundChannel channel{OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 4},
-                                wake.getDescriptor()};
+        OutboundChannel channel{OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 4}, wake.getDescriptor()};
         const auto connection = connection_of(4);
 
         auto reservation = channel.tryReserve(connection, 2);
@@ -74,8 +72,7 @@ namespace
     void test_zero_slot_reservation_is_valid_and_consumes_no_capacity()
     {
         const auto wake = make_wake_descriptor();
-        OutboundChannel channel{OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1},
-                                wake.getDescriptor()};
+        OutboundChannel channel{OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1}, wake.getDescriptor()};
 
         const auto reservation = channel.tryReserve(connection_of(4), 0);
         assert(reservation);
@@ -87,8 +84,7 @@ namespace
     void test_uncommitted_slots_return_when_the_reservation_dies()
     {
         const auto wake = make_wake_descriptor();
-        OutboundChannel channel{OutboundChannelConfig{.capacity = 2, .max_slots_per_connection = 2},
-                                wake.getDescriptor()};
+        OutboundChannel channel{OutboundChannelConfig{.capacity = 2, .max_slots_per_connection = 2}, wake.getDescriptor()};
         const auto connection = connection_of(4);
 
         {
@@ -110,8 +106,7 @@ namespace
     void test_a_tracked_connection_keeps_its_accounting_between_commands()
     {
         const auto wake = make_wake_descriptor();
-        OutboundChannel channel{OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 4},
-                                wake.getDescriptor()};
+        OutboundChannel channel{OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 4}, wake.getDescriptor()};
         const auto connection = connection_of(4);
         channel.trackConnection(connection);
 
@@ -144,8 +139,7 @@ namespace
     void test_an_untracked_connection_leaves_no_accounting_behind()
     {
         const auto wake = make_wake_descriptor();
-        OutboundChannel channel{OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 4},
-                                wake.getDescriptor()};
+        OutboundChannel channel{OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 4}, wake.getDescriptor()};
         // A command that reaches the channel after its session closed: the backend never
         // tracked this connection and will never forget it either, so its accounting has
         // to go as soon as it is idle. Otherwise connection churn accumulates entries.
@@ -170,8 +164,7 @@ namespace
     void test_reserve_defers_to_a_registered_waiter()
     {
         const auto wake = make_wake_descriptor();
-        OutboundChannel channel{OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 1},
-                                wake.getDescriptor()};
+        OutboundChannel channel{OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 1}, wake.getDescriptor()};
         const auto endpoint = std::make_shared<RecordingEndpoint>();
         const auto blocked = connection_of(4);
 
@@ -192,8 +185,7 @@ namespace
     void test_per_connection_limit_does_not_block_another_connection()
     {
         const auto wake = make_wake_descriptor();
-        OutboundChannel channel{OutboundChannelConfig{.capacity = 8, .max_slots_per_connection = 1},
-                                wake.getDescriptor()};
+        OutboundChannel channel{OutboundChannelConfig{.capacity = 8, .max_slots_per_connection = 1}, wake.getDescriptor()};
         const auto endpoint = std::make_shared<RecordingEndpoint>();
         const auto blocked = connection_of(4);
         const auto other = connection_of(5);
@@ -227,8 +219,7 @@ namespace
     void test_global_capacity_blocks_a_waiter_until_a_pop_frees_a_slot()
     {
         const auto wake = make_wake_descriptor();
-        OutboundChannel channel{OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1},
-                                wake.getDescriptor()};
+        OutboundChannel channel{OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1}, wake.getDescriptor()};
         const auto endpoint = std::make_shared<RecordingEndpoint>();
         const auto first = connection_of(4);
 
@@ -250,18 +241,14 @@ namespace
     void test_grant_pass_is_bounded_per_turn()
     {
         const auto wake = make_wake_descriptor();
-        OutboundChannel channel{OutboundChannelConfig{.capacity = 8,
-                                                      .max_slots_per_connection = 8,
-                                                      .max_grants_per_turn = 2},
-                                wake.getDescriptor()};
+        OutboundChannel channel{OutboundChannelConfig{.capacity = 8, .max_slots_per_connection = 8, .max_grants_per_turn = 2}, wake.getDescriptor()};
         const auto endpoint = std::make_shared<RecordingEndpoint>();
 
         std::vector<std::unique_ptr<TestWaiter>> waiters;
         for (std::uint64_t index = 0; index < 3; ++index)
         {
             auto waiter = std::make_unique<TestWaiter>(endpoint, index + 1);
-            static_cast<void>(channel.registerWaiter(
-                connection_of(static_cast<int>(index) + 4), 1, std::move(waiter->producer)));
+            static_cast<void>(channel.registerWaiter(connection_of(static_cast<int>(index) + 4), 1, std::move(waiter->producer)));
             waiters.push_back(std::move(waiter));
         }
 
@@ -274,8 +261,7 @@ namespace
     void test_award_that_lost_the_terminal_claim_returns_its_slots()
     {
         const auto wake = make_wake_descriptor();
-        OutboundChannel channel{OutboundChannelConfig{.capacity = 2, .max_slots_per_connection = 2},
-                                wake.getDescriptor()};
+        OutboundChannel channel{OutboundChannelConfig{.capacity = 2, .max_slots_per_connection = 2}, wake.getDescriptor()};
         const auto endpoint = std::make_shared<RecordingEndpoint>();
         const auto connection = connection_of(4);
 
@@ -297,8 +283,7 @@ namespace
     void test_withdrawn_waiter_is_never_granted()
     {
         const auto wake = make_wake_descriptor();
-        OutboundChannel channel{OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1},
-                                wake.getDescriptor()};
+        OutboundChannel channel{OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1}, wake.getDescriptor()};
         const auto endpoint = std::make_shared<RecordingEndpoint>();
         const auto connection = connection_of(4);
 
@@ -321,8 +306,7 @@ namespace
     void test_cancel_releases_every_waiter_with_an_invalid_reservation()
     {
         const auto wake = make_wake_descriptor();
-        OutboundChannel channel{OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 2},
-                                wake.getDescriptor()};
+        OutboundChannel channel{OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 2}, wake.getDescriptor()};
         const auto endpoint = std::make_shared<RecordingEndpoint>();
         const auto connection = connection_of(4);
 
@@ -354,8 +338,7 @@ namespace
     void test_registering_on_a_cancelled_channel_completes_the_producer()
     {
         const auto wake = make_wake_descriptor();
-        OutboundChannel channel{OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1},
-                                wake.getDescriptor()};
+        OutboundChannel channel{OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1}, wake.getDescriptor()};
         const auto endpoint = std::make_shared<RecordingEndpoint>();
         static_cast<void>(channel.cancel());
 
@@ -369,8 +352,7 @@ namespace
     void test_an_unsatisfiable_request_is_refused_without_throwing()
     {
         const auto wake = make_wake_descriptor();
-        OutboundChannel channel{OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 2},
-                                wake.getDescriptor()};
+        OutboundChannel channel{OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 2}, wake.getDescriptor()};
         const auto connection = connection_of(4);
 
         // Above the per-connection limit, so no amount of freed capacity would ever
@@ -387,10 +369,7 @@ namespace
     void test_admission_failures_collapse_and_overflow_uses_the_fail_safe()
     {
         const auto wake = make_wake_descriptor();
-        OutboundChannel channel{OutboundChannelConfig{.capacity = 1,
-                                                      .max_slots_per_connection = 1,
-                                                      .max_pending_admission_failures = 2},
-                                wake.getDescriptor()};
+        OutboundChannel channel{OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1, .max_pending_admission_failures = 2}, wake.getDescriptor()};
 
         // One connection reporting repeatedly holds one record, so it cannot crowd out
         // another connection's close.
@@ -432,9 +411,7 @@ namespace
         bool rejected = false;
         try
         {
-            OutboundChannel channel{
-                OutboundChannelConfig{.capacity = 2, .max_slots_per_connection = 4},
-                wake.getDescriptor()};
+            OutboundChannel channel{OutboundChannelConfig{.capacity = 2, .max_slots_per_connection = 4}, wake.getDescriptor()};
             static_cast<void>(channel.capacity());
         }
         catch (const std::invalid_argument&)

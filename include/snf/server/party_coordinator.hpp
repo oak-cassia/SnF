@@ -39,13 +39,11 @@ namespace snf::server
     public:
         explicit PartyCoordinator(std::size_t max_members = 8);
 
-        [[nodiscard]] std::optional<PartyAdmission>
-        tryJoin(snf::net::ConnectionId connection, PlayerId player, PartyId party);
+        [[nodiscard]] std::optional<PartyAdmission> tryJoin(snf::net::ConnectionId connection, PlayerId player, PartyId party);
         void rollbackJoin(const PartyAdmission& admission) noexcept;
         [[nodiscard]] std::optional<PartyRoute> routeFor(snf::net::ConnectionId connection) const;
         [[nodiscard]] std::size_t routeCountFor(PartyId party) const;
-        [[nodiscard]] std::optional<PartyRoute>
-        beginLeave(snf::net::ConnectionId connection) noexcept;
+        [[nodiscard]] std::optional<PartyRoute> beginLeave(snf::net::ConnectionId connection) noexcept;
         void rollbackLeave(const PartyRoute& route) noexcept;
         void completeLeave(const PartyRoute& route) noexcept;
         void abandon(snf::net::ConnectionId connection) noexcept;

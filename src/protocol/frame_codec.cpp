@@ -23,16 +23,13 @@ namespace
 
     std::uint32_t read_u32_big_endian(std::span<const std::byte> bytes, std::size_t offset)
     {
-        return (std::to_integer<std::uint32_t>(bytes[offset]) << 24U) |
-               (std::to_integer<std::uint32_t>(bytes[offset + 1]) << 16U) |
-               (std::to_integer<std::uint32_t>(bytes[offset + 2]) << 8U) |
+        return (std::to_integer<std::uint32_t>(bytes[offset]) << 24U) | (std::to_integer<std::uint32_t>(bytes[offset + 1]) << 16U) | (std::to_integer<std::uint32_t>(bytes[offset + 2]) << 8U) |
                std::to_integer<std::uint32_t>(bytes[offset + 3]);
     }
 
     std::uint16_t read_u16_big_endian(std::span<const std::byte> bytes, std::size_t offset)
     {
-        return (std::to_integer<std::uint16_t>(bytes[offset]) << 8U) |
-               (std::to_integer<std::uint16_t>(bytes[offset + 1]));
+        return (std::to_integer<std::uint16_t>(bytes[offset]) << 8U) | (std::to_integer<std::uint16_t>(bytes[offset + 1]));
     }
 
     bool is_known_message_type(const snf::protocol::MessageType type) noexcept
@@ -125,16 +122,14 @@ namespace snf::protocol
             return {};
         }
 
-        const auto request_type = static_cast<MessageType>(
-            read_u16_big_endian(buffer_view, _read_offset + FRAME_LENGTH_FIELD_SIZE));
+        const auto request_type = static_cast<MessageType>(read_u16_big_endian(buffer_view, _read_offset + FRAME_LENGTH_FIELD_SIZE));
 
         if (!is_known_message_type(request_type))
         {
             return fail(DecodeError::UnknownMessageType);
         }
 
-        const auto request_id = read_u32_big_endian(
-            buffer_view, _read_offset + FRAME_LENGTH_FIELD_SIZE + FRAME_TYPE_SIZE);
+        const auto request_id = read_u32_big_endian(buffer_view, _read_offset + FRAME_LENGTH_FIELD_SIZE + FRAME_TYPE_SIZE);
 
         const auto payload_begin = _read_offset + FRAME_LENGTH_FIELD_SIZE + MIN_BODY_SIZE;
         const auto payload_size = static_cast<std::size_t>(body_size - MIN_BODY_SIZE);
@@ -143,8 +138,7 @@ namespace snf::protocol
         Frame frame{
             .type = request_type,
             .request_id = request_id,
-            .payload = std::vector<std::byte>(buffer_view.begin() + payload_begin,
-                                              buffer_view.begin() + payload_end),
+            .payload = std::vector<std::byte>(buffer_view.begin() + payload_begin, buffer_view.begin() + payload_end),
         };
 
         _read_offset += full_frame_size;

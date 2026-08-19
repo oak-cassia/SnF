@@ -9,9 +9,7 @@
 
 namespace snf::server
 {
-    OutboundReservation::OutboundReservation(OutboundChannel& channel,
-                                             const snf::net::ConnectionId connection,
-                                             const std::size_t slots) noexcept
+    OutboundReservation::OutboundReservation(OutboundChannel& channel, const snf::net::ConnectionId connection, const std::size_t slots) noexcept
         : _channel(&channel)
         , _connection(connection)
         , _slots(slots)
@@ -77,8 +75,7 @@ namespace snf::server
         , _max_pending_admission_failures(config.max_pending_admission_failures)
         , _wake_descriptor(wake_descriptor)
     {
-        if (_capacity == 0 || _max_grants_per_turn == 0 || _max_waiters == 0 ||
-            _max_pending_admission_failures == 0 || _wake_descriptor < 0)
+        if (_capacity == 0 || _max_grants_per_turn == 0 || _max_waiters == 0 || _max_pending_admission_failures == 0 || _wake_descriptor < 0)
         {
             throw std::invalid_argument{"Invalid outbound channel configuration"};
         }
@@ -87,8 +84,7 @@ namespace snf::server
         // limit has to be reachable within the shared capacity.
         if (_max_slots_per_connection == 0 || _max_slots_per_connection > _capacity)
         {
-            throw std::invalid_argument{
-                "Outbound per-connection limit must fit within the shared capacity"};
+            throw std::invalid_argument{"Outbound per-connection limit must fit within the shared capacity"};
         }
     }
 
@@ -97,8 +93,7 @@ namespace snf::server
         return slots <= _max_slots_per_connection;
     }
 
-    std::optional<OutboundReservation>
-    OutboundChannel::tryReserve(const snf::net::ConnectionId connection, const std::size_t slots)
+    std::optional<OutboundReservation> OutboundChannel::tryReserve(const snf::net::ConnectionId connection, const std::size_t slots)
     {
         // Refused rather than thrown: a request this size can never be granted, and
         // turning one oversized result into a Worker failure would take down every
@@ -139,10 +134,7 @@ namespace snf::server
         return OutboundReservation{*this, connection, slots};
     }
 
-    ReservationTicket OutboundChannel::registerWaiter(
-        const snf::net::ConnectionId connection,
-        const std::size_t slots,
-        snf::runtime::AsyncOperationProducer<OutboundReservation> producer)
+    ReservationTicket OutboundChannel::registerWaiter(const snf::net::ConnectionId connection, const std::size_t slots, snf::runtime::AsyncOperationProducer<OutboundReservation> producer)
     {
         // Unlike tryReserve this is a caller error: a waiter is only registered after a
         // reserve attempt failed, and an unsatisfiable size must have been rejected
@@ -208,10 +200,7 @@ namespace snf::server
             }
 
             std::deque<Waiter>& waiters = usage_iterator->second.waiters;
-            const auto waiter_iterator = std::find_if(waiters.begin(),
-                                                      waiters.end(),
-                                                      [&ticket](const Waiter& waiter)
-                                                      { return waiter.ticket == ticket.value; });
+            const auto waiter_iterator = std::find_if(waiters.begin(), waiters.end(), [&ticket](const Waiter& waiter) { return waiter.ticket == ticket.value; });
             if (waiter_iterator == waiters.end())
             {
                 return;
@@ -283,8 +272,7 @@ namespace snf::server
         return takeFront();
     }
 
-    void OutboundChannel::drainInto(std::vector<PostedOutboundAction>& actions,
-                                    const std::size_t max_actions)
+    void OutboundChannel::drainInto(std::vector<PostedOutboundAction>& actions, const std::size_t max_actions)
     {
         std::lock_guard lock{_mutex};
         for (std::size_t drained = 0; drained < max_actions; ++drained)
@@ -342,8 +330,7 @@ namespace snf::server
             // whole stops after the per-turn budget however many connections wait.
             std::size_t remaining_rotations = _grant_order.size();
             std::size_t examined = 0;
-            while (awards.size() < _max_grants_per_turn && examined < _max_grants_per_turn &&
-                   remaining_rotations != 0 && !_grant_order.empty())
+            while (awards.size() < _max_grants_per_turn && examined < _max_grants_per_turn && remaining_rotations != 0 && !_grant_order.empty())
             {
                 --remaining_rotations;
                 ++examined;
@@ -402,8 +389,7 @@ namespace snf::server
         return awards.size();
     }
 
-    bool
-    OutboundChannel::takePendingAdmissionFailures(std::vector<snf::net::ConnectionId>& failures)
+    bool OutboundChannel::takePendingAdmissionFailures(std::vector<snf::net::ConnectionId>& failures)
     {
         std::lock_guard lock{_mutex};
         failures.reserve(failures.size() + _admission_failures.size());
@@ -543,8 +529,7 @@ namespace snf::server
         return _cancelled;
     }
 
-    void OutboundChannel::returnSlots(const snf::net::ConnectionId connection,
-                                      const std::size_t slots) noexcept
+    void OutboundChannel::returnSlots(const snf::net::ConnectionId connection, const std::size_t slots) noexcept
     {
         try
         {
@@ -601,12 +586,10 @@ namespace snf::server
 
     bool OutboundChannel::fits(const ConnectionUsage& usage, const std::size_t slots) const
     {
-        return _items.size() + _reserved_slots + slots <= _capacity &&
-               usage.queued + usage.reserved + slots <= _max_slots_per_connection;
+        return _items.size() + _reserved_slots + slots <= _capacity && usage.queued + usage.reserved + slots <= _max_slots_per_connection;
     }
 
-    void OutboundChannel::markGrantable(const snf::net::ConnectionId connection,
-                                        ConnectionUsage& usage)
+    void OutboundChannel::markGrantable(const snf::net::ConnectionId connection, ConnectionUsage& usage)
     {
         if (usage.waiters.empty() || usage.queued_for_grant)
         {
@@ -629,8 +612,7 @@ namespace snf::server
         // A tracked connection keeps its entry between commands, and an entry still
         // referenced by the grant order keeps it too: dropping that would leave a stale
         // key a later activation could duplicate.
-        if (usage.erase_when_idle && usage.queued == 0 && usage.reserved == 0 &&
-            usage.waiters.empty() && !usage.queued_for_grant)
+        if (usage.erase_when_idle && usage.queued == 0 && usage.reserved == 0 && usage.waiters.empty() && !usage.queued_for_grant)
         {
             _connections.erase(usage_iterator);
         }

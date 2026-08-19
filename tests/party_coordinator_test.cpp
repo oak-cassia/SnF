@@ -21,8 +21,7 @@ namespace
         assert(duplicate && !duplicate->created);
         assert(!parties.tryJoin(second_connection, first, party).has_value());
         assert(parties.tryJoin(second_connection, second, party).has_value());
-        const auto full =
-            parties.tryJoin(third_connection, snf::server::PlayerId{.value = 3}, party);
+        const auto full = parties.tryJoin(third_connection, snf::server::PlayerId{.value = 3}, party);
         assert(full && full->capacity_denied && !full->created);
         assert(!parties.routeFor(third_connection).has_value());
         assert(parties.routeCountFor(party) == 2);

@@ -14,17 +14,11 @@ namespace snf::server
     class PlayerActorIngress final : public PlayerCommandIngress
     {
     public:
-        PlayerActorIngress(snf::runtime::ActorRuntime& runtime,
-                           PlayerActorBinding& binding,
-                           CommandLifecycleSink& lifecycle) noexcept;
-        PlayerActorIngress(snf::runtime::ActorRuntime& runtime,
-                           PlayerActorBinding& provisional_binding,
-                           PlayerActorBinding& persistent_binding,
-                           CommandLifecycleSink& lifecycle) noexcept;
+        PlayerActorIngress(snf::runtime::ActorRuntime& runtime, PlayerActorBinding& binding, CommandLifecycleSink& lifecycle) noexcept;
+        PlayerActorIngress(snf::runtime::ActorRuntime& runtime, PlayerActorBinding& provisional_binding, PlayerActorBinding& persistent_binding, CommandLifecycleSink& lifecycle) noexcept;
 
         [[nodiscard]] snf::runtime::PostResult tryPost(PlayerInboundCommand command) override;
-        [[nodiscard]] snf::runtime::PostResult
-        tryPostConnectionClosed(PlayerActorId actor, ConnectionClosed closed) override;
+        [[nodiscard]] snf::runtime::PostResult tryPostConnectionClosed(PlayerActorId actor, ConnectionClosed closed) override;
         void close() noexcept override;
         void cancel() noexcept override;
 

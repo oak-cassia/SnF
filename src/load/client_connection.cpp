@@ -44,8 +44,7 @@ namespace
 
     snf::net::UniqueFileDescriptor create_client_socket()
     {
-        const int socket_descriptor =
-            ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+        const int socket_descriptor = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
         if (socket_descriptor == -1)
         {
             snf::net::throw_system_error("socket");
@@ -67,26 +66,22 @@ namespace
         return payload;
     }
 
-    template <typename Integer>
-    void append_big_endian(std::vector<std::byte>& payload, const Integer value)
+    template <typename Integer> void append_big_endian(std::vector<std::byte>& payload, const Integer value)
     {
         for (std::size_t remaining = sizeof(Integer); remaining > 0; --remaining)
         {
             const std::size_t shift = (remaining - 1) * 8;
-            payload.push_back(static_cast<std::byte>(
-                (static_cast<std::make_unsigned_t<Integer>>(value) >> shift) & 0xFFU));
+            payload.push_back(static_cast<std::byte>((static_cast<std::make_unsigned_t<Integer>>(value) >> shift) & 0xFFU));
         }
     }
 
-    template <typename Integer>
-    Integer read_big_endian(const std::vector<std::byte>& payload, const std::size_t offset)
+    template <typename Integer> Integer read_big_endian(const std::vector<std::byte>& payload, const std::size_t offset)
     {
         using Unsigned = std::make_unsigned_t<Integer>;
         Unsigned value = 0;
         for (std::size_t index = 0; index < sizeof(Integer); ++index)
         {
-            value = static_cast<Unsigned>((value << 8U) |
-                                          std::to_integer<unsigned int>(payload[offset + index]));
+            value = static_cast<Unsigned>((value << 8U) | std::to_integer<unsigned int>(payload[offset + index]));
         }
         return static_cast<Integer>(value);
     }
@@ -94,18 +89,13 @@ namespace
 
 namespace snf::load
 {
-    ClientConnection::ClientConnection(const std::string_view host,
-                                       const std::uint16_t port,
-                                       const std::chrono::milliseconds connect_timeout,
-                                       const ClientWorkload workload)
+    ClientConnection::ClientConnection(const std::string_view host, const std::uint16_t port, const std::chrono::milliseconds connect_timeout, const ClientWorkload workload)
         : _socket(create_client_socket())
         , _connect_deadline(std::chrono::steady_clock::now() + connect_timeout)
         , _workload(workload)
-        , _workload_stage(workload.scenario == LoadScenario::Ping ? WorkloadStage::Ping
-                                                                  : WorkloadStage::Authenticate)
+        , _workload_stage(workload.scenario == LoadScenario::Ping ? WorkloadStage::Ping : WorkloadStage::Authenticate)
     {
-        if (_workload.scenario == LoadScenario::Zone &&
-            (_workload.player_id == 0 || _workload.zone_id == 0))
+        if (_workload.scenario == LoadScenario::Zone && (_workload.player_id == 0 || _workload.zone_id == 0))
         {
             throw std::invalid_argument{"Zone workload identities must be non-zero"};
         }
@@ -116,8 +106,7 @@ namespace snf::load
         server_address.sin_port = htons(port);
 
         const std::string host_text{host};
-        const int conversion_result =
-            ::inet_pton(AF_INET, host_text.c_str(), &server_address.sin_addr);
+        const int conversion_result = ::inet_pton(AF_INET, host_text.c_str(), &server_address.sin_addr);
         if (conversion_result == 0)
         {
             throw std::invalid_argument{"Host must be a numeric IPv4 address"};
@@ -127,9 +116,7 @@ namespace snf::load
             snf::net::throw_system_error("inet_pton");
         }
 
-        const int connect_result = ::connect(_socket.getDescriptor(),
-                                             reinterpret_cast<const sockaddr*>(&server_address),
-                                             sizeof(server_address));
+        const int connect_result = ::connect(_socket.getDescriptor(), reinterpret_cast<const sockaddr*>(&server_address), sizeof(server_address));
 
         if (connect_result == 0)
         {
@@ -222,8 +209,7 @@ namespace snf::load
         switch (_workload_stage)
         {
         case WorkloadStage::Ping:
-            payload =
-                encode_timestamp(static_cast<std::uint64_t>(started_at.time_since_epoch().count()));
+            payload = encode_timestamp(static_cast<std::uint64_t>(started_at.time_since_epoch().count()));
             break;
         case WorkloadStage::Authenticate:
             request_type = snf::protocol::MessageType::Authenticate;
@@ -295,10 +281,7 @@ namespace snf::load
         // 현재 request를 모두 보내거나 socket이 EAGAIN을 반환할 때까지 전송한다.
         while (_send_offset < _pending_send_bytes.size())
         {
-            const auto sent_byte_count = ::send(_socket.getDescriptor(),
-                                                _pending_send_bytes.data() + _send_offset,
-                                                _pending_send_bytes.size() - _send_offset,
-                                                MSG_NOSIGNAL);
+            const auto sent_byte_count = ::send(_socket.getDescriptor(), _pending_send_bytes.data() + _send_offset, _pending_send_bytes.size() - _send_offset, MSG_NOSIGNAL);
 
             if (sent_byte_count > 0)
             {
@@ -346,13 +329,11 @@ namespace snf::load
         // 수신 가능한 response를 읽거나 EAGAIN, EOF, 오류가 발생할 때까지 반복한다.
         while (true)
         {
-            const auto received_byte_count =
-                ::recv(_socket.getDescriptor(), receive_buffer.data(), receive_buffer.size(), 0);
+            const auto received_byte_count = ::recv(_socket.getDescriptor(), receive_buffer.data(), receive_buffer.size(), 0);
 
             if (received_byte_count > 0)
             {
-                const std::span<const std::byte> received_bytes{
-                    receive_buffer.data(), static_cast<std::size_t>(received_byte_count)};
+                const std::span<const std::byte> received_bytes{receive_buffer.data(), static_cast<std::size_t>(received_byte_count)};
                 const auto decode_result = _frame_decoder.append(received_bytes);
 
                 if (!decode_result.ok())
@@ -369,8 +350,7 @@ namespace snf::load
                         return result;
                     }
 
-                    const auto round_trip_time =
-                        std::chrono::steady_clock::now() - _outstanding_request->started_at;
+                    const auto round_trip_time = std::chrono::steady_clock::now() - _outstanding_request->started_at;
                     result.round_trip_times.push_back(round_trip_time);
                     if (_outstanding_request->bootstrap)
                     {
@@ -415,8 +395,7 @@ namespace snf::load
         int pending_error = 0;
         auto option_size = static_cast<socklen_t>(sizeof(pending_error));
 
-        if (::getsockopt(
-                _socket.getDescriptor(), SOL_SOCKET, SO_ERROR, &pending_error, &option_size) == -1)
+        if (::getsockopt(_socket.getDescriptor(), SOL_SOCKET, SO_ERROR, &pending_error, &option_size) == -1)
         {
             return socket_error("getsockopt(SO_ERROR)", errno);
         }
@@ -429,8 +408,7 @@ namespace snf::load
         return std::nullopt;
     }
 
-    std::optional<ClientError>
-    ClientConnection::validateResponse(const snf::protocol::Frame& response) const
+    std::optional<ClientError> ClientConnection::validateResponse(const snf::protocol::Frame& response) const
     {
         if (!_outstanding_request)
         {
@@ -465,8 +443,7 @@ namespace snf::load
             return protocol_error("Response request ID does not match the request");
         }
 
-        if (_outstanding_request->request_type == snf::protocol::MessageType::Ping ||
-            _outstanding_request->request_type == snf::protocol::MessageType::Authenticate)
+        if (_outstanding_request->request_type == snf::protocol::MessageType::Ping || _outstanding_request->request_type == snf::protocol::MessageType::Authenticate)
         {
             if (response.payload != _outstanding_request->payload)
             {
@@ -476,18 +453,13 @@ namespace snf::load
         }
 
         constexpr std::size_t FIXED_ZONE_RESPONSE_SIZE = 1 + 8 + 8 + 4 + 4 + 2;
-        if (response.payload.size() < FIXED_ZONE_RESPONSE_SIZE ||
-            std::to_integer<std::uint8_t>(response.payload[0]) != 0 ||
-            read_big_endian<std::uint64_t>(response.payload, 1) != _workload.zone_id ||
+        if (response.payload.size() < FIXED_ZONE_RESPONSE_SIZE || std::to_integer<std::uint8_t>(response.payload[0]) != 0 || read_big_endian<std::uint64_t>(response.payload, 1) != _workload.zone_id ||
             read_big_endian<std::uint64_t>(response.payload, 9) == 0)
         {
             return protocol_error("Zone response fields do not match the request");
         }
         if (_outstanding_request->request_type == snf::protocol::MessageType::Move &&
-            (read_big_endian<std::int32_t>(response.payload, 17) !=
-                 _outstanding_request->expected_x ||
-             read_big_endian<std::int32_t>(response.payload, 21) !=
-                 _outstanding_request->expected_y))
+            (read_big_endian<std::int32_t>(response.payload, 17) != _outstanding_request->expected_x || read_big_endian<std::int32_t>(response.payload, 21) != _outstanding_request->expected_y))
         {
             return protocol_error("Move response position does not match the request");
         }
@@ -500,8 +472,7 @@ namespace snf::load
         std::uint64_t previous_player = 0;
         for (std::size_t index = 0; index < visible_count; ++index)
         {
-            const std::uint64_t player = read_big_endian<std::uint64_t>(
-                response.payload, FIXED_ZONE_RESPONSE_SIZE + index * 8U);
+            const std::uint64_t player = read_big_endian<std::uint64_t>(response.payload, FIXED_ZONE_RESPONSE_SIZE + index * 8U);
             if (player == 0 || player == _workload.player_id || player <= previous_player)
             {
                 return protocol_error("Zone response players are not a sorted peer set");

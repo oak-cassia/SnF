@@ -65,8 +65,7 @@ namespace
         sockaddr_in address{};
         auto address_size = static_cast<socklen_t>(sizeof(address));
 
-        if (::getsockname(
-                listener_descriptor, reinterpret_cast<sockaddr*>(&address), &address_size) == -1)
+        if (::getsockname(listener_descriptor, reinterpret_cast<sockaddr*>(&address), &address_size) == -1)
         {
             snf::net::throw_system_error("getsockname");
         }
@@ -77,11 +76,8 @@ namespace
 
 namespace snf::server
 {
-    TcpServer::TcpServer(const TcpServerConfig& config,
-                         FrameIngress& frame_ingress,
-                         OutboundChannel& outbound,
-                         snf::runtime::RuntimeCompletionSource& runtime_completion,
-                         const int outbound_event_descriptor)
+    TcpServer::TcpServer(
+        const TcpServerConfig& config, FrameIngress& frame_ingress, OutboundChannel& outbound, snf::runtime::RuntimeCompletionSource& runtime_completion, const int outbound_event_descriptor)
         : _listener(snf::net::create_tcp_listener(config.port))
         , _epoll(create_epoll_instance())
         , _stop_event(create_stop_event())
@@ -99,12 +95,8 @@ namespace snf::server
         , _runtime_completion(runtime_completion)
         , _outbound_event_descriptor(outbound_event_descriptor)
     {
-        if (_shutdown_grace_period < std::chrono::milliseconds::zero() ||
-            _metrics_report_interval < std::chrono::milliseconds::zero() ||
-            _max_pending_send_bytes == 0 ||
-            (_client_send_buffer_size && *_client_send_buffer_size <= 0) ||
-            _connection_lifecycle_capacity == 0 ||
-            _outbound_event_descriptor == snf::net::UniqueFileDescriptor::INVALID_FD)
+        if (_shutdown_grace_period < std::chrono::milliseconds::zero() || _metrics_report_interval < std::chrono::milliseconds::zero() || _max_pending_send_bytes == 0 ||
+            (_client_send_buffer_size && *_client_send_buffer_size <= 0) || _connection_lifecycle_capacity == 0 || _outbound_event_descriptor == snf::net::UniqueFileDescriptor::INVALID_FD)
         {
             throw std::invalid_argument{"Invalid TCP server configuration"};
         }
@@ -159,8 +151,7 @@ namespace snf::server
     {
         if (termination_signal_descriptor != snf::net::UniqueFileDescriptor::INVALID_FD)
         {
-            registerControlDescriptor(termination_signal_descriptor,
-                                      TERMINATION_SIGNAL_EVENT_TOKEN);
+            registerControlDescriptor(termination_signal_descriptor, TERMINATION_SIGNAL_EVENT_TOKEN);
         }
 
         std::array<epoll_event, MAX_READY_EVENTS> events{};
@@ -184,10 +175,7 @@ namespace snf::server
                 break;
             }
 
-            const int ready_event_count = ::epoll_wait(_epoll.getDescriptor(),
-                                                       events.data(),
-                                                       static_cast<int>(events.size()),
-                                                       getEpollWaitTimeout());
+            const int ready_event_count = ::epoll_wait(_epoll.getDescriptor(), events.data(), static_cast<int>(events.size()), getEpollWaitTimeout());
 
             if (ready_event_count == -1)
             {
@@ -224,9 +212,7 @@ namespace snf::server
                 const epoll_event& event = events[event_index];
                 const std::uint64_t event_token = event.data.u64;
 
-                if (event_token == STOP_EVENT_TOKEN ||
-                    event_token == TERMINATION_SIGNAL_EVENT_TOKEN ||
-                    event_token == OUTBOUND_EVENT_TOKEN)
+                if (event_token == STOP_EVENT_TOKEN || event_token == TERMINATION_SIGNAL_EVENT_TOKEN || event_token == OUTBOUND_EVENT_TOKEN)
                 {
                     continue;
                 }
@@ -241,8 +227,7 @@ namespace snf::server
                     continue;
                 }
 
-                const auto descriptor_iterator =
-                    _client_descriptors_by_event_token.find(event_token);
+                const auto descriptor_iterator = _client_descriptors_by_event_token.find(event_token);
                 if (descriptor_iterator == _client_descriptors_by_event_token.end())
                 {
                     continue;
@@ -254,9 +239,7 @@ namespace snf::server
 
             if (ready_event_count > 0)
             {
-                _reactor_turn_nanoseconds.record(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now() - turn_started_at));
+                _reactor_turn_nanoseconds.record(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - turn_started_at));
             }
 
             // Reported after the turn is measured so that the report itself does
@@ -288,17 +271,13 @@ namespace snf::server
         listener_event.events = EPOLLIN;
         listener_event.data.u64 = LISTENER_EVENT_TOKEN;
 
-        if (::epoll_ctl(_epoll.getDescriptor(),
-                        EPOLL_CTL_ADD,
-                        _listener.getDescriptor(),
-                        &listener_event) == -1)
+        if (::epoll_ctl(_epoll.getDescriptor(), EPOLL_CTL_ADD, _listener.getDescriptor(), &listener_event) == -1)
         {
             snf::net::throw_system_error("epoll_ctl(EPOLL_CTL_ADD listener)");
         }
     }
 
-    void TcpServer::registerControlDescriptor(const int descriptor,
-                                              const std::uint64_t event_token) const
+    void TcpServer::registerControlDescriptor(const int descriptor, const std::uint64_t event_token) const
     {
         epoll_event control_event{};
         control_event.events = EPOLLIN;
@@ -314,8 +293,7 @@ namespace snf::server
     {
         while (true)
         {
-            const int client_descriptor = ::accept4(
-                _listener.getDescriptor(), nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+            const int client_descriptor = ::accept4(_listener.getDescriptor(), nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
 
             if (client_descriptor == -1)
             {
@@ -346,8 +324,7 @@ namespace snf::server
 
             if (_client_send_buffer_size)
             {
-                snf::net::set_socket_send_buffer_size(client_socket.getDescriptor(),
-                                                      *_client_send_buffer_size);
+                snf::net::set_socket_send_buffer_size(client_socket.getDescriptor(), *_client_send_buffer_size);
             }
 
             if (_next_connection_generation == MAX_CONNECTION_GENERATION)
@@ -359,21 +336,14 @@ namespace snf::server
                 .descriptor = client_descriptor,
                 .generation = ++_next_connection_generation,
             };
-            const bool inserted =
-                _sessions
-                    .emplace(client_descriptor,
-                             snf::net::Session{
-                                 std::move(client_socket), connection, _max_pending_send_bytes})
-                    .second;
+            const bool inserted = _sessions.emplace(client_descriptor, snf::net::Session{std::move(client_socket), connection, _max_pending_send_bytes}).second;
 
             if (!inserted)
             {
                 throw std::logic_error{"A session already owns the client descriptor"};
             }
 
-            const bool event_token_inserted =
-                _client_descriptors_by_event_token.emplace(connection.generation, client_descriptor)
-                    .second;
+            const bool event_token_inserted = _client_descriptors_by_event_token.emplace(connection.generation, client_descriptor).second;
             if (!event_token_inserted)
             {
                 throw std::logic_error{"A client event token is already registered"};
@@ -383,8 +353,7 @@ namespace snf::server
             client_event.events = EPOLLIN | EPOLLRDHUP;
             client_event.data.u64 = connection.generation;
 
-            if (::epoll_ctl(
-                    _epoll.getDescriptor(), EPOLL_CTL_ADD, client_descriptor, &client_event) == -1)
+            if (::epoll_ctl(_epoll.getDescriptor(), EPOLL_CTL_ADD, client_descriptor, &client_event) == -1)
             {
                 snf::net::throw_system_error("epoll_ctl(EPOLL_CTL_ADD client)");
             }
@@ -407,8 +376,7 @@ namespace snf::server
         }
         bool should_update_events = false;
 
-        const bool has_read_event =
-            !_is_stopping && (event_flags & (EPOLLIN | EPOLLRDHUP | EPOLLHUP)) != 0;
+        const bool has_read_event = !_is_stopping && (event_flags & (EPOLLIN | EPOLLRDHUP | EPOLLHUP)) != 0;
 
         if (!close_cause && has_read_event)
         {
@@ -422,16 +390,13 @@ namespace snf::server
 
             while (true)
             {
-                const auto received_byte_count =
-                    ::recv(client_descriptor, receive_buffer.data(), receive_buffer.size(), 0);
+                const auto received_byte_count = ::recv(client_descriptor, receive_buffer.data(), receive_buffer.size(), 0);
 
                 if (received_byte_count > 0)
                 {
-                    const std::span<const std::byte> received_bytes{
-                        receive_buffer.data(), static_cast<std::size_t>(received_byte_count)};
+                    const std::span<const std::byte> received_bytes{receive_buffer.data(), static_cast<std::size_t>(received_byte_count)};
 
-                    auto decode_result =
-                        session_iterator->second.appendReceivedBytes(received_bytes);
+                    auto decode_result = session_iterator->second.appendReceivedBytes(received_bytes);
 
                     if (!decode_result.ok())
                     {
@@ -444,28 +409,23 @@ namespace snf::server
                     for (auto& frame : decode_result.frames)
                     {
                         ++_stats.received_frames;
-                        const snf::net::ConnectionId connection =
-                            session_iterator->second.getConnectionId();
+                        const snf::net::ConnectionId connection = session_iterator->second.getConnectionId();
                         const FramePostResult post_result = _frame_ingress.tryPost(FrameEnvelope{
                             .connection = connection,
                             .frame = std::move(frame),
                         });
                         if (post_result != FramePostResult::Accepted)
                         {
-                            if (post_result == FramePostResult::UnsupportedMessage ||
-                                post_result == FramePostResult::InvalidPayload)
+                            if (post_result == FramePostResult::UnsupportedMessage || post_result == FramePostResult::InvalidPayload)
                             {
                                 ++_stats.protocol_errors;
-                                std::cerr
-                                    << "Rejected message from client FD: " << client_descriptor
-                                    << '\n';
+                                std::cerr << "Rejected message from client FD: " << client_descriptor << '\n';
                                 close_cause = ConnectionCloseCause::ProtocolError;
                             }
                             else if (post_result == FramePostResult::Full)
                             {
                                 ++_stats.actor_queue_overflows;
-                                std::cerr << "Actor queue limit exceeded for client FD: "
-                                          << client_descriptor << '\n';
+                                std::cerr << "Actor queue limit exceeded for client FD: " << client_descriptor << '\n';
                                 close_cause = ConnectionCloseCause::Overflow;
                             }
                             else
@@ -522,8 +482,7 @@ namespace snf::server
                 should_update_events = true;
             }
 
-            if (_is_stopping && _logic_runtime_drained &&
-                !session_iterator->second.hasPendingSend())
+            if (_is_stopping && _logic_runtime_drained && !session_iterator->second.hasPendingSend())
             {
                 close_cause = ConnectionCloseCause::ServerShutdown;
             }
@@ -531,8 +490,7 @@ namespace snf::server
 
         if (!close_cause && (event_flags & (EPOLLRDHUP | EPOLLHUP)) != 0)
         {
-            close_cause = _is_stopping ? ConnectionCloseCause::ServerShutdown
-                                       : ConnectionCloseCause::PeerClosed;
+            close_cause = _is_stopping ? ConnectionCloseCause::ServerShutdown : ConnectionCloseCause::PeerClosed;
         }
 
         if (close_cause)
@@ -580,9 +538,7 @@ namespace snf::server
 
             for (PostedOutboundAction& posted : _drained_outbound_actions)
             {
-                _outbound_queue_wait_nanoseconds.record(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now() - posted.posted_at));
+                _outbound_queue_wait_nanoseconds.record(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - posted.posted_at));
                 handleOutboundAction(std::move(posted.action));
             }
 
@@ -606,8 +562,7 @@ namespace snf::server
 
     void TcpServer::closeConnectionsWithFailedOutboundAdmission()
     {
-        const bool close_all_sessions =
-            _outbound.takePendingAdmissionFailures(_failed_outbound_admissions);
+        const bool close_all_sessions = _outbound.takePendingAdmissionFailures(_failed_outbound_admissions);
 
         for (const snf::net::ConnectionId connection : _failed_outbound_admissions)
         {
@@ -617,8 +572,7 @@ namespace snf::server
             }
 
             ++_stats.outbound_admission_failures;
-            std::cerr << "Closing client FD " << connection.descriptor
-                      << " because its response could not be admitted to the outbound channel\n";
+            std::cerr << "Closing client FD " << connection.descriptor << " because its response could not be admitted to the outbound channel\n";
             removeSession(connection.descriptor, ConnectionCloseCause::Overflow);
         }
 
@@ -658,15 +612,12 @@ namespace snf::server
 
                     if (!session->enqueueFrame(network_action.frame))
                     {
-                        std::cerr << "Send queue limit exceeded for client FD: "
-                                  << network_action.connection.descriptor << '\n';
-                        removeSession(network_action.connection.descriptor,
-                                      ConnectionCloseCause::Overflow);
+                        std::cerr << "Send queue limit exceeded for client FD: " << network_action.connection.descriptor << '\n';
+                        removeSession(network_action.connection.descriptor, ConnectionCloseCause::Overflow);
                         return;
                     }
 
-                    _session_pending_send_bytes.record(
-                        static_cast<std::uint64_t>(session->getPendingSendByteCount()));
+                    _session_pending_send_bytes.record(static_cast<std::uint64_t>(session->getPendingSendByteCount()));
                     updateClientEvents(*session);
                 }
                 else
@@ -677,11 +628,8 @@ namespace snf::server
                     }
 
                     ++_stats.protocol_errors;
-                    std::cerr << "Closing client FD " << network_action.connection.descriptor
-                              << " because Logic runtime requested "
-                              << to_string(network_action.reason) << '\n';
-                    removeSession(network_action.connection.descriptor,
-                                  ConnectionCloseCause::ProtocolError);
+                    std::cerr << "Closing client FD " << network_action.connection.descriptor << " because Logic runtime requested " << to_string(network_action.reason) << '\n';
+                    removeSession(network_action.connection.descriptor, ConnectionCloseCause::ProtocolError);
                 }
             },
             std::move(action));
@@ -761,9 +709,7 @@ namespace snf::server
 
         if (_listener.isValid())
         {
-            if (::epoll_ctl(
-                    _epoll.getDescriptor(), EPOLL_CTL_DEL, _listener.getDescriptor(), nullptr) ==
-                -1)
+            if (::epoll_ctl(_epoll.getDescriptor(), EPOLL_CTL_DEL, _listener.getDescriptor(), nullptr) == -1)
             {
                 snf::net::throw_system_error("epoll_ctl(EPOLL_CTL_DEL listener)");
             }
@@ -788,8 +734,7 @@ namespace snf::server
             }
         }
 
-        _stats.pending_connection_closes_high_water_mark = std::max(
-            _stats.pending_connection_closes_high_water_mark, _pending_connection_closes.size());
+        _stats.pending_connection_closes_high_water_mark = std::max(_stats.pending_connection_closes_high_water_mark, _pending_connection_closes.size());
         retryPendingConnectionCloses();
 
         if (_logic_runtime_drained && isControlDrained())
@@ -841,8 +786,7 @@ namespace snf::server
         while (session.hasPendingSend())
         {
             const std::span<const std::byte> pending_bytes = session.getPendingSendBytes();
-            const auto sent_byte_count = ::send(
-                session.getDescriptor(), pending_bytes.data(), pending_bytes.size(), MSG_NOSIGNAL);
+            const auto sent_byte_count = ::send(session.getDescriptor(), pending_bytes.data(), pending_bytes.size(), MSG_NOSIGNAL);
 
             if (sent_byte_count > 0)
             {
@@ -885,9 +829,7 @@ namespace snf::server
             client_event.events |= EPOLLOUT;
         }
 
-        if (::epoll_ctl(
-                _epoll.getDescriptor(), EPOLL_CTL_MOD, session.getDescriptor(), &client_event) ==
-            -1)
+        if (::epoll_ctl(_epoll.getDescriptor(), EPOLL_CTL_MOD, session.getDescriptor(), &client_event) == -1)
         {
             snf::net::throw_system_error("epoll_ctl(EPOLL_CTL_MOD client)");
         }
@@ -906,8 +848,7 @@ namespace snf::server
         if (::epoll_ctl(_epoll.getDescriptor(), EPOLL_CTL_DEL, client_descriptor, nullptr) == -1)
         {
             const int error_number = errno;
-            std::cerr << "Failed to remove client FD " << client_descriptor
-                      << " from epoll: " << std::generic_category().message(error_number) << '\n';
+            std::cerr << "Failed to remove client FD " << client_descriptor << " from epoll: " << std::generic_category().message(error_number) << '\n';
         }
 
         _client_descriptors_by_event_token.erase(connection.generation);
@@ -956,17 +897,14 @@ namespace snf::server
                 throw std::logic_error{"Connection lifecycle capacity invariant violated"};
             }
             _pending_connection_closes.push_back(std::move(closed));
-            _stats.pending_connection_closes_high_water_mark =
-                std::max(_stats.pending_connection_closes_high_water_mark,
-                         _pending_connection_closes.size());
+            _stats.pending_connection_closes_high_water_mark = std::max(_stats.pending_connection_closes_high_water_mark, _pending_connection_closes.size());
             return;
         }
     }
 
     void TcpServer::retryPendingConnectionCloses()
     {
-        const std::size_t attempt_count =
-            std::min(_pending_connection_closes.size(), CONNECTION_CLOSE_RETRY_BUDGET);
+        const std::size_t attempt_count = std::min(_pending_connection_closes.size(), CONNECTION_CLOSE_RETRY_BUDGET);
 
         for (std::size_t attempt = 0; attempt < attempt_count; ++attempt)
         {
@@ -1014,9 +952,7 @@ namespace snf::server
 
     bool TcpServer::hasAvailableConnectionLifecycleSlot() const noexcept
     {
-        return _sessions.size() < _connection_lifecycle_capacity &&
-               _pending_connection_closes.size() <
-                   _connection_lifecycle_capacity - _sessions.size();
+        return _sessions.size() < _connection_lifecycle_capacity && _pending_connection_closes.size() < _connection_lifecycle_capacity - _sessions.size();
     }
 
     bool TcpServer::isControlDrained() const noexcept
@@ -1026,8 +962,7 @@ namespace snf::server
 
     bool TcpServer::hasMetricsReporting() const noexcept
     {
-        return _on_metrics_interval != nullptr &&
-               _metrics_report_interval > std::chrono::milliseconds::zero();
+        return _on_metrics_interval != nullptr && _metrics_report_interval > std::chrono::milliseconds::zero();
     }
 
     bool TcpServer::hasShutdownDeadlineExpired() const noexcept
@@ -1040,10 +975,8 @@ namespace snf::server
         int timeout = -1;
         if (_is_stopping)
         {
-            const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
-                _shutdown_deadline - std::chrono::steady_clock::now());
-            timeout = static_cast<int>(
-                std::clamp<std::int64_t>(remaining.count(), 0, std::numeric_limits<int>::max()));
+            const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(_shutdown_deadline - std::chrono::steady_clock::now());
+            timeout = static_cast<int>(std::clamp<std::int64_t>(remaining.count(), 0, std::numeric_limits<int>::max()));
         }
 
         if (!_pending_connection_closes.empty())
@@ -1054,10 +987,8 @@ namespace snf::server
 
         if (hasMetricsReporting())
         {
-            const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
-                _next_metrics_report - std::chrono::steady_clock::now());
-            const int report_timeout = static_cast<int>(
-                std::clamp<std::int64_t>(remaining.count(), 0, std::numeric_limits<int>::max()));
+            const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(_next_metrics_report - std::chrono::steady_clock::now());
+            const int report_timeout = static_cast<int>(std::clamp<std::int64_t>(remaining.count(), 0, std::numeric_limits<int>::max()));
             timeout = timeout == -1 ? report_timeout : std::min(timeout, report_timeout);
         }
 

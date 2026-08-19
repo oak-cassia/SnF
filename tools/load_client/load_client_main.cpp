@@ -38,14 +38,12 @@ namespace
         return static_cast<std::uint16_t>(value);
     }
 
-    std::optional<std::size_t> parse_positive_size(const std::string_view text,
-                                                   const std::size_t maximum)
+    std::optional<std::size_t> parse_positive_size(const std::string_view text, const std::size_t maximum)
     {
         std::size_t value = 0;
         const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
 
-        if (error != std::errc{} || end != text.data() + text.size() || value == 0 ||
-            value > maximum)
+        if (error != std::errc{} || end != text.data() + text.size() || value == 0 || value > maximum)
         {
             return std::nullopt;
         }
@@ -60,8 +58,7 @@ namespace
             return 0.0;
         }
 
-        const auto index = static_cast<std::size_t>(
-            std::ceil(ratio * static_cast<double>(sorted_values.size())) - 1.0);
+        const auto index = static_cast<std::size_t>(std::ceil(ratio * static_cast<double>(sorted_values.size())) - 1.0);
         return sorted_values[std::min(index, sorted_values.size() - 1)];
     }
 }
@@ -80,10 +77,8 @@ int main(const int argument_count, char* arguments[])
             return 0;
         }
 
-        if (argument != "--host" && argument != "--port" && argument != "--connections" &&
-            argument != "--duration" && argument != "--requests-per-second" &&
-            argument != "--scenario" && argument != "--players-per-zone" &&
-            argument != "--connect-timeout-ms" && argument != "--request-timeout-ms")
+        if (argument != "--host" && argument != "--port" && argument != "--connections" && argument != "--duration" && argument != "--requests-per-second" && argument != "--scenario" &&
+            argument != "--players-per-zone" && argument != "--connect-timeout-ms" && argument != "--request-timeout-ms")
         {
             std::cerr << "Unknown option: " << argument << '\n';
             return 1;
@@ -215,45 +210,28 @@ int main(const int argument_count, char* arguments[])
     gameplay_round_trip_milliseconds.reserve(result.gameplay_round_trip_times.size());
     for (const auto round_trip_time : result.gameplay_round_trip_times)
     {
-        gameplay_round_trip_milliseconds.push_back(
-            std::chrono::duration<double, std::milli>{round_trip_time}.count());
+        gameplay_round_trip_milliseconds.push_back(std::chrono::duration<double, std::milli>{round_trip_time}.count());
     }
     std::ranges::sort(gameplay_round_trip_milliseconds);
 
-    const double average_round_trip_milliseconds =
-        round_trip_milliseconds.empty()
-            ? 0.0
-            : total_round_trip_milliseconds / round_trip_milliseconds.size();
+    const double average_round_trip_milliseconds = round_trip_milliseconds.empty() ? 0.0 : total_round_trip_milliseconds / round_trip_milliseconds.size();
 
-    const double load_duration_seconds =
-        std::chrono::duration<double>{result.load_duration}.count();
-    const double throughput =
-        load_duration_seconds > 0.0
-            ? static_cast<double>(result.received_responses) / load_duration_seconds
-            : 0.0;
+    const double load_duration_seconds = std::chrono::duration<double>{result.load_duration}.count();
+    const double throughput = load_duration_seconds > 0.0 ? static_cast<double>(result.received_responses) / load_duration_seconds : 0.0;
 
-    std::cout << "Connections: " << result.successful_connections << '/'
-              << result.requested_connections << " succeeded, " << result.failed_connections
-              << " failed, peak active " << result.maximum_active_connections << '\n';
-    std::cout << "Requests: " << result.sent_requests << " sent, " << result.received_responses
-              << " received, " << result.request_timeouts << " timeout, "
-              << result.invalid_responses << " invalid, " << result.socket_errors
-              << " socket error\n";
-    std::cout << "Workload: " << result.sent_bootstrap_requests << '/'
-              << result.received_bootstrap_responses << " bootstrap sent/received, "
-              << result.sent_gameplay_requests << '/' << result.received_gameplay_responses
-              << " gameplay sent/received\n";
+    std::cout << "Connections: " << result.successful_connections << '/' << result.requested_connections << " succeeded, " << result.failed_connections << " failed, peak active "
+              << result.maximum_active_connections << '\n';
+    std::cout << "Requests: " << result.sent_requests << " sent, " << result.received_responses << " received, " << result.request_timeouts << " timeout, " << result.invalid_responses << " invalid, "
+              << result.socket_errors << " socket error\n";
+    std::cout << "Workload: " << result.sent_bootstrap_requests << '/' << result.received_bootstrap_responses << " bootstrap sent/received, " << result.sent_gameplay_requests << '/'
+              << result.received_gameplay_responses << " gameplay sent/received\n";
 
-    std::cout << std::fixed << std::setprecision(3) << "Throughput: " << throughput
-              << " responses/s\n"
-              << "RTT ms: avg " << average_round_trip_milliseconds << ", p50 "
-              << percentile(round_trip_milliseconds, 0.50) << ", p95 "
-              << percentile(round_trip_milliseconds, 0.95) << ", p99 "
+    std::cout << std::fixed << std::setprecision(3) << "Throughput: " << throughput << " responses/s\n"
+              << "RTT ms: avg " << average_round_trip_milliseconds << ", p50 " << percentile(round_trip_milliseconds, 0.50) << ", p95 " << percentile(round_trip_milliseconds, 0.95) << ", p99 "
               << percentile(round_trip_milliseconds, 0.99) << '\n';
     if (!gameplay_round_trip_milliseconds.empty())
     {
-        std::cout << "Gameplay RTT ms: p50 " << percentile(gameplay_round_trip_milliseconds, 0.50)
-                  << ", p95 " << percentile(gameplay_round_trip_milliseconds, 0.95) << ", p99 "
+        std::cout << "Gameplay RTT ms: p50 " << percentile(gameplay_round_trip_milliseconds, 0.50) << ", p95 " << percentile(gameplay_round_trip_milliseconds, 0.95) << ", p99 "
                   << percentile(gameplay_round_trip_milliseconds, 0.99) << '\n';
     }
 

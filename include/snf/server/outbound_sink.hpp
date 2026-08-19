@@ -31,16 +31,12 @@ namespace snf::server
 
         // Non-blocking. std::nullopt means capacity must be awaited through
         // registerWaiter; it is not an invitation to retry in a loop.
-        [[nodiscard]] virtual std::optional<OutboundReservation>
-        tryReserve(snf::net::ConnectionId connection, std::size_t slots) = 0;
+        [[nodiscard]] virtual std::optional<OutboundReservation> tryReserve(snf::net::ConnectionId connection, std::size_t slots) = 0;
 
         // The producer is completed with a valid reservation once capacity is
         // granted, and with an invalid one if the backend is cancelled first. Either
         // way the terminal outcome the awaiting Worker is owed always arrives.
-        [[nodiscard]] virtual ReservationTicket
-        registerWaiter(snf::net::ConnectionId connection,
-                       std::size_t slots,
-                       snf::runtime::AsyncOperationProducer<OutboundReservation> producer) = 0;
+        [[nodiscard]] virtual ReservationTicket registerWaiter(snf::net::ConnectionId connection, std::size_t slots, snf::runtime::AsyncOperationProducer<OutboundReservation> producer) = 0;
 
         // Owning Worker only, after it has claimed the operation cancelled. Withdrawing
         // is what keeps a cancelled await from leaving a waiter behind.
@@ -48,8 +44,7 @@ namespace snf::server
 
         // Consumes one reserved slot. false means the backend was cancelled; a
         // reserved slot is otherwise guaranteed, so this never fails for capacity.
-        [[nodiscard]] virtual bool commit(OutboundReservation& reservation,
-                                          OutboundAction action) = 0;
+        [[nodiscard]] virtual bool commit(OutboundReservation& reservation, OutboundAction action) = 0;
 
         // Records a connection whose emission could not even be admitted, so the
         // backend closes it rather than dropping its response silently. Reports for one

@@ -26,16 +26,13 @@ namespace snf::test
     class RecordingContinuationEndpoint final : public snf::runtime::ContinuationEndpoint
     {
     public:
-        [[nodiscard]] bool
-        publish(const snf::runtime::ActorContinuation& continuation) noexcept override
+        [[nodiscard]] bool publish(const snf::runtime::ActorContinuation& continuation) noexcept override
         {
             published.push_back(continuation);
             return true;
         }
 
-        void reportRejectedCompletion(
-            const snf::runtime::ActorContinuation&,
-            const snf::runtime::ContinuationRejection rejection) noexcept override
+        void reportRejectedCompletion(const snf::runtime::ActorContinuation&, const snf::runtime::ContinuationRejection rejection) noexcept override
         {
             ++rejected_count;
             last_rejection = rejection;
@@ -53,8 +50,7 @@ namespace snf::test
         using State = snf::runtime::AsyncOperationState<snf::server::OutboundReservation>;
         using Producer = snf::runtime::AsyncOperationProducer<snf::server::OutboundReservation>;
 
-        ReservationWaiter(const std::shared_ptr<RecordingContinuationEndpoint>& endpoint,
-                          const std::uint64_t task_id)
+        ReservationWaiter(const std::shared_ptr<RecordingContinuationEndpoint>& endpoint, const std::uint64_t task_id)
             : state(std::make_shared<State>())
             , producer(state,
                        snf::runtime::ActorCompletionHandle{

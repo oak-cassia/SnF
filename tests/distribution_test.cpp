@@ -17,8 +17,7 @@ namespace
     std::uint64_t reference_percentile(std::vector<std::uint64_t> values, const double ratio)
     {
         std::ranges::sort(values);
-        const auto rank =
-            static_cast<std::size_t>(std::ceil(ratio * static_cast<double>(values.size())));
+        const auto rank = static_cast<std::size_t>(std::ceil(ratio * static_cast<double>(values.size())));
         return values[std::min(rank == 0 ? 0 : rank - 1, values.size() - 1)];
     }
 
@@ -54,12 +53,7 @@ namespace
 
     void test_a_single_sample_is_reported_exactly()
     {
-        for (const std::uint64_t value : {std::uint64_t{0},
-                                          std::uint64_t{1},
-                                          std::uint64_t{15},
-                                          std::uint64_t{16},
-                                          std::uint64_t{4095},
-                                          std::uint64_t{1'000'000}})
+        for (const std::uint64_t value : {std::uint64_t{0}, std::uint64_t{1}, std::uint64_t{15}, std::uint64_t{16}, std::uint64_t{4095}, std::uint64_t{1'000'000}})
         {
             snf::runtime::Distribution distribution;
             distribution.record(value);
@@ -111,9 +105,7 @@ namespace
         assert(snapshot.sample_count == 1'000);
         assert(snapshot.max == 5'000'009);
 
-        for (const auto& [reported, ratio] : {std::pair{snapshot.p50, 0.50},
-                                              std::pair{snapshot.p95, 0.95},
-                                              std::pair{snapshot.p99, 0.99}})
+        for (const auto& [reported, ratio] : {std::pair{snapshot.p50, 0.50}, std::pair{snapshot.p95, 0.95}, std::pair{snapshot.p99, 0.99}})
         {
             const std::uint64_t expected = reference_percentile(values, ratio);
             assert(reported >= expected);
@@ -123,8 +115,7 @@ namespace
 
     void test_percentiles_saturate_above_the_representable_bound()
     {
-        constexpr std::uint64_t OVERFLOWING_SAMPLE =
-            snf::runtime::Distribution::REPRESENTABLE_UPPER_BOUND + 1'000;
+        constexpr std::uint64_t OVERFLOWING_SAMPLE = snf::runtime::Distribution::REPRESENTABLE_UPPER_BOUND + 1'000;
 
         snf::runtime::Distribution distribution;
         distribution.record(OVERFLOWING_SAMPLE);

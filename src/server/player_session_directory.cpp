@@ -4,8 +4,7 @@
 
 namespace snf::server
 {
-    PlayerAttachResult PlayerSessionDirectory::tryAttach(const snf::net::ConnectionId connection,
-                                                         const PlayerId player)
+    PlayerAttachResult PlayerSessionDirectory::tryAttach(const snf::net::ConnectionId connection, const PlayerId player)
     {
         std::lock_guard lock{_mutex};
 
@@ -14,17 +13,14 @@ namespace snf::server
             return PlayerAttachResult::ProvisionalActivity;
         }
 
-        if (const auto connection_iterator = _sessions_by_connection.find(connection);
-            connection_iterator != _sessions_by_connection.end())
+        if (const auto connection_iterator = _sessions_by_connection.find(connection); connection_iterator != _sessions_by_connection.end())
         {
             if (connection_iterator->second.state == State::Closing)
             {
                 return PlayerAttachResult::Closing;
             }
 
-            return connection_iterator->second.player == player
-                       ? PlayerAttachResult::AlreadyAttached
-                       : PlayerAttachResult::ConnectionConflict;
+            return connection_iterator->second.player == player ? PlayerAttachResult::AlreadyAttached : PlayerAttachResult::ConnectionConflict;
         }
 
         if (_connections_by_player.contains(player))
@@ -52,14 +48,11 @@ namespace snf::server
         return PlayerAttachResult::Attached;
     }
 
-    void PlayerSessionDirectory::rollbackAttach(const snf::net::ConnectionId connection,
-                                                const PlayerId player) noexcept
+    void PlayerSessionDirectory::rollbackAttach(const snf::net::ConnectionId connection, const PlayerId player) noexcept
     {
         std::lock_guard lock{_mutex};
         const auto connection_iterator = _sessions_by_connection.find(connection);
-        if (connection_iterator == _sessions_by_connection.end() ||
-            connection_iterator->second.player != player ||
-            connection_iterator->second.state != State::Active)
+        if (connection_iterator == _sessions_by_connection.end() || connection_iterator->second.player != player || connection_iterator->second.state != State::Active)
         {
             return;
         }
@@ -79,15 +72,13 @@ namespace snf::server
         return _provisional_activity.insert(connection).second;
     }
 
-    void PlayerSessionDirectory::clearProvisionalActivity(
-        const snf::net::ConnectionId connection) noexcept
+    void PlayerSessionDirectory::clearProvisionalActivity(const snf::net::ConnectionId connection) noexcept
     {
         std::lock_guard lock{_mutex};
         _provisional_activity.erase(connection);
     }
 
-    std::optional<PlayerId>
-    PlayerSessionDirectory::playerFor(const snf::net::ConnectionId connection) const
+    std::optional<PlayerId> PlayerSessionDirectory::playerFor(const snf::net::ConnectionId connection) const
     {
         std::lock_guard lock{_mutex};
         const auto iterator = _sessions_by_connection.find(connection);
@@ -99,17 +90,14 @@ namespace snf::server
         return iterator->second.player;
     }
 
-    std::optional<PlayerLocation>
-    PlayerSessionDirectory::locationFor(const snf::net::ConnectionId connection) const
+    std::optional<PlayerLocation> PlayerSessionDirectory::locationFor(const snf::net::ConnectionId connection) const
     {
         std::lock_guard lock{_mutex};
         const auto iterator = _sessions_by_connection.find(connection);
-        return iterator == _sessions_by_connection.end() ? std::nullopt
-                                                         : iterator->second.last_location;
+        return iterator == _sessions_by_connection.end() ? std::nullopt : iterator->second.last_location;
     }
 
-    PlayerLocationSnapshot
-    PlayerSessionDirectory::locationSnapshotFor(const snf::net::ConnectionId connection) const
+    PlayerLocationSnapshot PlayerSessionDirectory::locationSnapshotFor(const snf::net::ConnectionId connection) const
     {
         std::lock_guard lock{_mutex};
         const auto iterator = _sessions_by_connection.find(connection);
@@ -123,8 +111,7 @@ namespace snf::server
         };
     }
 
-    void PlayerSessionDirectory::noteLocation(const snf::net::ConnectionId connection,
-                                              std::optional<PlayerLocation> location) noexcept
+    void PlayerSessionDirectory::noteLocation(const snf::net::ConnectionId connection, std::optional<PlayerLocation> location) noexcept
     {
         std::lock_guard lock{_mutex};
         const auto iterator = _sessions_by_connection.find(connection);
@@ -169,8 +156,7 @@ namespace snf::server
 
         const snf::net::ConnectionId connection = player_iterator->second;
         const auto connection_iterator = _sessions_by_connection.find(connection);
-        if (connection_iterator == _sessions_by_connection.end() ||
-            connection_iterator->second.state != State::Closing)
+        if (connection_iterator == _sessions_by_connection.end() || connection_iterator->second.state != State::Closing)
         {
             return;
         }

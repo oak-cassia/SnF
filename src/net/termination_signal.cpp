@@ -19,8 +19,7 @@ namespace snf::net
             throw_system_error("sigprocmask(SIG_BLOCK)");
         }
 
-        const int signal_descriptor =
-            ::signalfd(-1, &termination_signals, SFD_NONBLOCK | SFD_CLOEXEC);
+        const int signal_descriptor = ::signalfd(-1, &termination_signals, SFD_NONBLOCK | SFD_CLOEXEC);
         if (signal_descriptor == -1)
         {
             throw_system_error("signalfd");

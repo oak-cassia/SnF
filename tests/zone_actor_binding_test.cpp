@@ -48,20 +48,18 @@ namespace
 
         const std::thread::id caller = std::this_thread::get_id();
         snf::server::CountingCommandLifecycleSink lifecycle;
-        snf::server::ZoneActorBinding binding{
-            snf::server::ZoneActorBindingConfig{
-                .actor = snf::server::ZoneActorConfig{.aoi_radius = 100},
-                .tick_budget = std::chrono::milliseconds{5},
-                .on_result =
-                    [&recorded](const snf::server::ZoneInboundCommand&,
-                                const snf::server::ZoneResult& result)
-                {
-                    std::lock_guard lock{recorded.mutex};
-                    recorded.positions.push_back(result.position);
-                    recorded.threads.push_back(std::this_thread::get_id());
-                },
-            },
-            lifecycle};
+        snf::server::ZoneActorBinding binding{snf::server::ZoneActorBindingConfig{
+                                                  .actor = snf::server::ZoneActorConfig{.aoi_radius = 100},
+                                                  .tick_budget = std::chrono::milliseconds{5},
+                                                  .on_result =
+                                                      [&recorded](const snf::server::ZoneInboundCommand&, const snf::server::ZoneResult& result)
+                                                  {
+                                                      std::lock_guard lock{recorded.mutex};
+                                                      recorded.positions.push_back(result.position);
+                                                      recorded.threads.push_back(std::this_thread::get_id());
+                                                  },
+                                              },
+                                              lifecycle};
         RecordingCompletion completion;
         snf::runtime::ActorRuntime runtime{snf::runtime::ActorRuntimeConfig{
                                                .worker_count = 1,
@@ -194,26 +192,23 @@ namespace
         std::promise<void> release_first_dispatch;
         const auto release = release_first_dispatch.get_future().share();
         std::atomic<bool> gated{false};
-        snf::runtime::ActorRuntime runtime{
-            snf::runtime::ActorRuntimeConfig{
-                .worker_count = 1,
-                .queue_capacity_per_worker = 16,
-                .max_in_flight_operations_per_worker = 2,
-                .on_worker_start = {},
-                .on_before_dispatch =
-                    [&first_dispatch_started, release, &gated](std::size_t,
-                                                               const snf::runtime::ActorKey&,
-                                                               const snf::runtime::ActorSubmission&)
-                {
-                    if (!gated.exchange(true))
-                    {
-                        first_dispatch_started.set_value();
-                        release.wait();
-                    }
-                },
-                .on_worker_failure = {},
-            },
-            completion};
+        snf::runtime::ActorRuntime runtime{snf::runtime::ActorRuntimeConfig{
+                                               .worker_count = 1,
+                                               .queue_capacity_per_worker = 16,
+                                               .max_in_flight_operations_per_worker = 2,
+                                               .on_worker_start = {},
+                                               .on_before_dispatch =
+                                                   [&first_dispatch_started, release, &gated](std::size_t, const snf::runtime::ActorKey&, const snf::runtime::ActorSubmission&)
+                                               {
+                                                   if (!gated.exchange(true))
+                                                   {
+                                                       first_dispatch_started.set_value();
+                                                       release.wait();
+                                                   }
+                                               },
+                                               .on_worker_failure = {},
+                                           },
+                                           completion};
         runtime.registerBinding(binding);
         snf::server::ZoneActorIngress ingress{runtime, binding};
         runtime.start();

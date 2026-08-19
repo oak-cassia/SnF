@@ -42,19 +42,17 @@ namespace
 
         const std::thread::id caller = std::this_thread::get_id();
         snf::server::CountingCommandLifecycleSink lifecycle;
-        snf::server::PartyActorBinding binding{
-            snf::server::PartyActorBindingConfig{
-                .actor = snf::server::PartyActorConfig{.max_members = 2},
-                .on_result =
-                    [&recorded](const snf::server::PartyInboundCommand&,
-                                const snf::server::PartyResult& result)
-                {
-                    std::lock_guard lock{recorded.mutex};
-                    recorded.results.push_back(result);
-                    recorded.threads.push_back(std::this_thread::get_id());
-                },
-            },
-            lifecycle};
+        snf::server::PartyActorBinding binding{snf::server::PartyActorBindingConfig{
+                                                   .actor = snf::server::PartyActorConfig{.max_members = 2},
+                                                   .on_result =
+                                                       [&recorded](const snf::server::PartyInboundCommand&, const snf::server::PartyResult& result)
+                                                   {
+                                                       std::lock_guard lock{recorded.mutex};
+                                                       recorded.results.push_back(result);
+                                                       recorded.threads.push_back(std::this_thread::get_id());
+                                                   },
+                                               },
+                                               lifecycle};
         RecordingCompletion completion;
         snf::runtime::ActorRuntime runtime{snf::runtime::ActorRuntimeConfig{
                                                .worker_count = 1,
@@ -72,8 +70,7 @@ namespace
         const snf::server::PartyId party{.value = 10};
         const snf::server::PlayerId first{.value = 1};
         const snf::server::PlayerId second{.value = 2};
-        const auto post =
-            [&ingress, party](snf::server::PartyCommand command, const std::uint32_t request_id)
+        const auto post = [&ingress, party](snf::server::PartyCommand command, const std::uint32_t request_id)
         {
             return ingress.tryPost(snf::server::PartyInboundCommand{
                 .party = party,
@@ -83,28 +80,22 @@ namespace
                     snf::server::PartyReplyContext{
                         .connection = {.descriptor = 4, .generation = 1},
                         .request_id = request_id,
-                        .kind = request_id <= 2 ? snf::server::PartyReplyKind::Joined
-                                                : snf::server::PartyReplyKind::Left,
+                        .kind = request_id <= 2 ? snf::server::PartyReplyKind::Joined : snf::server::PartyReplyKind::Left,
                     },
             });
         };
 
-        assert(post(snf::server::JoinPartyCommand{.player = first, .membership_epoch = 1}, 1) ==
-               snf::runtime::PostResult::Accepted);
-        assert(post(snf::server::JoinPartyCommand{.player = second, .membership_epoch = 1}, 2) ==
-               snf::runtime::PostResult::Accepted);
-        assert(post(snf::server::LeavePartyCommand{.player = first, .membership_epoch = 1}, 3) ==
-               snf::runtime::PostResult::Accepted);
-        assert(post(snf::server::LeavePartyCommand{.player = second, .membership_epoch = 1}, 4) ==
-               snf::runtime::PostResult::Accepted);
+        assert(post(snf::server::JoinPartyCommand{.player = first, .membership_epoch = 1}, 1) == snf::runtime::PostResult::Accepted);
+        assert(post(snf::server::JoinPartyCommand{.player = second, .membership_epoch = 1}, 2) == snf::runtime::PostResult::Accepted);
+        assert(post(snf::server::LeavePartyCommand{.player = first, .membership_epoch = 1}, 3) == snf::runtime::PostResult::Accepted);
+        assert(post(snf::server::LeavePartyCommand{.player = second, .membership_epoch = 1}, 4) == snf::runtime::PostResult::Accepted);
         runtime.close();
         runtime.join();
 
         {
             std::lock_guard lock{recorded.mutex};
             assert(recorded.results.size() == 4);
-            assert(recorded.results[1].members ==
-                   std::vector<snf::server::PlayerId>({first, second}));
+            assert(recorded.results[1].members == std::vector<snf::server::PlayerId>({first, second}));
             assert(recorded.results.back().members.empty());
             for (const std::thread::id thread : recorded.threads)
             {

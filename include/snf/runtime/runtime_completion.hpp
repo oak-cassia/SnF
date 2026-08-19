@@ -40,8 +40,7 @@ namespace snf::runtime
     // Completion is intentionally independent from data-plane backpressure.
     // The mask constructor is retained to make the coordinator explicit, but
     // Phase 3.8 accepts the Logic runtime only.
-    class RuntimeCompletionCoordinator final : public RuntimeCompletionSink,
-                                               public RuntimeCompletionSource
+    class RuntimeCompletionCoordinator final : public RuntimeCompletionSink, public RuntimeCompletionSource
     {
     public:
         RuntimeCompletionCoordinator(std::uint64_t required_runtime_mask, int wake_descriptor);

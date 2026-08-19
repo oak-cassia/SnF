@@ -113,12 +113,10 @@ namespace
             _pending.push_back(Pending{.value = value, .producer = std::move(producer)});
         }
 
-        void submitClaimWindow(std::shared_ptr<ClaimWindowGate> gate,
-                               AsyncOperationProducer<ClaimWindowResult> producer)
+        void submitClaimWindow(std::shared_ptr<ClaimWindowGate> gate, AsyncOperationProducer<ClaimWindowResult> producer)
         {
             std::lock_guard lock{_mutex};
-            _claim_window_pending.emplace(
-                ClaimWindowPending{.gate = std::move(gate), .producer = std::move(producer)});
+            _claim_window_pending.emplace(ClaimWindowPending{.gate = std::move(gate), .producer = std::move(producer)});
         }
 
         [[nodiscard]] std::size_t pendingCount() const
@@ -145,8 +143,7 @@ namespace
         {
             for (auto& pending : take())
             {
-                pending.producer.fail(
-                    std::make_exception_ptr(std::runtime_error{"test async service failure"}));
+                pending.producer.fail(std::make_exception_ptr(std::runtime_error{"test async service failure"}));
             }
         }
 
@@ -281,8 +278,7 @@ namespace
             std::atomic<int> submit_calls{0};
             std::atomic<bool> block_started{false};
             std::atomic<bool> release_block{false};
-            std::shared_ptr<ClaimWindowGate> claim_window_gate =
-                std::make_shared<ClaimWindowGate>();
+            std::shared_ptr<ClaimWindowGate> claim_window_gate = std::make_shared<ClaimWindowGate>();
         };
 
         AwaitingBinding(TestAsyncService& service, std::shared_ptr<State> state)
@@ -296,13 +292,9 @@ namespace
             return ActorKind::Zone;
         }
 
-        [[nodiscard]] ActorSubmission
-        post(const EntityId entity, const int value, const Behavior behavior) const
+        [[nodiscard]] ActorSubmission post(const EntityId entity, const int value, const Behavior behavior) const
         {
-            return makeSubmission(ActorKey{.kind = kind(), .entity = entity},
-                                  ActorActivation::ActivateIfMissing,
-                                  ActorAccounting::Command,
-                                  Payload{.value = value, .behavior = behavior});
+            return makeSubmission(ActorKey{.kind = kind(), .entity = entity}, ActorActivation::ActivateIfMissing, ActorAccounting::Command, Payload{.value = value, .behavior = behavior});
         }
 
         [[nodiscard]] std::vector<Outcome> outcomes() const
@@ -317,10 +309,7 @@ namespace
             return std::make_unique<Slot>();
         }
 
-        [[nodiscard]] ActorDispatchResult dispatch(ActorSlot& slot,
-                                                   const ActorSubmission& submission,
-                                                   ActorContext& context,
-                                                   std::stop_token stop_token) override
+        [[nodiscard]] ActorDispatchResult dispatch(ActorSlot& slot, const ActorSubmission& submission, ActorContext& context, std::stop_token stop_token) override
         {
             auto& typed_slot = dynamic_cast<Slot&>(slot);
             _state->affinity.dispatched.store(std::this_thread::get_id());
@@ -330,8 +319,7 @@ namespace
             return advance(typed_slot, stop_token);
         }
 
-        [[nodiscard]] ActorDispatchResult
-        resume(ActorSlot& slot, ActorContext&, std::stop_token stop_token) override
+        [[nodiscard]] ActorDispatchResult resume(ActorSlot& slot, ActorContext&, std::stop_token stop_token) override
         {
             _state->affinity.resumed.store(std::this_thread::get_id());
             return advance(dynamic_cast<Slot&>(slot), stop_token);
@@ -349,49 +337,40 @@ namespace
             Behavior behavior{Behavior::AwaitOnce};
         };
 
-        [[nodiscard]] static auto awaitOne(TestAsyncService& service,
-                                           ActorContext& context,
-                                           const Payload& payload,
-                                           State& state)
+        [[nodiscard]] static auto awaitOne(TestAsyncService& service, ActorContext& context, const Payload& payload, State& state)
         {
-            return awaitAsyncOperation<int>(
-                context,
-                [&service, &payload, &state](AsyncOperationProducer<int> producer)
-                {
-                    state.submit_calls.fetch_add(1);
-                    if (payload.behavior == Behavior::ThrowOnSubmit)
-                    {
-                        throw std::runtime_error{"submitting the operation failed"};
-                    }
+            return awaitAsyncOperation<int>(context,
+                                            [&service, &payload, &state](AsyncOperationProducer<int> producer)
+                                            {
+                                                state.submit_calls.fetch_add(1);
+                                                if (payload.behavior == Behavior::ThrowOnSubmit)
+                                                {
+                                                    throw std::runtime_error{"submitting the operation failed"};
+                                                }
 
-                    if (payload.behavior == Behavior::CompleteInline)
-                    {
-                        // Completes before await_suspend returns. The publish has
-                        // to wait for the owning Worker rather than resume here.
-                        producer.complete(payload.value * 10);
-                        return;
-                    }
+                                                if (payload.behavior == Behavior::CompleteInline)
+                                                {
+                                                    // Completes before await_suspend returns. The publish has
+                                                    // to wait for the owning Worker rather than resume here.
+                                                    producer.complete(payload.value * 10);
+                                                    return;
+                                                }
 
-                    service.submit(payload.value, std::move(producer));
-                });
+                                                service.submit(payload.value, std::move(producer));
+                                            });
         }
 
-        [[nodiscard]] static auto
-        awaitClaimWindow(TestAsyncService& service, ActorContext& context, State& state)
+        [[nodiscard]] static auto awaitClaimWindow(TestAsyncService& service, ActorContext& context, State& state)
         {
-            return awaitAsyncOperation<ClaimWindowResult>(
-                context,
-                [&service, &state](AsyncOperationProducer<ClaimWindowResult> producer)
-                {
-                    state.submit_calls.fetch_add(1);
-                    service.submitClaimWindow(state.claim_window_gate, std::move(producer));
-                });
+            return awaitAsyncOperation<ClaimWindowResult>(context,
+                                                          [&service, &state](AsyncOperationProducer<ClaimWindowResult> producer)
+                                                          {
+                                                              state.submit_calls.fetch_add(1);
+                                                              service.submitClaimWindow(state.claim_window_gate, std::move(producer));
+                                                          });
         }
 
-        static ActorTask<Outcome> runCommand(TestAsyncService& service,
-                                             ActorContext& context,
-                                             const Payload& payload,
-                                             State& state)
+        static ActorTask<Outcome> runCommand(TestAsyncService& service, ActorContext& context, const Payload& payload, State& state)
         {
             const FrameProbe probe{&state.affinity, &payload.value};
 
@@ -480,8 +459,7 @@ namespace
             runtime.start();
         }
 
-        static ActorRuntimeConfig makeConfig(const std::size_t workers,
-                                             const std::size_t max_in_flight)
+        static ActorRuntimeConfig makeConfig(const std::size_t workers, const std::size_t max_in_flight)
         {
             ActorRuntimeConfig config;
             config.worker_count = workers;
@@ -541,16 +519,13 @@ namespace
     {
         Harness harness{1};
 
-        assert(harness.runtime.tryPost(harness.binding.post(1, 5, Behavior::AwaitOnce)) ==
-               PostResult::Accepted);
+        assert(harness.runtime.tryPost(harness.binding.post(1, 5, Behavior::AwaitOnce)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.service.pendingCount() == 1; }));
 
         // Actor 1 is suspended. A second command for the same actor must wait in
         // its mailbox while a different actor makes progress on the same Worker.
-        assert(harness.runtime.tryPost(harness.binding.post(1, 6, Behavior::NoAwait)) ==
-               PostResult::Accepted);
-        assert(harness.runtime.tryPost(harness.binding.post(2, 7, Behavior::NoAwait)) ==
-               PostResult::Accepted);
+        assert(harness.runtime.tryPost(harness.binding.post(1, 6, Behavior::NoAwait)) == PostResult::Accepted);
+        assert(harness.runtime.tryPost(harness.binding.post(2, 7, Behavior::NoAwait)) == PostResult::Accepted);
 
         assert(wait_until([&harness] { return harness.binding.outcomes().size() == 1; }));
         const auto during_suspension = harness.binding.outcomes();
@@ -585,8 +560,7 @@ namespace
         Harness harness{1};
         const auto completing_thread = std::this_thread::get_id();
 
-        assert(harness.runtime.tryPost(harness.binding.post(1, 3, Behavior::AwaitOnce)) ==
-               PostResult::Accepted);
+        assert(harness.runtime.tryPost(harness.binding.post(1, 3, Behavior::AwaitOnce)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.service.pendingCount() == 1; }));
 
         harness.service.completeAll();
@@ -607,8 +581,7 @@ namespace
     {
         Harness harness{1};
 
-        assert(harness.runtime.tryPost(harness.binding.post(1, 4, Behavior::CompleteInline)) ==
-               PostResult::Accepted);
+        assert(harness.runtime.tryPost(harness.binding.post(1, 4, Behavior::CompleteInline)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.binding.outcomes().size() == 1; }));
 
         const auto outcomes = harness.binding.outcomes();
@@ -629,8 +602,7 @@ namespace
     {
         Harness harness{1};
 
-        assert(harness.runtime.tryPost(harness.binding.post(1, 2, Behavior::AwaitTwice)) ==
-               PostResult::Accepted);
+        assert(harness.runtime.tryPost(harness.binding.post(1, 2, Behavior::AwaitTwice)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.service.pendingCount() == 1; }));
         harness.service.completeAll();
         assert(wait_until([&harness] { return harness.service.pendingCount() == 1; }));
@@ -658,14 +630,12 @@ namespace
     {
         Harness harness{1, 1};
 
-        assert(harness.runtime.tryPost(harness.binding.post(1, 1, Behavior::AwaitOnce)) ==
-               PostResult::Accepted);
+        assert(harness.runtime.tryPost(harness.binding.post(1, 1, Behavior::AwaitOnce)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.service.pendingCount() == 1; }));
 
         // The single in-flight slot is taken, so the next actor cannot start an
         // operation at all.
-        assert(harness.runtime.tryPost(harness.binding.post(2, 2, Behavior::AwaitOnce)) ==
-               PostResult::Accepted);
+        assert(harness.runtime.tryPost(harness.binding.post(2, 2, Behavior::AwaitOnce)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.binding.outcomes().size() == 1; }));
 
         assert(harness.binding.outcomes().front().kind == OutcomeKind::Rejected);
@@ -684,8 +654,7 @@ namespace
     {
         Harness harness{1};
 
-        assert(harness.runtime.tryPost(harness.binding.post(1, 8, Behavior::AwaitOnce)) ==
-               PostResult::Accepted);
+        assert(harness.runtime.tryPost(harness.binding.post(1, 8, Behavior::AwaitOnce)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.service.pendingCount() == 1; }));
 
         harness.service.completeAllTwice();
@@ -705,8 +674,7 @@ namespace
     {
         Harness harness{1};
 
-        assert(harness.runtime.tryPost(harness.binding.post(1, 9, Behavior::AwaitOnce)) ==
-               PostResult::Accepted);
+        assert(harness.runtime.tryPost(harness.binding.post(1, 9, Behavior::AwaitOnce)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.service.pendingCount() == 1; }));
 
         harness.service.failAll();
@@ -732,8 +700,7 @@ namespace
     {
         Harness harness{1};
 
-        assert(harness.runtime.tryPost(harness.binding.post(1, 11, Behavior::AwaitOnce)) ==
-               PostResult::Accepted);
+        assert(harness.runtime.tryPost(harness.binding.post(1, 11, Behavior::AwaitOnce)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.service.pendingCount() == 1; }));
 
         harness.runtime.requestActorOperationCancel(zone_key(1));
@@ -744,9 +711,7 @@ namespace
         // A completion that arrives after the cancellation won the claim is a late
         // completion, not a second terminal outcome.
         harness.service.completeAll();
-        assert(wait_until(
-            [&harness]
-            { return harness.workerStats(zone_key(1)).discarded_late_completions == 1; }));
+        assert(wait_until([&harness] { return harness.workerStats(zone_key(1)).discarded_late_completions == 1; }));
         assert(harness.binding.outcomes().size() == 1);
 
         harness.runtime.close();
@@ -758,8 +723,7 @@ namespace
     {
         Harness harness{1};
 
-        assert(harness.runtime.tryPost(harness.binding.post(1, 12, Behavior::AwaitOnce)) ==
-               PostResult::Accepted);
+        assert(harness.runtime.tryPost(harness.binding.post(1, 12, Behavior::AwaitOnce)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.service.pendingCount() == 1; }));
 
         // The completion claims the terminal transition first, so the cancel must
@@ -781,24 +745,17 @@ namespace
     {
         Harness harness{1};
 
-        assert(harness.runtime.tryPost(harness.binding.post(
-                   1, 23, Behavior::PauseAfterTerminalClaim)) == PostResult::Accepted);
+        assert(harness.runtime.tryPost(harness.binding.post(1, 23, Behavior::PauseAfterTerminalClaim)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.service.hasClaimWindowPending(); }));
 
         std::jthread completer{[&harness] { harness.service.completeClaimWindow(230); }};
-        assert(wait_until(
-            [&harness]
-            {
-                return harness.state->claim_window_gate->result_store_entered.load(
-                    std::memory_order_acquire);
-            }));
+        assert(wait_until([&harness] { return harness.state->claim_window_gate->result_store_entered.load(std::memory_order_acquire); }));
 
         // Completed owns the terminal transition, but its result store and publish
         // are deliberately paused. Cancellation must leave the task suspended and
         // keep the reservation until that guaranteed publish arrives.
         harness.runtime.requestActorOperationCancel(zone_key(1));
-        assert(harness.runtime.tryPost(harness.binding.post(2, 24, Behavior::NoAwait)) ==
-               PostResult::Accepted);
+        assert(harness.runtime.tryPost(harness.binding.post(2, 24, Behavior::NoAwait)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.binding.outcomes().size() == 1; }));
         assert(harness.binding.outcomes().front().value == 24);
         const auto waiting_stats = harness.workerStats(zone_key(1));
@@ -806,8 +763,7 @@ namespace
         assert(waiting_stats.in_flight_operations == 1);
         assert(waiting_stats.cancelled_operations == 0);
 
-        harness.state->claim_window_gate->release_result_store.store(true,
-                                                                     std::memory_order_release);
+        harness.state->claim_window_gate->release_result_store.store(true, std::memory_order_release);
         completer.join();
         assert(wait_until([&harness] { return harness.binding.outcomes().size() == 2; }));
         const auto outcomes = harness.binding.outcomes();
@@ -828,20 +784,17 @@ namespace
         {
             Harness harness{1};
 
-            assert(harness.runtime.tryPost(harness.binding.post(1, 13, Behavior::AwaitOnce)) ==
-                   PostResult::Accepted);
+            assert(harness.runtime.tryPost(harness.binding.post(1, 13, Behavior::AwaitOnce)) == PostResult::Accepted);
             assert(wait_until([&harness] { return harness.service.pendingCount() == 1; }));
 
-            std::jthread canceller{[&harness]
-                                   { harness.runtime.requestActorOperationCancel(zone_key(1)); }};
+            std::jthread canceller{[&harness] { harness.runtime.requestActorOperationCancel(zone_key(1)); }};
             harness.service.completeAll();
             canceller.join();
 
             assert(wait_until([&harness] { return harness.binding.outcomes().size() == 1; }));
             const auto outcomes = harness.binding.outcomes();
             assert(outcomes.size() == 1);
-            const bool completed =
-                outcomes.front().kind == OutcomeKind::Completed && outcomes.front().value == 130;
+            const bool completed = outcomes.front().kind == OutcomeKind::Completed && outcomes.front().value == 130;
             const bool cancelled = outcomes.front().kind == OutcomeKind::Cancelled;
             assert(completed != cancelled);
 
@@ -863,8 +816,7 @@ namespace
         {
             Harness harness{1};
 
-            assert(harness.runtime.tryPost(harness.binding.post(1, 14, Behavior::AwaitOnce)) ==
-                   PostResult::Accepted);
+            assert(harness.runtime.tryPost(harness.binding.post(1, 14, Behavior::AwaitOnce)) == PostResult::Accepted);
             assert(wait_until([&harness] { return harness.service.pendingCount() == 1; }));
 
             // A graceful close only shuts the external ingress. An operation that
@@ -888,8 +840,7 @@ namespace
     {
         {
             Harness harness{1};
-            assert(harness.runtime.tryPost(harness.binding.post(
-                       1, 1, Behavior::ThrowBeforeAwait)) == PostResult::Accepted);
+            assert(harness.runtime.tryPost(harness.binding.post(1, 1, Behavior::ThrowBeforeAwait)) == PostResult::Accepted);
 
             bool threw = false;
             try
@@ -906,8 +857,7 @@ namespace
 
         {
             Harness harness{1};
-            assert(harness.runtime.tryPost(harness.binding.post(1, 1, Behavior::ThrowAfterAwait)) ==
-                   PostResult::Accepted);
+            assert(harness.runtime.tryPost(harness.binding.post(1, 1, Behavior::ThrowAfterAwait)) == PostResult::Accepted);
             assert(wait_until([&harness] { return harness.service.pendingCount() == 1; }));
             harness.service.completeAll();
 
@@ -929,8 +879,7 @@ namespace
     {
         Harness harness{1};
 
-        assert(harness.runtime.tryPost(harness.binding.post(1, 1, Behavior::ThrowOnSubmit)) ==
-               PostResult::Accepted);
+        assert(harness.runtime.tryPost(harness.binding.post(1, 1, Behavior::ThrowOnSubmit)) == PostResult::Accepted);
 
         bool threw = false;
         try
@@ -954,15 +903,13 @@ namespace
     {
         Harness harness{1};
 
-        assert(harness.runtime.tryPost(harness.binding.post(1, 15, Behavior::AwaitOnce)) ==
-               PostResult::Accepted);
+        assert(harness.runtime.tryPost(harness.binding.post(1, 15, Behavior::AwaitOnce)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.service.pendingCount() == 1; }));
 
         // Actor 2 fails the Worker while actor 1 is still suspended. The failing
         // Worker never returns to its pump, so it has to transition and destroy
         // actor 1's task itself.
-        assert(harness.runtime.tryPost(harness.binding.post(2, 1, Behavior::ThrowBeforeAwait)) ==
-               PostResult::Accepted);
+        assert(harness.runtime.tryPost(harness.binding.post(2, 1, Behavior::ThrowBeforeAwait)) == PostResult::Accepted);
 
         bool threw = false;
         try
@@ -976,8 +923,7 @@ namespace
 
         assert(threw);
         assert(harness.completion.failed_count.load() == 1);
-        assert(harness.state->affinity.frame_destroyed.load() ==
-               harness.state->affinity.dispatched.load());
+        assert(harness.state->affinity.frame_destroyed.load() == harness.state->affinity.dispatched.load());
 
         // A completion arriving after the failure has nothing left to resume.
         harness.service.completeAll();
@@ -989,15 +935,13 @@ namespace
         const EntityId suspended_entity = entity_for_worker(harness.runtime, 0);
         const EntityId failing_entity = entity_for_worker(harness.runtime, 1);
 
-        assert(harness.runtime.tryPost(harness.binding.post(
-                   suspended_entity, 21, Behavior::AwaitOnce)) == PostResult::Accepted);
+        assert(harness.runtime.tryPost(harness.binding.post(suspended_entity, 21, Behavior::AwaitOnce)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.service.pendingCount() == 1; }));
 
         // Worker 1 fails while Worker 0 is asleep with a suspended task. The
         // failure path may only request global cancellation; Worker 0 must wake,
         // claim cancellation, and destroy its own frame itself.
-        assert(harness.runtime.tryPost(harness.binding.post(
-                   failing_entity, 22, Behavior::ThrowBeforeAwait)) == PostResult::Accepted);
+        assert(harness.runtime.tryPost(harness.binding.post(failing_entity, 22, Behavior::ThrowBeforeAwait)) == PostResult::Accepted);
 
         bool threw = false;
         try
@@ -1025,8 +969,7 @@ namespace
     {
         Harness harness{1};
 
-        assert(harness.runtime.tryPost(harness.binding.post(1, 16, Behavior::AwaitOnce)) ==
-               PostResult::Accepted);
+        assert(harness.runtime.tryPost(harness.binding.post(1, 16, Behavior::AwaitOnce)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.service.pendingCount() == 1; }));
 
         harness.runtime.cancel();
@@ -1048,17 +991,14 @@ namespace
     {
         Harness harness{1};
 
-        assert(harness.runtime.tryPost(harness.binding.post(1, 19, Behavior::AwaitOnce)) ==
-               PostResult::Accepted);
+        assert(harness.runtime.tryPost(harness.binding.post(1, 19, Behavior::AwaitOnce)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.service.pendingCount() == 1; }));
 
         // Keep the owning Worker inside another Actor while actor 1's completion
         // claims terminal and publishes. Hard cancel must consume that reserved
         // continuation instead of destroying the frame and leaking the queue item.
-        assert(harness.runtime.tryPost(harness.binding.post(2, 20, Behavior::BlockWorker)) ==
-               PostResult::Accepted);
-        assert(wait_until(
-            [&harness] { return harness.state->block_started.load(std::memory_order_acquire); }));
+        assert(harness.runtime.tryPost(harness.binding.post(2, 20, Behavior::BlockWorker)) == PostResult::Accepted);
+        assert(wait_until([&harness] { return harness.state->block_started.load(std::memory_order_acquire); }));
 
         harness.service.completeAll();
         assert(harness.workerStats(zone_key(1)).continuation_queue_depth == 1);
@@ -1087,8 +1027,7 @@ namespace
             runtime.registerBinding(binding);
             runtime.start();
 
-            assert(runtime.tryPost(binding.post(1, 17, Behavior::AwaitOnce)) ==
-                   PostResult::Accepted);
+            assert(runtime.tryPost(binding.post(1, 17, Behavior::AwaitOnce)) == PostResult::Accepted);
             assert(wait_until([&service] { return service.pendingCount() == 1; }));
 
             runtime.cancel();
@@ -1106,16 +1045,13 @@ namespace
     {
         Harness harness{1};
 
-        assert(harness.runtime.tryPost(harness.binding.post(1, 18, Behavior::AwaitOnce)) ==
-               PostResult::Accepted);
+        assert(harness.runtime.tryPost(harness.binding.post(1, 18, Behavior::AwaitOnce)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.service.pendingCount() == 1; }));
         assert(harness.workerStats(zone_key(1)).scheduler_passivatable_actor_count == 0);
 
         harness.service.completeAll();
         assert(wait_until([&harness] { return harness.binding.outcomes().size() == 1; }));
-        assert(wait_until(
-            [&harness]
-            { return harness.workerStats(zone_key(1)).scheduler_passivatable_actor_count == 1; }));
+        assert(wait_until([&harness] { return harness.workerStats(zone_key(1)).scheduler_passivatable_actor_count == 1; }));
 
         harness.runtime.close();
         harness.runtime.join();

@@ -62,8 +62,7 @@ namespace
             snf::runtime::BoundedQueue<int> queue{1};
             std::promise<bool> pop_result;
             auto future = pop_result.get_future();
-            std::thread consumer{[&queue, &pop_result]
-                                 { pop_result.set_value(queue.pop().has_value()); }};
+            std::thread consumer{[&queue, &pop_result] { pop_result.set_value(queue.pop().has_value()); }};
 
             assert(future.wait_for(100ms) == std::future_status::timeout);
             queue.cancel();

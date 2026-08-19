@@ -5,9 +5,7 @@
 
 namespace snf::server
 {
-    PlayerActorIngress::PlayerActorIngress(snf::runtime::ActorRuntime& runtime,
-                                           PlayerActorBinding& binding,
-                                           CommandLifecycleSink& lifecycle) noexcept
+    PlayerActorIngress::PlayerActorIngress(snf::runtime::ActorRuntime& runtime, PlayerActorBinding& binding, CommandLifecycleSink& lifecycle) noexcept
         : _runtime(runtime)
         , _primary_binding(binding)
         , _lifecycle(lifecycle)
@@ -29,8 +27,7 @@ namespace snf::server
     {
         const snf::net::ConnectionId connection = command.connection;
         PlayerActorBinding& binding = bindingFor(command.actor);
-        const snf::runtime::PostResult result =
-            _runtime.tryPost(binding.makeCommand(std::move(command)));
+        const snf::runtime::PostResult result = _runtime.tryPost(binding.makeCommand(std::move(command)));
 
         if (result != snf::runtime::PostResult::Accepted)
         {
@@ -43,8 +40,7 @@ namespace snf::server
         return result;
     }
 
-    snf::runtime::PostResult PlayerActorIngress::tryPostConnectionClosed(const PlayerActorId actor,
-                                                                         ConnectionClosed closed)
+    snf::runtime::PostResult PlayerActorIngress::tryPostConnectionClosed(const PlayerActorId actor, ConnectionClosed closed)
     {
         return _runtime.tryPost(bindingFor(actor).makeConnectionClosed(actor, std::move(closed)));
     }

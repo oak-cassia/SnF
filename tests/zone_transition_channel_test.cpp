@@ -39,8 +39,7 @@ namespace
         assert(channel.publish(*second, completion(2)));
 
         std::uint64_t wake_count = 0;
-        assert(::read(wake.getDescriptor(), &wake_count, sizeof(wake_count)) ==
-               static_cast<ssize_t>(sizeof(wake_count)));
+        assert(::read(wake.getDescriptor(), &wake_count, sizeof(wake_count)) == static_cast<ssize_t>(sizeof(wake_count)));
         assert(wake_count == 2);
 
         channel.release(*first);
@@ -108,8 +107,7 @@ namespace
         workers.reserve(COUNT);
         for (std::size_t index = 0; index < COUNT; ++index)
         {
-            workers.emplace_back([&channel, ticket = tickets[index], index]
-                                 { assert(channel.publish(ticket, completion(index + 1))); });
+            workers.emplace_back([&channel, ticket = tickets[index], index] { assert(channel.publish(ticket, completion(index + 1))); });
         }
         for (std::thread& worker : workers)
         {
@@ -120,8 +118,7 @@ namespace
         for (std::size_t index = 0; index < COUNT; ++index)
         {
             const auto completed = channel.tryPop();
-            assert(completed && completed->handoff_id.value >= 1 &&
-                   completed->handoff_id.value <= COUNT);
+            assert(completed && completed->handoff_id.value >= 1 && completed->handoff_id.value <= COUNT);
             seen[completed->handoff_id.value - 1] = true;
         }
         for (const bool value : seen)

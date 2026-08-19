@@ -7,8 +7,7 @@ namespace
 {
     void test_party_actor_orders_members_and_enforces_epoch_and_capacity()
     {
-        snf::server::PartyActor actor{snf::server::PartyId{.value = 9},
-                                      snf::server::PartyActorConfig{.max_members = 2}};
+        snf::server::PartyActor actor{snf::server::PartyId{.value = 9}, snf::server::PartyActorConfig{.max_members = 2}};
         const snf::server::PlayerId first{.value = 20};
         const snf::server::PlayerId second{.value = 10};
         const snf::server::PlayerId third{.value = 30};

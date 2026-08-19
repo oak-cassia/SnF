@@ -33,20 +33,16 @@ namespace snf::server
     class PlayerSessionDirectory
     {
     public:
-        [[nodiscard]] PlayerAttachResult tryAttach(snf::net::ConnectionId connection,
-                                                   PlayerId player);
+        [[nodiscard]] PlayerAttachResult tryAttach(snf::net::ConnectionId connection, PlayerId player);
         void rollbackAttach(snf::net::ConnectionId connection, PlayerId player) noexcept;
 
         [[nodiscard]] bool noteProvisionalActivity(snf::net::ConnectionId connection);
         void clearProvisionalActivity(snf::net::ConnectionId connection) noexcept;
 
         [[nodiscard]] std::optional<PlayerId> playerFor(snf::net::ConnectionId connection) const;
-        [[nodiscard]] std::optional<PlayerLocation>
-        locationFor(snf::net::ConnectionId connection) const;
-        [[nodiscard]] PlayerLocationSnapshot
-        locationSnapshotFor(snf::net::ConnectionId connection) const;
-        void noteLocation(snf::net::ConnectionId connection,
-                          std::optional<PlayerLocation> location) noexcept;
+        [[nodiscard]] std::optional<PlayerLocation> locationFor(snf::net::ConnectionId connection) const;
+        [[nodiscard]] PlayerLocationSnapshot locationSnapshotFor(snf::net::ConnectionId connection) const;
+        void noteLocation(snf::net::ConnectionId connection, std::optional<PlayerLocation> location) noexcept;
 
         // Closing retains both indexes until the owning Worker has removed and
         // destroyed the Actor slot. This prevents a reconnect command from being
@@ -72,10 +68,8 @@ namespace snf::server
         };
 
         mutable std::mutex _mutex;
-        std::unordered_map<snf::net::ConnectionId, Session, snf::net::ConnectionIdHash>
-            _sessions_by_connection;
+        std::unordered_map<snf::net::ConnectionId, Session, snf::net::ConnectionIdHash> _sessions_by_connection;
         std::unordered_map<PlayerId, snf::net::ConnectionId, PlayerIdHash> _connections_by_player;
-        std::unordered_set<snf::net::ConnectionId, snf::net::ConnectionIdHash>
-            _provisional_activity;
+        std::unordered_set<snf::net::ConnectionId, snf::net::ConnectionIdHash> _provisional_activity;
     };
 }

@@ -40,16 +40,14 @@ namespace
             return snf::server::FramePostResult::Closed;
         }
 
-        [[nodiscard]] snf::server::PostResult
-        tryPostConnectionClosed(snf::server::ConnectionClosed closed) override
+        [[nodiscard]] snf::server::PostResult tryPostConnectionClosed(snf::server::ConnectionClosed closed) override
         {
             {
                 std::lock_guard lock{connection_closes_mutex};
                 connection_closes.push_back(closed);
             }
             const std::size_t attempt = lifecycle_attempts.fetch_add(1);
-            return attempt < lifecycle_results.size() ? lifecycle_results[attempt]
-                                                      : lifecycle_fallback;
+            return attempt < lifecycle_results.size() ? lifecycle_results[attempt] : lifecycle_fallback;
         }
 
         void close() noexcept override
@@ -71,8 +69,7 @@ namespace
                 bool seen = false;
                 for (std::size_t previous = 0; previous < index; ++previous)
                 {
-                    if (connection_closes[previous].connection ==
-                        connection_closes[index].connection)
+                    if (connection_closes[previous].connection == connection_closes[index].connection)
                     {
                         seen = true;
                         break;
@@ -105,8 +102,7 @@ namespace
     class RunningServer
     {
     public:
-        explicit RunningServer(
-            const int termination_signal_descriptor = snf::net::UniqueFileDescriptor::INVALID_FD)
+        explicit RunningServer(const int termination_signal_descriptor = snf::net::UniqueFileDescriptor::INVALID_FD)
             : RunningServer(
                   snf::server::GameServerConfig{
                       .port = 0,
@@ -118,10 +114,8 @@ namespace
         {
         }
 
-        explicit RunningServer(
-            snf::server::GameServerConfig config,
-            const int termination_signal_descriptor = snf::net::UniqueFileDescriptor::INVALID_FD)
-            : _server(std::move(config))
+        explicit RunningServer(snf::server::GameServerConfig config, const int termination_signal_descriptor = snf::net::UniqueFileDescriptor::INVALID_FD)
+            : _server(config)
             , _termination_signal_descriptor(termination_signal_descriptor)
             , _thread(
                   [this]
@@ -165,8 +159,7 @@ namespace
             return _server.getActorRuntimeStats();
         }
 
-        [[nodiscard]] std::optional<snf::server::PlayerRecord>
-        getPlayerRecord(const snf::server::PlayerId player) const
+        [[nodiscard]] std::optional<snf::server::PlayerRecord> getPlayerRecord(const snf::server::PlayerId player) const
         {
             return _server.getPlayerRecord(player);
         }
@@ -211,12 +204,9 @@ namespace
         std::thread _thread;
     };
 
-    snf::net::UniqueFileDescriptor
-    connect_client(const std::uint16_t port,
-                   const std::optional<int> receive_buffer_size = std::nullopt)
+    snf::net::UniqueFileDescriptor connect_client(const std::uint16_t port, const std::optional<int> receive_buffer_size = std::nullopt)
     {
-        snf::net::UniqueFileDescriptor client_socket{
-            ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
+        snf::net::UniqueFileDescriptor client_socket{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
         assert(client_socket.isValid());
 
         timeval timeout{
@@ -224,25 +214,13 @@ namespace
             .tv_usec = 0,
         };
 
-        assert(::setsockopt(client_socket.getDescriptor(),
-                            SOL_SOCKET,
-                            SO_RCVTIMEO,
-                            &timeout,
-                            sizeof(timeout)) == 0);
+        assert(::setsockopt(client_socket.getDescriptor(), SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0);
 
         if (receive_buffer_size)
         {
-            assert(::setsockopt(client_socket.getDescriptor(),
-                                SOL_SOCKET,
-                                SO_RCVBUF,
-                                &*receive_buffer_size,
-                                sizeof(*receive_buffer_size)) == 0);
+            assert(::setsockopt(client_socket.getDescriptor(), SOL_SOCKET, SO_RCVBUF, &*receive_buffer_size, sizeof(*receive_buffer_size)) == 0);
         }
-        assert(::setsockopt(client_socket.getDescriptor(),
-                            SOL_SOCKET,
-                            SO_SNDTIMEO,
-                            &timeout,
-                            sizeof(timeout)) == 0);
+        assert(::setsockopt(client_socket.getDescriptor(), SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) == 0);
 
         snf::net::enable_tcp_no_delay(client_socket.getDescriptor());
 
@@ -251,9 +229,7 @@ namespace
         server_address.sin_port = htons(port);
         assert(::inet_pton(AF_INET, "127.0.0.1", &server_address.sin_addr) == 1);
 
-        assert(::connect(client_socket.getDescriptor(),
-                         reinterpret_cast<const sockaddr*>(&server_address),
-                         sizeof(server_address)) == 0);
+        assert(::connect(client_socket.getDescriptor(), reinterpret_cast<const sockaddr*>(&server_address), sizeof(server_address)) == 0);
 
         return client_socket;
     }
@@ -264,10 +240,7 @@ namespace
 
         while (sent_byte_count < bytes.size())
         {
-            const auto result = ::send(socket_descriptor,
-                                       bytes.data() + sent_byte_count,
-                                       bytes.size() - sent_byte_count,
-                                       MSG_NOSIGNAL);
+            const auto result = ::send(socket_descriptor, bytes.data() + sent_byte_count, bytes.size() - sent_byte_count, MSG_NOSIGNAL);
 
             if (result > 0)
             {
@@ -284,17 +257,13 @@ namespace
         }
     }
 
-    void send_until_complete_or_closed(const int socket_descriptor,
-                                       const std::span<const std::byte> bytes)
+    void send_until_complete_or_closed(const int socket_descriptor, const std::span<const std::byte> bytes)
     {
         std::size_t sent_byte_count = 0;
 
         while (sent_byte_count < bytes.size())
         {
-            const auto result = ::send(socket_descriptor,
-                                       bytes.data() + sent_byte_count,
-                                       bytes.size() - sent_byte_count,
-                                       MSG_NOSIGNAL);
+            const auto result = ::send(socket_descriptor, bytes.data() + sent_byte_count, bytes.size() - sent_byte_count, MSG_NOSIGNAL);
 
             if (result > 0)
             {
@@ -316,18 +285,14 @@ namespace
         }
     }
 
-    std::vector<std::byte> receive_exact(const int socket_descriptor,
-                                         const std::size_t expected_byte_count)
+    std::vector<std::byte> receive_exact(const int socket_descriptor, const std::size_t expected_byte_count)
     {
         std::vector<std::byte> received_bytes(expected_byte_count);
         std::size_t received_byte_count = 0;
 
         while (received_byte_count < expected_byte_count)
         {
-            const auto result = ::recv(socket_descriptor,
-                                       received_bytes.data() + received_byte_count,
-                                       expected_byte_count - received_byte_count,
-                                       0);
+            const auto result = ::recv(socket_descriptor, received_bytes.data() + received_byte_count, expected_byte_count - received_byte_count, 0);
 
             if (result > 0)
             {
@@ -388,26 +353,21 @@ namespace
 
     std::uint32_t read_u32(const std::vector<std::byte>& payload, const std::size_t offset)
     {
-        return (std::to_integer<std::uint32_t>(payload[offset]) << 24U) |
-               (std::to_integer<std::uint32_t>(payload[offset + 1]) << 16U) |
-               (std::to_integer<std::uint32_t>(payload[offset + 2]) << 8U) |
+        return (std::to_integer<std::uint32_t>(payload[offset]) << 24U) | (std::to_integer<std::uint32_t>(payload[offset + 1]) << 16U) | (std::to_integer<std::uint32_t>(payload[offset + 2]) << 8U) |
                std::to_integer<std::uint32_t>(payload[offset + 3]);
     }
 
     std::uint16_t read_u16(const std::vector<std::byte>& payload, const std::size_t offset)
     {
-        return static_cast<std::uint16_t>((std::to_integer<std::uint16_t>(payload[offset]) << 8U) |
-                                          std::to_integer<std::uint16_t>(payload[offset + 1]));
+        return static_cast<std::uint16_t>((std::to_integer<std::uint16_t>(payload[offset]) << 8U) | std::to_integer<std::uint16_t>(payload[offset + 1]));
     }
 
     std::uint64_t read_u64(const std::vector<std::byte>& payload, const std::size_t offset)
     {
-        return (static_cast<std::uint64_t>(read_u32(payload, offset)) << 32U) |
-               read_u32(payload, offset + 4);
+        return (static_cast<std::uint64_t>(read_u32(payload, offset)) << 32U) | read_u32(payload, offset + 4);
     }
 
-    snf::protocol::Frame authentication_frame(const std::uint32_t request_id,
-                                              const std::uint64_t player_id)
+    snf::protocol::Frame authentication_frame(const std::uint32_t request_id, const std::uint64_t player_id)
     {
         return snf::protocol::Frame{
             .type = snf::protocol::MessageType::Authenticate,
@@ -416,9 +376,7 @@ namespace
         };
     }
 
-    snf::protocol::Frame purchase_frame(const std::uint32_t request_id,
-                                        const std::uint64_t idempotency_key,
-                                        const std::uint32_t product = 1)
+    snf::protocol::Frame purchase_frame(const std::uint32_t request_id, const std::uint64_t idempotency_key, const std::uint32_t product = 1)
     {
         std::vector<std::byte> payload;
         append_u64(payload, idempotency_key);
@@ -439,9 +397,7 @@ namespace
         };
     }
 
-    void assert_authenticated(const std::vector<std::byte>& response,
-                              const std::uint32_t request_id,
-                              const std::uint64_t player_id)
+    void assert_authenticated(const std::vector<std::byte>& response, const std::uint32_t request_id, const std::uint64_t player_id)
     {
         snf::protocol::FrameDecoder decoder;
         const auto result = decoder.append(response);
@@ -456,12 +412,9 @@ namespace
     snf::protocol::Frame receive_zone_response(const int socket_descriptor)
     {
         constexpr std::size_t ZONE_RESPONSE_PAYLOAD_SIZE = 27;
-        constexpr std::size_t ZONE_RESPONSE_FRAME_SIZE = snf::protocol::FRAME_LENGTH_FIELD_SIZE +
-                                                         snf::protocol::MIN_BODY_SIZE +
-                                                         ZONE_RESPONSE_PAYLOAD_SIZE;
+        constexpr std::size_t ZONE_RESPONSE_FRAME_SIZE = snf::protocol::FRAME_LENGTH_FIELD_SIZE + snf::protocol::MIN_BODY_SIZE + ZONE_RESPONSE_PAYLOAD_SIZE;
         snf::protocol::FrameDecoder decoder;
-        const auto decoded =
-            decoder.append(receive_exact(socket_descriptor, ZONE_RESPONSE_FRAME_SIZE));
+        const auto decoded = decoder.append(receive_exact(socket_descriptor, ZONE_RESPONSE_FRAME_SIZE));
         assert(decoded.ok());
         assert(decoded.frames.size() == 1);
         return decoded.frames.front();
@@ -470,24 +423,18 @@ namespace
     snf::protocol::Frame receive_purchase_response(const int socket_descriptor)
     {
         constexpr std::size_t PURCHASE_RESPONSE_PAYLOAD_SIZE = 30;
-        constexpr std::size_t PURCHASE_RESPONSE_FRAME_SIZE =
-            snf::protocol::FRAME_LENGTH_FIELD_SIZE + snf::protocol::MIN_BODY_SIZE +
-            PURCHASE_RESPONSE_PAYLOAD_SIZE;
+        constexpr std::size_t PURCHASE_RESPONSE_FRAME_SIZE = snf::protocol::FRAME_LENGTH_FIELD_SIZE + snf::protocol::MIN_BODY_SIZE + PURCHASE_RESPONSE_PAYLOAD_SIZE;
         snf::protocol::FrameDecoder decoder;
-        const auto decoded =
-            decoder.append(receive_exact(socket_descriptor, PURCHASE_RESPONSE_FRAME_SIZE));
+        const auto decoded = decoder.append(receive_exact(socket_descriptor, PURCHASE_RESPONSE_FRAME_SIZE));
         assert(decoded.ok());
         assert(decoded.frames.size() == 1);
         return decoded.frames.front();
     }
 
-    snf::protocol::Frame receive_party_response(const int socket_descriptor,
-                                                const std::size_t member_count)
+    snf::protocol::Frame receive_party_response(const int socket_descriptor, const std::size_t member_count)
     {
         constexpr std::size_t FIXED_PARTY_RESPONSE_PAYLOAD_SIZE = 19;
-        const std::size_t frame_size = snf::protocol::FRAME_LENGTH_FIELD_SIZE +
-                                       snf::protocol::MIN_BODY_SIZE +
-                                       FIXED_PARTY_RESPONSE_PAYLOAD_SIZE + member_count * 8;
+        const std::size_t frame_size = snf::protocol::FRAME_LENGTH_FIELD_SIZE + snf::protocol::MIN_BODY_SIZE + FIXED_PARTY_RESPONSE_PAYLOAD_SIZE + member_count * 8;
         snf::protocol::FrameDecoder decoder;
         const auto decoded = decoder.append(receive_exact(socket_descriptor, frame_size));
         assert(decoded.ok());
@@ -505,8 +452,7 @@ namespace
     {
         assert(response.type == type);
         assert(response.request_id == request_id);
-        assert(std::to_integer<std::uint8_t>(response.payload[0]) ==
-               static_cast<std::uint8_t>(status));
+        assert(std::to_integer<std::uint8_t>(response.payload[0]) == static_cast<std::uint8_t>(status));
         assert(read_u64(response.payload, 1) == party);
         assert(read_u64(response.payload, 9) == membership_epoch);
         assert(read_u16(response.payload, 17) == members.size());
@@ -528,8 +474,7 @@ namespace
         assert(response.type == snf::protocol::MessageType::PurchaseResult);
         assert(response.request_id == request_id);
         assert(response.payload.size() == 30);
-        assert(std::to_integer<std::uint8_t>(response.payload[0]) ==
-               static_cast<std::uint8_t>(status));
+        assert(std::to_integer<std::uint8_t>(response.payload[0]) == static_cast<std::uint8_t>(status));
         assert(std::to_integer<std::uint8_t>(response.payload[1]) == (replayed ? 1 : 0));
         assert(read_u64(response.payload, 2) == key);
         assert(read_u32(response.payload, 10) == product);
@@ -543,8 +488,7 @@ namespace
 
         while (true)
         {
-            const auto result =
-                ::recv(socket_descriptor, receive_buffer.data(), receive_buffer.size(), 0);
+            const auto result = ::recv(socket_descriptor, receive_buffer.data(), receive_buffer.size(), 0);
 
             if (result > 0)
             {
@@ -568,41 +512,29 @@ namespace
     std::size_t actor_count(const snf::runtime::ActorRuntimeStats& stats)
     {
         return std::accumulate(
-            stats.workers.begin(),
-            stats.workers.end(),
-            std::size_t{0},
-            [](const std::size_t total, const snf::runtime::ActorRuntimeWorkerStats& worker)
-            { return total + worker.actor_count; });
+            stats.workers.begin(), stats.workers.end(), std::size_t{0}, [](const std::size_t total, const snf::runtime::ActorRuntimeWorkerStats& worker) { return total + worker.actor_count; });
     }
 
     std::uint64_t evicted_actor_count(const snf::runtime::ActorRuntimeStats& stats)
     {
         return std::accumulate(
-            stats.workers.begin(),
-            stats.workers.end(),
-            std::uint64_t{0},
-            [](const std::uint64_t total, const snf::runtime::ActorRuntimeWorkerStats& worker)
-            { return total + worker.evicted_actors; });
+            stats.workers.begin(), stats.workers.end(), std::uint64_t{0}, [](const std::uint64_t total, const snf::runtime::ActorRuntimeWorkerStats& worker) { return total + worker.evicted_actors; });
     }
 
     std::uint64_t queue_wait_sample_count(const snf::runtime::ActorRuntimeStats& stats)
     {
-        return std::accumulate(
-            stats.workers.begin(),
-            stats.workers.end(),
-            std::uint64_t{0},
-            [](const std::uint64_t total, const snf::runtime::ActorRuntimeWorkerStats& worker)
-            { return total + worker.queue_wait_nanoseconds.sample_count; });
+        return std::accumulate(stats.workers.begin(),
+                               stats.workers.end(),
+                               std::uint64_t{0},
+                               [](const std::uint64_t total, const snf::runtime::ActorRuntimeWorkerStats& worker) { return total + worker.queue_wait_nanoseconds.sample_count; });
     }
 
     std::uint64_t suspended_command_count(const snf::runtime::ActorRuntimeStats& stats)
     {
-        return std::accumulate(
-            stats.workers.begin(),
-            stats.workers.end(),
-            std::uint64_t{0},
-            [](const std::uint64_t total, const snf::runtime::ActorRuntimeWorkerStats& worker)
-            { return total + worker.suspended_commands; });
+        return std::accumulate(stats.workers.begin(),
+                               stats.workers.end(),
+                               std::uint64_t{0},
+                               [](const std::uint64_t total, const snf::runtime::ActorRuntimeWorkerStats& worker) { return total + worker.suspended_commands; });
     }
 
     void test_saturated_outbound_answers_every_request_and_still_drains()
@@ -644,9 +576,7 @@ namespace
                 .request_id = request_id,
                 .payload = {},
             };
-            assert_pong(
-                receive_exact(client.getDescriptor(), snf::protocol::encode_frame(request).size()),
-                request);
+            assert_pong(receive_exact(client.getDescriptor(), snf::protocol::encode_frame(request).size()), request);
         }
 
         server.stop();
@@ -685,8 +615,7 @@ namespace
         const auto metrics = server.getMetricsSnapshot();
         assert(metrics.counters.received_frames == 1);
         assert(metrics.network.reactor_turn_nanoseconds.sample_count > 0);
-        assert(metrics.network.reactor_turn_nanoseconds.max >=
-               metrics.network.reactor_turn_nanoseconds.p99);
+        assert(metrics.network.reactor_turn_nanoseconds.max >= metrics.network.reactor_turn_nanoseconds.p99);
         // One drain observation for the PONG hand-off and one pending send sample
         // for the frame it enqueued.
         assert(metrics.network.outbound_queue_depth.sample_count > 0);
@@ -790,9 +719,7 @@ namespace
         const auto first_auth = authentication_frame(100, player_id);
         const auto first_auth_bytes = snf::protocol::encode_frame(first_auth);
         send_all(first.getDescriptor(), first_auth_bytes);
-        assert_authenticated(receive_exact(first.getDescriptor(), first_auth_bytes.size()),
-                             first_auth.request_id,
-                             player_id);
+        assert_authenticated(receive_exact(first.getDescriptor(), first_auth_bytes.size()), first_auth.request_id, player_id);
 
         const auto ping = snf::protocol::Frame{
             .type = snf::protocol::MessageType::Ping,
@@ -810,8 +737,7 @@ namespace
 
         first.init();
         const auto passivation_deadline = std::chrono::steady_clock::now() + 1s;
-        while (actor_count(server.getActorRuntimeStats()) != 0 &&
-               std::chrono::steady_clock::now() < passivation_deadline)
+        while (actor_count(server.getActorRuntimeStats()) != 0 && std::chrono::steady_clock::now() < passivation_deadline)
         {
             std::this_thread::sleep_for(1ms);
         }
@@ -824,9 +750,7 @@ namespace
         const auto reconnect_auth = authentication_frame(103, player_id);
         const auto reconnect_bytes = snf::protocol::encode_frame(reconnect_auth);
         send_all(reconnected.getDescriptor(), reconnect_bytes);
-        assert_authenticated(receive_exact(reconnected.getDescriptor(), reconnect_bytes.size()),
-                             reconnect_auth.request_id,
-                             player_id);
+        assert_authenticated(receive_exact(reconnected.getDescriptor(), reconnect_bytes.size()), reconnect_auth.request_id, player_id);
 
         const auto restored_ping = snf::protocol::Frame{
             .type = snf::protocol::MessageType::Ping,
@@ -835,13 +759,11 @@ namespace
         };
         const auto restored_ping_bytes = snf::protocol::encode_frame(restored_ping);
         send_all(reconnected.getDescriptor(), restored_ping_bytes);
-        assert_pong(receive_exact(reconnected.getDescriptor(), restored_ping_bytes.size()),
-                    restored_ping);
+        assert_pong(receive_exact(reconnected.getDescriptor(), restored_ping_bytes.size()), restored_ping);
 
         reconnected.init();
         const auto second_passivation_deadline = std::chrono::steady_clock::now() + 1s;
-        while (actor_count(server.getActorRuntimeStats()) != 0 &&
-               std::chrono::steady_clock::now() < second_passivation_deadline)
+        while (actor_count(server.getActorRuntimeStats()) != 0 && std::chrono::steady_clock::now() < second_passivation_deadline)
         {
             std::this_thread::sleep_for(1ms);
         }
@@ -863,30 +785,15 @@ namespace
         const auto auth = authentication_frame(110, player_id);
         const auto auth_bytes = snf::protocol::encode_frame(auth);
         send_all(client.getDescriptor(), auth_bytes);
-        assert_authenticated(
-            receive_exact(client.getDescriptor(), auth_bytes.size()), auth.request_id, player_id);
+        assert_authenticated(receive_exact(client.getDescriptor(), auth_bytes.size()), auth.request_id, player_id);
 
         const auto first = purchase_frame(111, 1);
         send_all(client.getDescriptor(), snf::protocol::encode_frame(first));
-        assert_purchase_response(receive_purchase_response(client.getDescriptor()),
-                                 first.request_id,
-                                 snf::server::PurchaseStatus::Committed,
-                                 false,
-                                 1,
-                                 1,
-                                 900,
-                                 1);
+        assert_purchase_response(receive_purchase_response(client.getDescriptor()), first.request_id, snf::server::PurchaseStatus::Committed, false, 1, 1, 900, 1);
 
         const auto duplicate = purchase_frame(112, 1);
         send_all(client.getDescriptor(), snf::protocol::encode_frame(duplicate));
-        assert_purchase_response(receive_purchase_response(client.getDescriptor()),
-                                 duplicate.request_id,
-                                 snf::server::PurchaseStatus::Committed,
-                                 true,
-                                 1,
-                                 1,
-                                 900,
-                                 1);
+        assert_purchase_response(receive_purchase_response(client.getDescriptor()), duplicate.request_id, snf::server::PurchaseStatus::Committed, true, 1, 1, 900, 1);
 
         // The Actor commits before response emission. Closing immediately after the
         // send models a client that cannot know whether key 2 was applied in memory.
@@ -899,8 +806,7 @@ namespace
         while (std::chrono::steady_clock::now() < commit_deadline)
         {
             committed = server.getPlayerRecord(player);
-            if (committed && committed->currency_balance == 800 &&
-                committed->purchased_item_count == 2)
+            if (committed && committed->currency_balance == 800 && committed->purchased_item_count == 2)
             {
                 break;
             }
@@ -911,8 +817,7 @@ namespace
         assert(committed->purchased_item_count == 2);
 
         const auto passivation_deadline = std::chrono::steady_clock::now() + 1s;
-        while (actor_count(server.getActorRuntimeStats()) != 0 &&
-               std::chrono::steady_clock::now() < passivation_deadline)
+        while (actor_count(server.getActorRuntimeStats()) != 0 && std::chrono::steady_clock::now() < passivation_deadline)
         {
             std::this_thread::sleep_for(1ms);
         }
@@ -922,32 +827,15 @@ namespace
         const auto reconnect_auth = authentication_frame(114, player_id);
         const auto reconnect_auth_bytes = snf::protocol::encode_frame(reconnect_auth);
         send_all(reconnected.getDescriptor(), reconnect_auth_bytes);
-        assert_authenticated(
-            receive_exact(reconnected.getDescriptor(), reconnect_auth_bytes.size()),
-            reconnect_auth.request_id,
-            player_id);
+        assert_authenticated(receive_exact(reconnected.getDescriptor(), reconnect_auth_bytes.size()), reconnect_auth.request_id, player_id);
 
         const auto retry = purchase_frame(115, 2);
         send_all(reconnected.getDescriptor(), snf::protocol::encode_frame(retry));
-        assert_purchase_response(receive_purchase_response(reconnected.getDescriptor()),
-                                 retry.request_id,
-                                 snf::server::PurchaseStatus::Committed,
-                                 false,
-                                 2,
-                                 1,
-                                 700,
-                                 3);
+        assert_purchase_response(receive_purchase_response(reconnected.getDescriptor()), retry.request_id, snf::server::PurchaseStatus::Committed, false, 2, 1, 700, 3);
 
         const auto unknown = purchase_frame(118, 4, 999);
         send_all(reconnected.getDescriptor(), snf::protocol::encode_frame(unknown));
-        assert_purchase_response(receive_purchase_response(reconnected.getDescriptor()),
-                                 unknown.request_id,
-                                 snf::server::PurchaseStatus::ProductNotFound,
-                                 false,
-                                 4,
-                                 999,
-                                 700,
-                                 3);
+        assert_purchase_response(receive_purchase_response(reconnected.getDescriptor()), unknown.request_id, snf::server::PurchaseStatus::ProductNotFound, false, 4, 999, 700, 3);
 
         reconnected.init();
         server.stop();
@@ -980,25 +868,16 @@ namespace
         const auto first_auth = authentication_frame(120, first_player);
         const auto first_auth_bytes = snf::protocol::encode_frame(first_auth);
         send_all(first.getDescriptor(), first_auth_bytes);
-        assert_authenticated(receive_exact(first.getDescriptor(), first_auth_bytes.size()),
-                             first_auth.request_id,
-                             first_player);
+        assert_authenticated(receive_exact(first.getDescriptor(), first_auth_bytes.size()), first_auth.request_id, first_player);
         const auto second_auth = authentication_frame(121, second_player);
         const auto second_auth_bytes = snf::protocol::encode_frame(second_auth);
         send_all(second.getDescriptor(), second_auth_bytes);
-        assert_authenticated(receive_exact(second.getDescriptor(), second_auth_bytes.size()),
-                             second_auth.request_id,
-                             second_player);
+        assert_authenticated(receive_exact(second.getDescriptor(), second_auth_bytes.size()), second_auth.request_id, second_player);
 
         const auto first_join = party_join_frame(122, party);
         send_all(first.getDescriptor(), snf::protocol::encode_frame(first_join));
-        assert_party_response(receive_party_response(first.getDescriptor(), 1),
-                              snf::protocol::MessageType::PartyJoined,
-                              first_join.request_id,
-                              snf::server::PartyCommandStatus::Applied,
-                              party,
-                              1,
-                              {first_player});
+        assert_party_response(
+            receive_party_response(first.getDescriptor(), 1), snf::protocol::MessageType::PartyJoined, first_join.request_id, snf::server::PartyCommandStatus::Applied, party, 1, {first_player});
 
         const auto second_join = party_join_frame(123, party);
         send_all(second.getDescriptor(), snf::protocol::encode_frame(second_join));
@@ -1014,9 +893,7 @@ namespace
         const auto third_auth = authentication_frame(126, third_player);
         const auto third_auth_bytes = snf::protocol::encode_frame(third_auth);
         send_all(third.getDescriptor(), third_auth_bytes);
-        assert_authenticated(receive_exact(third.getDescriptor(), third_auth_bytes.size()),
-                             third_auth.request_id,
-                             third_player);
+        assert_authenticated(receive_exact(third.getDescriptor(), third_auth_bytes.size()), third_auth.request_id, third_player);
         const auto full_join = party_join_frame(127, party);
         send_all(third.getDescriptor(), snf::protocol::encode_frame(full_join));
         assert_party_response(receive_party_response(third.getDescriptor(), 2),
@@ -1033,8 +910,7 @@ namespace
         };
         const auto still_connected_bytes = snf::protocol::encode_frame(still_connected);
         send_all(third.getDescriptor(), still_connected_bytes);
-        assert_pong(receive_exact(third.getDescriptor(), still_connected_bytes.size()),
-                    still_connected);
+        assert_pong(receive_exact(third.getDescriptor(), still_connected_bytes.size()), still_connected);
 
         const snf::protocol::Frame first_leave{
             .type = snf::protocol::MessageType::PartyLeave,
@@ -1042,13 +918,8 @@ namespace
             .payload = {},
         };
         send_all(first.getDescriptor(), snf::protocol::encode_frame(first_leave));
-        assert_party_response(receive_party_response(first.getDescriptor(), 1),
-                              snf::protocol::MessageType::PartyLeft,
-                              first_leave.request_id,
-                              snf::server::PartyCommandStatus::Applied,
-                              party,
-                              1,
-                              {second_player});
+        assert_party_response(
+            receive_party_response(first.getDescriptor(), 1), snf::protocol::MessageType::PartyLeft, first_leave.request_id, snf::server::PartyCommandStatus::Applied, party, 1, {second_player});
 
         const snf::protocol::Frame second_leave{
             .type = snf::protocol::MessageType::PartyLeave,
@@ -1056,13 +927,8 @@ namespace
             .payload = {},
         };
         send_all(second.getDescriptor(), snf::protocol::encode_frame(second_leave));
-        assert_party_response(receive_party_response(second.getDescriptor(), 0),
-                              snf::protocol::MessageType::PartyLeft,
-                              second_leave.request_id,
-                              snf::server::PartyCommandStatus::Applied,
-                              party,
-                              1,
-                              {});
+        assert_party_response(
+            receive_party_response(second.getDescriptor(), 0), snf::protocol::MessageType::PartyLeft, second_leave.request_id, snf::server::PartyCommandStatus::Applied, party, 1, {});
 
         const auto party_stats = server.getPartyActorStats();
         assert(party_stats.commands == 5);
@@ -1073,8 +939,7 @@ namespace
         second.init();
         third.init();
         const auto passivation_deadline = std::chrono::steady_clock::now() + 1s;
-        while (actor_count(server.getActorRuntimeStats()) != 0 &&
-               std::chrono::steady_clock::now() < passivation_deadline)
+        while (actor_count(server.getActorRuntimeStats()) != 0 && std::chrono::steady_clock::now() < passivation_deadline)
         {
             std::this_thread::sleep_for(1ms);
         }
@@ -1098,8 +963,7 @@ namespace
         const auto auth = authentication_frame(200, player_id);
         const auto auth_bytes = snf::protocol::encode_frame(auth);
         send_all(client.getDescriptor(), auth_bytes);
-        assert_authenticated(
-            receive_exact(client.getDescriptor(), auth_bytes.size()), auth.request_id, player_id);
+        assert_authenticated(receive_exact(client.getDescriptor(), auth_bytes.size()), auth.request_id, player_id);
 
         std::vector<std::byte> enter_payload = player_id_payload(zone_id);
         append_u32(enter_payload, 10);
@@ -1121,8 +985,7 @@ namespace
         assert(static_cast<std::int32_t>(read_u32(entered.payload, 21)) == 20);
 
         const auto tick_deadline = std::chrono::steady_clock::now() + 1s;
-        while (server.getZoneActorStats().tick_execution_nanoseconds.sample_count == 0 &&
-               std::chrono::steady_clock::now() < tick_deadline)
+        while (server.getZoneActorStats().tick_execution_nanoseconds.sample_count == 0 && std::chrono::steady_clock::now() < tick_deadline)
         {
             std::this_thread::sleep_for(1ms);
         }
@@ -1198,8 +1061,7 @@ namespace
         const auto auth = authentication_frame(400, player_id);
         const auto auth_bytes = snf::protocol::encode_frame(auth);
         send_all(client.getDescriptor(), auth_bytes);
-        assert_authenticated(
-            receive_exact(client.getDescriptor(), auth_bytes.size()), auth.request_id, player_id);
+        assert_authenticated(receive_exact(client.getDescriptor(), auth_bytes.size()), auth.request_id, player_id);
 
         std::vector<std::byte> source_payload = player_id_payload(source_zone);
         append_u32(source_payload, 10);
@@ -1227,8 +1089,7 @@ namespace
         const auto target_entered = receive_zone_response(client.getDescriptor());
         assert(target_entered.type == snf::protocol::MessageType::ZoneEntered);
         assert(target_entered.request_id == 402);
-        assert(target_entered.payload[0] ==
-               static_cast<std::byte>(snf::server::ZoneCommandStatus::Applied));
+        assert(target_entered.payload[0] == static_cast<std::byte>(snf::server::ZoneCommandStatus::Applied));
         assert(read_u64(target_entered.payload, 1) == target_zone);
         assert(read_u64(target_entered.payload, 9) == 2);
         assert(static_cast<std::int32_t>(read_u32(target_entered.payload, 17)) == -50);
@@ -1288,8 +1149,7 @@ namespace
         }
 
         const auto deadline = std::chrono::steady_clock::now() + 1s;
-        while (actor_count(server.getActorRuntimeStats()) != 0 &&
-               std::chrono::steady_clock::now() < deadline)
+        while (actor_count(server.getActorRuntimeStats()) != 0 && std::chrono::steady_clock::now() < deadline)
         {
             std::this_thread::sleep_for(5ms);
         }
@@ -1311,9 +1171,7 @@ namespace
             const auto auth = authentication_frame(300, player_id);
             const auto auth_bytes = snf::protocol::encode_frame(auth);
             send_all(client.getDescriptor(), auth_bytes);
-            assert_authenticated(receive_exact(client.getDescriptor(), auth_bytes.size()),
-                                 auth.request_id,
-                                 player_id);
+            assert_authenticated(receive_exact(client.getDescriptor(), auth_bytes.size()), auth.request_id, player_id);
 
             std::vector<std::byte> enter_payload = player_id_payload(zone_id);
             append_u32(enter_payload, 1);
@@ -1358,8 +1216,7 @@ namespace
                                         }));
 
         const auto passivation_deadline = std::chrono::steady_clock::now() + 1s;
-        while (actor_count(server.getActorRuntimeStats()) != 0 &&
-               std::chrono::steady_clock::now() < passivation_deadline)
+        while (actor_count(server.getActorRuntimeStats()) != 0 && std::chrono::steady_clock::now() < passivation_deadline)
         {
             std::this_thread::sleep_for(1ms);
         }
@@ -1369,9 +1226,7 @@ namespace
         const auto auth = authentication_frame(303, player_id);
         const auto auth_bytes = snf::protocol::encode_frame(auth);
         send_all(reconnected.getDescriptor(), auth_bytes);
-        assert_authenticated(receive_exact(reconnected.getDescriptor(), auth_bytes.size()),
-                             auth.request_id,
-                             player_id);
+        assert_authenticated(receive_exact(reconnected.getDescriptor(), auth_bytes.size()), auth.request_id, player_id);
 
         std::vector<std::byte> enter_payload = player_id_payload(zone_id);
         append_u32(enter_payload, 999);
@@ -1434,8 +1289,7 @@ namespace
         const auto second_encoded_request = snf::protocol::encode_frame(second_request);
 
         std::vector<std::byte> bundled_requests = first_encoded_request;
-        bundled_requests.insert(
-            bundled_requests.end(), second_encoded_request.begin(), second_encoded_request.end());
+        bundled_requests.insert(bundled_requests.end(), second_encoded_request.begin(), second_encoded_request.end());
 
         send_all(client.getDescriptor(), bundled_requests);
 
@@ -1468,8 +1322,7 @@ namespace
             };
 
             const auto encoded_request = snf::protocol::encode_frame(incomplete_request);
-            send_all(partial_client.getDescriptor(),
-                     std::span<const std::byte>{encoded_request}.first(5));
+            send_all(partial_client.getDescriptor(), std::span<const std::byte>{encoded_request}.first(5));
         }
 
         const auto next_client = connect_client(server.getPort());
@@ -1508,8 +1361,7 @@ namespace
         };
         const auto healthy_encoded_request = snf::protocol::encode_frame(healthy_request);
         send_all(healthy_client.getDescriptor(), healthy_encoded_request);
-        assert_pong(receive_exact(healthy_client.getDescriptor(), healthy_encoded_request.size()),
-                    healthy_request);
+        assert_pong(receive_exact(healthy_client.getDescriptor(), healthy_encoded_request.size()), healthy_request);
 
         server.stop();
         assert(server.getStats().protocol_errors >= 1);
@@ -1541,8 +1393,7 @@ namespace
         bundled_requests.reserve(encoded_request.size() * REQUEST_COUNT);
         for (int request_index = 0; request_index < REQUEST_COUNT; ++request_index)
         {
-            bundled_requests.insert(
-                bundled_requests.end(), encoded_request.begin(), encoded_request.end());
+            bundled_requests.insert(bundled_requests.end(), encoded_request.begin(), encoded_request.end());
         }
 
         send_all(overloaded_client.getDescriptor(), bundled_requests);
@@ -1556,8 +1407,7 @@ namespace
         };
         const auto healthy_encoded_request = snf::protocol::encode_frame(healthy_request);
         send_all(healthy_client.getDescriptor(), healthy_encoded_request);
-        assert_pong(receive_exact(healthy_client.getDescriptor(), healthy_encoded_request.size()),
-                    healthy_request);
+        assert_pong(receive_exact(healthy_client.getDescriptor(), healthy_encoded_request.size()), healthy_request);
 
         server.stop();
         assert(server.getStats().actor_queue_overflows >= 1);
@@ -1573,8 +1423,7 @@ namespace
         const auto auth = authentication_frame(1550, player_id);
         const auto auth_bytes = snf::protocol::encode_frame(auth);
         send_all(client.getDescriptor(), auth_bytes);
-        assert_authenticated(
-            receive_exact(client.getDescriptor(), auth_bytes.size()), auth.request_id, player_id);
+        assert_authenticated(receive_exact(client.getDescriptor(), auth_bytes.size()), auth.request_id, player_id);
 
         const snf::protocol::Frame ping{
             .type = snf::protocol::MessageType::Ping,
@@ -1594,8 +1443,7 @@ namespace
         assert(saved.has_value());
         assert(saved->handled_command_count == 2);
 
-        snf::net::UniqueFileDescriptor connection_attempt{
-            ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
+        snf::net::UniqueFileDescriptor connection_attempt{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
         assert(connection_attempt.isValid());
 
         sockaddr_in server_address{};
@@ -1603,9 +1451,7 @@ namespace
         server_address.sin_port = htons(port);
         assert(::inet_pton(AF_INET, "127.0.0.1", &server_address.sin_addr) == 1);
 
-        assert(::connect(connection_attempt.getDescriptor(),
-                         reinterpret_cast<const sockaddr*>(&server_address),
-                         sizeof(server_address)) == -1);
+        assert(::connect(connection_attempt.getDescriptor(), reinterpret_cast<const sockaddr*>(&server_address), sizeof(server_address)) == -1);
     }
 
     void test_closes_slow_client_when_send_queue_exceeds_limit()
@@ -1630,8 +1476,7 @@ namespace
         bundled_requests.reserve(encoded_request.size() * REQUEST_COUNT);
         for (int request_index = 0; request_index < REQUEST_COUNT; ++request_index)
         {
-            bundled_requests.insert(
-                bundled_requests.end(), encoded_request.begin(), encoded_request.end());
+            bundled_requests.insert(bundled_requests.end(), encoded_request.begin(), encoded_request.end());
         }
         send_until_complete_or_closed(slow_client.getDescriptor(), bundled_requests);
         receive_until_closed(slow_client.getDescriptor());
@@ -1644,8 +1489,7 @@ namespace
         };
         const auto healthy_encoded_request = snf::protocol::encode_frame(healthy_request);
         send_all(healthy_client.getDescriptor(), healthy_encoded_request);
-        const auto response =
-            receive_exact(healthy_client.getDescriptor(), healthy_encoded_request.size());
+        const auto response = receive_exact(healthy_client.getDescriptor(), healthy_encoded_request.size());
         assert_pong(response, healthy_request);
 
         server.stop();
@@ -1674,8 +1518,7 @@ namespace
 
         for (int request_index = 0; request_index < REQUEST_COUNT; ++request_index)
         {
-            bundled_requests.insert(
-                bundled_requests.end(), encoded_request.begin(), encoded_request.end());
+            bundled_requests.insert(bundled_requests.end(), encoded_request.begin(), encoded_request.end());
         }
 
         send_all(slow_client.getDescriptor(), bundled_requests);
@@ -1709,23 +1552,18 @@ namespace
     {
         RecordingFrameIngress ingress;
         const auto outbound_event = make_eventfd();
-        snf::server::OutboundChannel outbound{
-            snf::server::OutboundChannelConfig{.capacity = 8, .max_slots_per_connection = 8},
-            outbound_event.getDescriptor()};
-        snf::runtime::RuntimeCompletionCoordinator runtime_completion{
-            snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
-            outbound_event.getDescriptor()};
-        snf::server::TcpServer server{
-            snf::server::TcpServerConfig{
-                .port = 0,
-                .shutdown_grace_period = 5s,
-                .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
-                .client_send_buffer_size = std::nullopt,
-            },
-            ingress,
-            outbound,
-            runtime_completion,
-            outbound_event.getDescriptor()};
+        snf::server::OutboundChannel outbound{snf::server::OutboundChannelConfig{.capacity = 8, .max_slots_per_connection = 8}, outbound_event.getDescriptor()};
+        snf::runtime::RuntimeCompletionCoordinator runtime_completion{snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic), outbound_event.getDescriptor()};
+        snf::server::TcpServer server{snf::server::TcpServerConfig{
+                                          .port = 0,
+                                          .shutdown_grace_period = 5s,
+                                          .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
+                                          .client_send_buffer_size = std::nullopt,
+                                      },
+                                      ingress,
+                                      outbound,
+                                      runtime_completion,
+                                      outbound_event.getDescriptor()};
 
         std::promise<void> server_finished;
         const auto finished = server_finished.get_future();
@@ -1761,23 +1599,18 @@ namespace
             snf::server::PostResult::Accepted,
         };
         const auto outbound_event = make_eventfd();
-        snf::server::OutboundChannel outbound{
-            snf::server::OutboundChannelConfig{.capacity = 8, .max_slots_per_connection = 8},
-            outbound_event.getDescriptor()};
-        snf::runtime::RuntimeCompletionCoordinator runtime_completion{
-            snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
-            outbound_event.getDescriptor()};
-        snf::server::TcpServer server{
-            snf::server::TcpServerConfig{
-                .port = 0,
-                .shutdown_grace_period = 200ms,
-                .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
-                .client_send_buffer_size = std::nullopt,
-            },
-            ingress,
-            outbound,
-            runtime_completion,
-            outbound_event.getDescriptor()};
+        snf::server::OutboundChannel outbound{snf::server::OutboundChannelConfig{.capacity = 8, .max_slots_per_connection = 8}, outbound_event.getDescriptor()};
+        snf::runtime::RuntimeCompletionCoordinator runtime_completion{snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic), outbound_event.getDescriptor()};
+        snf::server::TcpServer server{snf::server::TcpServerConfig{
+                                          .port = 0,
+                                          .shutdown_grace_period = 200ms,
+                                          .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
+                                          .client_send_buffer_size = std::nullopt,
+                                      },
+                                      ingress,
+                                      outbound,
+                                      runtime_completion,
+                                      outbound_event.getDescriptor()};
 
         std::exception_ptr server_error;
         std::thread server_thread{[&]
@@ -1796,8 +1629,7 @@ namespace
         }
 
         const auto deadline = std::chrono::steady_clock::now() + 1s;
-        while (ingress.lifecycle_attempts.load() != 3 &&
-               std::chrono::steady_clock::now() < deadline)
+        while (ingress.lifecycle_attempts.load() != 3 && std::chrono::steady_clock::now() < deadline)
         {
             std::this_thread::sleep_for(1ms);
         }
@@ -1822,24 +1654,19 @@ namespace
         RecordingFrameIngress ingress;
         ingress.lifecycle_fallback = snf::server::PostResult::Full;
         const auto outbound_event = make_eventfd();
-        snf::server::OutboundChannel outbound{
-            snf::server::OutboundChannelConfig{.capacity = 8, .max_slots_per_connection = 8},
-            outbound_event.getDescriptor()};
-        snf::runtime::RuntimeCompletionCoordinator runtime_completion{
-            snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
-            outbound_event.getDescriptor()};
-        snf::server::TcpServer server{
-            snf::server::TcpServerConfig{
-                .port = 0,
-                .shutdown_grace_period = 200ms,
-                .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
-                .client_send_buffer_size = std::nullopt,
-                .connection_lifecycle_capacity = 2,
-            },
-            ingress,
-            outbound,
-            runtime_completion,
-            outbound_event.getDescriptor()};
+        snf::server::OutboundChannel outbound{snf::server::OutboundChannelConfig{.capacity = 8, .max_slots_per_connection = 8}, outbound_event.getDescriptor()};
+        snf::runtime::RuntimeCompletionCoordinator runtime_completion{snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic), outbound_event.getDescriptor()};
+        snf::server::TcpServer server{snf::server::TcpServerConfig{
+                                          .port = 0,
+                                          .shutdown_grace_period = 200ms,
+                                          .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
+                                          .client_send_buffer_size = std::nullopt,
+                                          .connection_lifecycle_capacity = 2,
+                                      },
+                                      ingress,
+                                      outbound,
+                                      runtime_completion,
+                                      outbound_event.getDescriptor()};
 
         std::exception_ptr server_error;
         std::thread server_thread{[&]
@@ -1861,8 +1688,7 @@ namespace
             }
 
             const auto deadline = std::chrono::steady_clock::now() + 1s;
-            while (ingress.distinctConnectionCloseCount() < close_index + 1 &&
-                   std::chrono::steady_clock::now() < deadline)
+            while (ingress.distinctConnectionCloseCount() < close_index + 1 && std::chrono::steady_clock::now() < deadline)
             {
                 std::this_thread::sleep_for(1ms);
             }
@@ -1887,30 +1713,24 @@ namespace
     {
         RecordingFrameIngress ingress;
         const auto outbound_event = make_eventfd();
-        snf::server::OutboundChannel outbound{
-            snf::server::OutboundChannelConfig{.capacity = 2, .max_slots_per_connection = 2},
-            outbound_event.getDescriptor()};
-        snf::runtime::RuntimeCompletionCoordinator runtime_completion{
-            snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
-            outbound_event.getDescriptor()};
+        snf::server::OutboundChannel outbound{snf::server::OutboundChannelConfig{.capacity = 2, .max_slots_per_connection = 2}, outbound_event.getDescriptor()};
+        snf::runtime::RuntimeCompletionCoordinator runtime_completion{snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic), outbound_event.getDescriptor()};
         std::atomic<bool> control_drained{false};
-        snf::server::TcpServer server{
-            snf::server::TcpServerConfig{
-                .port = 0,
-                .shutdown_grace_period = 500ms,
-                .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
-                .client_send_buffer_size = std::nullopt,
-                .connection_lifecycle_capacity = 2,
-                .metrics_report_interval = 0ms,
-                .on_metrics_interval = {},
-                .on_control_wake = {},
-                .is_control_drained = [&control_drained]
-                { return control_drained.load(std::memory_order_acquire); },
-            },
-            ingress,
-            outbound,
-            runtime_completion,
-            outbound_event.getDescriptor()};
+        snf::server::TcpServer server{snf::server::TcpServerConfig{
+                                          .port = 0,
+                                          .shutdown_grace_period = 500ms,
+                                          .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
+                                          .client_send_buffer_size = std::nullopt,
+                                          .connection_lifecycle_capacity = 2,
+                                          .metrics_report_interval = 0ms,
+                                          .on_metrics_interval = {},
+                                          .on_control_wake = {},
+                                          .is_control_drained = [&control_drained] { return control_drained.load(std::memory_order_acquire); },
+                                      },
+                                      ingress,
+                                      outbound,
+                                      runtime_completion,
+                                      outbound_event.getDescriptor()};
 
         std::exception_ptr server_error;
         std::promise<void> finished;
@@ -1934,8 +1754,7 @@ namespace
 
         control_drained.store(true, std::memory_order_release);
         constexpr std::uint64_t wake = 1;
-        assert(::write(outbound_event.getDescriptor(), &wake, sizeof(wake)) ==
-               static_cast<ssize_t>(sizeof(wake)));
+        assert(::write(outbound_event.getDescriptor(), &wake, sizeof(wake)) == static_cast<ssize_t>(sizeof(wake)));
         assert(finished_future.wait_for(1s) == std::future_status::ready);
         server_thread.join();
         assert(server_error == nullptr);

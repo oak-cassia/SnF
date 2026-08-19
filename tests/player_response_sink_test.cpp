@@ -18,15 +18,12 @@ namespace
     {
         explicit ResponseSinkFixture(const std::size_t capacity)
             : wake(snf::test::make_wake_descriptor())
-            , channel(snf::server::OutboundChannelConfig{.capacity = capacity,
-                                                         .max_slots_per_connection = capacity},
-                      wake.getDescriptor())
+            , channel(snf::server::OutboundChannelConfig{.capacity = capacity, .max_slots_per_connection = capacity}, wake.getDescriptor())
             , response_sink(channel)
         {
         }
 
-        [[nodiscard]] snf::server::OutboundReservation
-        reserve(const snf::net::ConnectionId connection, const std::size_t slots)
+        [[nodiscard]] snf::server::OutboundReservation reserve(const snf::net::ConnectionId connection, const std::size_t slots)
         {
             auto reservation = channel.tryReserve(connection, slots);
             assert(reservation);
@@ -47,8 +44,7 @@ namespace
         snf::server::ProtocolPlayerResponseSink response_sink;
     };
 
-    snf::server::PlayerResult pong_result(const std::uint32_t request_id,
-                                          std::vector<std::byte> payload = {})
+    snf::server::PlayerResult pong_result(const std::uint32_t request_id, std::vector<std::byte> payload = {})
     {
         return snf::server::PlayerResult{
             .responses =
@@ -83,8 +79,7 @@ namespace
         const snf::net::ConnectionId connection{.descriptor = 4, .generation = 9};
         auto reservation = fixture.reserve(connection, 1);
 
-        assert(fixture.response_sink.applyResponses(
-            connection, pong_result(42, {std::byte{0xAB}}), reservation));
+        assert(fixture.response_sink.applyResponses(connection, pong_result(42, {std::byte{0xAB}}), reservation));
         assert(reservation.remainingSlots() == 0);
 
         const auto posted = fixture.channel.tryPop();
@@ -118,8 +113,7 @@ namespace
         const snf::net::ConnectionId connection{.descriptor = 4, .generation = 9};
         auto reservation = fixture.reserve(connection, 0);
 
-        assert(fixture.response_sink.applyResponses(
-            connection, snf::server::PlayerResult{}, reservation));
+        assert(fixture.response_sink.applyResponses(connection, snf::server::PlayerResult{}, reservation));
         assert(fixture.channel.size() == 0);
         assert(fixture.channel.reservedSlotCount() == 0);
     }
@@ -151,8 +145,7 @@ namespace
         bool shortfall_reported = false;
         try
         {
-            static_cast<void>(
-                fixture.response_sink.applyResponses(connection, std::move(result), reservation));
+            static_cast<void>(fixture.response_sink.applyResponses(connection, std::move(result), reservation));
         }
         catch (const std::logic_error&)
         {

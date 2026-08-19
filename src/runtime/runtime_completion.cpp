@@ -6,8 +6,7 @@
 
 namespace snf::runtime
 {
-    RuntimeCompletionCoordinator::RuntimeCompletionCoordinator(
-        const std::uint64_t required_runtime_mask, const int wake_descriptor)
+    RuntimeCompletionCoordinator::RuntimeCompletionCoordinator(const std::uint64_t required_runtime_mask, const int wake_descriptor)
         : _required_runtime_mask(required_runtime_mask)
         , _wake_descriptor(wake_descriptor)
     {

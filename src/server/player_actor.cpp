@@ -34,6 +34,11 @@ namespace snf::server
         return _economy.purchased_item_count;
     }
 
+    std::uint64_t PlayerState::streetExperience() const noexcept
+    {
+        return _progression.street_experience;
+    }
+
     PlayerStateComponentMask PlayerState::dirtyComponents() const noexcept
     {
         return _dirty_components;
@@ -55,6 +60,7 @@ namespace snf::server
         _state._session.last_location = record.last_location;
         _state._economy.currency_balance = record.currency_balance;
         _state._economy.purchased_item_count = record.purchased_item_count;
+        _state._progression.street_experience = record.street_experience;
         _state._dirty_components = 0;
         _purchase_evidence.clear();
     }
@@ -65,9 +71,17 @@ namespace snf::server
         _state._dirty_components |= componentMask(PlayerStateComponent::Session);
     }
 
+    void PlayerActor::grantStreetExperience(const std::uint64_t experience) noexcept
+    {
+        std::uint64_t& total = _state._progression.street_experience;
+        total = experience > std::numeric_limits<std::uint64_t>::max() - total ? std::numeric_limits<std::uint64_t>::max() : total + experience;
+        _state._dirty_components |= componentMask(PlayerStateComponent::Progression);
+    }
+
     bool PlayerActor::hasFlushableDirtyState() const noexcept
     {
-        return (_state._dirty_components & componentMask(PlayerStateComponent::Economy)) != 0;
+        constexpr PlayerStateComponentMask flushable = componentMask(PlayerStateComponent::Economy) | componentMask(PlayerStateComponent::Progression);
+        return (_state._dirty_components & flushable) != 0;
     }
 
     PlayerStateComponentMask PlayerActor::dirtyComponents() const noexcept
@@ -75,8 +89,7 @@ namespace snf::server
         return _state._dirty_components;
     }
 
-    std::optional<PlayerRecord>
-    PlayerActor::takeDirtySnapshot(PlayerStateComponentMask* const cleared_components)
+    std::optional<PlayerRecord> PlayerActor::takeDirtySnapshot(PlayerStateComponentMask* const cleared_components)
     {
         if (!hasFlushableDirtyState())
         {
@@ -116,6 +129,7 @@ namespace snf::server
             .last_location = _state._session.last_location,
             .currency_balance = _state._economy.currency_balance,
             .purchased_item_count = _state._economy.purchased_item_count,
+            .street_experience = _state._progression.street_experience,
         };
     }
 
@@ -124,8 +138,7 @@ namespace snf::server
         _state._session.identity = identity;
     }
 
-    PlayerActor::PlayerActor(const PlayerActorId identity,
-                             const std::size_t max_purchase_idempotency_records)
+    PlayerActor::PlayerActor(const PlayerActorId identity, const std::size_t max_purchase_idempotency_records)
         : _max_purchase_idempotency_records(max_purchase_idempotency_records)
     {
         if (_max_purchase_idempotency_records == 0)
@@ -137,8 +150,7 @@ namespace snf::server
 
     snf::runtime::ActorTask<PlayerResult> PlayerActor::handle(const PlayerCommand& command)
     {
-        PlayerResult result =
-            std::visit([this](const auto& value) { return handleCommand(value); }, command);
+        PlayerResult result = std::visit([this](const auto& value) { return handleCommand(value); }, command);
         ++_state._session.handled_command_count;
         co_return result;
     }
@@ -198,8 +210,7 @@ namespace snf::server
             .replayed = false,
         };
 
-        if (const auto existing = _purchase_evidence.find(command.idempotency_key.value);
-            existing != _purchase_evidence.end())
+        if (const auto existing = _purchase_evidence.find(command.idempotency_key.value); existing != _purchase_evidence.end())
         {
             if (existing->second.product != command.product)
             {
@@ -230,8 +241,7 @@ namespace snf::server
             {
                 result.status = PurchaseStatus::InsufficientFunds;
             }
-            else if (next_item_count >
-                     std::numeric_limits<std::uint64_t>::max() - definition->grant_count)
+            else if (next_item_count > std::numeric_limits<std::uint64_t>::max() - definition->grant_count)
             {
                 result.status = PurchaseStatus::InventoryCapacityExceeded;
             }
@@ -269,5 +279,4 @@ namespace snf::server
                 },
         };
     }
-
 }

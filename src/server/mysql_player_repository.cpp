@@ -10,7 +10,6 @@
 #include <charconv>
 #include <chrono>
 #include <cstddef>
-#include <cstdint>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -27,16 +26,14 @@ namespace
 {
     using MySqlResult = std::unique_ptr<MYSQL_RES, decltype(&::mysql_free_result)>;
 
-    [[nodiscard]] std::runtime_error mysql_error(MYSQL* connection,
-                                                 const std::string_view operation)
+    [[nodiscard]] std::runtime_error mysql_error(MYSQL* connection, const std::string_view operation)
     {
         return std::runtime_error{std::string{operation} + ": " + ::mysql_error(connection)};
     }
 
     [[nodiscard]] unsigned int timeout_seconds(const std::chrono::seconds timeout)
     {
-        if (timeout <= std::chrono::seconds::zero() ||
-            timeout.count() > std::numeric_limits<unsigned int>::max())
+        if (timeout <= std::chrono::seconds::zero() || timeout.count() > std::numeric_limits<unsigned int>::max())
         {
             throw std::invalid_argument{"MySQL timeout is outside the client range"};
         }
@@ -45,8 +42,7 @@ namespace
 
     void validate_config(const snf::server::MySqlPlayerRepositoryConfig& config)
     {
-        if (config.host.empty() || config.user.empty() || config.database.empty() ||
-            config.port == 0 || config.worker_count == 0 || config.queue_capacity == 0)
+        if (config.host.empty() || config.user.empty() || config.database.empty() || config.port == 0 || config.worker_count == 0 || config.queue_capacity == 0)
         {
             throw std::invalid_argument{"MySQL repository configuration is incomplete"};
         }
@@ -82,14 +78,7 @@ namespace
                 setOption(MYSQL_OPT_READ_TIMEOUT, &read_timeout);
                 setOption(MYSQL_OPT_WRITE_TIMEOUT, &write_timeout);
 
-                if (::mysql_real_connect(_connection,
-                                         config.host.c_str(),
-                                         config.user.c_str(),
-                                         config.password.c_str(),
-                                         config.database.c_str(),
-                                         config.port,
-                                         nullptr,
-                                         CLIENT_FOUND_ROWS) == nullptr)
+                if (::mysql_real_connect(_connection, config.host.c_str(), config.user.c_str(), config.password.c_str(), config.database.c_str(), config.port, nullptr, CLIENT_FOUND_ROWS) == nullptr)
                 {
                     throw mysql_error(_connection, "mysql_real_connect");
                 }
@@ -155,8 +144,7 @@ namespace
         MYSQL* _connection{nullptr};
     };
 
-    template <typename Integer>
-    [[nodiscard]] Integer parse_integer(const char* const text, const std::string_view field)
+    template <typename Integer> [[nodiscard]] Integer parse_integer(const char* const text, const std::string_view field)
     {
         if (text == nullptr)
         {
@@ -175,12 +163,11 @@ namespace
     [[nodiscard]] std::string player_select(const snf::server::PlayerId player)
     {
         return "SELECT handled_command_count, zone_id, position_x, position_y, "
-               "currency_balance, purchased_item_count FROM snf_players WHERE player_id=" +
+               "currency_balance, purchased_item_count, street_experience FROM snf_players WHERE player_id=" +
                std::to_string(player.value);
     }
 
-    [[nodiscard]] snf::server::PlayerRecord decode_player(const snf::server::PlayerId player,
-                                                          MYSQL_ROW row)
+    [[nodiscard]] snf::server::PlayerRecord decode_player(const snf::server::PlayerId player, MYSQL_ROW row)
     {
         const bool has_zone = row[1] != nullptr;
         if (has_zone != (row[2] != nullptr) || has_zone != (row[3] != nullptr))
@@ -192,8 +179,7 @@ namespace
         if (has_zone)
         {
             location = snf::server::PlayerLocation{
-                .zone =
-                    snf::server::ZoneId{.value = parse_integer<std::uint64_t>(row[1], "zone_id")},
+                .zone = snf::server::ZoneId{.value = parse_integer<std::uint64_t>(row[1], "zone_id")},
                 .position =
                     {
                         .x = parse_integer<std::int32_t>(row[2], "position_x"),
@@ -208,6 +194,7 @@ namespace
             .last_location = location,
             .currency_balance = parse_integer<std::uint64_t>(row[4], "currency_balance"),
             .purchased_item_count = parse_integer<std::uint64_t>(row[5], "purchased_item_count"),
+            .street_experience = parse_integer<std::uint64_t>(row[6], "street_experience"),
         };
     }
 
@@ -245,24 +232,19 @@ namespace
 
         [[nodiscard]] snf::server::PlayerSaveResult save(const snf::server::PlayerRecord& record)
         {
-            const std::string zone =
-                record.last_location ? std::to_string(record.last_location->zone.value) : "NULL";
-            const std::string position_x =
-                record.last_location ? std::to_string(record.last_location->position.x) : "NULL";
-            const std::string position_y =
-                record.last_location ? std::to_string(record.last_location->position.y) : "NULL";
-            _connection.execute(
-                "INSERT INTO snf_players (player_id, handled_command_count, zone_id, "
-                "position_x, position_y, currency_balance, purchased_item_count) VALUES (" +
-                std::to_string(record.player.value) + "," +
-                std::to_string(record.handled_command_count) + "," + zone + "," + position_x + "," +
-                position_y + "," + std::to_string(record.currency_balance) + "," +
-                std::to_string(record.purchased_item_count) +
-                ") ON DUPLICATE KEY UPDATE "
-                "handled_command_count=VALUES(handled_command_count), "
-                "zone_id=VALUES(zone_id), position_x=VALUES(position_x), "
-                "position_y=VALUES(position_y), currency_balance=VALUES(currency_balance), "
-                "purchased_item_count=VALUES(purchased_item_count)");
+            const std::string zone = record.last_location ? std::to_string(record.last_location->zone.value) : "NULL";
+            const std::string position_x = record.last_location ? std::to_string(record.last_location->position.x) : "NULL";
+            const std::string position_y = record.last_location ? std::to_string(record.last_location->position.y) : "NULL";
+            _connection.execute("INSERT INTO snf_players (player_id, handled_command_count, zone_id, "
+                                "position_x, position_y, currency_balance, purchased_item_count, street_experience) VALUES (" +
+                                std::to_string(record.player.value) + "," + std::to_string(record.handled_command_count) + "," + zone + "," + position_x + "," + position_y + "," +
+                                std::to_string(record.currency_balance) + "," + std::to_string(record.purchased_item_count) + "," + std::to_string(record.street_experience) +
+                                ") ON DUPLICATE KEY UPDATE "
+                                "handled_command_count=VALUES(handled_command_count), "
+                                "zone_id=VALUES(zone_id), position_x=VALUES(position_x), "
+                                "position_y=VALUES(position_y), currency_balance=VALUES(currency_balance), "
+                                "purchased_item_count=VALUES(purchased_item_count), "
+                                "street_experience=VALUES(street_experience)");
             return snf::server::PlayerSaveResult{
                 .status = snf::server::PlayerRepositoryStatus::Success,
             };
@@ -271,9 +253,8 @@ namespace
     private:
         void ensureSchema()
         {
-            _connection.execute(
-                "CREATE TABLE IF NOT EXISTS snf_schema_version (version INT UNSIGNED NOT NULL "
-                "PRIMARY KEY) ENGINE=InnoDB");
+            _connection.execute("CREATE TABLE IF NOT EXISTS snf_schema_version (version INT UNSIGNED NOT NULL "
+                                "PRIMARY KEY) ENGINE=InnoDB");
             _connection.execute("INSERT IGNORE INTO snf_schema_version (version) VALUES (1)");
             auto version = _connection.query("SELECT MAX(version) FROM snf_schema_version");
             MYSQL_ROW version_row = ::mysql_fetch_row(version.get());
@@ -281,23 +262,22 @@ namespace
             {
                 throw std::runtime_error{"MySQL schema version is unsupported"};
             }
-            const std::uint32_t schema_version =
-                parse_integer<std::uint32_t>(version_row[0], "schema version");
-            if (schema_version == 0 || schema_version > 6)
+            const std::uint32_t schema_version = parse_integer<std::uint32_t>(version_row[0], "schema version");
+            if (schema_version == 0 || schema_version > 7)
             {
                 throw std::runtime_error{"MySQL schema version is unsupported"};
             }
 
-            _connection.execute(
-                "CREATE TABLE IF NOT EXISTS snf_players ("
-                "player_id BIGINT UNSIGNED NOT NULL PRIMARY KEY, "
-                "handled_command_count BIGINT UNSIGNED NOT NULL, "
-                "zone_id BIGINT UNSIGNED NULL, position_x INT NULL, position_y INT NULL, "
-                "currency_balance BIGINT UNSIGNED NOT NULL, "
-                "purchased_item_count BIGINT UNSIGNED NOT NULL, "
-                "CONSTRAINT snf_player_location_complete CHECK ((zone_id IS NULL AND "
-                "position_x IS NULL AND position_y IS NULL) OR (zone_id IS NOT NULL AND "
-                "position_x IS NOT NULL AND position_y IS NOT NULL))) ENGINE=InnoDB");
+            _connection.execute("CREATE TABLE IF NOT EXISTS snf_players ("
+                                "player_id BIGINT UNSIGNED NOT NULL PRIMARY KEY, "
+                                "handled_command_count BIGINT UNSIGNED NOT NULL, "
+                                "zone_id BIGINT UNSIGNED NULL, position_x INT NULL, position_y INT NULL, "
+                                "currency_balance BIGINT UNSIGNED NOT NULL, "
+                                "purchased_item_count BIGINT UNSIGNED NOT NULL, "
+                                "street_experience BIGINT UNSIGNED NOT NULL DEFAULT 0, "
+                                "CONSTRAINT snf_player_location_complete CHECK ((zone_id IS NULL AND "
+                                "position_x IS NULL AND position_y IS NULL) OR (zone_id IS NOT NULL AND "
+                                "position_x IS NOT NULL AND position_y IS NOT NULL))) ENGINE=InnoDB");
 
             if (schema_version < 5)
             {
@@ -306,24 +286,19 @@ namespace
                 _connection.execute("DROP TABLE IF EXISTS snf_player_events");
                 _connection.execute("DROP TABLE IF EXISTS snf_event_stream");
 
-                auto ranking_score = _connection.query(
-                    "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() "
-                    "AND table_name=\"snf_players\" AND column_name=\"ranking_score\"");
-                if (parse_integer<std::uint64_t>(::mysql_fetch_row(ranking_score.get())[0],
-                                                 "ranking score column count") != 0)
+                auto ranking_score = _connection.query("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() "
+                                                       "AND table_name=\"snf_players\" AND column_name=\"ranking_score\"");
+                if (parse_integer<std::uint64_t>(::mysql_fetch_row(ranking_score.get())[0], "ranking score column count") != 0)
                 {
                     _connection.execute("ALTER TABLE snf_players DROP COLUMN ranking_score");
                 }
 
-                auto event_sequence = _connection.query(
-                    "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() "
-                    "AND table_name=\"snf_players\" AND "
-                    "column_name=\"last_domain_event_sequence\"");
-                if (parse_integer<std::uint64_t>(::mysql_fetch_row(event_sequence.get())[0],
-                                                 "domain event sequence column count") != 0)
+                auto event_sequence = _connection.query("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() "
+                                                        "AND table_name=\"snf_players\" AND "
+                                                        "column_name=\"last_domain_event_sequence\"");
+                if (parse_integer<std::uint64_t>(::mysql_fetch_row(event_sequence.get())[0], "domain event sequence column count") != 0)
                 {
-                    _connection.execute(
-                        "ALTER TABLE snf_players DROP COLUMN last_domain_event_sequence");
+                    _connection.execute("ALTER TABLE snf_players DROP COLUMN last_domain_event_sequence");
                 }
                 _connection.execute("INSERT INTO snf_schema_version (version) VALUES (5)");
             }
@@ -332,6 +307,20 @@ namespace
             {
                 _connection.execute("DROP TABLE IF EXISTS snf_purchase_idempotency");
                 _connection.execute("INSERT INTO snf_schema_version (version) VALUES (6)");
+            }
+
+            if (schema_version < 7)
+            {
+                // The CREATE TABLE above already carries the column on a fresh database,
+                // where the recorded version is still 1, so this has to check before it
+                // adds rather than assume the column is missing.
+                auto street_experience = _connection.query("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() "
+                                                           "AND table_name=\"snf_players\" AND column_name=\"street_experience\"");
+                if (parse_integer<std::uint64_t>(::mysql_fetch_row(street_experience.get())[0], "street experience column count") == 0)
+                {
+                    _connection.execute("ALTER TABLE snf_players ADD COLUMN street_experience BIGINT UNSIGNED NOT NULL DEFAULT 0");
+                }
+                _connection.execute("INSERT INTO snf_schema_version (version) VALUES (7)");
             }
         }
 
@@ -439,15 +428,13 @@ namespace snf::server
             {
                 MySqlStore store{_config, false};
                 const PlayerLoadResult loaded = store.load(player);
-                _operation_latency.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - started_at));
+                _operation_latency.record(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started_at));
                 return loaded.record;
             }
             catch (...)
             {
                 _operation_failures.fetch_add(1, std::memory_order_relaxed);
-                _operation_latency.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - started_at));
+                _operation_latency.record(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started_at));
                 return std::nullopt;
             }
         }
@@ -535,8 +522,7 @@ namespace snf::server
                         }
                     },
                     std::move(*job));
-                _operation_latency.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - started_at));
+                _operation_latency.record(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started_at));
             }
             store.reset();
             ::mysql_thread_end();
@@ -556,8 +542,7 @@ namespace snf::server
             store.reset();
         }
 
-        template <typename Completion, typename Result>
-        void invoke(Completion& completion, Result result) noexcept
+        template <typename Completion, typename Result> void invoke(Completion& completion, Result result) noexcept
         {
             try
             {

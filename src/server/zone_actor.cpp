@@ -75,10 +75,7 @@ namespace snf::server
             }
         }
 
-        std::sort(visible.begin(),
-                  visible.end(),
-                  [](const PlayerId left, const PlayerId right)
-                  { return left.value < right.value; });
+        std::sort(visible.begin(), visible.end(), [](const PlayerId left, const PlayerId right) { return left.value < right.value; });
         return visible;
     }
 

@@ -46,14 +46,12 @@ namespace snf::runtime
         static constexpr std::uint64_t SCALED_BUCKET_COUNT_PER_SCALE = EXACT_BUCKET_COUNT / 2;
         // Scale 30 puts the last bucket at 2^34 - 1. Larger samples share it.
         static constexpr std::size_t MAX_SCALE = 30;
-        static constexpr std::size_t BUCKET_COUNT = static_cast<std::size_t>(
-            EXACT_BUCKET_COUNT + MAX_SCALE * SCALED_BUCKET_COUNT_PER_SCALE);
+        static constexpr std::size_t BUCKET_COUNT = static_cast<std::size_t>(EXACT_BUCKET_COUNT + MAX_SCALE * SCALED_BUCKET_COUNT_PER_SCALE);
 
     public:
         // The largest sample the buckets separate, roughly 17 seconds of
         // nanoseconds. Percentiles of larger samples saturate at this value.
-        static constexpr std::uint64_t REPRESENTABLE_UPPER_BOUND =
-            (2 * SCALED_BUCKET_COUNT_PER_SCALE << MAX_SCALE) - 1;
+        static constexpr std::uint64_t REPRESENTABLE_UPPER_BOUND = (2 * SCALED_BUCKET_COUNT_PER_SCALE << MAX_SCALE) - 1;
 
         Distribution() = default;
 
@@ -66,9 +64,7 @@ namespace snf::runtime
             // the buckets first, so it can never report a max below a sample it
             // has already counted.
             std::uint64_t observed = _max.load(std::memory_order_relaxed);
-            while (observed < value &&
-                   !_max.compare_exchange_weak(
-                       observed, value, std::memory_order_relaxed, std::memory_order_relaxed))
+            while (observed < value && !_max.compare_exchange_weak(observed, value, std::memory_order_relaxed, std::memory_order_relaxed))
             {
             }
 
@@ -118,10 +114,8 @@ namespace snf::runtime
                 return BUCKET_COUNT - 1;
             }
 
-            const auto offset =
-                static_cast<std::size_t>((value >> scale) - SCALED_BUCKET_COUNT_PER_SCALE);
-            return static_cast<std::size_t>(EXACT_BUCKET_COUNT) +
-                   (scale - 1) * static_cast<std::size_t>(SCALED_BUCKET_COUNT_PER_SCALE) + offset;
+            const auto offset = static_cast<std::size_t>((value >> scale) - SCALED_BUCKET_COUNT_PER_SCALE);
+            return static_cast<std::size_t>(EXACT_BUCKET_COUNT) + (scale - 1) * static_cast<std::size_t>(SCALED_BUCKET_COUNT_PER_SCALE) + offset;
         }
 
         [[nodiscard]] static std::uint64_t lastValueOf(const std::size_t bucket) noexcept
@@ -132,10 +126,8 @@ namespace snf::runtime
             }
 
             const std::size_t scaled = bucket - static_cast<std::size_t>(EXACT_BUCKET_COUNT);
-            const std::size_t scale =
-                scaled / static_cast<std::size_t>(SCALED_BUCKET_COUNT_PER_SCALE) + 1;
-            const std::size_t offset =
-                scaled % static_cast<std::size_t>(SCALED_BUCKET_COUNT_PER_SCALE);
+            const std::size_t scale = scaled / static_cast<std::size_t>(SCALED_BUCKET_COUNT_PER_SCALE) + 1;
+            const std::size_t offset = scaled % static_cast<std::size_t>(SCALED_BUCKET_COUNT_PER_SCALE);
             const std::uint64_t first_value = (SCALED_BUCKET_COUNT_PER_SCALE + offset) << scale;
             return first_value + (std::uint64_t{1} << scale) - 1;
         }
@@ -143,10 +135,7 @@ namespace snf::runtime
         // Nearest-rank percentile: the bucket holding the ceil(ratio * count)-th
         // sample. The load client uses the same definition for its client-side
         // round-trip percentiles.
-        [[nodiscard]] static std::uint64_t
-        percentileOf(const std::array<std::uint64_t, BUCKET_COUNT>& counts,
-                     const std::uint64_t sample_count,
-                     const std::uint64_t percentile) noexcept
+        [[nodiscard]] static std::uint64_t percentileOf(const std::array<std::uint64_t, BUCKET_COUNT>& counts, const std::uint64_t sample_count, const std::uint64_t percentile) noexcept
         {
             const std::uint64_t rank = (sample_count * percentile + 99) / 100;
             std::uint64_t cumulative = 0;

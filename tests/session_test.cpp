@@ -20,9 +20,7 @@ namespace
             snf::net::UniqueFileDescriptor{pipe_file_descriptors[0]},
         };
 
-        const snf::protocol::Frame frame{.type = snf::protocol::MessageType::Ping,
-                                         .request_id = 1,
-                                         .payload = {std::byte{0xAA}, std::byte{0xBB}}};
+        const snf::protocol::Frame frame{.type = snf::protocol::MessageType::Ping, .request_id = 1, .payload = {std::byte{0xAA}, std::byte{0xBB}}};
 
         const auto encoded = snf::protocol::encode_frame(frame);
         const std::span<const std::byte> encoded_view{encoded};
@@ -33,8 +31,7 @@ namespace
         assert(first_result.ok());
         assert(first_result.frames.empty());
 
-        const auto second_result =
-            session.appendReceivedBytes(encoded_view.subspan(first_chunk_size));
+        const auto second_result = session.appendReceivedBytes(encoded_view.subspan(first_chunk_size));
 
         assert(second_result.ok());
         assert(second_result.frames.size() == 1);
@@ -93,9 +90,7 @@ namespace
         assert(!session.consumeSentBytes(sent_byte_count));
 
         assert(session.getPendingSendByteCount() == encoded_frame.size() - sent_byte_count);
-        assert(
-            std::ranges::equal(session.getPendingSendBytes(),
-                               std::span<const std::byte>{encoded_frame}.subspan(sent_byte_count)));
+        assert(std::ranges::equal(session.getPendingSendBytes(), std::span<const std::byte>{encoded_frame}.subspan(sent_byte_count)));
 
         assert(session.consumeSentBytes(encoded_frame.size() - sent_byte_count));
         assert(!session.hasPendingSend());

@@ -8,9 +8,7 @@ namespace snf::server
     class PartyActorIngress final
     {
     public:
-        PartyActorIngress(snf::runtime::ActorRuntime& runtime,
-                          PartyActorBinding& binding,
-                          CommandLifecycleSink& lifecycle) noexcept;
+        PartyActorIngress(snf::runtime::ActorRuntime& runtime, PartyActorBinding& binding, CommandLifecycleSink& lifecycle) noexcept;
 
         [[nodiscard]] snf::runtime::PostResult tryPost(PartyInboundCommand command);
 

@@ -12,16 +12,12 @@ namespace
     {
         snf::server::PlayerSessionDirectory sessions;
 
-        assert(sessions.tryAttach(FIRST_CONNECTION, PLAYER) ==
-               snf::server::PlayerAttachResult::Attached);
+        assert(sessions.tryAttach(FIRST_CONNECTION, PLAYER) == snf::server::PlayerAttachResult::Attached);
         assert(!sessions.locationSnapshotFor(FIRST_CONNECTION).known);
         assert(sessions.playerFor(FIRST_CONNECTION) == PLAYER);
-        assert(sessions.tryAttach(FIRST_CONNECTION, PLAYER) ==
-               snf::server::PlayerAttachResult::AlreadyAttached);
-        assert(sessions.tryAttach(SECOND_CONNECTION, PLAYER) ==
-               snf::server::PlayerAttachResult::PlayerConflict);
-        assert(sessions.tryAttach(FIRST_CONNECTION, snf::server::PlayerId{.value = 78}) ==
-               snf::server::PlayerAttachResult::ConnectionConflict);
+        assert(sessions.tryAttach(FIRST_CONNECTION, PLAYER) == snf::server::PlayerAttachResult::AlreadyAttached);
+        assert(sessions.tryAttach(SECOND_CONNECTION, PLAYER) == snf::server::PlayerAttachResult::PlayerConflict);
+        assert(sessions.tryAttach(FIRST_CONNECTION, snf::server::PlayerId{.value = 78}) == snf::server::PlayerAttachResult::ConnectionConflict);
 
         const snf::server::PlayerLocation location{
             .zone = snf::server::ZoneId{.value = 5},
@@ -44,43 +40,35 @@ namespace
         snf::server::PlayerSessionDirectory sessions;
 
         assert(sessions.noteProvisionalActivity(FIRST_CONNECTION));
-        assert(sessions.tryAttach(FIRST_CONNECTION, PLAYER) ==
-               snf::server::PlayerAttachResult::ProvisionalActivity);
+        assert(sessions.tryAttach(FIRST_CONNECTION, PLAYER) == snf::server::PlayerAttachResult::ProvisionalActivity);
         sessions.clearProvisionalActivity(FIRST_CONNECTION);
-        assert(sessions.tryAttach(FIRST_CONNECTION, PLAYER) ==
-               snf::server::PlayerAttachResult::Attached);
+        assert(sessions.tryAttach(FIRST_CONNECTION, PLAYER) == snf::server::PlayerAttachResult::Attached);
     }
 
     void test_reconnect_waits_for_actor_passivation()
     {
         snf::server::PlayerSessionDirectory sessions;
-        assert(sessions.tryAttach(FIRST_CONNECTION, PLAYER) ==
-               snf::server::PlayerAttachResult::Attached);
+        assert(sessions.tryAttach(FIRST_CONNECTION, PLAYER) == snf::server::PlayerAttachResult::Attached);
 
         assert(sessions.beginClose(FIRST_CONNECTION));
-        assert(sessions.tryAttach(SECOND_CONNECTION, PLAYER) ==
-               snf::server::PlayerAttachResult::PlayerConflict);
+        assert(sessions.tryAttach(SECOND_CONNECTION, PLAYER) == snf::server::PlayerAttachResult::PlayerConflict);
 
         sessions.completePassivation(PLAYER);
         assert(!sessions.playerFor(FIRST_CONNECTION).has_value());
-        assert(sessions.tryAttach(SECOND_CONNECTION, PLAYER) ==
-               snf::server::PlayerAttachResult::Attached);
+        assert(sessions.tryAttach(SECOND_CONNECTION, PLAYER) == snf::server::PlayerAttachResult::Attached);
     }
 
     void test_rolls_back_refused_attach_and_close_posts()
     {
         snf::server::PlayerSessionDirectory sessions;
-        assert(sessions.tryAttach(FIRST_CONNECTION, PLAYER) ==
-               snf::server::PlayerAttachResult::Attached);
+        assert(sessions.tryAttach(FIRST_CONNECTION, PLAYER) == snf::server::PlayerAttachResult::Attached);
         sessions.rollbackAttach(FIRST_CONNECTION, PLAYER);
         assert(!sessions.playerFor(FIRST_CONNECTION).has_value());
 
-        assert(sessions.tryAttach(FIRST_CONNECTION, PLAYER) ==
-               snf::server::PlayerAttachResult::Attached);
+        assert(sessions.tryAttach(FIRST_CONNECTION, PLAYER) == snf::server::PlayerAttachResult::Attached);
         assert(sessions.beginClose(FIRST_CONNECTION));
         sessions.rollbackClose(FIRST_CONNECTION);
-        assert(sessions.tryAttach(FIRST_CONNECTION, PLAYER) ==
-               snf::server::PlayerAttachResult::AlreadyAttached);
+        assert(sessions.tryAttach(FIRST_CONNECTION, PLAYER) == snf::server::PlayerAttachResult::AlreadyAttached);
     }
 }
 

@@ -14,8 +14,7 @@ namespace snf::server
         void accept(const PartyInboundCommand& command, const PartyResult& result);
 
     private:
-        [[nodiscard]] snf::protocol::Frame map(const PartyInboundCommand& command,
-                                               const PartyResult& result) const;
+        [[nodiscard]] snf::protocol::Frame map(const PartyInboundCommand& command, const PartyResult& result) const;
 
         OutboundSink& _outbound;
     };

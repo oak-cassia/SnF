@@ -14,9 +14,7 @@ namespace snf::server
         }
     }
 
-    std::optional<PartyAdmission> PartyCoordinator::tryJoin(const snf::net::ConnectionId connection,
-                                                            const PlayerId player,
-                                                            const PartyId party)
+    std::optional<PartyAdmission> PartyCoordinator::tryJoin(const snf::net::ConnectionId connection, const PlayerId player, const PartyId party)
     {
         if (player.value == 0 || party.value == 0)
         {
@@ -36,8 +34,7 @@ namespace snf::server
         const auto existing = _routes.find(connection);
         if (existing != _routes.end())
         {
-            if (existing->second.leaving || existing->second.player != player ||
-                existing->second.party != party)
+            if (existing->second.leaving || existing->second.player != player || existing->second.party != party)
             {
                 return std::nullopt;
             }
@@ -100,8 +97,7 @@ namespace snf::server
         }
     }
 
-    std::optional<PartyRoute>
-    PartyCoordinator::routeFor(const snf::net::ConnectionId connection) const
+    std::optional<PartyRoute> PartyCoordinator::routeFor(const snf::net::ConnectionId connection) const
     {
         std::lock_guard lock{_mutex};
         const auto iterator = _routes.find(connection);
@@ -114,8 +110,7 @@ namespace snf::server
         return routeCountForLocked(party);
     }
 
-    std::optional<PartyRoute>
-    PartyCoordinator::beginLeave(const snf::net::ConnectionId connection) noexcept
+    std::optional<PartyRoute> PartyCoordinator::beginLeave(const snf::net::ConnectionId connection) noexcept
     {
         std::lock_guard lock{_mutex};
         const auto iterator = _routes.find(connection);

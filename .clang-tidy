@@ -1,0 +1,25 @@
+# Only the checks that have been swept over the whole tree and left it clean.
+# bugprone-* has not been vetted yet and would ship unreviewed findings.
+Checks: >
+  -*,
+  performance-*,
+  -performance-move-const-arg,
+  -performance-enum-size,
+  -performance-unnecessary-value-param
+
+# performance-move-const-arg fires on ~60 sites. std::move on a payload that is
+# trivially copyable today is deliberate here: commands, records and results are
+# passed by value into sinks, mailboxes and persistence queues, so the move
+# becomes real the moment one of them gains a string or a vector. Removing the
+# calls would silently turn those transfers into copies later. The variant of
+# this check that matters -- a std::move into a const& parameter, which can never
+# become a move -- was fixed instead of suppressed.
+#
+# performance-enum-size wants narrower underlying types on enums that are never
+# stored in bulk.
+#
+# performance-unnecessary-value-param conflicts with the by-value sink style and
+# with std::stop_token, which the runtime's virtual interfaces take by value.
+
+WarningsAsErrors: ''
+HeaderFilterRegex: 'include/snf/.*'

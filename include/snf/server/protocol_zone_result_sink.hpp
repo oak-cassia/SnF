@@ -15,8 +15,7 @@ namespace snf::server
         void reportAdmissionFailure(snf::net::ConnectionId connection) noexcept;
 
     private:
-        [[nodiscard]] snf::protocol::Frame map(const ZoneInboundCommand& command,
-                                               const ZoneResult& result) const;
+        [[nodiscard]] snf::protocol::Frame map(const ZoneInboundCommand& command, const ZoneResult& result) const;
 
         OutboundSink& _outbound;
     };

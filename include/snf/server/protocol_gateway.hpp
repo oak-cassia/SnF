@@ -75,34 +75,19 @@ namespace snf::server
             std::chrono::steady_clock::time_point started_at;
         };
 
-        [[nodiscard]] FramePostResult tryStartZoneHandoff(const FrameEnvelope& envelope,
-                                                          PlayerId player,
-                                                          ZoneId target_zone,
-                                                          ZonePosition requested_position,
-                                                          const SessionRoute& source);
-        [[nodiscard]] PostResult postZoneHandoffStage(const ZoneHandoff& handoff,
-                                                      ZoneHandoffStep step);
+        [[nodiscard]] FramePostResult tryStartZoneHandoff(const FrameEnvelope& envelope, PlayerId player, ZoneId target_zone, ZonePosition requested_position, const SessionRoute& source);
+        [[nodiscard]] PostResult postZoneHandoffStage(const ZoneHandoff& handoff, ZoneHandoffStep step);
         void handleZoneHandoffCompletion(ZoneHandoffCompletion completion);
-        void failHandoffBeforeSourceLeave(snf::net::ConnectionId connection,
-                                          ZoneHandoffId handoff,
-                                          ZoneCommandStatus status);
+        void failHandoffBeforeSourceLeave(snf::net::ConnectionId connection, ZoneHandoffId handoff, ZoneCommandStatus status);
         void beginSourceRestore(const ZoneHandoff& handoff);
         void finishSourceRestore(const ZoneHandoff& handoff, ZonePosition position);
         void beginDisconnectCleanup(const ZoneHandoff& handoff, ZoneHandoffStep cleanup_step);
         void finishDisconnectedHandoff(const ZoneHandoff& handoff);
         void finishFatalHandoff(const ZoneHandoff& handoff);
         void finishActiveHandoff(snf::net::ConnectionId connection);
-        void replyZoneStatus(snf::net::ConnectionId connection,
-                             PlayerId player,
-                             ZoneId zone,
-                             std::uint64_t route_epoch,
-                             ZonePosition position,
-                             std::uint32_t request_id,
-                             ZoneReplyKind kind,
-                             ZoneCommandStatus status);
-        [[nodiscard]] bool
-        isValidCompletion(const ZoneHandoff& handoff,
-                          const ZoneHandoffCompletion& completion) const noexcept;
+        void replyZoneStatus(
+            snf::net::ConnectionId connection, PlayerId player, ZoneId zone, std::uint64_t route_epoch, ZonePosition position, std::uint32_t request_id, ZoneReplyKind kind, ZoneCommandStatus status);
+        [[nodiscard]] bool isValidCompletion(const ZoneHandoff& handoff, const ZoneHandoffCompletion& completion) const noexcept;
 
         MessageDispatcher _dispatcher;
         RoutedCommandIngress& _commands;
@@ -113,8 +98,7 @@ namespace snf::server
         CommandLifecycleSink& _lifecycle;
         ProtocolZoneResultSink& _zone_results;
         std::size_t _max_zone_completions_per_turn;
-        std::unordered_map<snf::net::ConnectionId, ActiveZoneHandoff, snf::net::ConnectionIdHash>
-            _active_zone_handoffs;
+        std::unordered_map<snf::net::ConnectionId, ActiveZoneHandoff, snf::net::ConnectionIdHash> _active_zone_handoffs;
         snf::runtime::Distribution _zone_transition_nanoseconds;
         std::uint64_t _handoff_failures_before_source_leave{0};
         std::uint64_t _handoff_target_failures{0};
