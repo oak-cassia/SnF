@@ -65,6 +65,42 @@ namespace snf::server
         }
     }
 
+    void ProtocolZoneResultSink::replyStatus(const snf::net::ConnectionId connection,
+                                             const PlayerId player,
+                                             const ZoneId zone,
+                                             const std::uint64_t route_epoch,
+                                             const ZonePosition position,
+                                             const std::uint32_t request_id,
+                                             const ZoneReplyKind kind,
+                                             const ZoneCommandStatus status)
+    {
+        accept(
+            ZoneInboundCommand{
+                .zone = zone,
+                .command =
+                    EnterZoneCommand{
+                        .player = player,
+                        .route_epoch = route_epoch,
+                        .position = position,
+                    },
+                .reply =
+                    ZoneReplyContext{
+                        .connection = connection,
+                        .request_id = request_id,
+                        .kind = kind,
+                    },
+                .handoff = std::nullopt,
+            },
+            ZoneResult{
+                .status = status,
+                .player = player,
+                .position = position,
+                .route_epoch = route_epoch,
+                .tick = 0,
+                .visible_players = {},
+            });
+    }
+
     void ProtocolZoneResultSink::reportAdmissionFailure(const snf::net::ConnectionId connection) noexcept
     {
         _outbound.reportAdmissionFailure(connection);

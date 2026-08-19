@@ -101,6 +101,7 @@ snf_configure_target(snf_runtime)
 add_library(snf_server_runtime STATIC
     src/server/message_dispatcher.cpp
     src/server/protocol_gateway.cpp
+    src/server/zone_handoff_service.cpp
     src/server/command_router.cpp
     src/server/protocol_response_mapper.cpp
     src/server/protocol_player_response_sink.cpp

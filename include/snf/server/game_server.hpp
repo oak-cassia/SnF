@@ -26,6 +26,7 @@
 #include "snf/server/tcp_server.hpp"
 #include "snf/server/zone_actor_binding.hpp"
 #include "snf/server/zone_actor_ingress.hpp"
+#include "snf/server/zone_handoff_service.hpp"
 #include "snf/server/zone_transition_channel.hpp"
 
 #include <chrono>
@@ -53,7 +54,7 @@ namespace snf::server
         PlayerRepositoryStats player_repository;
         ZoneActorBindingStats zone_actors;
         RouteCoordinatorStats zone_handoffs;
-        ZoneHandoffGatewayStats zone_handoff_gateway;
+        ZoneHandoffStats zone_handoffs_saga;
         ZoneTransitionChannelStats zone_transition_channel;
         PartyActorBindingStats party_actors;
         // Commands that were admitted and reached a final result, counted once each
@@ -179,6 +180,7 @@ namespace snf::server
         PartyActorIngress _party_actor_ingress;
         RoomActorIngress _room_actor_ingress;
         CommandRouter _command_router;
+        ZoneHandoffService _zone_handoff_service;
         ProtocolGateway _protocol_gateway;
         TcpServer _tcp_server;
         bool _has_run{false};

@@ -249,16 +249,8 @@ namespace snf::server
         , _party_actor_ingress(_logic_runtime, _party_actor_binding, _command_lifecycle)
         , _room_actor_ingress(_logic_runtime, _room_actor_binding, _command_lifecycle)
         , _command_router(_player_actor_ingress, _zone_actor_ingress, _party_actor_ingress, _room_actor_ingress)
-        , _protocol_gateway(_command_router,
-                            _player_sessions,
-                            _route_coordinator,
-                            _party_coordinator,
-                            _zone_transition_channel,
-                            _command_lifecycle,
-                            _zone_results,
-                            ProtocolGatewayConfig{
-                                .max_zone_completions_per_turn = config.max_zone_handoff_completions_per_turn,
-                            })
+        , _zone_handoff_service(_command_router, _player_sessions, _route_coordinator, _zone_transition_channel, _command_lifecycle, _zone_results, config.max_zone_handoff_completions_per_turn)
+        , _protocol_gateway(_command_router, _player_sessions, _route_coordinator, _party_coordinator, _zone_handoff_service, _zone_results, ProtocolGatewayConfig{})
         , _tcp_server(
               TcpServerConfig{
                   .port = config.port,
@@ -352,7 +344,7 @@ namespace snf::server
             .player_repository = repository_diagnostics(*_player_repository).stats(),
             .zone_actors = _zone_actor_binding.stats(),
             .zone_handoffs = _route_coordinator.stats(),
-            .zone_handoff_gateway = _protocol_gateway.zoneHandoffStats(),
+            .zone_handoffs_saga = _protocol_gateway.zoneHandoffStats(),
             .zone_transition_channel = _zone_transition_channel.stats(),
             .party_actors = _party_actor_binding.stats(),
             .command_terminals = _command_lifecycle.terminalCount(),
