@@ -85,8 +85,15 @@ Actor 간 메시지, 후속 작업의 목적지 분기와 게임 시간 기준�
 
 ## 5. Coroutine과 외부 작업
 
-Actor handler는 lazy `ActorTask<Result>`다. 외부 작업을 시작하기 전에 in-flight slot과 terminal
-continuation slot을 함께 예약한다.
+도메인 handler는 동기 함수다. 명령을 받아 결정을 반환할 뿐 기다리지 않는다. 기다리는 쪽은
+Binding이며, 외부 작업을 시작하기 전에 in-flight slot과 terminal continuation slot을 함께
+예약한다. 그래서 `ActorTask<Result>`는 record load, save, outbound reservation처럼 Binding이
+소유한 단계에만 존재한다.
+
+한때 `PlayerActor::handle`이 `ActorTask<PlayerResult>`였다. 언젠가 handler 안에서 DB를
+`co_await`할 것을 예상한 선택이었는데, 실제로 도착한 suspension은 전부 Binding의 단계로
+들어갔다. 명령마다 코루틴 프레임과 "명령이 lazy task보다 오래 살아야 한다"는 계약을 내면서
+쓰이지 않는 선택지였으므로 되돌렸다.
 
 ```text
 Actor Worker

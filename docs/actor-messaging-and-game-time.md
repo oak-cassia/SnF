@@ -12,8 +12,8 @@
 2. Actor 위치와 mailbox 라우팅은 Runtime이 책임진다.
 3. 게임 시간은 tick 수가 아니라 실제 경과 시간으로 계산한다.
 
-이 결정은 협동 Battle Room이 `PartyActor → BattleRoomActor`,
-`BattleRoomActor → PlayerActor` 흐름을 필요로 하면서 나왔다. 그전까지 Actor 간
+이 결정은 협동 Battle Room이 `PartyActor → Room`, `Room → PlayerActor` 흐름을 필요로 하면서
+나왔다. 그전까지 Actor 간
 상호작용은 result를 reactor로 올려 `ProtocolGateway`와 `CommandRouter`를 거쳐 다시
 내려와야 했고, 그 결과 조율 코드가 도메인 코드보다 세 배 이상 많았다.
 
@@ -195,7 +195,7 @@ tell을 `requiredSlots`에 넣지 않는다. 네트워크 backpressure와 mailbo
 ### 4.2 Actor는 시계를 직접 읽지 않는다
 
 `ZoneActor`에는 시계가 없다. `handle()`이 명령만 받고 결과만 돌려주는 순수 함수라
-테스트가 결정론적이다. `RoomActor`가 `steady_clock::now()`를 직접 부르면 그 성질이 깨지고,
+테스트가 결정론적이다. `Room`이 `steady_clock::now()`를 직접 부르면 그 성질이 깨지고,
 방금 제거한 `TimerClock` 주입을 도메인 Actor에 되돌리는 셈이 된다.
 
 대신 런타임이 **명령을 처리하기 시작한 시점**을 실어 준다.
