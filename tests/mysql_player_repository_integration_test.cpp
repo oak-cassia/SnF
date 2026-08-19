@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <exception>
 #include <future>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -198,7 +199,7 @@ namespace
                       snf::server::GameServerConfig server_config;
                       server_config.port = 0;
                       server_config.shutdown_grace_period = 500ms;
-                      server_config.mysql_player_repository = repository_config;
+                      server_config.player_repository_factory = [repository_config] { return std::make_unique<snf::server::MySqlPlayerRepository>(repository_config); };
                       return server_config;
                   }())
             , _thread(

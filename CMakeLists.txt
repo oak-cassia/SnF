@@ -115,7 +115,6 @@ add_library(snf_server_runtime STATIC
     src/server/player_repository.cpp
     src/server/room_actor_binding.cpp
     src/server/room_actor_ingress.cpp
-    src/server/mysql_player_repository.cpp
     src/server/player_session_directory.cpp
     src/server/zone_actor_binding.cpp
     src/server/zone_actor_ingress.cpp
@@ -127,13 +126,21 @@ add_library(snf_server_runtime STATIC
     src/server/game_server.cpp
     src/server/tcp_server.cpp
 )
-target_link_libraries(snf_server_runtime PUBLIC snf_game snf_core snf_runtime PkgConfig::MySQL)
+target_link_libraries(snf_server_runtime PUBLIC snf_game snf_core snf_runtime)
 snf_configure_target(snf_server_runtime)
+
+# The only target that knows MySQL exists. Kept out of snf_server_runtime so that
+# linking the server does not drag a database client into every test binary.
+add_library(snf_mysql_player_repository STATIC
+    src/server/mysql_player_repository.cpp
+)
+target_link_libraries(snf_mysql_player_repository PUBLIC snf_server_runtime PRIVATE PkgConfig::MySQL)
+snf_configure_target(snf_mysql_player_repository)
 
 add_executable(snf_server
     src/server_main.cpp
 )
-target_link_libraries(snf_server PRIVATE snf_server_runtime)
+target_link_libraries(snf_server PRIVATE snf_mysql_player_repository)
 snf_configure_target(snf_server)
 
 add_library(snf_load_client_runtime STATIC
@@ -243,7 +250,7 @@ if(BUILD_TESTING)
     )
     target_link_libraries(snf_mysql_integration_tests
         PRIVATE
-            snf_server_runtime
+            snf_mysql_player_repository
             snf_load_client_runtime
             Threads::Threads
     )

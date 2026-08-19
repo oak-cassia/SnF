@@ -6,7 +6,6 @@
 #include "snf/runtime/runtime_completion.hpp"
 #include "snf/server/command_router.hpp"
 #include "snf/server/command_terminal.hpp"
-#include "snf/server/mysql_player_repository.hpp"
 #include "snf/server/outbound_channel.hpp"
 #include "snf/server/party_actor_binding.hpp"
 #include "snf/server/party_actor_ingress.hpp"
@@ -82,7 +81,10 @@ namespace snf::server
         std::size_t max_purchase_idempotency_records_per_player{1024};
         // Empty keeps the deterministic in-memory adapter. A value selects the
         // durable MySQL adapter and its own bounded Worker/queue configuration.
-        std::optional<MySqlPlayerRepositoryConfig> mysql_player_repository{};
+        // Supplies the repository when the caller wants one other than the default
+        // in-memory adapter. It is a factory rather than a config so that choosing a
+        // backend -- and linking it -- stays with whoever runs the server.
+        std::function<std::unique_ptr<PlayerRepository>()> player_repository_factory{};
         std::size_t max_party_members{8};
         std::int32_t zone_aoi_radius{1000};
         std::chrono::milliseconds zone_tick_interval{50};

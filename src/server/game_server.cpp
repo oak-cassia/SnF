@@ -14,11 +14,17 @@ namespace
 {
     std::unique_ptr<snf::server::PlayerRepository> make_player_repository(const snf::server::GameServerConfig& config)
     {
-        if (config.mysql_player_repository)
+        if (!config.player_repository_factory)
         {
-            return std::make_unique<snf::server::MySqlPlayerRepository>(*config.mysql_player_repository);
+            return std::make_unique<snf::server::InMemoryPlayerRepository>();
         }
-        return std::make_unique<snf::server::InMemoryPlayerRepository>();
+
+        auto repository = config.player_repository_factory();
+        if (!repository)
+        {
+            throw std::invalid_argument{"Player repository factory returned nothing"};
+        }
+        return repository;
     }
 
     const snf::server::PlayerRepositoryDiagnostics& repository_diagnostics(const snf::server::PlayerRepository& repository)
