@@ -51,6 +51,11 @@ namespace
         case snf::protocol::MessageType::PartyJoin:
         case snf::protocol::MessageType::PartyJoined:
         case snf::protocol::MessageType::PartyLeave:
+        case snf::protocol::MessageType::RoomJoin:
+        case snf::protocol::MessageType::RoomJoined:
+        case snf::protocol::MessageType::BattleStart:
+        case snf::protocol::MessageType::BattleStarted:
+        case snf::protocol::MessageType::BattleCleared:
         case snf::protocol::MessageType::PartyLeft:
             return true;
         }
