@@ -1,5 +1,7 @@
 #include "snf/server/player_actor_binding.hpp"
 
+#include "snf/server/street_experience_grant.hpp"
+
 #include "snf/server/player_actor.hpp"
 
 #include <cstddef>
@@ -118,6 +120,12 @@ namespace snf::server
         bool loaded{false};
         Stage stage{Stage::Idle};
         std::optional<PlayerCommand> pending_command;
+        // Held while the record loads when a tell arrived before it. A grant is not a
+        // client request, so it cannot ride in pending_command.
+        std::optional<StreetExperienceGrant> pending_grant;
+        // True when a tell, not a connection, brought this slot to life. Such a slot
+        // has no session keeping it resident, so it passivates once the grant is saved.
+        bool activated_by_tell{false};
         snf::runtime::ActorTask<PlayerLoadResult> load_task;
         // Holds the handler's task while it runs, including across a suspension.
         // Keeping the frame in the slot is what confines resume and destruction to
@@ -146,6 +154,11 @@ namespace snf::server
     struct PlayerActorBinding::ConnectionClosedPayload
     {
         ConnectionClosed closed;
+    };
+
+    struct PlayerActorBinding::StreetExperienceGrantPayload
+    {
+        StreetExperienceGrant grant;
     };
 
     PlayerActorBinding::PlayerActorBinding(PlayerResponseSink& response_sink, OutboundSink& outbound, CommandLifecycleSink& lifecycle, PlayerActorBindingConfig config)
@@ -229,6 +242,27 @@ namespace snf::server
             });
     }
 
+    std::optional<snf::runtime::ActorSubmission> PlayerActorBinding::makeTell(const snf::runtime::ActorKey target, snf::runtime::TellPayload payload)
+    {
+        if (_kind != snf::runtime::ActorKind::Player)
+        {
+            // Only the persistent namespace has a record to grant against.
+            return std::nullopt;
+        }
+
+        auto grant = payload.take<StreetExperienceGrant>();
+        if (!grant)
+        {
+            // A refused take leaves the carrier intact, and the runtime reports the
+            // mismatch as the wiring bug it is rather than delivering a wrong command.
+            return std::nullopt;
+        }
+
+        // ActivateIfMissing: a reward has to reach a player who logged out between the
+        // battle and the clear. ExistingOnly would report Accepted and drop it.
+        return makeSubmission(target, snf::runtime::ActorActivation::ActivateIfMissing, snf::runtime::ActorAccounting::Command, StreetExperienceGrantPayload{.grant = *grant});
+    }
+
     std::unique_ptr<snf::runtime::ActorSlot> PlayerActorBinding::activate(const snf::runtime::EntityId entity)
     {
         const PlayerActorId identity = kind() == snf::runtime::ActorKind::Player ? PlayerActorId{PlayerId{.value = entity}} : PlayerActorId{ProvisionalActorId{.value = entity}};
@@ -270,6 +304,27 @@ namespace snf::server
         if (player_slot.stage != PlayerActorSlot::Stage::Idle)
         {
             throw std::logic_error{"PlayerActorBinding dispatched a command while one was in flight"};
+        }
+
+        if (const auto* grant = tryPayloadAs<StreetExperienceGrantPayload>(submission))
+        {
+            if (!player_slot.loaded)
+            {
+                // Applying to a default-constructed actor would then save zeros over the
+                // stored currency, so the record loads first exactly as a command makes
+                // it. Evicting instead -- what a close does -- would lose the reward.
+                player_slot.pending_grant = grant->grant;
+                player_slot.activated_by_tell = true;
+                player_slot.stage = PlayerActorSlot::Stage::Loading;
+                player_slot.load_task = awaitPlayerLoad(*_repository, context, *player_slot.identity.playerId());
+                return advance(player_slot, context, stop_token);
+            }
+
+            // A tell carries no connection, so nothing here emits a response or takes
+            // outbound capacity.
+            player_slot.actor.grantStreetExperience(grant->grant.experience);
+            publishDirtySnapshot(player_slot);
+            return snf::runtime::ActorDispatchResult::KeepActive;
         }
 
         const CommandPayload& payload = payloadAs<CommandPayload>(submission);
@@ -329,6 +384,7 @@ namespace snf::server
             if (loaded.status != PlayerRepositoryStatus::Success)
             {
                 slot.pending_command.reset();
+                slot.pending_grant.reset();
                 slot.stage = PlayerActorSlot::Stage::Idle;
                 _outbound.reportAdmissionFailure(slot.connection);
                 return snf::runtime::ActorDispatchResult::KeepActive;
@@ -342,6 +398,17 @@ namespace snf::server
             if (_on_record_loaded)
             {
                 _on_record_loaded(slot.connection, loaded.record ? loaded.record->last_location : std::nullopt);
+            }
+
+            if (slot.pending_grant)
+            {
+                slot.actor.grantStreetExperience(slot.pending_grant->experience);
+                slot.pending_grant.reset();
+                publishDirtySnapshot(slot);
+                slot.stage = PlayerActorSlot::Stage::Idle;
+                // Nothing else is keeping this slot alive, and the snapshot is already
+                // queued, so it may go once the mailbox is empty.
+                return slot.activated_by_tell ? snf::runtime::ActorDispatchResult::PassivateIfIdle : snf::runtime::ActorDispatchResult::KeepActive;
             }
 
             if (!slot.pending_command)

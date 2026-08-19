@@ -59,11 +59,15 @@ namespace snf::server
         [[nodiscard]] snf::runtime::ActorDispatchResult
         dispatch(snf::runtime::ActorSlot& slot, const snf::runtime::ActorSubmission& submission, snf::runtime::ActorContext& context, std::stop_token stop_token) override;
         [[nodiscard]] snf::runtime::ActorDispatchResult resume(snf::runtime::ActorSlot& slot, snf::runtime::ActorContext& context, std::stop_token stop_token) override;
+        // Called on the sending actor's Worker, so this stays a read-only transform:
+        // no cache, no counter, nothing another Worker could race with.
+        [[nodiscard]] std::optional<snf::runtime::ActorSubmission> makeTell(snf::runtime::ActorKey target, snf::runtime::TellPayload payload) override;
 
     private:
         struct PlayerActorSlot;
         struct CommandPayload;
         struct ConnectionClosedPayload;
+        struct StreetExperienceGrantPayload;
 
         // Shared tail of dispatch and resume: drive whichever stage the command is in,
         // and apply its follow-ups once the capacity is in hand.

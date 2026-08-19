@@ -20,6 +20,8 @@
 #include "snf/server/protocol_party_result_sink.hpp"
 #include "snf/server/protocol_player_response_sink.hpp"
 #include "snf/server/protocol_zone_result_sink.hpp"
+#include "snf/server/room_actor_binding.hpp"
+#include "snf/server/room_actor_ingress.hpp"
 #include "snf/server/route_coordinator.hpp"
 #include "snf/server/tcp_server.hpp"
 #include "snf/server/zone_actor_binding.hpp"
@@ -85,6 +87,9 @@ namespace snf::server
         std::chrono::milliseconds zone_tick_interval{50};
         std::chrono::nanoseconds zone_tick_budget{std::chrono::milliseconds{5}};
         std::size_t max_zone_handoffs{4096};
+        std::chrono::milliseconds room_battle_duration{5000};
+        std::size_t max_room_participants{4};
+        std::uint64_t room_clear_experience{300};
         std::size_t max_zone_handoff_completions_per_turn{64};
         std::size_t outbound_queue_capacity{4096};
         // Bounds the shared outbound capacity one connection may hold at once.
@@ -161,10 +166,12 @@ namespace snf::server
         PlayerActorBinding _persistent_player_actor_binding;
         ZoneActorBinding _zone_actor_binding;
         PartyActorBinding _party_actor_binding;
+        RoomActorBinding _room_actor_binding;
         snf::runtime::ActorRuntime _logic_runtime;
         PlayerActorIngress _player_actor_ingress;
         ZoneActorIngress _zone_actor_ingress;
         PartyActorIngress _party_actor_ingress;
+        RoomActorIngress _room_actor_ingress;
         CommandRouter _command_router;
         ProtocolGateway _protocol_gateway;
         TcpServer _tcp_server;

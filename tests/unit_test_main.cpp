@@ -4,6 +4,7 @@ void run_tell_payload_tests();
 void run_street_progression_tests();
 void run_room_actor_tests();
 void run_room_actor_binding_tests();
+void run_player_tell_tests();
 void run_distribution_tests();
 void run_frame_codec_tests();
 void run_command_router_tests();
@@ -41,6 +42,7 @@ int main()
     run_street_progression_tests();
     run_room_actor_tests();
     run_room_actor_binding_tests();
+    run_player_tell_tests();
     run_distribution_tests();
     run_frame_codec_tests();
     run_command_router_tests();

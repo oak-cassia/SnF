@@ -216,6 +216,17 @@ namespace snf::server
                   },
               },
               _command_lifecycle)
+        , _room_actor_binding(
+              RoomActorBindingConfig{
+                  .actor =
+                      RoomActorConfig{
+                          .battle_duration = config.room_battle_duration,
+                          .max_participants = config.max_room_participants,
+                          .clear_experience = config.room_clear_experience,
+                      },
+                  .on_result = {},
+              },
+              _command_lifecycle)
         , _logic_runtime(
               [config]
               {
@@ -229,6 +240,7 @@ namespace snf::server
         , _player_actor_ingress(_logic_runtime, _player_actor_binding, _persistent_player_actor_binding, _command_lifecycle)
         , _zone_actor_ingress(_logic_runtime, _zone_actor_binding, _command_lifecycle)
         , _party_actor_ingress(_logic_runtime, _party_actor_binding, _command_lifecycle)
+        , _room_actor_ingress(_logic_runtime, _room_actor_binding, _command_lifecycle)
         , _command_router(_player_actor_ingress, _zone_actor_ingress, _party_actor_ingress)
         , _protocol_gateway(_command_router,
                             _player_sessions,
@@ -261,6 +273,9 @@ namespace snf::server
         _logic_runtime.registerBinding(_persistent_player_actor_binding);
         _logic_runtime.registerBinding(_zone_actor_binding);
         _logic_runtime.registerBinding(_party_actor_binding);
+        // Registered before start so a cleared Room's reward tell resolves to the
+        // persistent Player binding. Nothing routes client frames here yet.
+        _logic_runtime.registerBinding(_room_actor_binding);
     }
 
     GameServer::GameServer(const std::uint16_t port, const std::chrono::milliseconds shutdown_grace_period)

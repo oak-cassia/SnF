@@ -151,6 +151,7 @@ if(BUILD_TESTING)
         tests/street_progression_test.cpp
         tests/room_actor_test.cpp
         tests/room_actor_binding_test.cpp
+        tests/player_tell_test.cpp
         tests/distribution_test.cpp
         tests/command_router_test.cpp
         tests/protocol_gateway_test.cpp
