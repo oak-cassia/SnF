@@ -76,7 +76,8 @@ namespace
                       .capacity = outbound_capacity,
                       .max_slots_per_connection = outbound_capacity,
                   },
-                  outbound_event.getDescriptor())
+                  outbound_event.getDescriptor()
+              )
             , outbound_sink(outbound)
         {
         }
@@ -91,7 +92,9 @@ namespace
     class PlayerRuntime final
     {
     public:
-        PlayerRuntime(RuntimeDependencies& dependencies, const ActorRuntimeConfig& runtime_config, snf::server::PlayerActorBindingConfig binding_config = {})
+        PlayerRuntime(
+            RuntimeDependencies& dependencies, const ActorRuntimeConfig& runtime_config, snf::server::PlayerActorBindingConfig binding_config = {}
+        )
             : binding(dependencies.outbound_sink, dependencies.outbound, dependencies.lifecycle, std::move(binding_config))
             , runtime(runtime_config, dependencies.completion)
             , ingress(runtime, binding, dependencies.lifecycle)
@@ -215,17 +218,29 @@ namespace
 
         [[nodiscard]] ActorSubmission post(const EntityId entity, const int value) const
         {
-            return makeSubmission(ActorKey{.kind = _kind, .entity = entity}, ActorActivation::ActivateIfMissing, ActorAccounting::Command, Payload{.value = value, .evict = false});
+            return makeSubmission(
+                ActorKey{.kind = _kind, .entity = entity},
+                ActorActivation::ActivateIfMissing,
+                ActorAccounting::Command,
+                Payload{.value = value, .evict = false}
+            );
         }
 
         [[nodiscard]] ActorSubmission control(const EntityId entity, const int value) const
         {
-            return makeSubmission(ActorKey{.kind = _kind, .entity = entity}, ActorActivation::ActivateIfMissing, ActorAccounting::Control, Payload{.value = value, .evict = false});
+            return makeSubmission(
+                ActorKey{.kind = _kind, .entity = entity},
+                ActorActivation::ActivateIfMissing,
+                ActorAccounting::Control,
+                Payload{.value = value, .evict = false}
+            );
         }
 
         [[nodiscard]] ActorSubmission evict(const EntityId entity) const
         {
-            return makeSubmission(ActorKey{.kind = _kind, .entity = entity}, ActorActivation::ExistingOnly, ActorAccounting::Control, Payload{.value = 0, .evict = true});
+            return makeSubmission(
+                ActorKey{.kind = _kind, .entity = entity}, ActorActivation::ExistingOnly, ActorAccounting::Control, Payload{.value = 0, .evict = true}
+            );
         }
 
     protected:
@@ -256,7 +271,8 @@ namespace
             return std::make_unique<Slot>();
         }
 
-        [[nodiscard]] ActorDispatchResult dispatch(ActorSlot& slot, const ActorSubmission& submission, ActorContext& context, std::stop_token) override
+        [[nodiscard]] ActorDispatchResult
+        dispatch(ActorSlot& slot, const ActorSubmission& submission, ActorContext& context, std::stop_token) override
         {
             static_cast<void>(dynamic_cast<Slot&>(slot));
             const Payload& payload = payloadAs<Payload>(submission);
@@ -525,8 +541,22 @@ namespace
         runtime.close();
         runtime.join();
 
-        const auto zone_dispatch = std::find_if(state->dispatched.begin(), state->dispatched.end(), [](const auto& event) { return event.second == 1000; });
-        const auto final_player_dispatch = std::find_if(state->dispatched.begin(), state->dispatched.end(), [](const auto& event) { return event.second == 32; });
+        const auto zone_dispatch = std::find_if(
+            state->dispatched.begin(),
+            state->dispatched.end(),
+            [](const auto& event)
+            {
+                return event.second == 1000;
+            }
+        );
+        const auto final_player_dispatch = std::find_if(
+            state->dispatched.begin(),
+            state->dispatched.end(),
+            [](const auto& event)
+            {
+                return event.second == 32;
+            }
+        );
         assert(zone_dispatch != state->dispatched.end());
         assert(final_player_dispatch != state->dispatched.end());
         assert(zone_dispatch < final_player_dispatch);
@@ -600,8 +630,22 @@ namespace
         runtime.close();
         runtime.join();
 
-        const auto zone_dispatch = std::find_if(state->dispatched.begin(), state->dispatched.end(), [](const auto& event) { return event.second == 1000; });
-        const auto final_control = std::find_if(state->dispatched.begin(), state->dispatched.end(), [](const auto& event) { return event.second == 32; });
+        const auto zone_dispatch = std::find_if(
+            state->dispatched.begin(),
+            state->dispatched.end(),
+            [](const auto& event)
+            {
+                return event.second == 1000;
+            }
+        );
+        const auto final_control = std::find_if(
+            state->dispatched.begin(),
+            state->dispatched.end(),
+            [](const auto& event)
+            {
+                return event.second == 32;
+            }
+        );
         assert(zone_dispatch != state->dispatched.end());
         assert(final_control != state->dispatched.end());
         assert(zone_dispatch < final_control);
@@ -1018,7 +1062,13 @@ namespace
         assert(dependencies.outbound.pendingWaiterCount() == 1);
 
         player.runtime.cancel();
-        auto joined = std::async(std::launch::async, [&player] { player.runtime.join(); });
+        auto joined = std::async(
+            std::launch::async,
+            [&player]
+            {
+                player.runtime.join();
+            }
+        );
         const bool completed = joined.wait_for(1s) == std::future_status::ready;
         if (!completed)
         {
@@ -1122,7 +1172,8 @@ namespace
             return _slots;
         }
 
-        [[nodiscard]] bool applyResponses(snf::net::ConnectionId, std::uint32_t, snf::server::PlayerResult, snf::server::OutboundReservation&) override
+        [[nodiscard]] bool
+        applyResponses(snf::net::ConnectionId, std::uint32_t, snf::server::PlayerResult, snf::server::OutboundReservation&) override
         {
             applied = true;
             return true;
@@ -1227,7 +1278,13 @@ namespace
         };
 
         player.runtime.close();
-        auto joined = std::async(std::launch::async, [&player] { player.runtime.join(); });
+        auto joined = std::async(
+            std::launch::async,
+            [&player]
+            {
+                player.runtime.join();
+            }
+        );
         const auto deadline = std::chrono::steady_clock::now() + 5s;
         while (joined.wait_for(1ms) != std::future_status::ready && std::chrono::steady_clock::now() < deadline)
         {
@@ -1259,16 +1316,18 @@ namespace
         RuntimeDependencies dependencies{8};
         DelayedLoadPlayerRepository repository;
         snf::server::PlayerActorBinding provisional{dependencies.outbound_sink, dependencies.outbound, dependencies.lifecycle};
-        snf::server::PlayerActorBinding persistent{dependencies.outbound_sink,
-                                                   dependencies.outbound,
-                                                   dependencies.lifecycle,
-                                                   snf::server::PlayerActorBindingConfig{
-                                                       .actor_kind = ActorKind::Player,
-                                                       .repository = &repository,
-                                                       .on_before_command = {},
-                                                       .on_actor_deactivated = {},
-                                                       .on_record_loaded = {},
-                                                   }};
+        snf::server::PlayerActorBinding persistent{
+            dependencies.outbound_sink,
+            dependencies.outbound,
+            dependencies.lifecycle,
+            snf::server::PlayerActorBindingConfig{
+                .actor_kind = ActorKind::Player,
+                .repository = &repository,
+                .on_before_command = {},
+                .on_actor_deactivated = {},
+                .on_record_loaded = {},
+            }
+        };
         ActorRuntime runtime{player_runtime_config(1, 8), dependencies.completion};
         runtime.registerBinding(provisional);
         runtime.registerBinding(persistent);
@@ -1277,15 +1336,17 @@ namespace
 
         const snf::server::PlayerId player{.value = 77};
         const snf::net::ConnectionId player_connection{.descriptor = 70, .generation = 700};
-        assert(ingress.tryPost(snf::server::PlayerInboundCommand{
-                   .actor = player,
-                   .connection = player_connection,
-                   .command =
-                       snf::server::AuthenticateCommand{
-                           .player = player,
-                       },
-                   .request_id = 1,
-               }) == PostResult::Accepted);
+        assert(
+            ingress.tryPost(snf::server::PlayerInboundCommand{
+                .actor = player,
+                .connection = player_connection,
+                .command =
+                    snf::server::AuthenticateCommand{
+                        .player = player,
+                    },
+                .request_id = 1,
+            }) == PostResult::Accepted
+        );
         assert(repository.load_requested_future.wait_for(1s) == std::future_status::ready);
         assert(repository.requested_player == player);
 
@@ -1293,12 +1354,14 @@ namespace
             .descriptor = 71,
             .generation = 701,
         };
-        assert(ingress.tryPost(snf::server::PlayerInboundCommand{
-                   .actor = snf::server::ProvisionalActorId{.value = 701},
-                   .connection = provisional_connection,
-                   .command = snf::server::PingCommand{.payload = {}},
-                   .request_id = 2,
-               }) == PostResult::Accepted);
+        assert(
+            ingress.tryPost(snf::server::PlayerInboundCommand{
+                .actor = snf::server::ProvisionalActorId{.value = 701},
+                .connection = provisional_connection,
+                .command = snf::server::PingCommand{.payload = {}},
+                .request_id = 2,
+            }) == PostResult::Accepted
+        );
 
         std::optional<snf::server::PostedOutboundAction> pong;
         const auto pong_deadline = std::chrono::steady_clock::now() + 1s;
@@ -1315,13 +1378,17 @@ namespace
 
         // The close snapshot is deliberately unknown because the disconnect raced
         // the repository load. The binding must retain the location the load restores.
-        assert(ingress.tryPostConnectionClosed(player,
-                                               snf::server::ConnectionClosed{
-                                                   .connection = player_connection,
-                                                   .cause = snf::server::ConnectionCloseCause::PeerClosed,
-                                                   .has_location_snapshot = false,
-                                                   .last_location = std::nullopt,
-                                               }) == PostResult::Accepted);
+        assert(
+            ingress.tryPostConnectionClosed(
+                player,
+                snf::server::ConnectionClosed{
+                    .connection = player_connection,
+                    .cause = snf::server::ConnectionCloseCause::PeerClosed,
+                    .has_location_snapshot = false,
+                    .last_location = std::nullopt,
+                }
+            ) == PostResult::Accepted
+        );
         repository.completeLoad(snf::server::PlayerRecord{
             .player = player,
             .handled_command_count = 0,
@@ -1348,23 +1415,30 @@ namespace
         assert(auth_frame.type == snf::protocol::MessageType::Authenticated);
         assert(auth_frame.request_id == 1);
 
-        assert(ingress.tryPostConnectionClosed(snf::server::ProvisionalActorId{.value = 701},
-                                               snf::server::ConnectionClosed{
-                                                   .connection = provisional_connection,
-                                                   .cause = snf::server::ConnectionCloseCause::PeerClosed,
-                                                   .has_location_snapshot = false,
-                                                   .last_location = std::nullopt,
-                                               }) == PostResult::Accepted);
+        assert(
+            ingress.tryPostConnectionClosed(
+                snf::server::ProvisionalActorId{.value = 701},
+                snf::server::ConnectionClosed{
+                    .connection = provisional_connection,
+                    .cause = snf::server::ConnectionCloseCause::PeerClosed,
+                    .has_location_snapshot = false,
+                    .last_location = std::nullopt,
+                }
+            ) == PostResult::Accepted
+        );
         runtime.close();
         runtime.join();
 
         assert(repository.saved.has_value());
         assert(repository.saved->player == player);
         assert(repository.saved->handled_command_count == 1);
-        assert((repository.saved->last_location == snf::server::PlayerLocation{
-                                                       .zone = snf::server::ZoneId{.value = 9},
-                                                       .position = {.x = 17, .y = -19},
-                                                   }));
+        assert(
+            (repository.saved->last_location ==
+             snf::server::PlayerLocation{
+                 .zone = snf::server::ZoneId{.value = 9},
+                 .position = {.x = 17, .y = -19},
+             })
+        );
         const auto stats = runtime.getStats().workers.front();
         assert(stats.suspended_commands >= 2);
         assert(stats.in_flight_operations == 0);
@@ -1375,16 +1449,18 @@ namespace
         RuntimeDependencies dependencies{8};
         DelayedLoadPlayerRepository repository;
         snf::server::PlayerActorBinding provisional{dependencies.outbound_sink, dependencies.outbound, dependencies.lifecycle};
-        snf::server::PlayerActorBinding persistent{dependencies.outbound_sink,
-                                                   dependencies.outbound,
-                                                   dependencies.lifecycle,
-                                                   snf::server::PlayerActorBindingConfig{
-                                                       .actor_kind = ActorKind::Player,
-                                                       .repository = &repository,
-                                                       .on_before_command = {},
-                                                       .on_actor_deactivated = {},
-                                                       .on_record_loaded = {},
-                                                   }};
+        snf::server::PlayerActorBinding persistent{
+            dependencies.outbound_sink,
+            dependencies.outbound,
+            dependencies.lifecycle,
+            snf::server::PlayerActorBindingConfig{
+                .actor_kind = ActorKind::Player,
+                .repository = &repository,
+                .on_before_command = {},
+                .on_actor_deactivated = {},
+                .on_record_loaded = {},
+            }
+        };
         ActorRuntime runtime{player_runtime_config(1, 8), dependencies.completion};
         runtime.registerBinding(provisional);
         runtime.registerBinding(persistent);
@@ -1393,15 +1469,17 @@ namespace
 
         const snf::server::PlayerId player{.value = 781};
         const snf::net::ConnectionId connection{.descriptor = 75, .generation = 705};
-        assert(ingress.tryPost(snf::server::PlayerInboundCommand{
-                   .actor = player,
-                   .connection = connection,
-                   .command =
-                       snf::server::AuthenticateCommand{
-                           .player = player,
-                       },
-                   .request_id = 1,
-               }) == PostResult::Accepted);
+        assert(
+            ingress.tryPost(snf::server::PlayerInboundCommand{
+                .actor = player,
+                .connection = connection,
+                .command =
+                    snf::server::AuthenticateCommand{
+                        .player = player,
+                    },
+                .request_id = 1,
+            }) == PostResult::Accepted
+        );
         assert(repository.load_requested_future.wait_for(1s) == std::future_status::ready);
         repository.completeLoad(snf::server::PlayerRecord{
             .player = player,
@@ -1428,12 +1506,14 @@ namespace
             .product = snf::server::BASIC_PRODUCT,
         };
         constexpr std::uint32_t purchase_request_id = 55;
-        assert(ingress.tryPost(snf::server::PlayerInboundCommand{
-                   .actor = player,
-                   .connection = connection,
-                   .command = command,
-                   .request_id = purchase_request_id,
-               }) == PostResult::Accepted);
+        assert(
+            ingress.tryPost(snf::server::PlayerInboundCommand{
+                .actor = player,
+                .connection = connection,
+                .command = command,
+                .request_id = purchase_request_id,
+            }) == PostResult::Accepted
+        );
 
         std::optional<snf::server::PostedOutboundAction> purchase;
         const auto purchase_deadline = std::chrono::steady_clock::now() + 1s;
@@ -1449,13 +1529,17 @@ namespace
         const auto& frame = std::get<snf::server::SendFrame>(purchase->action).frame;
         assert(frame.type == snf::protocol::MessageType::PurchaseResult);
         assert(frame.request_id == purchase_request_id);
-        assert(ingress.tryPostConnectionClosed(player,
-                                               snf::server::ConnectionClosed{
-                                                   .connection = connection,
-                                                   .cause = snf::server::ConnectionCloseCause::PeerClosed,
-                                                   .has_location_snapshot = false,
-                                                   .last_location = std::nullopt,
-                                               }) == PostResult::Accepted);
+        assert(
+            ingress.tryPostConnectionClosed(
+                player,
+                snf::server::ConnectionClosed{
+                    .connection = connection,
+                    .cause = snf::server::ConnectionCloseCause::PeerClosed,
+                    .has_location_snapshot = false,
+                    .last_location = std::nullopt,
+                }
+            ) == PostResult::Accepted
+        );
         runtime.close();
         runtime.join();
 
@@ -1678,7 +1762,10 @@ namespace
         runtime.registerBinding(binding);
         runtime.start();
 
-        state->on_dispatch_with_context = [&](ActorContext& context, const ActorKey&, int value) { static_cast<void>(context.trySchedule(5ms, binding.post(1, value + 1))); };
+        state->on_dispatch_with_context = [&](ActorContext& context, const ActorKey&, int value)
+        {
+            static_cast<void>(context.trySchedule(5ms, binding.post(1, value + 1)));
+        };
 
         assert(runtime.tryPost(binding.post(1, 1)) == PostResult::Accepted);
 
@@ -1948,8 +2035,63 @@ namespace
     }
 }
 
+void test_observed_at_is_when_the_turn_ran_not_when_the_command_arrived()
+{
+    auto state = std::make_shared<SyntheticBinding::State>();
+    std::mutex observed_mutex;
+    std::vector<std::chrono::steady_clock::time_point> observed;
+
+    state->on_dispatch_with_context = [&](ActorContext& context, const ActorKey&, const int value)
+    {
+        {
+            const std::lock_guard lock{observed_mutex};
+            observed.push_back(context.observedAt());
+        }
+        if (value == 1)
+        {
+            // Holds the Worker, so the second command waits in the mailbox. That
+            // wait is the whole point: it must show up in the time the second turn
+            // reports, not be hidden by the moment the command was accepted.
+            std::this_thread::sleep_for(60ms);
+        }
+    };
+
+    SyntheticBinding binding{ActorKind::Zone, state};
+    RecordingRuntimeCompletion completion;
+    ActorRuntime runtime{player_runtime_config(1, 16), completion};
+    runtime.registerBinding(binding);
+    runtime.start();
+
+    const auto posted_at = std::chrono::steady_clock::now();
+    assert(runtime.tryPost(binding.post(1, 1)) == PostResult::Accepted);
+    assert(runtime.tryPost(binding.post(1, 2)) == PostResult::Accepted);
+
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        {
+            const std::lock_guard lock{observed_mutex};
+            if (observed.size() >= 2)
+            {
+                break;
+            }
+        }
+        std::this_thread::sleep_for(1ms);
+    }
+    runtime.close();
+    runtime.join();
+
+    const std::lock_guard lock{observed_mutex};
+    assert(observed.size() >= 2);
+    // Both were accepted at once, so an arrival-time reading would put the second
+    // at posted_at. It ran after the first held the Worker for 60ms instead.
+    assert(observed[1] >= posted_at + 60ms);
+    assert(observed[0] < observed[1]);
+    assert(completion.failed_count.load() == 0);
+}
 void run_actor_runtime_tests()
 {
+    test_observed_at_is_when_the_turn_ran_not_when_the_command_arrived();
     test_actor_key_affinity_and_registry_rules();
     test_player_binding_preserves_ping_pong_fifo_and_follow_up_order();
     test_same_actor_is_serial_and_different_shards_run_in_parallel();

@@ -88,6 +88,13 @@ namespace snf::runtime
         [[nodiscard]] virtual ActorKey key() const noexcept = 0;
         [[nodiscard]] virtual ActorIncarnation incarnation() const noexcept = 0;
 
+        // When this turn began, not when a timer expired. An actor whose mailbox
+        // held the command for 500 ms would otherwise reason about a moment 500 ms
+        // gone, which is the drift that measuring in real time was meant to remove.
+        // Content derives durations, cooldowns and rate-based amounts from the
+        // difference between successive values rather than from a tick count.
+        [[nodiscard]] virtual std::chrono::steady_clock::time_point observedAt() const noexcept = 0;
+
         // Reserves an in-flight slot -- which is also the terminal continuation
         // slot -- allocates a TaskId, and registers the operation on the actor
         // slot so the owning Worker can cancel it later. std::nullopt means the
@@ -194,7 +201,8 @@ namespace snf::runtime
     // co_await awaitAsyncOperation<Result>(context, [&](auto producer) {
     //     service.submit(request, std::move(producer));
     // });
-    template <typename T, typename Submit> [[nodiscard]] AsyncOperationAwaiter<T, std::decay_t<Submit>> awaitAsyncOperation(ActorContext& context, Submit&& submit)
+    template <typename T, typename Submit>
+    [[nodiscard]] AsyncOperationAwaiter<T, std::decay_t<Submit>> awaitAsyncOperation(ActorContext& context, Submit&& submit)
     {
         return AsyncOperationAwaiter<T, std::decay_t<Submit>>{context, std::forward<Submit>(submit)};
     }
@@ -274,7 +282,9 @@ namespace snf::runtime
         [[nodiscard]] virtual ActorKind kind() const noexcept = 0;
 
     protected:
-        template <typename Payload> [[nodiscard]] ActorSubmission makeSubmission(const ActorKey target, const ActorActivation activation, const ActorAccounting accounting, Payload&& payload) const
+        template <typename Payload>
+        [[nodiscard]] ActorSubmission
+        makeSubmission(const ActorKey target, const ActorActivation activation, const ActorAccounting accounting, Payload&& payload) const
         {
             if (target.kind != kind())
             {
@@ -312,7 +322,8 @@ namespace snf::runtime
         // Returning Suspended means the handler's task is parked on an operation
         // begun through the context. The binding keeps the task in its own slot
         // until resume() finishes it.
-        [[nodiscard]] virtual ActorDispatchResult dispatch(ActorSlot& slot, const ActorSubmission& submission, ActorContext& context, std::stop_token stop_token) = 0;
+        [[nodiscard]] virtual ActorDispatchResult
+        dispatch(ActorSlot& slot, const ActorSubmission& submission, ActorContext& context, std::stop_token stop_token) = 0;
 
         // Builds this binding's submission for a tell addressed to one of its
         // actors. Only the binding that owns the payload type can restore it, which

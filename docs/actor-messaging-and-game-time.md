@@ -175,8 +175,8 @@ tell을 `requiredSlots`에 넣지 않는다. 네트워크 backpressure와 mailbo
 
 ## 4. 게임 시간
 
-> **미구현.** 결정만 기록한다. 런타임이 `observed_at`을 전달하는 부분은 Battle Room이
-> 필요로 할 때 추가한다.
+> 런타임 전달은 구현됐다(`ActorContext::observedAt`). 이를 소비하는 콘텐츠는 Room의
+> 실제 전투에서 시작된다.
 
 ### 4.1 tick 수로 세지 않는다
 
@@ -198,11 +198,16 @@ tell을 `requiredSlots`에 넣지 않는다. 네트워크 backpressure와 mailbo
 테스트가 결정론적이다. `Room`이 `steady_clock::now()`를 직접 부르면 그 성질이 깨지고,
 방금 제거한 `TimerClock` 주입을 도메인 Actor에 되돌리는 셈이 된다.
 
-대신 런타임이 **명령을 처리하기 시작한 시점**을 실어 준다.
+대신 런타임이 **명령을 처리하기 시작한 시점**을 알려 준다.
 
 ```cpp
-struct Tick { std::chrono::steady_clock::time_point observed_at; };
+[[nodiscard]] virtual std::chrono::steady_clock::time_point observedAt() const noexcept;   // ActorContext
 ```
+
+한때 이 값을 명령 안에 담는 형태(`struct Tick { observed_at; }`)로 적어뒀는데, **명령은 예약
+시점에 Binding이 만들고 발화는 나중이다.** 그러면 담긴 시각이 낡는다. 그래서 `ActorContext`가
+turn마다 알려주고, Binding이 dispatch 시점에 도메인 핸들러로 넘긴다. `steady_clock`은
+표준 타입이므로 게임 계층이 런타임을 참조하게 되지 않는다.
 
 Actor는 시점 산술만 한다.
 
