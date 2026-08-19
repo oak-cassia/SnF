@@ -13,7 +13,6 @@ namespace snf::server
                                                      [](snf::protocol::Frame request) -> std::optional<PlayerCommand>
                                                      {
                                                          return PlayerCommand{PingCommand{
-                                                             .request_id = request.request_id,
                                                              .payload = std::move(request.payload),
                                                          }};
                                                      });
@@ -38,7 +37,6 @@ namespace snf::server
                                                                  }
 
                                                                  return PlayerCommand{AuthenticateCommand{
-                                                                     .request_id = request.request_id,
                                                                      .player = PlayerId{.value = player_value},
                                                                  }};
                                                              });
@@ -69,7 +67,6 @@ namespace snf::server
                                                              }
 
                                                              return PlayerCommand{PurchaseCommand{
-                                                                 .request_id = request.request_id,
                                                                  .idempotency_key = PurchaseIdempotencyKey{.value = key},
                                                                  .product = ProductId{.value = product},
                                                              }};

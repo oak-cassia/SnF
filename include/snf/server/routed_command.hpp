@@ -23,6 +23,7 @@ namespace snf::server
     {
         PlayerActorId actor;
         PlayerCommand command;
+        std::uint32_t request_id{0};
     };
 
     struct ConnectionClosedRoute

@@ -163,7 +163,6 @@ namespace snf::server
                     SendResponse{
                         .response =
                             PongResponse{
-                                .request_id = command.request_id,
                                 .payload = command.payload,
                             },
                     },
@@ -184,7 +183,6 @@ namespace snf::server
                     SendResponse{
                         .response =
                             AuthenticatedResponse{
-                                .request_id = command.request_id,
                                 .player = command.player,
                             },
                     },
@@ -272,7 +270,6 @@ namespace snf::server
                     SendResponse{
                         .response =
                             PurchaseResponse{
-                                .request_id = command.request_id,
                                 .result = std::move(result),
                             },
                     },

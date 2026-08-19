@@ -53,7 +53,6 @@ namespace
         assert(result.command.has_value());
         const auto* command = std::get_if<snf::server::PingCommand>(&*result.command);
         assert(command != nullptr);
-        assert(command->request_id == request.request_id);
         assert(command->payload == request.payload);
     }
 
@@ -85,7 +84,6 @@ namespace
         assert(result.handled());
         const auto* authenticate = std::get_if<snf::server::AuthenticateCommand>(&*result.command);
         assert(authenticate != nullptr);
-        assert(authenticate->request_id == 8);
         assert(authenticate->player == snf::server::PlayerId{.value = 77});
 
         const auto invalid = dispatcher.dispatch(snf::protocol::Frame{
@@ -108,7 +106,6 @@ namespace
         assert(result.handled());
         const auto* purchase = std::get_if<snf::server::PurchaseCommand>(&*result.command);
         assert(purchase != nullptr);
-        assert(purchase->request_id == 10);
         assert(purchase->idempotency_key.value == 0x0102030405060708ULL);
         assert(purchase->product.value == 0x11223344U);
 
@@ -130,7 +127,6 @@ namespace
                                                            [](snf::protocol::Frame request) -> snf::server::PlayerCommand
                                                            {
                                                                return snf::server::PingCommand{
-                                                                   .request_id = request.request_id,
                                                                    .payload = std::move(request.payload),
                                                                };
                                                            });
@@ -156,7 +152,6 @@ namespace
                                                            [](snf::protocol::Frame request) -> snf::server::PlayerCommand
                                                            {
                                                                return snf::server::PingCommand{
-                                                                   .request_id = request.request_id,
                                                                    .payload = std::move(request.payload),
                                                                };
                                                            });

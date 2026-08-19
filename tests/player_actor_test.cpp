@@ -12,7 +12,6 @@ namespace
     snf::server::PlayerCommand make_ping(const std::uint32_t request_id)
     {
         return snf::server::PingCommand{
-            .request_id = request_id,
             .payload = {},
         };
     }
@@ -47,8 +46,6 @@ namespace
         const auto* second_pong = std::get_if<snf::server::PongResponse>(&second_send->response);
         assert(first_pong != nullptr);
         assert(second_pong != nullptr);
-        assert(first_pong->request_id == 100);
-        assert(second_pong->request_id == 101);
         assert(actor.state().handledCommandCount() == 2);
     }
 
@@ -72,7 +69,6 @@ namespace
         const snf::server::PlayerId player{.value = 77};
         snf::server::PlayerActor actor{snf::server::PlayerActorId{player}};
         const snf::server::PlayerCommand command = snf::server::AuthenticateCommand{
-            .request_id = 9,
             .player = player,
         };
 
@@ -83,7 +79,6 @@ namespace
         assert(send != nullptr);
         const auto* authenticated = std::get_if<snf::server::AuthenticatedResponse>(&send->response);
         assert(authenticated != nullptr);
-        assert(authenticated->request_id == 9);
         assert(authenticated->player == player);
     }
 
@@ -203,7 +198,6 @@ namespace
         });
 
         const snf::server::PurchaseCommand first{
-            .request_id = 21,
             .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = 1},
             .product = snf::server::BASIC_PRODUCT,
         };
@@ -233,7 +227,6 @@ namespace
         assert(actor.state().purchasedItemCount() == 1);
 
         const snf::server::PurchaseCommand capacity{
-            .request_id = 22,
             .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = 2},
             .product = snf::server::BASIC_PRODUCT,
         };
@@ -257,7 +250,6 @@ namespace
         });
 
         const snf::server::PurchaseCommand insufficient{
-            .request_id = 23,
             .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = 3},
             .product = snf::server::BASIC_PRODUCT,
         };
@@ -277,7 +269,6 @@ namespace
         assert(replay_response->result.replayed);
 
         const snf::server::PurchaseCommand unknown{
-            .request_id = 24,
             .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = 4},
             .product = snf::server::ProductId{.value = 999},
         };

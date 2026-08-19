@@ -24,17 +24,17 @@ namespace
 
 namespace snf::server
 {
-    snf::protocol::Frame ProtocolResponseMapper::map(const PlayerResponse& response) const
+    snf::protocol::Frame ProtocolResponseMapper::map(const PlayerResponse& response, const std::uint32_t request_id) const
     {
         return std::visit(
-            [](const auto& value) -> snf::protocol::Frame
+            [request_id](const auto& value) -> snf::protocol::Frame
             {
                 using Response = std::decay_t<decltype(value)>;
                 if constexpr (std::is_same_v<Response, PongResponse>)
                 {
                     return snf::protocol::Frame{
                         .type = snf::protocol::MessageType::Pong,
-                        .request_id = value.request_id,
+                        .request_id = request_id,
                         .payload = value.payload,
                     };
                 }
@@ -51,7 +51,7 @@ namespace snf::server
 
                     return snf::protocol::Frame{
                         .type = snf::protocol::MessageType::Authenticated,
-                        .request_id = value.request_id,
+                        .request_id = request_id,
                         .payload = std::move(payload),
                     };
                 }
@@ -69,7 +69,7 @@ namespace snf::server
 
                     return snf::protocol::Frame{
                         .type = snf::protocol::MessageType::PurchaseResult,
-                        .request_id = value.request_id,
+                        .request_id = request_id,
                         .payload = std::move(payload),
                     };
                 }

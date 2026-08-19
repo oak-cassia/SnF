@@ -16,14 +16,14 @@ namespace snf::server
         return result.responses.size();
     }
 
-    bool ProtocolPlayerResponseSink::applyResponses(const snf::net::ConnectionId connection, PlayerResult result, OutboundReservation& reservation)
+    bool ProtocolPlayerResponseSink::applyResponses(const snf::net::ConnectionId connection, const std::uint32_t request_id, PlayerResult result, OutboundReservation& reservation)
     {
         for (const SendResponse& response : result.responses)
         {
             const bool emitted = _outbound.commit(reservation,
                                                   SendFrame{
                                                       .connection = connection,
-                                                      .frame = _response_mapper.map(response.response),
+                                                      .frame = _response_mapper.map(response.response, request_id),
                                                   });
             if (!emitted)
             {

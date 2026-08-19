@@ -139,8 +139,9 @@ namespace snf::server
         // whose capacity is still being awaited.
         PlayerResult pending_result;
         // Captured at dispatch because resume() does not carry the submission, and
-        // follow-ups still have to reach the connection that issued the command.
+        // responses still have to reach the connection and answer the frame that asked.
         snf::net::ConnectionId connection{};
+        std::uint32_t request_id{0};
     };
 
     struct PlayerActorBinding::CommandPayload
@@ -342,6 +343,7 @@ namespace snf::server
         }
 
         player_slot.connection = payload.command.connection;
+        player_slot.request_id = payload.command.request_id;
 
         if (kind() == snf::runtime::ActorKind::Player && !player_slot.loaded)
         {
@@ -530,9 +532,10 @@ namespace snf::server
     {
         PlayerResult result = std::move(slot.pending_result);
         const snf::net::ConnectionId connection = slot.connection;
+        const std::uint32_t request_id = slot.request_id;
         resetPendingCommand(slot);
 
-        if (_response_sink.applyResponses(connection, std::move(result), reservation))
+        if (_response_sink.applyResponses(connection, request_id, std::move(result), reservation))
         {
             return snf::runtime::ActorDispatchResult::KeepActive;
         }

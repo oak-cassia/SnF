@@ -161,9 +161,9 @@ namespace
                 },
             .command =
                 snf::server::PingCommand{
-                    .request_id = request_id,
                     .payload = {},
                 },
+            .request_id = request_id,
         };
     }
 
@@ -1122,7 +1122,7 @@ namespace
             return _slots;
         }
 
-        [[nodiscard]] bool applyResponses(snf::net::ConnectionId, snf::server::PlayerResult, snf::server::OutboundReservation&) override
+        [[nodiscard]] bool applyResponses(snf::net::ConnectionId, std::uint32_t, snf::server::PlayerResult, snf::server::OutboundReservation&) override
         {
             applied = true;
             return true;
@@ -1282,9 +1282,9 @@ namespace
                    .connection = player_connection,
                    .command =
                        snf::server::AuthenticateCommand{
-                           .request_id = 1,
                            .player = player,
                        },
+                   .request_id = 1,
                }) == PostResult::Accepted);
         assert(repository.load_requested_future.wait_for(1s) == std::future_status::ready);
         assert(repository.requested_player == player);
@@ -1296,7 +1296,8 @@ namespace
         assert(ingress.tryPost(snf::server::PlayerInboundCommand{
                    .actor = snf::server::ProvisionalActorId{.value = 701},
                    .connection = provisional_connection,
-                   .command = snf::server::PingCommand{.request_id = 2, .payload = {}},
+                   .command = snf::server::PingCommand{.payload = {}},
+                   .request_id = 2,
                }) == PostResult::Accepted);
 
         std::optional<snf::server::PostedOutboundAction> pong;
@@ -1397,9 +1398,9 @@ namespace
                    .connection = connection,
                    .command =
                        snf::server::AuthenticateCommand{
-                           .request_id = 1,
                            .player = player,
                        },
+                   .request_id = 1,
                }) == PostResult::Accepted);
         assert(repository.load_requested_future.wait_for(1s) == std::future_status::ready);
         repository.completeLoad(snf::server::PlayerRecord{
@@ -1423,14 +1424,15 @@ namespace
         assert(authenticated.has_value());
 
         const snf::server::PurchaseCommand command{
-            .request_id = 2,
             .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = 7810},
             .product = snf::server::BASIC_PRODUCT,
         };
+        constexpr std::uint32_t purchase_request_id = 55;
         assert(ingress.tryPost(snf::server::PlayerInboundCommand{
                    .actor = player,
                    .connection = connection,
                    .command = command,
+                   .request_id = purchase_request_id,
                }) == PostResult::Accepted);
 
         std::optional<snf::server::PostedOutboundAction> purchase;
@@ -1446,7 +1448,7 @@ namespace
         assert(purchase.has_value());
         const auto& frame = std::get<snf::server::SendFrame>(purchase->action).frame;
         assert(frame.type == snf::protocol::MessageType::PurchaseResult);
-        assert(frame.request_id == command.request_id);
+        assert(frame.request_id == purchase_request_id);
         assert(ingress.tryPostConnectionClosed(player,
                                                snf::server::ConnectionClosed{
                                                    .connection = connection,
