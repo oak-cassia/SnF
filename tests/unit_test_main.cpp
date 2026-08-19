@@ -1,6 +1,7 @@
 void run_build_info_tests();
 void run_bounded_queue_tests();
 void run_tell_payload_tests();
+void run_street_progression_tests();
 void run_distribution_tests();
 void run_frame_codec_tests();
 void run_command_router_tests();
@@ -35,6 +36,7 @@ int main()
     run_build_info_tests();
     run_bounded_queue_tests();
     run_tell_payload_tests();
+    run_street_progression_tests();
     run_distribution_tests();
     run_frame_codec_tests();
     run_command_router_tests();
