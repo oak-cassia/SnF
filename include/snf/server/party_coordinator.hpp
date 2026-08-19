@@ -28,12 +28,12 @@ namespace snf::server
         PartyRoute route;
         bool created{false};
         // The route was not published, but a Join command may still be posted so
-        // PartyActor returns a typed PartyFull result instead of a protocol error.
+        // Party returns a typed PartyFull result instead of a protocol error.
         bool capacity_denied{false};
     };
 
     // Reactor-facing authoritative membership route. It prevents one session from
-    // joining multiple parties and admits no more routes than PartyActor can hold.
+    // joining multiple parties and admits no more routes than Party can hold.
     class PartyCoordinator
     {
     public:

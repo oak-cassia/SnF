@@ -49,7 +49,7 @@ namespace
         const std::thread::id caller = std::this_thread::get_id();
         snf::server::CountingCommandLifecycleSink lifecycle;
         snf::server::ZoneActorBinding binding{snf::server::ZoneActorBindingConfig{
-                                                  .actor = snf::server::ZoneActorConfig{.aoi_radius = 100},
+                                                  .actor = snf::server::ZoneConfig{.aoi_radius = 100},
                                                   .tick_budget = std::chrono::milliseconds{5},
                                                   .on_result =
                                                       [&recorded](const snf::server::ZoneInboundCommand&, const snf::server::ZoneResult& result)
@@ -263,7 +263,7 @@ namespace
     {
         snf::server::ZoneActorBinding binding{snf::server::ZoneActorBindingConfig{
             .actor =
-                snf::server::ZoneActorConfig{
+                snf::server::ZoneConfig{
                     .aoi_radius = 100,
                     .tick_interval = 10ms,
                 },

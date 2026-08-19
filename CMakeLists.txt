@@ -59,8 +59,8 @@ endfunction()
 # which is the wall the compiler keeps for us.
 add_library(snf_game STATIC
     src/game/player_actor.cpp
-    src/game/zone_actor.cpp
-    src/game/party_actor.cpp
+    src/game/zone.cpp
+    src/game/party.cpp
     src/game/room.cpp
     src/game/street_progression.cpp
     src/game/product_catalog.cpp
@@ -204,8 +204,8 @@ if(BUILD_TESTING)
         tests/street_progression_test.cpp
         tests/room_test.cpp
         tests/player_actor_test.cpp
-        tests/zone_actor_test.cpp
-        tests/party_actor_test.cpp
+        tests/zone_test.cpp
+        tests/party_test.cpp
     )
     target_link_libraries(snf_game_tests PRIVATE snf_game)
     snf_configure_target(snf_game_tests)

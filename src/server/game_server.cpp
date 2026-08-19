@@ -159,7 +159,7 @@ namespace snf::server
         , _zone_actor_binding(
               ZoneActorBindingConfig{
                   .actor =
-                      ZoneActorConfig{
+                      ZoneConfig{
                           .aoi_radius = config.zone_aoi_radius,
                           .tick_interval = config.zone_tick_interval,
                       },
@@ -193,7 +193,7 @@ namespace snf::server
               _command_lifecycle)
         , _party_actor_binding(
               PartyActorBindingConfig{
-                  .actor = PartyActorConfig{.max_members = checked_party_members(config.max_party_members)},
+                  .actor = PartyConfig{.max_members = checked_party_members(config.max_party_members)},
                   .on_result =
                       [this](const PartyInboundCommand& command, const PartyResult& result)
                   {

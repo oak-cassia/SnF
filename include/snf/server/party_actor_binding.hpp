@@ -1,6 +1,6 @@
 #pragma once
 
-#include "snf/game/party_actor.hpp"
+#include "snf/game/party.hpp"
 #include "snf/runtime/actor_runtime.hpp"
 #include "snf/server/command_terminal.hpp"
 #include "snf/server/party_inbound_command.hpp"
@@ -13,7 +13,7 @@ namespace snf::server
 {
     struct PartyActorBindingConfig
     {
-        PartyActorConfig actor;
+        PartyConfig actor;
         std::function<void(const PartyInboundCommand&, const PartyResult&)> on_result;
     };
 
@@ -43,7 +43,7 @@ namespace snf::server
         struct PartyActorSlot;
         struct CommandPayload;
 
-        PartyActorConfig _actor_config;
+        PartyConfig _actor_config;
         std::function<void(const PartyInboundCommand&, const PartyResult&)> _on_result;
         CommandLifecycleSink& _lifecycle;
         std::atomic<std::uint64_t> _commands{0};

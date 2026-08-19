@@ -1,4 +1,4 @@
-#include "snf/game/zone_actor.hpp"
+#include "snf/game/zone.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -7,7 +7,7 @@
 
 namespace snf::server
 {
-    ZoneActor::ZoneActor(const ZoneId zone, const ZoneActorConfig config)
+    Zone::Zone(const ZoneId zone, const ZoneConfig config)
         : _zone(zone)
         , _aoi_radius(config.aoi_radius)
         , _tick_interval(config.tick_interval)
@@ -26,27 +26,27 @@ namespace snf::server
         }
     }
 
-    ZoneId ZoneActor::id() const noexcept
+    ZoneId Zone::id() const noexcept
     {
         return _zone;
     }
 
-    std::size_t ZoneActor::playerCount() const noexcept
+    std::size_t Zone::playerCount() const noexcept
     {
         return _players.size();
     }
 
-    std::uint64_t ZoneActor::lastTick() const noexcept
+    std::uint64_t Zone::lastTick() const noexcept
     {
         return _last_tick;
     }
 
-    std::chrono::milliseconds ZoneActor::tickInterval() const noexcept
+    std::chrono::milliseconds Zone::tickInterval() const noexcept
     {
         return _tick_interval;
     }
 
-    std::optional<ZonePosition> ZoneActor::positionOf(const PlayerId player) const
+    std::optional<ZonePosition> Zone::positionOf(const PlayerId player) const
     {
         const auto iterator = _players.find(player);
         if (iterator == _players.end())
@@ -57,7 +57,7 @@ namespace snf::server
         return iterator->second.position;
     }
 
-    std::vector<PlayerId> ZoneActor::visiblePlayers(const PlayerId player) const
+    std::vector<PlayerId> Zone::visiblePlayers(const PlayerId player) const
     {
         const auto subject = _players.find(player);
         if (subject == _players.end())
@@ -79,12 +79,12 @@ namespace snf::server
         return visible;
     }
 
-    ZoneResult ZoneActor::handle(const ZoneCommand& command)
+    ZoneResult Zone::handle(const ZoneCommand& command)
     {
         return std::visit([this](const auto& value) { return handleCommand(value); }, command);
     }
 
-    ZoneResult ZoneActor::handleCommand(const EnterZoneCommand& command)
+    ZoneResult Zone::handleCommand(const EnterZoneCommand& command)
     {
         const auto existing = _players.find(command.player);
         if (existing != _players.end())
@@ -133,7 +133,7 @@ namespace snf::server
         };
     }
 
-    ZoneResult ZoneActor::handleCommand(const LeaveZoneCommand& command)
+    ZoneResult Zone::handleCommand(const LeaveZoneCommand& command)
     {
         const auto existing = _players.find(command.player);
         if (existing == _players.end())
@@ -171,7 +171,7 @@ namespace snf::server
         };
     }
 
-    ZoneResult ZoneActor::handleCommand(const MoveInZoneCommand& command)
+    ZoneResult Zone::handleCommand(const MoveInZoneCommand& command)
     {
         const auto existing = _players.find(command.player);
         if (existing == _players.end())
@@ -208,7 +208,7 @@ namespace snf::server
         };
     }
 
-    ZoneResult ZoneActor::handleCommand(const ZoneSimulationTick&)
+    ZoneResult Zone::handleCommand(const ZoneSimulationTick&)
     {
         ++_last_tick;
         const std::optional<std::chrono::milliseconds> tick_after = _players.empty() ? std::nullopt : std::optional{_tick_interval};
@@ -224,7 +224,7 @@ namespace snf::server
         };
     }
 
-    bool ZoneActor::isVisible(const ZonePosition left, const ZonePosition right) const noexcept
+    bool Zone::isVisible(const ZonePosition left, const ZonePosition right) const noexcept
     {
         const std::int64_t x = static_cast<std::int64_t>(left.x) - right.x;
         const std::int64_t y = static_cast<std::int64_t>(left.y) - right.y;

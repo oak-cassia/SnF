@@ -40,7 +40,7 @@ namespace snf::server
     };
 
     // Immutable routing identity carried by one internal Zone submission. It is
-    // deliberately separate from the gameplay command so ZoneActor never sees
+    // deliberately separate from the gameplay command so Zone never sees
     // connection, ticket, or reactor transition state.
     struct ZoneHandoffContext
     {
