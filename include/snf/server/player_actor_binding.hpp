@@ -1,6 +1,6 @@
 #pragma once
 
-#include "snf/game/player_actor.hpp"
+#include "snf/game/player.hpp"
 #include "snf/runtime/actor_runtime.hpp"
 #include "snf/runtime/actor_task.hpp"
 #include "snf/server/command_terminal.hpp"
@@ -23,7 +23,7 @@ namespace snf::server
         snf::runtime::ActorKind actor_kind{snf::runtime::ActorKind::ProvisionalPlayer};
         PlayerRepository* repository{nullptr};
         // Test-only diagnostic hook. It executes on the Player actor's owner
-        // Worker immediately before PlayerActor::handle().
+        // Worker immediately before Player::handle().
         std::function<void(PlayerActorId, const PlayerCommand&)> on_before_command;
         // Runs after the scheduler has removed and destroyed a persistent Player
         // slot. GameServer uses it to finish the Closing -> detached transition.
@@ -43,7 +43,7 @@ namespace snf::server
     // Its factories are the only way Player inputs become ActorSubmission values.
     //
     // It also owns the outbound reservation, in two stages: the handler decides, and
-    // only then does the binding acquire the capacity to emit. That keeps PlayerActor
+    // only then does the binding acquire the capacity to emit. That keeps Player
     // unaware that outbound capacity is finite while still applying follow-ups strictly
     // after the handler has returned.
     class PlayerActorBinding final : public snf::runtime::ActorBinding

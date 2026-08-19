@@ -1,4 +1,4 @@
-#include "snf/game/player_actor.hpp"
+#include "snf/game/player.hpp"
 
 #include "snf/game/street_progression.hpp"
 
@@ -18,7 +18,7 @@ namespace
 
     void test_player_actor_owns_state_and_dispatches_ping()
     {
-        snf::server::PlayerActor actor;
+        snf::server::Player actor;
         assert(actor.state().handledCommandCount() == 0);
 
         const auto first_command = make_ping(100);
@@ -42,7 +42,7 @@ namespace
     void test_persistent_player_actor_acknowledges_its_identity()
     {
         const snf::server::PlayerId player{.value = 77};
-        snf::server::PlayerActor actor{player};
+        snf::server::Player actor{player};
         const snf::server::PlayerCommand command = snf::server::AuthenticateCommand{
             .player = player,
         };
@@ -60,7 +60,7 @@ namespace
     void test_persistent_player_actor_restores_and_snapshots_state()
     {
         const snf::server::PlayerId player{.value = 88};
-        snf::server::PlayerActor actor{player};
+        snf::server::Player actor{player};
         actor.restore(snf::server::PlayerRecord{
             .player = player,
             .handled_command_count = 10,
@@ -98,7 +98,7 @@ namespace
     void test_street_experience_grant_marks_progression_dirty()
     {
         const snf::server::PlayerId player{.value = 91};
-        snf::server::PlayerActor actor{player};
+        snf::server::Player actor{player};
         assert(!actor.hasFlushableDirtyState());
 
         actor.grantStreetExperience(300);
@@ -117,7 +117,7 @@ namespace
     void test_street_experience_grants_accumulate_and_saturate()
     {
         const snf::server::PlayerId player{.value = 92};
-        snf::server::PlayerActor actor{player};
+        snf::server::Player actor{player};
 
         actor.grantStreetExperience(300);
         actor.grantStreetExperience(400);
@@ -134,7 +134,7 @@ namespace
     void test_street_experience_survives_the_record_round_trip()
     {
         const snf::server::PlayerId player{.value = 93};
-        snf::server::PlayerActor actor{player};
+        snf::server::Player actor{player};
         actor.restore(snf::server::PlayerRecord{
             .player = player,
             .street_experience = 29500,
@@ -149,7 +149,7 @@ namespace
     void test_street_experience_keeps_accumulating_past_the_level_cap()
     {
         const snf::server::PlayerId player{.value = 94};
-        snf::server::PlayerActor actor{player};
+        snf::server::Player actor{player};
 
         const std::uint64_t at_cap = snf::server::EXPERIENCE_PER_STREET_LEVEL * (snf::server::MAX_STREET_LEVEL - 1);
         actor.grantStreetExperience(at_cap + 5000);
@@ -164,7 +164,7 @@ namespace
     void test_live_purchase_is_memory_authoritative_and_bounded()
     {
         const snf::server::PlayerId player{.value = 89};
-        snf::server::PlayerActor actor{player, 1};
+        snf::server::Player actor{player, 1};
         actor.restore(snf::server::PlayerRecord{
             .player = player,
             .last_location = std::nullopt,
@@ -221,7 +221,7 @@ namespace
     void test_live_purchase_rejects_unknown_and_reports_insufficient_funds()
     {
         const snf::server::PlayerId player{.value = 890};
-        snf::server::PlayerActor actor{player};
+        snf::server::Player actor{player};
         actor.restore(snf::server::PlayerRecord{
             .player = player,
             .last_location = std::nullopt,
@@ -260,7 +260,7 @@ namespace
     }
 }
 
-void run_player_actor_tests()
+void run_player_tests()
 {
     test_player_actor_owns_state_and_dispatches_ping();
     test_persistent_player_actor_acknowledges_its_identity();

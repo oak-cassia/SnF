@@ -2,7 +2,7 @@
 
 #include "snf/game/street_experience_grant.hpp"
 
-#include "snf/game/player_actor.hpp"
+#include "snf/game/player.hpp"
 
 #include <cstddef>
 #include <stdexcept>
@@ -115,7 +115,7 @@ namespace snf::server
             }
         }
 
-        PlayerActor actor;
+        Player actor;
         PlayerActorId identity;
         std::function<void(PlayerActorId)> on_deactivated;
         bool loaded{false};

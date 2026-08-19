@@ -27,7 +27,7 @@ namespace snf::server
 
     inline constexpr std::size_t DEFAULT_PURCHASE_IDEMPOTENCY_CAPACITY = 1024;
 
-    // The state is intentionally only mutable by PlayerActor. These are ownership
+    // The state is intentionally only mutable by Player. These are ownership
     // boundaries inside one Actor, not additional Actors.
     class PlayerState
     {
@@ -44,7 +44,7 @@ namespace snf::server
         [[nodiscard]] PlayerStateComponentMask dirtyComponents() const noexcept;
 
     private:
-        friend class PlayerActor;
+        friend class Player;
 
         struct Session
         {
@@ -67,17 +67,19 @@ namespace snf::server
         PlayerStateComponentMask _dirty_components{0};
     };
 
-    class PlayerActor
+    // The game model, not the execution unit: being an actor is how a Player is
+    // run, which is PlayerActorBinding's business.
+    class Player
     {
     public:
-        PlayerActor() = default;
-        explicit PlayerActor(std::optional<PlayerId> identity) noexcept;
-        PlayerActor(std::optional<PlayerId> identity, std::size_t max_purchase_idempotency_records);
+        Player() = default;
+        explicit Player(std::optional<PlayerId> identity) noexcept;
+        Player(std::optional<PlayerId> identity, std::size_t max_purchase_idempotency_records);
 
-        PlayerActor(const PlayerActor&) = delete;
-        PlayerActor& operator=(const PlayerActor&) = delete;
-        PlayerActor(PlayerActor&&) noexcept = default;
-        PlayerActor& operator=(PlayerActor&&) noexcept = default;
+        Player(const Player&) = delete;
+        Player& operator=(const Player&) = delete;
+        Player(Player&&) noexcept = default;
+        Player& operator=(Player&&) noexcept = default;
 
         // Only a const view escapes the actor, but it is safe to read only on the
         // owning Worker. Cross-thread queries must use an immutable snapshot or a

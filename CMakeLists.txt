@@ -58,7 +58,7 @@ endfunction()
 # threads. Anything it needed from those would fail to link snf_game_tests below,
 # which is the wall the compiler keeps for us.
 add_library(snf_game STATIC
-    src/game/player_actor.cpp
+    src/game/player.cpp
     src/game/zone.cpp
     src/game/party.cpp
     src/game/room.cpp
@@ -203,7 +203,7 @@ if(BUILD_TESTING)
         tests/game_test_main.cpp
         tests/street_progression_test.cpp
         tests/room_test.cpp
-        tests/player_actor_test.cpp
+        tests/player_test.cpp
         tests/zone_test.cpp
         tests/party_test.cpp
     )

@@ -1,4 +1,4 @@
-#include "snf/game/player_actor.hpp"
+#include "snf/game/player.hpp"
 
 #include "snf/game/product_catalog.hpp"
 
@@ -44,12 +44,12 @@ namespace snf::server
         return _dirty_components;
     }
 
-    const PlayerState& PlayerActor::state() const noexcept
+    const PlayerState& Player::state() const noexcept
     {
         return _state;
     }
 
-    void PlayerActor::restore(const PlayerRecord& record)
+    void Player::restore(const PlayerRecord& record)
     {
         if (_state._session.identity != std::optional{record.player})
         {
@@ -65,31 +65,31 @@ namespace snf::server
         _purchase_evidence.clear();
     }
 
-    void PlayerActor::setLastLocation(std::optional<PlayerLocation> location) noexcept
+    void Player::setLastLocation(std::optional<PlayerLocation> location) noexcept
     {
         _state._session.last_location = std::move(location);
         _state._dirty_components |= componentMask(PlayerStateComponent::Session);
     }
 
-    void PlayerActor::grantStreetExperience(const std::uint64_t experience) noexcept
+    void Player::grantStreetExperience(const std::uint64_t experience) noexcept
     {
         std::uint64_t& total = _state._progression.street_experience;
         total = experience > std::numeric_limits<std::uint64_t>::max() - total ? std::numeric_limits<std::uint64_t>::max() : total + experience;
         _state._dirty_components |= componentMask(PlayerStateComponent::Progression);
     }
 
-    bool PlayerActor::hasFlushableDirtyState() const noexcept
+    bool Player::hasFlushableDirtyState() const noexcept
     {
         constexpr PlayerStateComponentMask flushable = componentMask(PlayerStateComponent::Economy) | componentMask(PlayerStateComponent::Progression);
         return (_state._dirty_components & flushable) != 0;
     }
 
-    PlayerStateComponentMask PlayerActor::dirtyComponents() const noexcept
+    PlayerStateComponentMask Player::dirtyComponents() const noexcept
     {
         return _state._dirty_components;
     }
 
-    std::optional<PlayerRecord> PlayerActor::takeDirtySnapshot(PlayerStateComponentMask* const cleared_components)
+    std::optional<PlayerRecord> Player::takeDirtySnapshot(PlayerStateComponentMask* const cleared_components)
     {
         if (!hasFlushableDirtyState())
         {
@@ -110,12 +110,12 @@ namespace snf::server
         return record;
     }
 
-    void PlayerActor::restoreDirtyComponents(const PlayerStateComponentMask components) noexcept
+    void Player::restoreDirtyComponents(const PlayerStateComponentMask components) noexcept
     {
         _state._dirty_components |= components;
     }
 
-    PlayerRecord PlayerActor::snapshot() const
+    PlayerRecord Player::snapshot() const
     {
         const auto player = _state._session.identity;
         if (!player)
@@ -133,12 +133,12 @@ namespace snf::server
         };
     }
 
-    PlayerActor::PlayerActor(std::optional<PlayerId> identity) noexcept
+    Player::Player(std::optional<PlayerId> identity) noexcept
     {
         _state._session.identity = identity;
     }
 
-    PlayerActor::PlayerActor(std::optional<PlayerId> identity, const std::size_t max_purchase_idempotency_records)
+    Player::Player(std::optional<PlayerId> identity, const std::size_t max_purchase_idempotency_records)
         : _max_purchase_idempotency_records(max_purchase_idempotency_records)
     {
         if (_max_purchase_idempotency_records == 0)
@@ -148,14 +148,14 @@ namespace snf::server
         _state._session.identity = identity;
     }
 
-    PlayerResult PlayerActor::handle(const PlayerCommand& command)
+    PlayerResult Player::handle(const PlayerCommand& command)
     {
         PlayerResult result = std::visit([this](const auto& value) { return handleCommand(value); }, command);
         ++_state._session.handled_command_count;
         return result;
     }
 
-    PlayerResult PlayerActor::handleCommand(const PingCommand& command)
+    PlayerResult Player::handleCommand(const PingCommand& command)
     {
         return PlayerResult{
             .responses =
@@ -170,7 +170,7 @@ namespace snf::server
         };
     }
 
-    PlayerResult PlayerActor::handleCommand(const AuthenticateCommand& command)
+    PlayerResult Player::handleCommand(const AuthenticateCommand& command)
     {
         if (_state._session.identity != std::optional{command.player})
         {
@@ -190,7 +190,7 @@ namespace snf::server
         };
     }
 
-    PlayerResult PlayerActor::handleCommand(const PurchaseCommand& command)
+    PlayerResult Player::handleCommand(const PurchaseCommand& command)
     {
         const auto player = _state._session.identity;
         if (!player)
