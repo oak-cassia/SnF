@@ -10,7 +10,6 @@
 #include <charconv>
 #include <chrono>
 #include <cstddef>
-#include <cstdint>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -164,7 +163,7 @@ namespace
     [[nodiscard]] std::string player_select(const snf::server::PlayerId player)
     {
         return "SELECT handled_command_count, zone_id, position_x, position_y, "
-               "currency_balance, purchased_item_count FROM snf_players WHERE player_id=" +
+               "currency_balance, purchased_item_count, street_experience FROM snf_players WHERE player_id=" +
                std::to_string(player.value);
     }
 
@@ -195,6 +194,7 @@ namespace
             .last_location = location,
             .currency_balance = parse_integer<std::uint64_t>(row[4], "currency_balance"),
             .purchased_item_count = parse_integer<std::uint64_t>(row[5], "purchased_item_count"),
+            .street_experience = parse_integer<std::uint64_t>(row[6], "street_experience"),
         };
     }
 
@@ -236,14 +236,15 @@ namespace
             const std::string position_x = record.last_location ? std::to_string(record.last_location->position.x) : "NULL";
             const std::string position_y = record.last_location ? std::to_string(record.last_location->position.y) : "NULL";
             _connection.execute("INSERT INTO snf_players (player_id, handled_command_count, zone_id, "
-                                "position_x, position_y, currency_balance, purchased_item_count) VALUES (" +
+                                "position_x, position_y, currency_balance, purchased_item_count, street_experience) VALUES (" +
                                 std::to_string(record.player.value) + "," + std::to_string(record.handled_command_count) + "," + zone + "," + position_x + "," + position_y + "," +
-                                std::to_string(record.currency_balance) + "," + std::to_string(record.purchased_item_count) +
+                                std::to_string(record.currency_balance) + "," + std::to_string(record.purchased_item_count) + "," + std::to_string(record.street_experience) +
                                 ") ON DUPLICATE KEY UPDATE "
                                 "handled_command_count=VALUES(handled_command_count), "
                                 "zone_id=VALUES(zone_id), position_x=VALUES(position_x), "
                                 "position_y=VALUES(position_y), currency_balance=VALUES(currency_balance), "
-                                "purchased_item_count=VALUES(purchased_item_count)");
+                                "purchased_item_count=VALUES(purchased_item_count), "
+                                "street_experience=VALUES(street_experience)");
             return snf::server::PlayerSaveResult{
                 .status = snf::server::PlayerRepositoryStatus::Success,
             };
@@ -262,7 +263,7 @@ namespace
                 throw std::runtime_error{"MySQL schema version is unsupported"};
             }
             const std::uint32_t schema_version = parse_integer<std::uint32_t>(version_row[0], "schema version");
-            if (schema_version == 0 || schema_version > 6)
+            if (schema_version == 0 || schema_version > 7)
             {
                 throw std::runtime_error{"MySQL schema version is unsupported"};
             }
@@ -273,6 +274,7 @@ namespace
                                 "zone_id BIGINT UNSIGNED NULL, position_x INT NULL, position_y INT NULL, "
                                 "currency_balance BIGINT UNSIGNED NOT NULL, "
                                 "purchased_item_count BIGINT UNSIGNED NOT NULL, "
+                                "street_experience BIGINT UNSIGNED NOT NULL DEFAULT 0, "
                                 "CONSTRAINT snf_player_location_complete CHECK ((zone_id IS NULL AND "
                                 "position_x IS NULL AND position_y IS NULL) OR (zone_id IS NOT NULL AND "
                                 "position_x IS NOT NULL AND position_y IS NOT NULL))) ENGINE=InnoDB");
@@ -305,6 +307,20 @@ namespace
             {
                 _connection.execute("DROP TABLE IF EXISTS snf_purchase_idempotency");
                 _connection.execute("INSERT INTO snf_schema_version (version) VALUES (6)");
+            }
+
+            if (schema_version < 7)
+            {
+                // The CREATE TABLE above already carries the column on a fresh database,
+                // where the recorded version is still 1, so this has to check before it
+                // adds rather than assume the column is missing.
+                auto street_experience = _connection.query("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() "
+                                                           "AND table_name=\"snf_players\" AND column_name=\"street_experience\"");
+                if (parse_integer<std::uint64_t>(::mysql_fetch_row(street_experience.get())[0], "street experience column count") == 0)
+                {
+                    _connection.execute("ALTER TABLE snf_players ADD COLUMN street_experience BIGINT UNSIGNED NOT NULL DEFAULT 0");
+                }
+                _connection.execute("INSERT INTO snf_schema_version (version) VALUES (7)");
             }
         }
 

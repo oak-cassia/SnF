@@ -129,6 +129,7 @@ namespace
                                 },
                             .currency_balance = 700,
                             .purchased_item_count = 3,
+                            .street_experience = 29500,
                         })
                        .saved());
         }
@@ -144,6 +145,7 @@ namespace
                                                 }));
         assert(loaded.record->currency_balance == 700);
         assert(loaded.record->purchased_item_count == 3);
+        assert(loaded.record->street_experience == 29500);
     }
 
     void test_actor_snapshot_overwrites_the_complete_player_record(const snf::server::MySqlPlayerRepositoryConfig& repository_config)
@@ -157,6 +159,7 @@ namespace
                         .last_location = std::nullopt,
                         .currency_balance = 500,
                         .purchased_item_count = 5,
+                        .street_experience = 1000,
                     })
                    .saved());
 
@@ -171,6 +174,7 @@ namespace
             .last_location = std::nullopt,
             .currency_balance = 700,
             .purchased_item_count = 3,
+            .street_experience = 29500,
         }));
         persistence.flush();
         persistence.stop();
@@ -180,6 +184,8 @@ namespace
         assert(loaded.record->handled_command_count == 2);
         assert(loaded.record->currency_balance == 700);
         assert(loaded.record->purchased_item_count == 3);
+        // The UPDATE clause has to carry the column too, or only the first save lands.
+        assert(loaded.record->street_experience == 29500);
     }
 
     class RunningMySqlServer final
