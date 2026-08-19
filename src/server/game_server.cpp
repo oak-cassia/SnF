@@ -219,7 +219,7 @@ namespace snf::server
         , _room_actor_binding(
               RoomActorBindingConfig{
                   .actor =
-                      RoomActorConfig{
+                      RoomConfig{
                           .battle_duration = config.room_battle_duration,
                           .max_participants = config.max_room_participants,
                           .clear_experience = config.room_clear_experience,

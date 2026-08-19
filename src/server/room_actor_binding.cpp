@@ -10,12 +10,12 @@ namespace snf::server
 {
     struct RoomActorBinding::RoomActorSlot final : snf::runtime::ActorSlot
     {
-        RoomActorSlot(const RoomId room, const RoomActorConfig config)
+        RoomActorSlot(const RoomId room, const RoomConfig config)
             : actor(room, config)
         {
         }
 
-        RoomActor actor;
+        Room actor;
     };
 
     struct RoomActorBinding::CommandPayload

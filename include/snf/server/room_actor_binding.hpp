@@ -3,7 +3,7 @@
 #include "snf/runtime/actor_runtime.hpp"
 #include "snf/runtime/distribution.hpp"
 #include "snf/server/command_terminal.hpp"
-#include "snf/server/room_actor.hpp"
+#include "snf/server/room.hpp"
 #include "snf/server/room_inbound_command.hpp"
 
 #include <chrono>
@@ -14,10 +14,10 @@ namespace snf::server
 {
     struct RoomActorBindingConfig
     {
-        RoomActorConfig actor;
+        RoomConfig actor;
         // Result delivery is intentionally a binding concern. Production routing
         // can replace this callback with a typed sink without putting connection
-        // or protocol state inside RoomActor.
+        // or protocol state inside Room.
         std::function<void(const RoomInboundCommand&, const RoomResult&)> on_result;
     };
 
@@ -48,7 +48,7 @@ namespace snf::server
         struct CommandPayload;
         struct PassivatePayload;
 
-        RoomActorConfig _actor_config;
+        RoomConfig _actor_config;
         std::function<void(const RoomInboundCommand&, const RoomResult&)> _on_result;
         CommandLifecycleSink* _lifecycle{nullptr};
         snf::runtime::Distribution _command_execution_nanoseconds;

@@ -1,4 +1,4 @@
-#include "snf/server/room_actor.hpp"
+#include "snf/server/room.hpp"
 
 #include "snf/server/street_experience_grant.hpp"
 
@@ -11,17 +11,17 @@ namespace
     using snf::server::BattleCompleted;
     using snf::server::JoinRoom;
     using snf::server::PlayerId;
-    using snf::server::RoomActor;
-    using snf::server::RoomActorConfig;
+    using snf::server::Room;
     using snf::server::RoomCommandStatus;
+    using snf::server::RoomConfig;
     using snf::server::RoomId;
     using snf::server::RoomPhase;
     using snf::server::StartBattle;
     using snf::server::StreetExperienceGrant;
 
-    [[nodiscard]] RoomActorConfig small_room()
+    [[nodiscard]] RoomConfig small_room()
     {
-        return RoomActorConfig{
+        return RoomConfig{
             .battle_duration = std::chrono::milliseconds{5000},
             .max_participants = 2,
             .clear_experience = 300,
@@ -30,7 +30,7 @@ namespace
 
     void test_a_room_starts_empty_and_waiting()
     {
-        const RoomActor actor{RoomId{.value = 1}, small_room()};
+        const Room actor{RoomId{.value = 1}, small_room()};
 
         assert(actor.id() == RoomId{.value = 1});
         assert(actor.phase() == RoomPhase::Waiting);
@@ -39,7 +39,7 @@ namespace
 
     void test_a_room_refuses_a_duplicate_join()
     {
-        RoomActor actor{RoomId{.value = 1}, small_room()};
+        Room actor{RoomId{.value = 1}, small_room()};
 
         const auto first = actor.handle(JoinRoom{.player = PlayerId{.value = 7}});
         assert(first.status == RoomCommandStatus::Applied);
@@ -53,7 +53,7 @@ namespace
 
     void test_a_room_refuses_a_join_past_capacity()
     {
-        RoomActor actor{RoomId{.value = 1}, small_room()};
+        Room actor{RoomId{.value = 1}, small_room()};
 
         static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 1}}));
         static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 2}}));
@@ -65,7 +65,7 @@ namespace
 
     void test_starting_a_battle_arms_exactly_one_timer()
     {
-        RoomActor actor{RoomId{.value = 1}, small_room()};
+        Room actor{RoomId{.value = 1}, small_room()};
         static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 7}}));
 
         const auto started = actor.handle(StartBattle{});
@@ -77,7 +77,7 @@ namespace
 
     void test_an_empty_room_cannot_start_a_battle()
     {
-        RoomActor actor{RoomId{.value = 1}, small_room()};
+        Room actor{RoomId{.value = 1}, small_room()};
 
         const auto started = actor.handle(StartBattle{});
         // Otherwise the room arms a timer and then clears with nobody to reward.
@@ -88,7 +88,7 @@ namespace
 
     void test_a_second_start_is_refused()
     {
-        RoomActor actor{RoomId{.value = 1}, small_room()};
+        Room actor{RoomId{.value = 1}, small_room()};
         static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 7}}));
         static_cast<void>(actor.handle(StartBattle{}));
 
@@ -100,7 +100,7 @@ namespace
 
     void test_joining_is_refused_once_the_battle_is_running()
     {
-        RoomActor actor{RoomId{.value = 1}, small_room()};
+        Room actor{RoomId{.value = 1}, small_room()};
         static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 7}}));
         static_cast<void>(actor.handle(StartBattle{}));
 
@@ -111,7 +111,7 @@ namespace
 
     void test_a_completion_before_the_battle_starts_is_refused()
     {
-        RoomActor actor{RoomId{.value = 1}, small_room()};
+        Room actor{RoomId{.value = 1}, small_room()};
         static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 7}}));
 
         const auto completed = actor.handle(BattleCompleted{});
@@ -122,12 +122,12 @@ namespace
 
     void test_a_clear_rewards_every_participant_in_player_id_order()
     {
-        RoomActor actor{RoomId{.value = 1},
-                        RoomActorConfig{
-                            .battle_duration = std::chrono::milliseconds{5000},
-                            .max_participants = 3,
-                            .clear_experience = 300,
-                        }};
+        Room actor{RoomId{.value = 1},
+                   RoomConfig{
+                       .battle_duration = std::chrono::milliseconds{5000},
+                       .max_participants = 3,
+                       .clear_experience = 300,
+                   }};
         // Deliberately out of order: the reward order must come from the identity,
         // not from who happened to join first.
         static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 30}}));
@@ -149,7 +149,7 @@ namespace
 
     void test_a_clear_pays_out_only_once()
     {
-        RoomActor actor{RoomId{.value = 1}, small_room()};
+        Room actor{RoomId{.value = 1}, small_room()};
         static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 7}}));
         static_cast<void>(actor.handle(StartBattle{}));
 
@@ -165,7 +165,7 @@ namespace
     }
 }
 
-void run_room_actor_tests()
+void run_room_tests()
 {
     test_a_room_starts_empty_and_waiting();
     test_a_room_refuses_a_duplicate_join();

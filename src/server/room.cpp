@@ -1,4 +1,4 @@
-#include "snf/server/room_actor.hpp"
+#include "snf/server/room.hpp"
 
 #include <algorithm>
 #include <stdexcept>
@@ -6,7 +6,7 @@
 
 namespace snf::server
 {
-    RoomActor::RoomActor(const RoomId room, const RoomActorConfig config)
+    Room::Room(const RoomId room, const RoomConfig config)
         : _room(room)
         , _config(config)
     {
@@ -24,27 +24,27 @@ namespace snf::server
         }
     }
 
-    RoomId RoomActor::id() const noexcept
+    RoomId Room::id() const noexcept
     {
         return _room;
     }
 
-    RoomPhase RoomActor::phase() const noexcept
+    RoomPhase Room::phase() const noexcept
     {
         return _phase;
     }
 
-    std::size_t RoomActor::participantCount() const noexcept
+    std::size_t Room::participantCount() const noexcept
     {
         return _participants.size();
     }
 
-    RoomResult RoomActor::handle(const RoomCommand& command)
+    RoomResult Room::handle(const RoomCommand& command)
     {
         return std::visit([this](const auto& value) { return handleCommand(value); }, command);
     }
 
-    RoomResult RoomActor::handleCommand(const JoinRoom& command)
+    RoomResult Room::handleCommand(const JoinRoom& command)
     {
         if (_phase != RoomPhase::Waiting)
         {
@@ -83,7 +83,7 @@ namespace snf::server
         };
     }
 
-    RoomResult RoomActor::handleCommand(const StartBattle&)
+    RoomResult Room::handleCommand(const StartBattle&)
     {
         // An empty room would arm the timer and then clear with nobody to reward.
         if (_phase != RoomPhase::Waiting || _participants.empty())
@@ -106,7 +106,7 @@ namespace snf::server
         return result;
     }
 
-    RoomResult RoomActor::handleCommand(const BattleCompleted&)
+    RoomResult Room::handleCommand(const BattleCompleted&)
     {
         // A second completion lands here. The phase moves before a single reward is
         // built, so a clear cannot pay out twice however the timer or the mailbox

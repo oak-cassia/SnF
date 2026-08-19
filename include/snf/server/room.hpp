@@ -11,7 +11,7 @@
 
 namespace snf::server
 {
-    struct RoomActorConfig
+    struct RoomConfig
     {
         // Combat is a placeholder: the battle is one delay, not a simulation, so
         // there is no periodic tick and nothing here measures a tick budget.
@@ -20,15 +20,17 @@ namespace snf::server
         std::uint64_t clear_experience{300};
     };
 
-    // A pure state machine, like ZoneActor: no clock, no sockets, no runtime types
-    // beyond the follow-ups it asks for. That is what keeps its tests deterministic.
+    // The game model, not the execution unit: being an actor is how a Room is run,
+    // which is RoomActorBinding's business. This is a pure state machine with no
+    // clock, no sockets and no runtime types, which is what keeps its tests
+    // deterministic.
     //
     //   Waiting --StartBattle--> Running --BattleCompleted--> Cleared
     //
-    class RoomActor
+    class Room
     {
     public:
-        explicit RoomActor(RoomId room, RoomActorConfig config = {});
+        explicit Room(RoomId room, RoomConfig config = {});
 
         [[nodiscard]] RoomId id() const noexcept;
         [[nodiscard]] RoomPhase phase() const noexcept;
@@ -42,7 +44,7 @@ namespace snf::server
         [[nodiscard]] RoomResult handleCommand(const BattleCompleted& command);
 
         RoomId _room;
-        RoomActorConfig _config;
+        RoomConfig _config;
         RoomPhase _phase{RoomPhase::Waiting};
         // Ascending PlayerId, so a clear emits its rewards in a deterministic order.
         std::vector<PlayerId> _participants;
