@@ -39,6 +39,24 @@ namespace snf::server
         return _participants.size();
     }
 
+    std::optional<CombatStats> Room::statsOf(const PlayerId player) const
+    {
+        const auto position = std::ranges::lower_bound(
+            _participants,
+            player,
+            [](const PlayerId left, const PlayerId right)
+            {
+                return left.value < right.value;
+            },
+            &Participant::player
+        );
+        if (position == _participants.end() || position->player != player)
+        {
+            return std::nullopt;
+        }
+        return position->stats;
+    }
+
     RoomResult Room::handle(const RoomCommand& command)
     {
         return std::visit(
@@ -67,9 +85,10 @@ namespace snf::server
             [](const PlayerId left, const PlayerId right)
             {
                 return left.value < right.value;
-            }
+            },
+            &Participant::player
         );
-        if (position != _participants.end() && *position == command.player)
+        if (position != _participants.end() && position->player == command.player)
         {
             return RoomResult{
                 .status = RoomCommandStatus::AlreadyJoined,
@@ -88,7 +107,13 @@ namespace snf::server
 
         // Sorted insert rather than append. A clear emits its rewards in this order,
         // so the order must not depend on who happened to join first.
-        _participants.insert(position, command.player);
+        _participants.insert(
+            position,
+            Participant{
+                .player = command.player,
+                .stats = command.stats,
+            }
+        );
         return RoomResult{
             .status = RoomCommandStatus::Applied,
             .phase = _phase,
@@ -135,10 +160,10 @@ namespace snf::server
 
         std::vector<StreetExperienceGrant> grants;
         grants.reserve(_participants.size());
-        for (const PlayerId participant : _participants)
+        for (const Participant& participant : _participants)
         {
             grants.push_back(StreetExperienceGrant{
-                .player = participant,
+                .player = participant.player,
                 .experience = _config.clear_experience,
             });
         }

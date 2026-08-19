@@ -170,8 +170,24 @@ namespace
     }
 }
 
+void test_a_room_keeps_the_stats_each_participant_joined_with()
+{
+    Room actor{RoomId{.value = 1}, small_room()};
+    const PlayerId weak{.value = 10};
+    const PlayerId strong{.value = 20};
+
+    static_cast<void>(actor.handle(JoinRoom{.player = weak, .stats = {.attack = 10, .health = 100}}));
+    static_cast<void>(actor.handle(JoinRoom{.player = strong, .stats = {.attack = 39, .health = 390}}));
+
+    // Fixed at join. The Room never asks the Player again, so what it stored is
+    // what the battle runs on.
+    assert((actor.statsOf(weak) == snf::server::CombatStats{.attack = 10, .health = 100}));
+    assert((actor.statsOf(strong) == snf::server::CombatStats{.attack = 39, .health = 390}));
+    assert(!actor.statsOf(PlayerId{.value = 30}));
+}
 void run_room_tests()
 {
+    test_a_room_keeps_the_stats_each_participant_joined_with();
     test_a_room_starts_empty_and_waiting();
     test_a_room_refuses_a_duplicate_join();
     test_a_room_refuses_a_join_past_capacity();

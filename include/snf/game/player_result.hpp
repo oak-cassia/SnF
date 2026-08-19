@@ -2,9 +2,11 @@
 
 #include "snf/game/player_id.hpp"
 #include "snf/game/purchase.hpp"
+#include "snf/game/room_join_request.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <variant>
 #include <vector>
 
@@ -38,6 +40,10 @@ namespace snf::server
     // is a named field on the per-kind result, and the binding translates it.
     struct PlayerResult
     {
-        std::vector<SendResponse> responses;
+        std::vector<SendResponse> responses{};
+        // Set when the Player wants to enter a Room. The binding turns it into a
+        // message; nothing here names a mailbox. It is not priced into outbound
+        // capacity, because a mailbox and a socket are different resources.
+        std::optional<RoomJoinRequest> room_join{};
     };
 }

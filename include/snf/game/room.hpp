@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace snf::server
@@ -35,6 +36,8 @@ namespace snf::server
         [[nodiscard]] RoomId id() const noexcept;
         [[nodiscard]] RoomPhase phase() const noexcept;
         [[nodiscard]] std::size_t participantCount() const noexcept;
+        // The snapshot this player entered with, absent when they are not in.
+        [[nodiscard]] std::optional<CombatStats> statsOf(PlayerId player) const;
 
         [[nodiscard]] RoomResult handle(const RoomCommand& command);
 
@@ -46,7 +49,13 @@ namespace snf::server
         RoomId _room;
         RoomConfig _config;
         RoomPhase _phase{RoomPhase::Waiting};
+        struct Participant
+        {
+            PlayerId player;
+            CombatStats stats;
+        };
+
         // Ascending PlayerId, so a clear emits its rewards in a deterministic order.
-        std::vector<PlayerId> _participants;
+        std::vector<Participant> _participants;
     };
 }
