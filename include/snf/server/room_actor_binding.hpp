@@ -5,6 +5,7 @@
 #include "snf/runtime/distribution.hpp"
 #include "snf/server/command_terminal.hpp"
 #include "snf/server/room_inbound_command.hpp"
+#include "snf/server/room_join_tell.hpp"
 
 #include <chrono>
 #include <functional>
@@ -42,6 +43,9 @@ namespace snf::server
         [[nodiscard]] snf::runtime::ActorDispatchResult
         dispatch(snf::runtime::ActorSlot& slot, const snf::runtime::ActorSubmission& submission, snf::runtime::ActorContext& context, std::stop_token stop_token) override;
         [[nodiscard]] snf::runtime::ActorDispatchResult resume(snf::runtime::ActorSlot& slot, snf::runtime::ActorContext& context, std::stop_token stop_token) override;
+        // Called on the sending Player's Worker, so this stays a read-only
+        // transform: no cache, no counter, nothing another Worker could race with.
+        [[nodiscard]] std::optional<snf::runtime::ActorSubmission> makeTell(snf::runtime::ActorKey target, snf::runtime::TellPayload payload) override;
 
     private:
         struct RoomActorSlot;

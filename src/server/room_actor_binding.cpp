@@ -100,6 +100,46 @@ namespace snf::server
             PassivatePayload{});
     }
 
+    std::optional<snf::runtime::ActorSubmission> RoomActorBinding::makeTell(const snf::runtime::ActorKey target, snf::runtime::TellPayload payload)
+    {
+        auto join = payload.take<RoomJoinTell>();
+        if (!join)
+        {
+            // A refused take leaves the carrier intact, and the runtime reports the
+            // mismatch as the wiring bug it is rather than inventing a command.
+            return std::nullopt;
+        }
+        if (join->request.room.value != target.entity)
+        {
+            // Only a routing bug puts these out of step, and entering the wrong Room
+            // is worse than failing loudly.
+            return std::nullopt;
+        }
+        if (_lifecycle == nullptr)
+        {
+            throw std::logic_error{"Replying Room join requires a lifecycle sink"};
+        }
+
+        return makeSubmission(
+            target,
+            snf::runtime::ActorActivation::ActivateIfMissing,
+            snf::runtime::ActorAccounting::Command,
+            CommandPayload{
+                .command =
+                    RoomInboundCommand{
+                        .room = join->request.room,
+                        .command =
+                            JoinRoom{
+                                .player = join->player,
+                                .stats = join->request.stats,
+                            },
+                        .reply = join->reply,
+                    },
+                .release = CommandReleaseToken{*_lifecycle, join->reply.connection},
+            }
+        );
+    }
+
     std::unique_ptr<snf::runtime::ActorSlot> RoomActorBinding::activate(const snf::runtime::EntityId entity)
     {
         return std::make_unique<RoomActorSlot>(RoomId{.value = entity}, _actor_config);

@@ -1,6 +1,7 @@
 #include "snf/server/player_actor_binding.hpp"
 
 #include "snf/game/street_experience_grant.hpp"
+#include "snf/server/room_join_tell.hpp"
 
 #include "snf/game/player.hpp"
 
@@ -358,7 +359,7 @@ namespace snf::server
             }
         }
 
-        runHandler(player_slot, payload.command.command);
+        runHandler(player_slot, payload.command.command, context);
         return advance(player_slot, context, stop_token);
     }
 
@@ -419,7 +420,7 @@ namespace snf::server
                 throw std::logic_error{"Player load completed without a pending command"};
             }
             const PlayerCommand command = *slot.pending_command;
-            runHandler(slot, command);
+            runHandler(slot, command, context);
         }
 
         if (slot.stage == PlayerActorSlot::Stage::Reserving && !slot.reservation_task.valid())
@@ -523,9 +524,33 @@ namespace snf::server
         throw std::runtime_error{"Player follow-up application failed while logic runtime was active"};
     }
 
-    void PlayerActorBinding::runHandler(PlayerActorSlot& slot, const PlayerCommand& command)
+    void PlayerActorBinding::runHandler(PlayerActorSlot& slot, const PlayerCommand& command, snf::runtime::ActorContext& context)
     {
         slot.pending_result = slot.actor.handle(command);
+        if (slot.pending_result.room_join)
+        {
+            // Applied after the handler returned, like every other follow-up, and not
+            // priced into the outbound reservation below: a mailbox and a socket are
+            // different resources. Best effort -- a full Room mailbox drops the join
+            // rather than blocking this Player, and the client simply sees no answer.
+            static_cast<void>(context.tryTell(
+                snf::runtime::ActorKey{
+                    .kind = snf::runtime::ActorKind::Room,
+                    .entity = slot.pending_result.room_join->room.value,
+                },
+                snf::runtime::TellPayload::of(RoomJoinTell{
+                    .player = *slot.identity.playerId(),
+                    .request = *slot.pending_result.room_join,
+                    .reply =
+                        RoomReplyContext{
+                            .connection = slot.connection,
+                            .request_id = slot.request_id,
+                            .kind = RoomReplyKind::Joined,
+                        },
+                })
+            ));
+            slot.pending_result.room_join.reset();
+        }
         publishDirtySnapshot(slot);
         slot.pending_command.reset();
         slot.stage = PlayerActorSlot::Stage::Reserving;

@@ -77,7 +77,7 @@ namespace snf::server
         // Runs the handler and leaves the slot ready to reserve outbound capacity.
         // The handler cannot suspend, so its decisions are complete before any of
         // them is applied -- a throw emits nothing.
-        void runHandler(PlayerActorSlot& slot, const PlayerCommand& command);
+        void runHandler(PlayerActorSlot& slot, const PlayerCommand& command, snf::runtime::ActorContext& context);
         void publishDirtySnapshot(PlayerActorSlot& slot) noexcept;
         // Ends a command that could not acquire capacity at all, either because none
         // could be awaited or because the result asks for more than one connection may

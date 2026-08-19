@@ -10,8 +10,8 @@ namespace
 {
     std::uint32_t read_u32(std::span<const std::byte> bytes, const std::size_t offset)
     {
-        return (std::to_integer<std::uint32_t>(bytes[offset]) << 24U) | (std::to_integer<std::uint32_t>(bytes[offset + 1]) << 16U) | (std::to_integer<std::uint32_t>(bytes[offset + 2]) << 8U) |
-               std::to_integer<std::uint32_t>(bytes[offset + 3]);
+        return (std::to_integer<std::uint32_t>(bytes[offset]) << 24U) | (std::to_integer<std::uint32_t>(bytes[offset + 1]) << 16U) |
+               (std::to_integer<std::uint32_t>(bytes[offset + 2]) << 8U) | std::to_integer<std::uint32_t>(bytes[offset + 3]);
     }
 
     std::uint64_t read_u64(std::span<const std::byte> bytes, const std::size_t offset)
@@ -36,13 +36,15 @@ namespace
 
 namespace snf::server
 {
-    ProtocolGateway::ProtocolGateway(RoutedCommandIngress& commands,
-                                     PlayerSessionDirectory& sessions,
-                                     RouteCoordinator& routes,
-                                     PartyCoordinator& parties,
-                                     ZoneHandoffService& handoffs,
-                                     ProtocolZoneResultSink& zone_results,
-                                     ProtocolGatewayConfig config)
+    ProtocolGateway::ProtocolGateway(
+        RoutedCommandIngress& commands,
+        PlayerSessionDirectory& sessions,
+        RouteCoordinator& routes,
+        PartyCoordinator& parties,
+        ZoneHandoffService& handoffs,
+        ProtocolZoneResultSink& zone_results,
+        ProtocolGatewayConfig config
+    )
         : _dispatcher(std::move(config.dispatcher))
         , _commands(commands)
         , _sessions(sessions)
@@ -94,12 +96,19 @@ namespace snf::server
             {
                 return FramePostResult::InvalidPayload;
             }
-            return post_room(RoomCommandRoute{
-                .room = room,
-                .command = JoinRoom{.player = *player},
-                .reply_kind = RoomReplyKind::Joined,
-                .request_id = envelope.frame.request_id,
-            });
+
+            // Routed to the Player, not the Room. The stats the Room needs come from
+            // the experience the Player owns, so the Player decides them and then tells
+            // the Room; reading them here would read a copy.
+            return frame_post_result(_commands.tryPost(RoutedCommand{
+                .connection = envelope.connection,
+                .route =
+                    PlayerCommandRoute{
+                        .actor = *player,
+                        .command = JoinRoomRequest{.room = room},
+                        .request_id = envelope.frame.request_id,
+                    },
+            }));
         }
 
         if (envelope.frame.type == snf::protocol::MessageType::BattleStart)
