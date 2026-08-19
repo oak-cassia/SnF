@@ -3,9 +3,7 @@
 #include "snf/server/street_experience_grant.hpp"
 
 #include <cassert>
-#include <cstdint>
-#include <optional>
-#include <variant>
+#include <chrono>
 #include <vector>
 
 namespace
@@ -18,11 +16,8 @@ namespace
     using snf::server::RoomCommandStatus;
     using snf::server::RoomId;
     using snf::server::RoomPhase;
-    using snf::server::RoomResult;
-    using snf::server::ScheduleTimer;
     using snf::server::StartBattle;
     using snf::server::StreetExperienceGrant;
-    using snf::server::TellActor;
 
     [[nodiscard]] RoomActorConfig small_room()
     {
@@ -31,22 +26,6 @@ namespace
             .max_participants = 2,
             .clear_experience = 300,
         };
-    }
-
-    // The participant list is not exposed, so the reward order a clear emits is the
-    // only place its ordering is observable -- which is the property that matters.
-    [[nodiscard]] std::vector<std::uint64_t> reward_targets(RoomResult& result)
-    {
-        std::vector<std::uint64_t> targets;
-        for (auto& action : result.follow_ups)
-        {
-            if (auto* tell = std::get_if<TellActor>(&action))
-            {
-                assert(tell->target.kind == snf::runtime::ActorKind::Player);
-                targets.push_back(tell->target.entity);
-            }
-        }
-        return targets;
     }
 
     void test_a_room_starts_empty_and_waiting()
@@ -89,13 +68,11 @@ namespace
         RoomActor actor{RoomId{.value = 1}, small_room()};
         static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 7}}));
 
-        auto started = actor.handle(StartBattle{});
+        const auto started = actor.handle(StartBattle{});
         assert(started.status == RoomCommandStatus::Applied);
         assert(actor.phase() == RoomPhase::Running);
-        assert(started.follow_ups.size() == 1);
-
-        const auto* timer = std::get_if<ScheduleTimer>(&started.follow_ups.front());
-        assert(timer && timer->delay == std::chrono::milliseconds{5000});
+        assert(started.complete_after == std::chrono::milliseconds{5000});
+        assert(started.grants.empty());
     }
 
     void test_an_empty_room_cannot_start_a_battle()
@@ -105,7 +82,7 @@ namespace
         const auto started = actor.handle(StartBattle{});
         // Otherwise the room arms a timer and then clears with nobody to reward.
         assert(started.status == RoomCommandStatus::WrongPhase);
-        assert(started.follow_ups.empty());
+        assert(!started.complete_after);
         assert(actor.phase() == RoomPhase::Waiting);
     }
 
@@ -118,7 +95,7 @@ namespace
         const auto again = actor.handle(StartBattle{});
         assert(again.status == RoomCommandStatus::WrongPhase);
         // A second timer would deliver a second completion to the same battle.
-        assert(again.follow_ups.empty());
+        assert(!again.complete_after);
     }
 
     void test_joining_is_refused_once_the_battle_is_running()
@@ -139,7 +116,7 @@ namespace
 
         const auto completed = actor.handle(BattleCompleted{});
         assert(completed.status == RoomCommandStatus::WrongPhase);
-        assert(completed.follow_ups.empty());
+        assert(completed.grants.empty());
         assert(actor.phase() == RoomPhase::Waiting);
     }
 
@@ -158,16 +135,16 @@ namespace
         static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 20}}));
         static_cast<void>(actor.handle(StartBattle{}));
 
-        auto cleared = actor.handle(BattleCompleted{});
+        const auto cleared = actor.handle(BattleCompleted{});
         assert(cleared.status == RoomCommandStatus::Applied);
         assert(actor.phase() == RoomPhase::Cleared);
-        assert(cleared.follow_ups.size() == 3);
-        assert((reward_targets(cleared) == std::vector<std::uint64_t>{10, 20, 30}));
-
-        auto* tell = std::get_if<TellActor>(&cleared.follow_ups.front());
-        assert(tell != nullptr);
-        const auto grant = tell->payload.take<StreetExperienceGrant>();
-        assert(grant && grant->experience == 300);
+        // The reward order is the only place the participant order is observable,
+        // and it must follow the identity rather than who joined first.
+        assert((cleared.grants == std::vector<StreetExperienceGrant>{
+                                      {.player = PlayerId{.value = 10}, .experience = 300},
+                                      {.player = PlayerId{.value = 20}, .experience = 300},
+                                      {.player = PlayerId{.value = 30}, .experience = 300},
+                                  }));
     }
 
     void test_a_clear_pays_out_only_once()
@@ -177,13 +154,13 @@ namespace
         static_cast<void>(actor.handle(StartBattle{}));
 
         const auto first = actor.handle(BattleCompleted{});
-        assert(first.follow_ups.size() == 1);
+        assert(first.grants.size() == 1);
 
         // A duplicate completion -- a redelivered timer, or a mailbox that still held
         // one -- must not grant the reward a second time.
         const auto second = actor.handle(BattleCompleted{});
         assert(second.status == RoomCommandStatus::WrongPhase);
-        assert(second.follow_ups.empty());
+        assert(second.grants.empty());
         assert(actor.phase() == RoomPhase::Cleared);
     }
 }

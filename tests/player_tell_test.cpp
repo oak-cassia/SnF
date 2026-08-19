@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cstdint>
 #include <optional>
+#include <stdexcept>
 #include <thread>
 
 using namespace std::chrono_literals;
@@ -115,7 +116,7 @@ namespace
                        .kind = snf::runtime::ActorKind::Player,
                        .entity = player.value,
                    },
-                   snf::runtime::TellPayload::of(snf::server::StreetExperienceGrant{.experience = 300})) == snf::runtime::PostResult::Accepted);
+                   snf::runtime::TellPayload::of(snf::server::StreetExperienceGrant{.player = player, .experience = 300})) == snf::runtime::PostResult::Accepted);
 
         const auto record = wait_for_experience(harness.repository, player, 1300);
         harness.runtime.close();
@@ -150,7 +151,7 @@ namespace
                            .kind = snf::runtime::ActorKind::Player,
                            .entity = player.value,
                        },
-                       snf::runtime::TellPayload::of(snf::server::StreetExperienceGrant{.experience = 300})) == snf::runtime::PostResult::Accepted);
+                       snf::runtime::TellPayload::of(snf::server::StreetExperienceGrant{.player = player, .experience = 300})) == snf::runtime::PostResult::Accepted);
         }
 
         const auto record = wait_for_experience(harness.repository, player, 900);
@@ -161,10 +162,41 @@ namespace
         assert(record->currency_balance == 500);
         assert(harness.completion.failed.load() == 0);
     }
+
+    void test_a_grant_naming_another_player_is_refused()
+    {
+        Harness harness;
+        harness.runtime.start();
+
+        bool refused = false;
+        try
+        {
+            // The key says actor 44, the grant says player 45. Only a routing bug can
+            // produce that, and crediting the wrong account is worse than failing loud.
+            static_cast<void>(harness.runtime.tryTell(
+                snf::runtime::ActorKey{
+                    .kind = snf::runtime::ActorKind::Player,
+                    .entity = 44,
+                },
+                snf::runtime::TellPayload::of(snf::server::StreetExperienceGrant{
+                    .player = snf::server::PlayerId{.value = 45},
+                    .experience = 300,
+                })));
+        }
+        catch (const std::logic_error&)
+        {
+            refused = true;
+        }
+
+        harness.runtime.close();
+        harness.runtime.join();
+        assert(refused);
+    }
 }
 
 void run_player_tell_tests()
 {
     test_a_grant_to_an_offline_player_loads_the_record_before_applying();
     test_grants_accumulate_across_tells();
+    test_a_grant_naming_another_player_is_refused();
 }

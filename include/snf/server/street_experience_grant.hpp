@@ -1,15 +1,23 @@
 #pragma once
 
+#include "snf/server/player_id.hpp"
+
 #include <cstdint>
 
 namespace snf::server
 {
-    // What a cleared Room tells each participant's PlayerActor. Both bindings name
-    // this type and no one else does: the Room's binding wraps it in a TellPayload,
-    // and the Player's binding is the only one that can take it back out, which is
-    // what keeps actor routing free of either side's command types.
+    // A reward a cleared Room hands to one of its participants. It names the player
+    // rather than an actor key: routing a grant to a mailbox is the binding's job,
+    // and the game model has no business knowing that actors exist.
+    //
+    // The Room's binding also puts this value in the TellPayload the Player's
+    // binding takes back out, which is what keeps the runtime's carrier free of
+    // either side's command types.
     struct StreetExperienceGrant
     {
+        PlayerId player;
         std::uint64_t experience{0};
+
+        [[nodiscard]] bool operator==(const StreetExperienceGrant&) const noexcept = default;
     };
 }

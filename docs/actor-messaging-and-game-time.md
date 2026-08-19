@@ -46,7 +46,7 @@ repository를 `co_await`한다. 그러므로 이것은 능력의 한계가 아�
 
 ### 2.2 Domain Event는 다중 소비가 실제로 생길 때
 
-`TellActor`는 1:1이다. 하나의 사실을 여러 곳이 받아야 할 때 — 예를 들어 `BattleCleared`를
+Actor 간 tell은 1:1이다. 하나의 사실을 여러 곳이 받아야 할 때 — 예를 들어 `BattleCleared`를
 보상·업적·통계가 함께 소비할 때 — 송신자가 수신자 전부를 알아야 하므로 결합이 생긴다.
 그때 Domain Event를 도입한다.
 
@@ -72,8 +72,8 @@ ActorRuntime::tryPost:         _bindings[kind] != _binding  → throw
 
 ```text
 Actor A
-  → FollowUpAction::TellActor{target, payload}
-  → A의 Binding
+  → Result의 게임 필드 (예: RoomResult::grants)
+  → A의 Binding이 대상과 payload로 번역
   → ActorContext::tryTell(target, payload)
   → ActorRuntime: _bindings[target.kind]->makeTell(target, payload)
   → 기존 tryPost 경로 (해시 → worker → ingress → mailbox)
@@ -115,7 +115,7 @@ Binding이 분기한다. Sink는 네트워크 출력만 담당한다.
 
 ```text
                     Actor
-                      ↓  Result
+                      ↓  Result (게임 의미만)
                    Binding
                   /       \
         PlayerResponseSink   ActorContext
@@ -130,21 +130,47 @@ Binding이 분기한다. Sink는 네트워크 출력만 담당한다.
 timer heap은 런타임이 소유한 자원이고, 소켓은 아니다. `ActorRuntime`은 frame이 존재한다는
 사실조차 모른다.
 
-그래서 `FollowUpAction`에는 런타임 목적지만 들어간다.
+### 3.1 Result는 게임 의미만 담는다
+
+한때 모든 Actor가 공유하는 `FollowUpAction` variant가 있었고, 그 안에 `ActorKey`와
+`TellPayload`가 들어 있었다. 지금은 없다. **런타임 타입을 도메인 result에서 걷어내고,
+각 result가 자기 언어로 말하게 했다.**
 
 ```cpp
-using FollowUpAction = std::variant<TellActor, ScheduleTimer>;   // 모든 Actor 공용
+struct RoomResult
+{
+    ...
+    std::optional<std::chrono::milliseconds> complete_after;   // 이 전투에 남은 시간
+    std::vector<StreetExperienceGrant> grants;                 // 누구에게 얼마
+};
+
+struct ZoneResult
+{
+    ...
+    std::optional<std::chrono::milliseconds> tick_after;       // 다음 tick까지
+};
 ```
 
-응답은 여기에 들어가지 않는다. 응답 타입은 Actor 종류마다 다르고, Zone에는 대응하는
-response 타입이 아예 없다. Zone은 결과 전체를 보고 frame을 만든다. 그래서 응답은 각
-result가 자기 채널로 갖는다 — `PlayerResult::responses`.
+Binding이 번역한다. `complete_after`/`tick_after` → `trySchedule`, `grants` → `tryTell`.
+
+바꾼 이유는 계층 규칙이 아니라 눈에 보이는 비용이었다.
+
+- `TellPayload`가 move-only라 **result 전체가 복사 불가**가 됐다. `ZoneResult`를 담아두려던
+  테스트 recorder를 필드 하나만 담도록 고쳐야 했다.
+- 보상을 단언하려면 `payload.take<T>()`로 꺼내야 했는데, **그 호출이 result를 변형한다.**
+  단언이 상태를 바꾸는 테스트가 나온다.
+- 지금은 값 비교로 끝난다: `result.grants == std::vector{{player, 300}}`.
+
+도메인이 런타임 목적지를 이름 붙이지 않으므로 `snf/runtime` 의존도 함께 사라진다.
+
+응답도 마찬가지로 각 result의 채널이다 — `PlayerResult::responses`. 응답 타입은 Actor
+종류마다 다르고, Zone에는 대응하는 response 타입이 아예 없다.
 
 Binding이 다른 Binding의 ingress를 직접 들고 있지 않다는 점이 핵심이다. 그래야
 `PlayerBinding → RoomBinding → PartyBinding` 같은 참조 그래프가 생기지 않고, actor
 routing이 런타임의 책임으로 남는다.
 
-`TellActor`를 `requiredSlots`에 넣지 않는다. 네트워크 backpressure와 mailbox 포화는 다른
+tell을 `requiredSlots`에 넣지 않는다. 네트워크 backpressure와 mailbox 포화는 다른
 자원이고, 섞으면 sink의 스칼라 가격 계산이 다시 깨진다.
 
 ## 4. 게임 시간

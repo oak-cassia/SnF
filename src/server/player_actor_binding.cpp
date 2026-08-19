@@ -258,6 +258,14 @@ namespace snf::server
             return std::nullopt;
         }
 
+        if (grant->player.value != target.entity)
+        {
+            // The grant names its player and the key names the actor. They can only
+            // disagree through a routing bug, and delivering it anyway would credit
+            // the wrong account.
+            return std::nullopt;
+        }
+
         // ActivateIfMissing: a reward has to reach a player who logged out between the
         // battle and the clear. ExistingOnly would report Accepted and drop it.
         return makeSubmission(target, snf::runtime::ActorActivation::ActivateIfMissing, snf::runtime::ActorAccounting::Command, StreetExperienceGrantPayload{.grant = *grant});

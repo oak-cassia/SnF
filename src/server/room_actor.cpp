@@ -1,7 +1,5 @@
 #include "snf/server/room_actor.hpp"
 
-#include "snf/server/street_experience_grant.hpp"
-
 #include <algorithm>
 #include <stdexcept>
 #include <variant>
@@ -104,7 +102,7 @@ namespace snf::server
         };
         // One shot. Combat is a placeholder, so the battle is this delay and nothing
         // else; there is no periodic tick to rearm.
-        result.follow_ups.push_back(ScheduleTimer{.delay = _config.battle_duration});
+        result.complete_after = _config.battle_duration;
         return result;
     }
 
@@ -127,18 +125,12 @@ namespace snf::server
             .status = RoomCommandStatus::Applied,
             .phase = _phase,
         };
-        result.follow_ups.reserve(_participants.size());
+        result.grants.reserve(_participants.size());
         for (const PlayerId participant : _participants)
         {
-            result.follow_ups.push_back(TellActor{
-                .target =
-                    snf::runtime::ActorKey{
-                        .kind = snf::runtime::ActorKind::Player,
-                        .entity = participant.value,
-                    },
-                .payload = snf::runtime::TellPayload::of(StreetExperienceGrant{
-                    .experience = _config.clear_experience,
-                }),
+            result.grants.push_back(StreetExperienceGrant{
+                .player = participant,
+                .experience = _config.clear_experience,
             });
         }
         return result;

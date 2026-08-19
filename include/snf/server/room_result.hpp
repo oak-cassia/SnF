@@ -1,8 +1,10 @@
 #pragma once
 
-#include "snf/server/follow_up_action.hpp"
 #include "snf/server/player_id.hpp"
+#include "snf/server/street_experience_grant.hpp"
 
+#include <chrono>
+#include <cstdint>
 #include <optional>
 #include <vector>
 
@@ -26,13 +28,17 @@ namespace snf::server
         WrongPhase,
     };
 
-    // Non-copyable, because TellActor owns a move-only TellPayload. A recorder in a
-    // test has to keep the fields it asserts on rather than the whole result.
+    // What the Room decided, in game terms only. Turning complete_after into a
+    // timer and grants into messages is the binding's job, so nothing here names
+    // an ActorKey, a mailbox, or a payload carrier -- and the result stays a plain
+    // copyable value that a test can hold on to.
     struct RoomResult
     {
         RoomCommandStatus status{RoomCommandStatus::Applied};
         RoomPhase phase{RoomPhase::Waiting};
         std::optional<PlayerId> player;
-        std::vector<FollowUpAction> follow_ups;
+        // How long this battle still needs. Set once, when it starts.
+        std::optional<std::chrono::milliseconds> complete_after;
+        std::vector<StreetExperienceGrant> grants;
     };
 }
