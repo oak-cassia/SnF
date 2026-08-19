@@ -866,7 +866,7 @@ namespace
             release.wait();
         };
 
-        PlayerRuntime player{dependencies, std::move(config)};
+        PlayerRuntime player{dependencies, config};
         player.runtime.start();
         assert(started.wait_for(1s) == std::future_status::ready);
         assert(player.ingress.tryPost(make_command(3, 1)) == PostResult::Accepted);
@@ -908,7 +908,7 @@ namespace
             worker_started.set_value();
             hold.wait();
         };
-        PlayerRuntime player{dependencies, std::move(config)};
+        PlayerRuntime player{dependencies, config};
         player.runtime.start();
         assert(worker_started.get_future().wait_for(1s) == std::future_status::ready);
         assert(player.ingress.tryPost(make_command(3, 1)) == PostResult::Accepted);
@@ -1052,7 +1052,7 @@ namespace
                 release.wait();
             };
 
-            PlayerRuntime player{dependencies, std::move(config)};
+            PlayerRuntime player{dependencies, config};
             player.runtime.start();
             assert(started.wait_for(1s) == std::future_status::ready);
             for (std::uint32_t request_id = 1; request_id <= 3; ++request_id)
@@ -1086,7 +1086,7 @@ namespace
                 release.wait();
             };
 
-            PlayerRuntime player{dependencies, std::move(config)};
+            PlayerRuntime player{dependencies, config};
             player.runtime.start();
             assert(started.wait_for(1s) == std::future_status::ready);
             assert(player.ingress.tryPost(make_command(9, 1)) == PostResult::Accepted);

@@ -115,7 +115,7 @@ namespace
         }
 
         explicit RunningServer(snf::server::GameServerConfig config, const int termination_signal_descriptor = snf::net::UniqueFileDescriptor::INVALID_FD)
-            : _server(std::move(config))
+            : _server(config)
             , _termination_signal_descriptor(termination_signal_descriptor)
             , _thread(
                   [this]
