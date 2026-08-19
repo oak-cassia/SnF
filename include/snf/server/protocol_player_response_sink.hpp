@@ -15,9 +15,7 @@ namespace snf::server
 
         [[nodiscard]] std::size_t requiredSlots(const PlayerResult& result) const noexcept override;
 
-        [[nodiscard]] bool applyResponses(snf::net::ConnectionId connection,
-                                          PlayerResult result,
-                                          OutboundReservation& reservation) override;
+        [[nodiscard]] bool applyResponses(snf::net::ConnectionId connection, PlayerResult result, OutboundReservation& reservation) override;
 
     private:
         OutboundSink& _outbound;

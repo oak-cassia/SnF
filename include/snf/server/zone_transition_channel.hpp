@@ -40,8 +40,7 @@ namespace snf::server
         ZoneTransitionChannel& operator=(const ZoneTransitionChannel&) = delete;
 
         [[nodiscard]] std::optional<ZoneTransitionTicket> tryReserve(ZoneHandoffId handoff);
-        [[nodiscard]] bool publish(ZoneTransitionTicket ticket,
-                                   ZoneHandoffCompletion completion) noexcept;
+        [[nodiscard]] bool publish(ZoneTransitionTicket ticket, ZoneHandoffCompletion completion) noexcept;
         [[nodiscard]] std::optional<ZoneHandoffCompletion> tryPop();
         void release(ZoneTransitionTicket ticket) noexcept;
         void wakeIfPending() const noexcept;

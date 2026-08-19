@@ -39,10 +39,7 @@ namespace snf::server
             static_cast<void>(epoch);
             result.push_back(player);
         }
-        std::sort(result.begin(),
-                  result.end(),
-                  [](const PlayerId left, const PlayerId right)
-                  { return left.value < right.value; });
+        std::sort(result.begin(), result.end(), [](const PlayerId left, const PlayerId right) { return left.value < right.value; });
         return result;
     }
 
@@ -63,8 +60,7 @@ namespace snf::server
         {
             if (command.membership_epoch < existing->second)
             {
-                return result(
-                    PartyCommandStatus::StaleMembership, command.player, existing->second);
+                return result(PartyCommandStatus::StaleMembership, command.player, existing->second);
             }
             if (command.membership_epoch == existing->second)
             {
@@ -94,8 +90,7 @@ namespace snf::server
         const auto existing = _members.find(command.player);
         if (existing == _members.end())
         {
-            return result(
-                PartyCommandStatus::MemberMissing, command.player, command.membership_epoch);
+            return result(PartyCommandStatus::MemberMissing, command.player, command.membership_epoch);
         }
         if (command.membership_epoch != existing->second)
         {
@@ -106,9 +101,7 @@ namespace snf::server
         return result(PartyCommandStatus::Applied, command.player, command.membership_epoch);
     }
 
-    PartyResult PartyActor::result(const PartyCommandStatus status,
-                                   const PlayerId player,
-                                   const std::uint64_t membership_epoch) const
+    PartyResult PartyActor::result(const PartyCommandStatus status, const PlayerId player, const std::uint64_t membership_epoch) const
     {
         return PartyResult{
             .status = status,

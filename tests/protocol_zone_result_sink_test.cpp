@@ -13,9 +13,7 @@ namespace
     void test_zone_result_maps_to_a_bounded_wire_response()
     {
         const auto wake = snf::test::make_wake_descriptor();
-        snf::server::OutboundChannel outbound{
-            snf::server::OutboundChannelConfig{.capacity = 2, .max_slots_per_connection = 2},
-            wake.getDescriptor()};
+        snf::server::OutboundChannel outbound{snf::server::OutboundChannelConfig{.capacity = 2, .max_slots_per_connection = 2}, wake.getDescriptor()};
         snf::server::ProtocolZoneResultSink sink{outbound};
         const snf::net::ConnectionId connection{.descriptor = 4, .generation = 9};
 
@@ -59,9 +57,7 @@ namespace
     void test_zone_result_without_reply_is_internal_and_saturation_closes_explicitly()
     {
         const auto wake = snf::test::make_wake_descriptor();
-        snf::server::OutboundChannel outbound{
-            snf::server::OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1},
-            wake.getDescriptor()};
+        snf::server::OutboundChannel outbound{snf::server::OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1}, wake.getDescriptor()};
         snf::server::ProtocolZoneResultSink sink{outbound};
         const snf::net::ConnectionId connection{.descriptor = 5, .generation = 10};
         const snf::server::ZoneResult result{};

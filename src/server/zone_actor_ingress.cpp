@@ -5,16 +5,13 @@
 
 namespace snf::server
 {
-    ZoneActorIngress::ZoneActorIngress(snf::runtime::ActorRuntime& runtime,
-                                       ZoneActorBinding& binding) noexcept
+    ZoneActorIngress::ZoneActorIngress(snf::runtime::ActorRuntime& runtime, ZoneActorBinding& binding) noexcept
         : _runtime(runtime)
         , _binding(binding)
     {
     }
 
-    ZoneActorIngress::ZoneActorIngress(snf::runtime::ActorRuntime& runtime,
-                                       ZoneActorBinding& binding,
-                                       CommandLifecycleSink& lifecycle) noexcept
+    ZoneActorIngress::ZoneActorIngress(snf::runtime::ActorRuntime& runtime, ZoneActorBinding& binding, CommandLifecycleSink& lifecycle) noexcept
         : _runtime(runtime)
         , _binding(binding)
         , _lifecycle(&lifecycle)
@@ -23,10 +20,8 @@ namespace snf::server
 
     snf::runtime::PostResult ZoneActorIngress::tryPost(ZoneInboundCommand command)
     {
-        const std::optional<snf::net::ConnectionId> connection =
-            command.reply ? std::optional{command.reply->connection} : std::nullopt;
-        const snf::runtime::PostResult result =
-            _runtime.tryPost(_binding.makeCommand(std::move(command)));
+        const std::optional<snf::net::ConnectionId> connection = command.reply ? std::optional{command.reply->connection} : std::nullopt;
+        const snf::runtime::PostResult result = _runtime.tryPost(_binding.makeCommand(std::move(command)));
         if (result != snf::runtime::PostResult::Accepted && connection)
         {
             if (_lifecycle == nullptr)

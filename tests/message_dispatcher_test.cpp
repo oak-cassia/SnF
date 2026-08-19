@@ -112,8 +112,7 @@ namespace
         assert(purchase->idempotency_key.value == 0x0102030405060708ULL);
         assert(purchase->product.value == 0x11223344U);
 
-        for (const auto& payload :
-             {purchase_payload(0, 1), purchase_payload(1, 0), std::vector<std::byte>(11)})
+        for (const auto& payload : {purchase_payload(0, 1), purchase_payload(1, 0), std::vector<std::byte>(11)})
         {
             const auto invalid = dispatcher.dispatch(snf::protocol::Frame{
                 .type = snf::protocol::MessageType::Purchase,
@@ -127,15 +126,14 @@ namespace
     void test_registers_an_additional_handler()
     {
         snf::server::MessageDispatcher dispatcher;
-        const bool registered = dispatcher.registerHandler(
-            snf::protocol::MessageType::Pong,
-            [](snf::protocol::Frame request) -> snf::server::PlayerCommand
-            {
-                return snf::server::PingCommand{
-                    .request_id = request.request_id,
-                    .payload = std::move(request.payload),
-                };
-            });
+        const bool registered = dispatcher.registerHandler(snf::protocol::MessageType::Pong,
+                                                           [](snf::protocol::Frame request) -> snf::server::PlayerCommand
+                                                           {
+                                                               return snf::server::PingCommand{
+                                                                   .request_id = request.request_id,
+                                                                   .payload = std::move(request.payload),
+                                                               };
+                                                           });
 
         const snf::protocol::Frame request{
             .type = snf::protocol::MessageType::Pong,
@@ -154,15 +152,14 @@ namespace
     {
         snf::server::MessageDispatcher dispatcher;
 
-        const bool registered = dispatcher.registerHandler(
-            snf::protocol::MessageType::Ping,
-            [](snf::protocol::Frame request) -> snf::server::PlayerCommand
-            {
-                return snf::server::PingCommand{
-                    .request_id = request.request_id,
-                    .payload = std::move(request.payload),
-                };
-            });
+        const bool registered = dispatcher.registerHandler(snf::protocol::MessageType::Ping,
+                                                           [](snf::protocol::Frame request) -> snf::server::PlayerCommand
+                                                           {
+                                                               return snf::server::PingCommand{
+                                                                   .request_id = request.request_id,
+                                                                   .payload = std::move(request.payload),
+                                                               };
+                                                           });
 
         assert(!registered);
     }
@@ -170,10 +167,7 @@ namespace
     void test_reports_invalid_payload_from_a_registered_handler()
     {
         snf::server::MessageDispatcher dispatcher;
-        assert(dispatcher.registerHandler(
-            snf::protocol::MessageType::Pong,
-            [](snf::protocol::Frame) -> std::optional<snf::server::PlayerCommand>
-            { return std::nullopt; }));
+        assert(dispatcher.registerHandler(snf::protocol::MessageType::Pong, [](snf::protocol::Frame) -> std::optional<snf::server::PlayerCommand> { return std::nullopt; }));
 
         const auto result = dispatcher.dispatch(snf::protocol::Frame{
             .type = snf::protocol::MessageType::Pong,

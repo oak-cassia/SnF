@@ -20,8 +20,7 @@ namespace
     class RecordingRepository final : public snf::server::PlayerRepository
     {
     public:
-        void asyncLoad(snf::server::PlayerId player,
-                       snf::server::PlayerLoadCompletion completion) override
+        void asyncLoad(snf::server::PlayerId player, snf::server::PlayerLoadCompletion completion) override
         {
             completion(snf::server::PlayerLoadResult{
                 .status = snf::server::PlayerRepositoryStatus::Success,
@@ -30,8 +29,7 @@ namespace
             static_cast<void>(player);
         }
 
-        void asyncSave(snf::server::PlayerRecord record,
-                       snf::server::PlayerSaveCompletion completion) override
+        void asyncSave(snf::server::PlayerRecord record, snf::server::PlayerSaveCompletion completion) override
         {
             std::lock_guard lock{_mutex};
             ++_save_calls;
@@ -47,8 +45,7 @@ namespace
         void waitForSaveCalls(const std::size_t count)
         {
             std::unique_lock lock{_mutex};
-            const bool completed =
-                _wake.wait_for(lock, 1s, [this, count] { return _save_calls >= count; });
+            const bool completed = _wake.wait_for(lock, 1s, [this, count] { return _save_calls >= count; });
             assert(completed);
         }
 
@@ -147,9 +144,7 @@ namespace
 
         std::promise<snf::server::PlayerSaveResult> final_result_promise;
         auto final_result = final_result_promise.get_future();
-        service.asyncSave(record(2, 11),
-                          [&final_result_promise](snf::server::PlayerSaveResult result)
-                          { final_result_promise.set_value(result); });
+        service.asyncSave(record(2, 11), [&final_result_promise](snf::server::PlayerSaveResult result) { final_result_promise.set_value(result); });
         repository.waitForSaveCalls(3);
         assert(repository.maximumActiveSaves() == 1);
         assert(repository.pendingRecord().handled_command_count == 11);

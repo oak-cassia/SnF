@@ -21,8 +21,7 @@ namespace snf::server
         CommandReleaseToken release;
     };
 
-    PartyActorBinding::PartyActorBinding(PartyActorBindingConfig config,
-                                         CommandLifecycleSink& lifecycle)
+    PartyActorBinding::PartyActorBinding(PartyActorBindingConfig config, CommandLifecycleSink& lifecycle)
         : _actor_config(config.actor)
         , _on_result(std::move(config.on_result))
         , _lifecycle(lifecycle)
@@ -77,17 +76,13 @@ namespace snf::server
             });
     }
 
-    std::unique_ptr<snf::runtime::ActorSlot>
-    PartyActorBinding::activate(const snf::runtime::EntityId entity)
+    std::unique_ptr<snf::runtime::ActorSlot> PartyActorBinding::activate(const snf::runtime::EntityId entity)
     {
         return std::make_unique<PartyActorSlot>(PartyId{.value = entity}, _actor_config);
     }
 
     snf::runtime::ActorDispatchResult
-    PartyActorBinding::dispatch(snf::runtime::ActorSlot& slot,
-                                const snf::runtime::ActorSubmission& submission,
-                                snf::runtime::ActorContext& context,
-                                const std::stop_token stop_token)
+    PartyActorBinding::dispatch(snf::runtime::ActorSlot& slot, const snf::runtime::ActorSubmission& submission, snf::runtime::ActorContext& context, const std::stop_token stop_token)
     {
         static_cast<void>(context);
         static_cast<void>(stop_token);
@@ -95,8 +90,7 @@ namespace snf::server
         const CommandPayload& payload = payloadAs<CommandPayload>(submission);
         const PartyResult result = party_slot.actor.handle(payload.command.command);
         _commands.fetch_add(1, std::memory_order_relaxed);
-        if (result.status != PartyCommandStatus::Applied &&
-            result.status != PartyCommandStatus::AlreadyMember)
+        if (result.status != PartyCommandStatus::Applied && result.status != PartyCommandStatus::AlreadyMember)
         {
             _rejected.fetch_add(1, std::memory_order_relaxed);
         }
@@ -113,9 +107,7 @@ namespace snf::server
         return snf::runtime::ActorDispatchResult::KeepActive;
     }
 
-    snf::runtime::ActorDispatchResult PartyActorBinding::resume(snf::runtime::ActorSlot& slot,
-                                                                snf::runtime::ActorContext& context,
-                                                                const std::stop_token stop_token)
+    snf::runtime::ActorDispatchResult PartyActorBinding::resume(snf::runtime::ActorSlot& slot, snf::runtime::ActorContext& context, const std::stop_token stop_token)
     {
         static_cast<void>(slot);
         static_cast<void>(context);

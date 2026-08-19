@@ -41,8 +41,7 @@ namespace snf::server
     {
     }
 
-    void ProtocolPartyResultSink::accept(const PartyInboundCommand& command,
-                                         const PartyResult& result)
+    void ProtocolPartyResultSink::accept(const PartyInboundCommand& command, const PartyResult& result)
     {
         if (!command.reply)
         {
@@ -65,19 +64,12 @@ namespace snf::server
         }
     }
 
-    snf::protocol::Frame ProtocolPartyResultSink::map(const PartyInboundCommand& command,
-                                                      const PartyResult& result) const
+    snf::protocol::Frame ProtocolPartyResultSink::map(const PartyInboundCommand& command, const PartyResult& result) const
     {
-        const snf::protocol::MessageType type = command.reply->kind == PartyReplyKind::Joined
-                                                    ? snf::protocol::MessageType::PartyJoined
-                                                    : snf::protocol::MessageType::PartyLeft;
+        const snf::protocol::MessageType type = command.reply->kind == PartyReplyKind::Joined ? snf::protocol::MessageType::PartyJoined : snf::protocol::MessageType::PartyLeft;
         constexpr std::size_t FIXED_PAYLOAD_SIZE = 1 + 8 + 8 + 2;
-        constexpr std::size_t MAX_MEMBERS_BY_PAYLOAD =
-            (snf::protocol::MAX_PAYLOAD_SIZE - FIXED_PAYLOAD_SIZE) / 8;
-        const std::size_t member_count =
-            std::min(result.members.size(),
-                     std::min(static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()),
-                              MAX_MEMBERS_BY_PAYLOAD));
+        constexpr std::size_t MAX_MEMBERS_BY_PAYLOAD = (snf::protocol::MAX_PAYLOAD_SIZE - FIXED_PAYLOAD_SIZE) / 8;
+        const std::size_t member_count = std::min(result.members.size(), std::min(static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()), MAX_MEMBERS_BY_PAYLOAD));
 
         std::vector<std::byte> payload;
         payload.reserve(FIXED_PAYLOAD_SIZE + member_count * 8);

@@ -12,9 +12,7 @@ namespace
         const snf::server::PlayerId player{.value = 77};
 
         std::optional<snf::server::PlayerLoadResult> missing;
-        repository.asyncLoad(player,
-                             [&missing](snf::server::PlayerLoadResult result)
-                             { missing = std::move(result); });
+        repository.asyncLoad(player, [&missing](snf::server::PlayerLoadResult result) { missing = std::move(result); });
         assert(missing.has_value());
         assert(!missing->record.has_value());
 
@@ -36,9 +34,7 @@ namespace
         assert(save->saved());
 
         std::optional<snf::server::PlayerLoadResult> loaded;
-        repository.asyncLoad(player,
-                             [&loaded](snf::server::PlayerLoadResult result)
-                             { loaded = std::move(result); });
+        repository.asyncLoad(player, [&loaded](snf::server::PlayerLoadResult result) { loaded = std::move(result); });
         assert(loaded.has_value());
         assert(loaded->record.has_value());
         assert(loaded->record->player == player);

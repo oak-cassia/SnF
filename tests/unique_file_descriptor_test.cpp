@@ -7,7 +7,6 @@
 
 namespace
 {
-
     void test_closes_descriptor_when_destroyed()
     {
         int pipe_fds[2]{};
@@ -79,7 +78,6 @@ namespace
         assert(::close(released_fd) == 0);
         assert(::close(pipe_fds[1]) == 0);
     }
-
 } // namespace
 
 void run_unique_file_descriptor_tests()

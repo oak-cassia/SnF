@@ -10,8 +10,7 @@
 
 namespace snf::server
 {
-    ZoneTransitionChannel::ZoneTransitionChannel(const std::size_t capacity,
-                                                 const int wake_descriptor)
+    ZoneTransitionChannel::ZoneTransitionChannel(const std::size_t capacity, const int wake_descriptor)
         : _capacity(capacity)
         , _wake_descriptor(wake_descriptor)
         , _slots(capacity)
@@ -23,12 +22,10 @@ namespace snf::server
         _reservations.reserve(_capacity);
     }
 
-    std::optional<ZoneTransitionTicket>
-    ZoneTransitionChannel::tryReserve(const ZoneHandoffId handoff)
+    std::optional<ZoneTransitionTicket> ZoneTransitionChannel::tryReserve(const ZoneHandoffId handoff)
     {
         std::lock_guard lock{_mutex};
-        if (_cancelled || handoff.value == 0 || _reservations.size() == _capacity ||
-            _next_ticket == std::numeric_limits<std::uint64_t>::max())
+        if (_cancelled || handoff.value == 0 || _reservations.size() == _capacity || _next_ticket == std::numeric_limits<std::uint64_t>::max())
         {
             ++_reservations_rejected;
             return std::nullopt;
@@ -41,17 +38,15 @@ namespace snf::server
         return ticket;
     }
 
-    bool ZoneTransitionChannel::publish(const ZoneTransitionTicket ticket,
-                                        ZoneHandoffCompletion completion) noexcept
+    bool ZoneTransitionChannel::publish(const ZoneTransitionTicket ticket, ZoneHandoffCompletion completion) noexcept
     {
         try
         {
             {
                 std::lock_guard lock{_mutex};
                 const auto reservation = _reservations.find(ticket.value);
-                if (_cancelled || !ticket.valid() || reservation == _reservations.end() ||
-                    reservation->second.handoff != completion.handoff_id ||
-                    reservation->second.queued || _queued == _capacity || _slots[_tail])
+                if (_cancelled || !ticket.valid() || reservation == _reservations.end() || reservation->second.handoff != completion.handoff_id || reservation->second.queued || _queued == _capacity ||
+                    _slots[_tail])
                 {
                     ++_invalid_publishes;
                     return false;
@@ -106,8 +101,7 @@ namespace snf::server
         {
             _reservations.erase(reservation);
         }
-        _queue_wait_nanoseconds.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - queued.posted_at));
+        _queue_wait_nanoseconds.record(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - queued.posted_at));
         return std::move(queued.completion);
     }
 

@@ -23,10 +23,7 @@ namespace snf::net
     {
         [[nodiscard]] std::size_t operator()(const ConnectionId& connection) const noexcept
         {
-            std::uint64_t value =
-                static_cast<std::uint64_t>(static_cast<std::uint32_t>(connection.descriptor)) +
-                0x9e3779b97f4a7c15ULL + (connection.generation << 6U) +
-                (connection.generation >> 2U);
+            std::uint64_t value = static_cast<std::uint64_t>(static_cast<std::uint32_t>(connection.descriptor)) + 0x9e3779b97f4a7c15ULL + (connection.generation << 6U) + (connection.generation >> 2U);
             value ^= value >> 30U;
             value *= 0xbf58476d1ce4e5b9ULL;
             value ^= value >> 27U;

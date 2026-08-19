@@ -60,8 +60,7 @@ namespace snf::runtime
         // A reserved slot guarantees this never fails for capacity reasons.
         [[nodiscard]] virtual bool publish(const ActorContinuation& continuation) noexcept = 0;
 
-        virtual void reportRejectedCompletion(const ActorContinuation& continuation,
-                                              ContinuationRejection rejection) noexcept = 0;
+        virtual void reportRejectedCompletion(const ActorContinuation& continuation, ContinuationRejection rejection) noexcept = 0;
 
     protected:
         ContinuationEndpoint() = default;
@@ -105,10 +104,7 @@ namespace snf::runtime
         [[nodiscard]] bool claimCancelled() noexcept
         {
             AsyncOperationOutcome expected = AsyncOperationOutcome::Pending;
-            return _outcome.compare_exchange_strong(expected,
-                                                    AsyncOperationOutcome::Cancelled,
-                                                    std::memory_order_acq_rel,
-                                                    std::memory_order_acquire);
+            return _outcome.compare_exchange_strong(expected, AsyncOperationOutcome::Cancelled, std::memory_order_acq_rel, std::memory_order_acquire);
         }
 
         [[nodiscard]] AsyncOperationOutcome outcome() const noexcept
@@ -125,10 +121,7 @@ namespace snf::runtime
         [[nodiscard]] AsyncOperationOutcome claimCompleted() noexcept
         {
             AsyncOperationOutcome expected = AsyncOperationOutcome::Pending;
-            if (_outcome.compare_exchange_strong(expected,
-                                                 AsyncOperationOutcome::Completed,
-                                                 std::memory_order_acq_rel,
-                                                 std::memory_order_acquire))
+            if (_outcome.compare_exchange_strong(expected, AsyncOperationOutcome::Completed, std::memory_order_acq_rel, std::memory_order_acquire))
             {
                 return AsyncOperationOutcome::Pending;
             }
@@ -181,8 +174,7 @@ namespace snf::runtime
         // exactly this publish and has no other way to finish.
         void complete(const ActorCompletionHandle& handle, T result) noexcept
         {
-            publishTerminal(handle,
-                            [this, &result]() noexcept { _value.emplace(std::move(result)); });
+            publishTerminal(handle, [this, &result]() noexcept { _value.emplace(std::move(result)); });
         }
 
         void fail(const ActorCompletionHandle& handle, std::exception_ptr error) noexcept
@@ -208,19 +200,15 @@ namespace snf::runtime
         }
 
     private:
-        template <typename StoreResult>
-        void publishTerminal(const ActorCompletionHandle& handle, StoreResult store) noexcept
+        template <typename StoreResult> void publishTerminal(const ActorCompletionHandle& handle, StoreResult store) noexcept
         {
             const AsyncOperationOutcome lost_to = claimCompleted();
             if (lost_to != AsyncOperationOutcome::Pending)
             {
                 if (handle.endpoint)
                 {
-                    handle.endpoint->reportRejectedCompletion(
-                        handle.continuation,
-                        lost_to == AsyncOperationOutcome::Completed
-                            ? ContinuationRejection::DuplicateCompletion
-                            : ContinuationRejection::AlreadyCancelled);
+                    handle.endpoint->reportRejectedCompletion(handle.continuation,
+                                                              lost_to == AsyncOperationOutcome::Completed ? ContinuationRejection::DuplicateCompletion : ContinuationRejection::AlreadyCancelled);
                 }
                 return;
             }
@@ -243,8 +231,7 @@ namespace snf::runtime
     template <typename T> class AsyncOperationProducer final
     {
     public:
-        AsyncOperationProducer(std::shared_ptr<AsyncOperationState<T>> state,
-                               ActorCompletionHandle handle) noexcept
+        AsyncOperationProducer(std::shared_ptr<AsyncOperationState<T>> state, ActorCompletionHandle handle) noexcept
             : _state(std::move(state))
             , _handle(std::move(handle))
         {

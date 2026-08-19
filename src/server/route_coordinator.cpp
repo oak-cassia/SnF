@@ -15,8 +15,7 @@ namespace snf::server
         _handoffs.reserve(_max_handoffs);
     }
 
-    std::optional<RouteAdmission> RouteCoordinator::tryEnter(
-        const snf::net::ConnectionId connection, const PlayerId player, const ZoneId zone)
+    std::optional<RouteAdmission> RouteCoordinator::tryEnter(const snf::net::ConnectionId connection, const PlayerId player, const ZoneId zone)
     {
         if (zone.value == 0)
         {
@@ -55,20 +54,17 @@ namespace snf::server
         return RouteAdmission{.route = route, .created = true};
     }
 
-    std::optional<ZoneHandoff>
-    RouteCoordinator::tryBeginHandoff(const snf::net::ConnectionId connection,
-                                      const PlayerId player,
-                                      const ZoneId target_zone,
-                                      const ZonePosition source_position,
-                                      const ZonePosition requested_target_position,
-                                      const std::uint32_t request_id)
+    std::optional<ZoneHandoff> RouteCoordinator::tryBeginHandoff(const snf::net::ConnectionId connection,
+                                                                 const PlayerId player,
+                                                                 const ZoneId target_zone,
+                                                                 const ZonePosition source_position,
+                                                                 const ZonePosition requested_target_position,
+                                                                 const std::uint32_t request_id)
     {
         std::lock_guard lock{_mutex};
         const auto source = _routes.find(connection);
-        if (target_zone.value == 0 || source == _routes.end() || source->second.player != player ||
-            source->second.zone == target_zone || _handoffs.contains(connection) ||
-            _handoffs.size() == _max_handoffs ||
-            _next_handoff_id == std::numeric_limits<std::uint64_t>::max())
+        if (target_zone.value == 0 || source == _routes.end() || source->second.player != player || source->second.zone == target_zone || _handoffs.contains(connection) ||
+            _handoffs.size() == _max_handoffs || _next_handoff_id == std::numeric_limits<std::uint64_t>::max())
         {
             ++_handoffs_rejected;
             return std::nullopt;
@@ -97,17 +93,14 @@ namespace snf::server
         return handoff;
     }
 
-    std::optional<ZoneHandoff>
-    RouteCoordinator::handoffFor(const snf::net::ConnectionId connection) const
+    std::optional<ZoneHandoff> RouteCoordinator::handoffFor(const snf::net::ConnectionId connection) const
     {
         std::lock_guard lock{_mutex};
         const auto handoff = _handoffs.find(connection);
         return handoff == _handoffs.end() ? std::nullopt : std::optional{handoff->second};
     }
 
-    bool RouteCoordinator::noteSourceLeft(const snf::net::ConnectionId connection,
-                                          const ZoneHandoffId handoff,
-                                          const ZonePosition position) noexcept
+    bool RouteCoordinator::noteSourceLeft(const snf::net::ConnectionId connection, const ZoneHandoffId handoff, const ZonePosition position) noexcept
     {
         std::lock_guard lock{_mutex};
         const auto iterator = findHandoff(connection, handoff);
@@ -120,9 +113,7 @@ namespace snf::server
         return true;
     }
 
-    std::optional<std::uint64_t>
-    RouteCoordinator::beginSourceRestore(const snf::net::ConnectionId connection,
-                                         const ZoneHandoffId handoff)
+    std::optional<std::uint64_t> RouteCoordinator::beginSourceRestore(const snf::net::ConnectionId connection, const ZoneHandoffId handoff)
     {
         std::lock_guard lock{_mutex};
         const auto iterator = findHandoff(connection, handoff);
@@ -140,9 +131,7 @@ namespace snf::server
         return iterator->second.restore_epoch;
     }
 
-    bool RouteCoordinator::beginCleanup(const snf::net::ConnectionId connection,
-                                        const ZoneHandoffId handoff,
-                                        const ZoneHandoffStep cleanup_step) noexcept
+    bool RouteCoordinator::beginCleanup(const snf::net::ConnectionId connection, const ZoneHandoffId handoff, const ZoneHandoffStep cleanup_step) noexcept
     {
         std::lock_guard lock{_mutex};
         const auto iterator = findHandoff(connection, handoff);
@@ -150,10 +139,8 @@ namespace snf::server
         {
             return false;
         }
-        const bool cleans_target = cleanup_step == ZoneHandoffStep::CleanupTarget &&
-                                   iterator->second.step == ZoneHandoffStep::EnterTarget;
-        const bool cleans_source = cleanup_step == ZoneHandoffStep::CleanupSource &&
-                                   iterator->second.step == ZoneHandoffStep::RestoreSource;
+        const bool cleans_target = cleanup_step == ZoneHandoffStep::CleanupTarget && iterator->second.step == ZoneHandoffStep::EnterTarget;
+        const bool cleans_source = cleanup_step == ZoneHandoffStep::CleanupSource && iterator->second.step == ZoneHandoffStep::RestoreSource;
         if (!cleans_target && !cleans_source)
         {
             return false;
@@ -162,9 +149,7 @@ namespace snf::server
         return true;
     }
 
-    std::optional<SessionRoute>
-    RouteCoordinator::completeTargetEnter(const snf::net::ConnectionId connection,
-                                          const ZoneHandoffId handoff) noexcept
+    std::optional<SessionRoute> RouteCoordinator::completeTargetEnter(const snf::net::ConnectionId connection, const ZoneHandoffId handoff) noexcept
     {
         std::lock_guard lock{_mutex};
         const auto iterator = findHandoff(connection, handoff);
@@ -184,15 +169,11 @@ namespace snf::server
         return route;
     }
 
-    std::optional<SessionRoute>
-    RouteCoordinator::completeSourceRestore(const snf::net::ConnectionId connection,
-                                            const ZoneHandoffId handoff) noexcept
+    std::optional<SessionRoute> RouteCoordinator::completeSourceRestore(const snf::net::ConnectionId connection, const ZoneHandoffId handoff) noexcept
     {
         std::lock_guard lock{_mutex};
         const auto iterator = findHandoff(connection, handoff);
-        if (iterator == _handoffs.end() ||
-            iterator->second.step != ZoneHandoffStep::RestoreSource ||
-            iterator->second.restore_epoch == 0)
+        if (iterator == _handoffs.end() || iterator->second.step != ZoneHandoffStep::RestoreSource || iterator->second.restore_epoch == 0)
         {
             return std::nullopt;
         }
@@ -208,8 +189,7 @@ namespace snf::server
         return route;
     }
 
-    bool RouteCoordinator::rollbackHandoffBeforeLeave(const snf::net::ConnectionId connection,
-                                                      const ZoneHandoffId handoff) noexcept
+    bool RouteCoordinator::rollbackHandoffBeforeLeave(const snf::net::ConnectionId connection, const ZoneHandoffId handoff) noexcept
     {
         std::lock_guard lock{_mutex};
         const auto iterator = findHandoff(connection, handoff);
@@ -237,8 +217,7 @@ namespace snf::server
         }
     }
 
-    std::optional<SessionRoute>
-    RouteCoordinator::routeFor(const snf::net::ConnectionId connection) const
+    std::optional<SessionRoute> RouteCoordinator::routeFor(const snf::net::ConnectionId connection) const
     {
         std::lock_guard lock{_mutex};
         if (_handoffs.contains(connection))
@@ -314,12 +293,9 @@ namespace snf::server
         _routes.erase(connection);
     }
 
-    RouteCoordinator::HandoffMap::iterator
-    RouteCoordinator::findHandoff(const snf::net::ConnectionId connection,
-                                  const ZoneHandoffId handoff)
+    RouteCoordinator::HandoffMap::iterator RouteCoordinator::findHandoff(const snf::net::ConnectionId connection, const ZoneHandoffId handoff)
     {
         const auto iterator = _handoffs.find(connection);
-        return iterator != _handoffs.end() && iterator->second.id == handoff ? iterator
-                                                                             : _handoffs.end();
+        return iterator != _handoffs.end() && iterator->second.id == handoff ? iterator : _handoffs.end();
     }
 }

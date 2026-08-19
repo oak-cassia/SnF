@@ -2,7 +2,6 @@
 
 namespace snf
 {
-
     std::string_view project_name() noexcept
     {
         return "SnF";
@@ -12,5 +11,4 @@ namespace snf
     {
         return "0.1.0";
     }
-
 } // namespace snf

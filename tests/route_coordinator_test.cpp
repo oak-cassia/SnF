@@ -60,26 +60,18 @@ namespace
         assert(source && source->route.route_epoch == 1);
         assert(routes.tryEnter(SECOND_CONNECTION, SECOND_PLAYER, FIRST_ZONE));
 
-        const auto handoff = routes.tryBeginHandoff(
-            FIRST_CONNECTION, PLAYER, SECOND_ZONE, {.x = 10, .y = 20}, {.x = 30, .y = 40}, 99);
+        const auto handoff = routes.tryBeginHandoff(FIRST_CONNECTION, PLAYER, SECOND_ZONE, {.x = 10, .y = 20}, {.x = 30, .y = 40}, 99);
         assert(handoff && handoff->target_epoch == 2);
         assert(handoff->step == snf::server::ZoneHandoffStep::LeaveSource);
         assert(!routes.routeFor(FIRST_CONNECTION));
         assert(routes.routeCountFor(FIRST_ZONE) == 2);
         assert(routes.routeCountFor(SECOND_ZONE) == 1);
-        assert(!routes.tryBeginHandoff(SECOND_CONNECTION,
-                                       SECOND_PLAYER,
-                                       SECOND_ZONE,
-                                       {.x = 1, .y = 2},
-                                       {.x = 3, .y = 4},
-                                       100));
+        assert(!routes.tryBeginHandoff(SECOND_CONNECTION, SECOND_PLAYER, SECOND_ZONE, {.x = 1, .y = 2}, {.x = 3, .y = 4}, 100));
 
-        assert(!routes.noteSourceLeft(
-            FIRST_CONNECTION, snf::server::ZoneHandoffId{.value = 999}, {.x = 11, .y = 21}));
+        assert(!routes.noteSourceLeft(FIRST_CONNECTION, snf::server::ZoneHandoffId{.value = 999}, {.x = 11, .y = 21}));
         assert(!routes.noteSourceLeft(SECOND_CONNECTION, handoff->id, {.x = 11, .y = 21}));
         assert(routes.noteSourceLeft(FIRST_CONNECTION, handoff->id, {.x = 11, .y = 21}));
-        assert(routes.handoffFor(FIRST_CONNECTION)->step ==
-               snf::server::ZoneHandoffStep::EnterTarget);
+        assert(routes.handoffFor(FIRST_CONNECTION)->step == snf::server::ZoneHandoffStep::EnterTarget);
         const auto restore_epoch = routes.beginSourceRestore(FIRST_CONNECTION, handoff->id);
         assert(restore_epoch && *restore_epoch == 3);
         const auto restored = routes.completeSourceRestore(FIRST_CONNECTION, handoff->id);
@@ -87,8 +79,7 @@ namespace
         assert(routes.routeFor(FIRST_CONNECTION) == restored);
         assert(routes.routeCountFor(SECOND_ZONE) == 0);
 
-        const auto second_handoff = routes.tryBeginHandoff(
-            FIRST_CONNECTION, PLAYER, SECOND_ZONE, {.x = 11, .y = 21}, {.x = 50, .y = 60}, 101);
+        const auto second_handoff = routes.tryBeginHandoff(FIRST_CONNECTION, PLAYER, SECOND_ZONE, {.x = 11, .y = 21}, {.x = 50, .y = 60}, 101);
         assert(second_handoff && second_handoff->target_epoch == 4);
         assert(routes.noteSourceLeft(FIRST_CONNECTION, second_handoff->id, {.x = 11, .y = 21}));
         const auto target = routes.completeTargetEnter(FIRST_CONNECTION, second_handoff->id);
@@ -109,14 +100,12 @@ namespace
         snf::server::RouteCoordinator routes;
         const auto source = routes.tryEnter(FIRST_CONNECTION, PLAYER, FIRST_ZONE);
         assert(source);
-        const auto handoff = routes.tryBeginHandoff(
-            FIRST_CONNECTION, PLAYER, SECOND_ZONE, {.x = 1, .y = 2}, {.x = 3, .y = 4}, 1);
+        const auto handoff = routes.tryBeginHandoff(FIRST_CONNECTION, PLAYER, SECOND_ZONE, {.x = 1, .y = 2}, {.x = 3, .y = 4}, 1);
         assert(handoff && routes.rollbackHandoffBeforeLeave(FIRST_CONNECTION, handoff->id));
         assert(routes.routeFor(FIRST_CONNECTION) == source->route);
         assert(routes.stats().handoffs_rolled_back == 1);
 
-        const auto next = routes.tryBeginHandoff(
-            FIRST_CONNECTION, PLAYER, SECOND_ZONE, {.x = 1, .y = 2}, {.x = 3, .y = 4}, 2);
+        const auto next = routes.tryBeginHandoff(FIRST_CONNECTION, PLAYER, SECOND_ZONE, {.x = 1, .y = 2}, {.x = 3, .y = 4}, 2);
         assert(next);
         routes.abandon(FIRST_CONNECTION);
         assert(!routes.routeFor(FIRST_CONNECTION));

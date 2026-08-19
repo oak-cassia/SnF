@@ -18,8 +18,7 @@ namespace
     // The command has to outlive the task, so it is always a named local here.
     // Handing handle() a temporary would leave the lazy body reading a destroyed
     // command on its first resume.
-    snf::server::PlayerResult run_handler(snf::server::PlayerActor& actor,
-                                          const snf::server::PlayerCommand& command)
+    snf::server::PlayerResult run_handler(snf::server::PlayerActor& actor, const snf::server::PlayerCommand& command)
     {
         auto task = actor.handle(command);
         assert(task.resume() == snf::runtime::ActorTaskStatus::Completed);
@@ -80,8 +79,7 @@ namespace
         assert(result.responses.size() == 1);
         const auto* send = &result.responses.front();
         assert(send != nullptr);
-        const auto* authenticated =
-            std::get_if<snf::server::AuthenticatedResponse>(&send->response);
+        const auto* authenticated = std::get_if<snf::server::AuthenticatedResponse>(&send->response);
         assert(authenticated != nullptr);
         assert(authenticated->request_id == 9);
         assert(authenticated->player == player);
@@ -144,27 +142,23 @@ namespace
         const auto committed = run_handler(actor, first);
         const auto* committed_send = &committed.responses.front();
         assert(committed_send != nullptr);
-        const auto* committed_response =
-            std::get_if<snf::server::PurchaseResponse>(&committed_send->response);
+        const auto* committed_response = std::get_if<snf::server::PurchaseResponse>(&committed_send->response);
         assert(committed_response != nullptr);
         assert(committed_response->result.status == snf::server::PurchaseStatus::Committed);
         assert(actor.state().currencyBalance() == 900);
         assert(actor.state().purchasedItemCount() == 1);
-        assert((actor.dirtyComponents() &
-                snf::server::componentMask(snf::server::PlayerStateComponent::Economy)) != 0);
+        assert((actor.dirtyComponents() & snf::server::componentMask(snf::server::PlayerStateComponent::Economy)) != 0);
 
         snf::server::PlayerStateComponentMask cleared = 0;
         const auto dirty_snapshot = actor.takeDirtySnapshot(&cleared);
         assert(dirty_snapshot.has_value());
-        assert((cleared & snf::server::componentMask(snf::server::PlayerStateComponent::Economy)) !=
-               0);
+        assert((cleared & snf::server::componentMask(snf::server::PlayerStateComponent::Economy)) != 0);
         assert(actor.dirtyComponents() == 0);
 
         const auto replay = run_handler(actor, first);
         const auto* replay_send = &replay.responses.front();
         assert(replay_send != nullptr);
-        const auto* replay_response =
-            std::get_if<snf::server::PurchaseResponse>(&replay_send->response);
+        const auto* replay_response = std::get_if<snf::server::PurchaseResponse>(&replay_send->response);
         assert(replay_response != nullptr);
         assert(replay_response->result.replayed);
         assert(actor.state().currencyBalance() == 900);
@@ -178,11 +172,9 @@ namespace
         const auto rejected = run_handler(actor, capacity);
         const auto* rejected_send = &rejected.responses.front();
         assert(rejected_send != nullptr);
-        const auto* rejected_response =
-            std::get_if<snf::server::PurchaseResponse>(&rejected_send->response);
+        const auto* rejected_response = std::get_if<snf::server::PurchaseResponse>(&rejected_send->response);
         assert(rejected_response != nullptr);
-        assert(rejected_response->result.status ==
-               snf::server::PurchaseStatus::IdempotencyCapacityExceeded);
+        assert(rejected_response->result.status == snf::server::PurchaseStatus::IdempotencyCapacityExceeded);
         assert(actor.state().currencyBalance() == 900);
     }
 
@@ -204,8 +196,7 @@ namespace
         const auto first = run_handler(actor, insufficient);
         const auto* first_send = &first.responses.front();
         assert(first_send != nullptr);
-        const auto* first_response =
-            std::get_if<snf::server::PurchaseResponse>(&first_send->response);
+        const auto* first_response = std::get_if<snf::server::PurchaseResponse>(&first_send->response);
         assert(first_response != nullptr);
         assert(first_response->result.status == snf::server::PurchaseStatus::InsufficientFunds);
         assert(!actor.hasFlushableDirtyState());
@@ -213,8 +204,7 @@ namespace
         const auto replay = run_handler(actor, insufficient);
         const auto* replay_send = &replay.responses.front();
         assert(replay_send != nullptr);
-        const auto* replay_response =
-            std::get_if<snf::server::PurchaseResponse>(&replay_send->response);
+        const auto* replay_response = std::get_if<snf::server::PurchaseResponse>(&replay_send->response);
         assert(replay_response != nullptr);
         assert(replay_response->result.replayed);
 
@@ -226,12 +216,10 @@ namespace
         const auto missing = run_handler(actor, unknown);
         const auto* missing_send = &missing.responses.front();
         assert(missing_send != nullptr);
-        const auto* missing_response =
-            std::get_if<snf::server::PurchaseResponse>(&missing_send->response);
+        const auto* missing_response = std::get_if<snf::server::PurchaseResponse>(&missing_send->response);
         assert(missing_response != nullptr);
         assert(missing_response->result.status == snf::server::PurchaseStatus::ProductNotFound);
     }
-
 }
 
 void run_player_actor_tests()

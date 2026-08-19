@@ -16,11 +16,8 @@ namespace snf::net
     class Session
     {
     public:
-        explicit Session(UniqueFileDescriptor socket,
-                         std::size_t max_pending_send_bytes = MAX_PENDING_SEND_BYTES) noexcept;
-        explicit Session(UniqueFileDescriptor socket,
-                         ConnectionId connection_id,
-                         std::size_t max_pending_send_bytes = MAX_PENDING_SEND_BYTES) noexcept;
+        explicit Session(UniqueFileDescriptor socket, std::size_t max_pending_send_bytes = MAX_PENDING_SEND_BYTES) noexcept;
+        explicit Session(UniqueFileDescriptor socket, ConnectionId connection_id, std::size_t max_pending_send_bytes = MAX_PENDING_SEND_BYTES) noexcept;
 
         Session(const Session&) = delete;
         Session& operator=(const Session&) = delete;
@@ -31,8 +28,7 @@ namespace snf::net
         [[nodiscard]] int getDescriptor() const noexcept;
         [[nodiscard]] const ConnectionId& getConnectionId() const noexcept;
 
-        [[nodiscard]] snf::protocol::DecodeResult
-        appendReceivedBytes(std::span<const std::byte> bytes);
+        [[nodiscard]] snf::protocol::DecodeResult appendReceivedBytes(std::span<const std::byte> bytes);
 
         [[nodiscard]] bool enqueueFrame(const snf::protocol::Frame& frame);
         [[nodiscard]] bool hasPendingSend() const noexcept;

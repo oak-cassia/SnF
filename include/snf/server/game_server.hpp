@@ -110,9 +110,7 @@ namespace snf::server
     {
     public:
         explicit GameServer(const GameServerConfig& config);
-        explicit GameServer(
-            std::uint16_t port,
-            std::chrono::milliseconds shutdown_grace_period = std::chrono::milliseconds{5000});
+        explicit GameServer(std::uint16_t port, std::chrono::milliseconds shutdown_grace_period = std::chrono::milliseconds{5000});
         ~GameServer();
 
         GameServer(const GameServer&) = delete;

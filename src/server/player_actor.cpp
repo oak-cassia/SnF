@@ -75,8 +75,7 @@ namespace snf::server
         return _state._dirty_components;
     }
 
-    std::optional<PlayerRecord>
-    PlayerActor::takeDirtySnapshot(PlayerStateComponentMask* const cleared_components)
+    std::optional<PlayerRecord> PlayerActor::takeDirtySnapshot(PlayerStateComponentMask* const cleared_components)
     {
         if (!hasFlushableDirtyState())
         {
@@ -124,8 +123,7 @@ namespace snf::server
         _state._session.identity = identity;
     }
 
-    PlayerActor::PlayerActor(const PlayerActorId identity,
-                             const std::size_t max_purchase_idempotency_records)
+    PlayerActor::PlayerActor(const PlayerActorId identity, const std::size_t max_purchase_idempotency_records)
         : _max_purchase_idempotency_records(max_purchase_idempotency_records)
     {
         if (_max_purchase_idempotency_records == 0)
@@ -137,8 +135,7 @@ namespace snf::server
 
     snf::runtime::ActorTask<PlayerResult> PlayerActor::handle(const PlayerCommand& command)
     {
-        PlayerResult result =
-            std::visit([this](const auto& value) { return handleCommand(value); }, command);
+        PlayerResult result = std::visit([this](const auto& value) { return handleCommand(value); }, command);
         ++_state._session.handled_command_count;
         co_return result;
     }
@@ -198,8 +195,7 @@ namespace snf::server
             .replayed = false,
         };
 
-        if (const auto existing = _purchase_evidence.find(command.idempotency_key.value);
-            existing != _purchase_evidence.end())
+        if (const auto existing = _purchase_evidence.find(command.idempotency_key.value); existing != _purchase_evidence.end())
         {
             if (existing->second.product != command.product)
             {
@@ -230,8 +226,7 @@ namespace snf::server
             {
                 result.status = PurchaseStatus::InsufficientFunds;
             }
-            else if (next_item_count >
-                     std::numeric_limits<std::uint64_t>::max() - definition->grant_count)
+            else if (next_item_count > std::numeric_limits<std::uint64_t>::max() - definition->grant_count)
             {
                 result.status = PurchaseStatus::InventoryCapacityExceeded;
             }
@@ -269,5 +264,4 @@ namespace snf::server
                 },
         };
     }
-
 }

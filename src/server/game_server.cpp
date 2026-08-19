@@ -12,22 +12,18 @@
 
 namespace
 {
-    std::unique_ptr<snf::server::PlayerRepository>
-    make_player_repository(const snf::server::GameServerConfig& config)
+    std::unique_ptr<snf::server::PlayerRepository> make_player_repository(const snf::server::GameServerConfig& config)
     {
         if (config.mysql_player_repository)
         {
-            return std::make_unique<snf::server::MySqlPlayerRepository>(
-                *config.mysql_player_repository);
+            return std::make_unique<snf::server::MySqlPlayerRepository>(*config.mysql_player_repository);
         }
         return std::make_unique<snf::server::InMemoryPlayerRepository>();
     }
 
-    const snf::server::PlayerRepositoryDiagnostics&
-    repository_diagnostics(const snf::server::PlayerRepository& repository)
+    const snf::server::PlayerRepositoryDiagnostics& repository_diagnostics(const snf::server::PlayerRepository& repository)
     {
-        const auto* diagnostics =
-            dynamic_cast<const snf::server::PlayerRepositoryDiagnostics*>(&repository);
+        const auto* diagnostics = dynamic_cast<const snf::server::PlayerRepositoryDiagnostics*>(&repository);
         if (diagnostics == nullptr)
         {
             throw std::logic_error{"Configured Player repository has no diagnostics"};
@@ -46,8 +42,7 @@ namespace
         return snf::net::UniqueFileDescriptor{descriptor};
     }
 
-    std::size_t
-    checked_product(const std::size_t left, const std::size_t right, const char* const message)
+    std::size_t checked_product(const std::size_t left, const std::size_t right, const char* const message)
     {
         if (left != 0 && right > std::numeric_limits<std::size_t>::max() / left)
         {
@@ -57,8 +52,7 @@ namespace
         return left * right;
     }
 
-    std::size_t
-    checked_sum(const std::size_t left, const std::size_t right, const char* const message)
+    std::size_t checked_sum(const std::size_t left, const std::size_t right, const char* const message)
     {
         if (right > std::numeric_limits<std::size_t>::max() - left)
         {
@@ -71,11 +65,8 @@ namespace
     std::size_t checked_party_members(const std::size_t max_members)
     {
         constexpr std::size_t FIXED_PARTY_RESPONSE_PAYLOAD_SIZE = 1 + 8 + 8 + 2;
-        constexpr std::size_t MAX_MEMBERS_BY_PAYLOAD =
-            (snf::protocol::MAX_PAYLOAD_SIZE - FIXED_PARTY_RESPONSE_PAYLOAD_SIZE) / 8;
-        constexpr std::size_t MAX_WIRE_MEMBERS =
-            std::min(MAX_MEMBERS_BY_PAYLOAD,
-                     static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()));
+        constexpr std::size_t MAX_MEMBERS_BY_PAYLOAD = (snf::protocol::MAX_PAYLOAD_SIZE - FIXED_PARTY_RESPONSE_PAYLOAD_SIZE) / 8;
+        constexpr std::size_t MAX_WIRE_MEMBERS = std::min(MAX_MEMBERS_BY_PAYLOAD, static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()));
         if (max_members == 0 || max_members > MAX_WIRE_MEMBERS)
         {
             throw std::invalid_argument{"Party member capacity exceeds its wire response"};
@@ -83,13 +74,11 @@ namespace
         return max_members;
     }
 
-    std::size_t checked_zone_handoffs(const std::size_t max_handoffs,
-                                      const std::size_t lifecycle_capacity)
+    std::size_t checked_zone_handoffs(const std::size_t max_handoffs, const std::size_t lifecycle_capacity)
     {
         if (max_handoffs == 0 || max_handoffs > lifecycle_capacity)
         {
-            throw std::invalid_argument{
-                "Zone handoff capacity must be positive and no greater than lifecycle capacity"};
+            throw std::invalid_argument{"Zone handoff capacity must be positive and no greater than lifecycle capacity"};
         }
         return max_handoffs;
     }
@@ -104,21 +93,16 @@ namespace snf::server
               [&config]
               {
                   const std::size_t total_in_flight_budget =
-                      checked_product(config.actor_worker_count,
-                                      config.actor_max_in_flight_operations_per_worker,
-                                      "Actor in-flight operation budget exceeds size_t");
+                      checked_product(config.actor_worker_count, config.actor_max_in_flight_operations_per_worker, "Actor in-flight operation budget exceeds size_t");
                   const std::size_t total_actor_outstanding_budget =
-                      checked_product(config.actor_worker_count,
-                                      config.actor_queue_capacity_per_worker,
-                                      "Actor outstanding command budget exceeds size_t");
+                      checked_product(config.actor_worker_count, config.actor_queue_capacity_per_worker, "Actor outstanding command budget exceeds size_t");
 
                   return OutboundChannelConfig{
                       .capacity = config.outbound_queue_capacity,
                       // A per-connection cap above the shared capacity is unreachable
                       // anyway, so it is capped rather than rejected: shrinking the
                       // channel must not make the server refuse to start.
-                      .max_slots_per_connection = std::min(config.max_outbound_slots_per_connection,
-                                                           config.outbound_queue_capacity),
+                      .max_slots_per_connection = std::min(config.max_outbound_slots_per_connection, config.outbound_queue_capacity),
                       .max_grants_per_turn = config.outbound_grants_per_turn,
                       // A Worker reserves an in-flight slot before it registers as a
                       // waiter, so the registry is sized above the sum of those
@@ -128,31 +112,23 @@ namespace snf::server
                       // command that was already admitted when its session disappeared.
                       // Cover both populations; the channel still has a no-throw
                       // close-all fail-safe if this accounting invariant is ever broken.
-                      .max_pending_admission_failures =
-                          checked_sum(config.connection_lifecycle_capacity,
-                                      total_actor_outstanding_budget,
-                                      "Outbound admission failure budget exceeds size_t"),
+                      .max_pending_admission_failures = checked_sum(config.connection_lifecycle_capacity, total_actor_outstanding_budget, "Outbound admission failure budget exceeds size_t"),
                   };
               }(),
               _outbound_event.getDescriptor())
-        , _zone_transition_channel(
-              checked_zone_handoffs(config.max_zone_handoffs, config.connection_lifecycle_capacity),
-              _outbound_event.getDescriptor())
+        , _zone_transition_channel(checked_zone_handoffs(config.max_zone_handoffs, config.connection_lifecycle_capacity), _outbound_event.getDescriptor())
         , _player_responses(_outbound_channel)
         , _zone_results(_outbound_channel)
         , _party_results(_outbound_channel)
-        , _route_coordinator(
-              checked_zone_handoffs(config.max_zone_handoffs, config.connection_lifecycle_capacity))
+        , _route_coordinator(checked_zone_handoffs(config.max_zone_handoffs, config.connection_lifecycle_capacity))
         , _party_coordinator(checked_party_members(config.max_party_members))
         , _player_repository(make_player_repository(config))
-        , _player_persistence_service(
-              *_player_repository,
-              PlayerPersistenceServiceConfig{
-                  .queue_capacity = config.player_persistence_queue_capacity,
-                  .flush_interval = config.player_persistence_flush_interval,
-              })
-        , _runtime_completion(snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic),
-                              _outbound_event.getDescriptor())
+        , _player_persistence_service(*_player_repository,
+                                      PlayerPersistenceServiceConfig{
+                                          .queue_capacity = config.player_persistence_queue_capacity,
+                                          .flush_interval = config.player_persistence_flush_interval,
+                                      })
+        , _runtime_completion(snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic), _outbound_event.getDescriptor())
         , _player_actor_binding(_player_responses, _outbound_channel, _command_lifecycle)
         , _persistent_player_actor_binding(
               _player_responses,
@@ -170,12 +146,9 @@ namespace snf::server
                           _player_sessions.completePassivation(*player);
                       }
                   },
-                  .on_record_loaded = [this](const snf::net::ConnectionId connection,
-                                             std::optional<PlayerLocation> location)
-                  { _player_sessions.noteLocation(connection, std::move(location)); },
+                  .on_record_loaded = [this](const snf::net::ConnectionId connection, std::optional<PlayerLocation> location) { _player_sessions.noteLocation(connection, std::move(location)); },
                   .persistence_service = &_player_persistence_service,
-                  .max_purchase_idempotency_records_per_player =
-                      config.max_purchase_idempotency_records_per_player,
+                  .max_purchase_idempotency_records_per_player = config.max_purchase_idempotency_records_per_player,
               })
         , _zone_actor_binding(
               ZoneActorBindingConfig{
@@ -214,8 +187,7 @@ namespace snf::server
               _command_lifecycle)
         , _party_actor_binding(
               PartyActorBindingConfig{
-                  .actor = PartyActorConfig{.max_members =
-                                                checked_party_members(config.max_party_members)},
+                  .actor = PartyActorConfig{.max_members = checked_party_members(config.max_party_members)},
                   .on_result =
                       [this](const PartyInboundCommand& command, const PartyResult& result)
                   {
@@ -229,8 +201,7 @@ namespace snf::server
                               .leaving = true,
                           });
                       }
-                      else if (result.status != PartyCommandStatus::Applied &&
-                               result.status != PartyCommandStatus::AlreadyMember)
+                      else if (result.status != PartyCommandStatus::Applied && result.status != PartyCommandStatus::AlreadyMember)
                       {
                           const auto& join = std::get<JoinPartyCommand>(command.command);
                           _party_coordinator.completeLeave(PartyRoute{
@@ -251,29 +222,24 @@ namespace snf::server
                   snf::runtime::ActorRuntimeConfig runtime_config;
                   runtime_config.worker_count = config.actor_worker_count;
                   runtime_config.queue_capacity_per_worker = config.actor_queue_capacity_per_worker;
-                  runtime_config.max_in_flight_operations_per_worker =
-                      config.actor_max_in_flight_operations_per_worker;
+                  runtime_config.max_in_flight_operations_per_worker = config.actor_max_in_flight_operations_per_worker;
                   return runtime_config;
               }(),
               _runtime_completion)
-        , _player_actor_ingress(_logic_runtime,
-                                _player_actor_binding,
-                                _persistent_player_actor_binding,
-                                _command_lifecycle)
+        , _player_actor_ingress(_logic_runtime, _player_actor_binding, _persistent_player_actor_binding, _command_lifecycle)
         , _zone_actor_ingress(_logic_runtime, _zone_actor_binding, _command_lifecycle)
         , _party_actor_ingress(_logic_runtime, _party_actor_binding, _command_lifecycle)
         , _command_router(_player_actor_ingress, _zone_actor_ingress, _party_actor_ingress)
-        , _protocol_gateway(
-              _command_router,
-              _player_sessions,
-              _route_coordinator,
-              _party_coordinator,
-              _zone_transition_channel,
-              _command_lifecycle,
-              _zone_results,
-              ProtocolGatewayConfig{
-                  .max_zone_completions_per_turn = config.max_zone_handoff_completions_per_turn,
-              })
+        , _protocol_gateway(_command_router,
+                            _player_sessions,
+                            _route_coordinator,
+                            _party_coordinator,
+                            _zone_transition_channel,
+                            _command_lifecycle,
+                            _zone_results,
+                            ProtocolGatewayConfig{
+                                .max_zone_completions_per_turn = config.max_zone_handoff_completions_per_turn,
+                            })
         , _tcp_server(
               TcpServerConfig{
                   .port = config.port,
@@ -284,8 +250,7 @@ namespace snf::server
                   .metrics_report_interval = config.metrics_report_interval,
                   .on_metrics_interval = [this] { publishMetrics(); },
                   .on_control_wake = [this] { _protocol_gateway.drainZoneTransitions(); },
-                  .is_control_drained = [this]
-                  { return _protocol_gateway.zoneTransitionsDrained(); },
+                  .is_control_drained = [this] { return _protocol_gateway.zoneTransitionsDrained(); },
               },
               _protocol_gateway,
               _outbound_channel,
@@ -298,8 +263,7 @@ namespace snf::server
         _logic_runtime.registerBinding(_party_actor_binding);
     }
 
-    GameServer::GameServer(const std::uint16_t port,
-                           const std::chrono::milliseconds shutdown_grace_period)
+    GameServer::GameServer(const std::uint16_t port, const std::chrono::milliseconds shutdown_grace_period)
         : GameServer(GameServerConfig{
               .port = port,
               .shutdown_grace_period = shutdown_grace_period,

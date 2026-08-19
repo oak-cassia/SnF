@@ -48,8 +48,7 @@ namespace
     void arm_request_timer(const int timer_descriptor, const std::size_t requests_per_second)
     {
         constexpr std::int64_t NANOSECONDS_PER_SECOND = 1'000'000'000;
-        const auto interval_nanoseconds = static_cast<long>(
-            NANOSECONDS_PER_SECOND / static_cast<std::int64_t>(requests_per_second));
+        const auto interval_nanoseconds = static_cast<long>(NANOSECONDS_PER_SECOND / static_cast<std::int64_t>(requests_per_second));
 
         itimerspec timer_settings{};
         timer_settings.it_value.tv_nsec = 1;
@@ -100,13 +99,10 @@ namespace
         }
 
         const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
-        return static_cast<int>(
-            std::min<std::int64_t>(remaining.count(), std::numeric_limits<int>::max()));
+        return static_cast<int>(std::min<std::int64_t>(remaining.count(), std::numeric_limits<int>::max()));
     }
 
-    void update_epoll_events(const int epoll_descriptor,
-                             const snf::load::ClientConnection& connection,
-                             const int operation)
+    void update_epoll_events(const int epoll_descriptor, const snf::load::ClientConnection& connection, const int operation)
     {
         epoll_event event{};
         event.events = connection.getDesiredEvents();
@@ -132,8 +128,7 @@ namespace
 
     void remove_epoll_events(const int epoll_descriptor, const int connection_descriptor)
     {
-        if (::epoll_ctl(epoll_descriptor, EPOLL_CTL_DEL, connection_descriptor, nullptr) == -1 &&
-            errno != ENOENT && errno != EBADF)
+        if (::epoll_ctl(epoll_descriptor, EPOLL_CTL_DEL, connection_descriptor, nullptr) == -1 && errno != ENOENT && errno != EBADF)
         {
             snf::net::throw_system_error("epoll_ctl(EPOLL_CTL_DEL client)");
         }
@@ -147,8 +142,7 @@ namespace
         }
     }
 
-    std::chrono::steady_clock::time_point earliest_connection_deadline(
-        const std::unordered_map<int, snf::load::ClientConnection>& connections)
+    std::chrono::steady_clock::time_point earliest_connection_deadline(const std::unordered_map<int, snf::load::ClientConnection>& connections)
     {
         auto earliest_deadline = std::chrono::steady_clock::time_point::max();
 
@@ -160,24 +154,17 @@ namespace
         return earliest_deadline;
     }
 
-    bool has_connecting_connection(
-        const std::unordered_map<int, snf::load::ClientConnection>& connections)
+    bool has_connecting_connection(const std::unordered_map<int, snf::load::ClientConnection>& connections)
     {
-        return std::ranges::any_of(connections,
-                                   [](const auto& connection_entry)
-                                   { return connection_entry.second.isConnecting(); });
+        return std::ranges::any_of(connections, [](const auto& connection_entry) { return connection_entry.second.isConnecting(); });
     }
 
-    bool
-    all_connections_idle(const std::unordered_map<int, snf::load::ClientConnection>& connections)
+    bool all_connections_idle(const std::unordered_map<int, snf::load::ClientConnection>& connections)
     {
-        return std::ranges::all_of(connections,
-                                   [](const auto& connection_entry)
-                                   { return connection_entry.second.isIdle(); });
+        return std::ranges::all_of(connections, [](const auto& connection_entry) { return connection_entry.second.isIdle(); });
     }
 
-    void record_runtime_error(snf::load::LoadClientResult& result,
-                              const snf::load::ClientError& error)
+    void record_runtime_error(snf::load::LoadClientResult& result, const snf::load::ClientError& error)
     {
         remember_first_error(result.error, error.message);
 
@@ -234,8 +221,7 @@ namespace snf::load
                 return result;
             }
 
-            if (_config.requests_per_second == 0 ||
-                _config.requests_per_second > MAX_REQUESTS_PER_SECOND)
+            if (_config.requests_per_second == 0 || _config.requests_per_second > MAX_REQUESTS_PER_SECOND)
             {
                 result.error = "Requests per second is out of range";
                 return result;
@@ -251,9 +237,7 @@ namespace snf::load
                 return result;
             }
 
-            if (_config.duration <= std::chrono::milliseconds::zero() ||
-                _config.connect_timeout <= std::chrono::milliseconds::zero() ||
-                _config.request_timeout <= std::chrono::milliseconds::zero())
+            if (_config.duration <= std::chrono::milliseconds::zero() || _config.connect_timeout <= std::chrono::milliseconds::zero() || _config.request_timeout <= std::chrono::milliseconds::zero())
             {
                 result.error = "Duration and timeout values must be positive";
                 return result;
@@ -262,8 +246,7 @@ namespace snf::load
             const auto epoll = create_epoll_instance();
             std::unordered_map<int, ClientConnection> connections;
             connections.reserve(_config.connections);
-            for (std::size_t connection_index = 0; connection_index < _config.connections;
-                 ++connection_index)
+            for (std::size_t connection_index = 0; connection_index < _config.connections; ++connection_index)
             {
                 try
                 {
@@ -284,8 +267,7 @@ namespace snf::load
                     const bool connected_immediately = connection.isConnected();
                     update_epoll_events(epoll.getDescriptor(), connection, EPOLL_CTL_ADD);
 
-                    const bool inserted =
-                        connections.emplace(connection_descriptor, std::move(connection)).second;
+                    const bool inserted = connections.emplace(connection_descriptor, std::move(connection)).second;
                     if (!inserted)
                     {
                         throw std::logic_error{"Duplicate client descriptor"};
@@ -308,12 +290,8 @@ namespace snf::load
             // 모든 non-blocking connect가 성공, 실패 또는 timeout으로 끝날 때까지 처리한다.
             while (has_connecting_connection(connections))
             {
-                const int wait_timeout =
-                    get_wait_timeout(earliest_connection_deadline(connections));
-                const int ready_event_count = ::epoll_wait(epoll.getDescriptor(),
-                                                           events.data(),
-                                                           static_cast<int>(events.size()),
-                                                           wait_timeout);
+                const int wait_timeout = get_wait_timeout(earliest_connection_deadline(connections));
+                const int ready_event_count = ::epoll_wait(epoll.getDescriptor(), events.data(), static_cast<int>(events.size()), wait_timeout);
 
                 if (ready_event_count == -1)
                 {
@@ -329,8 +307,7 @@ namespace snf::load
                 {
                     const epoll_event& event = events[event_index];
                     const auto connection_iterator = connections.find(event.data.fd);
-                    if (connection_iterator == connections.end() ||
-                        !connection_iterator->second.isConnecting())
+                    if (connection_iterator == connections.end() || !connection_iterator->second.isConnecting())
                     {
                         continue;
                     }
@@ -346,15 +323,13 @@ namespace snf::load
                         connection_error = std::move(write_result.error);
                     }
 
-                    if (!connection_error &&
-                        (event.events & (EPOLLIN | EPOLLRDHUP | EPOLLHUP)) != 0)
+                    if (!connection_error && (event.events & (EPOLLIN | EPOLLRDHUP | EPOLLHUP)) != 0)
                     {
                         auto read_result = connection.handleReadable();
                         connection_error = std::move(read_result.error);
                     }
 
-                    if (!connection_error && connection.isConnecting() &&
-                        (event.events & EPOLLERR) != 0)
+                    if (!connection_error && connection.isConnecting() && (event.events & EPOLLERR) != 0)
                     {
                         connection_error = connection.getSocketError();
                         if (!connection_error)
@@ -385,11 +360,9 @@ namespace snf::load
                 }
 
                 const auto now = std::chrono::steady_clock::now();
-                for (auto connection_iterator = connections.begin();
-                     connection_iterator != connections.end();)
+                for (auto connection_iterator = connections.begin(); connection_iterator != connections.end();)
                 {
-                    if (!connection_iterator->second.isConnecting() ||
-                        now < connection_iterator->second.getDeadline())
+                    if (!connection_iterator->second.isConnecting() || now < connection_iterator->second.getDeadline())
                     {
                         ++connection_iterator;
                         continue;
@@ -431,14 +404,8 @@ namespace snf::load
                     break;
                 }
 
-                const auto wait_deadline =
-                    generation_complete
-                        ? earliest_connection_deadline(connections)
-                        : std::min(load_ends_at, earliest_connection_deadline(connections));
-                const int ready_event_count = ::epoll_wait(epoll.getDescriptor(),
-                                                           events.data(),
-                                                           static_cast<int>(events.size()),
-                                                           get_wait_timeout(wait_deadline));
+                const auto wait_deadline = generation_complete ? earliest_connection_deadline(connections) : std::min(load_ends_at, earliest_connection_deadline(connections));
+                const int ready_event_count = ::epoll_wait(epoll.getDescriptor(), events.data(), static_cast<int>(events.size()), get_wait_timeout(wait_deadline));
 
                 if (ready_event_count == -1)
                 {
@@ -469,8 +436,7 @@ namespace snf::load
                                 }
 
                                 connection.enqueueNextRequest(_config.request_timeout);
-                                update_epoll_events(
-                                    epoll.getDescriptor(), connection, EPOLL_CTL_MOD);
+                                update_epoll_events(epoll.getDescriptor(), connection, EPOLL_CTL_MOD);
                             }
                         }
 
@@ -495,20 +461,14 @@ namespace snf::load
                         connection_error = std::move(write_result.error);
                     }
 
-                    if (!connection_error &&
-                        (event.events & (EPOLLIN | EPOLLRDHUP | EPOLLHUP)) != 0)
+                    if (!connection_error && (event.events & (EPOLLIN | EPOLLRDHUP | EPOLLHUP)) != 0)
                     {
                         auto read_result = connection.handleReadable();
                         result.received_responses += read_result.round_trip_times.size();
                         result.received_bootstrap_responses += read_result.bootstrap_responses;
                         result.received_gameplay_responses += read_result.gameplay_responses;
-                        result.round_trip_times.insert(result.round_trip_times.end(),
-                                                       read_result.round_trip_times.begin(),
-                                                       read_result.round_trip_times.end());
-                        result.gameplay_round_trip_times.insert(
-                            result.gameplay_round_trip_times.end(),
-                            read_result.gameplay_round_trip_times.begin(),
-                            read_result.gameplay_round_trip_times.end());
+                        result.round_trip_times.insert(result.round_trip_times.end(), read_result.round_trip_times.begin(), read_result.round_trip_times.end());
+                        result.gameplay_round_trip_times.insert(result.gameplay_round_trip_times.end(), read_result.gameplay_round_trip_times.begin(), read_result.gameplay_round_trip_times.end());
                         connection_error = std::move(read_result.error);
                     }
 
@@ -537,12 +497,10 @@ namespace snf::load
                 }
 
                 const auto timeout_check_time = std::chrono::steady_clock::now();
-                for (auto connection_iterator = connections.begin();
-                     connection_iterator != connections.end();)
+                for (auto connection_iterator = connections.begin(); connection_iterator != connections.end();)
                 {
                     const auto deadline = connection_iterator->second.getDeadline();
-                    if (deadline == std::chrono::steady_clock::time_point::max() ||
-                        timeout_check_time < deadline)
+                    if (deadline == std::chrono::steady_clock::time_point::max() || timeout_check_time < deadline)
                     {
                         ++connection_iterator;
                         continue;
@@ -558,16 +516,9 @@ namespace snf::load
             const bool workload_completed =
                 _config.scenario == LoadScenario::Ping
                     ? result.received_gameplay_responses > 0
-                    : result.received_gameplay_responses > 0 &&
-                          std::ranges::all_of(
-                              connections,
-                              [](const auto& connection_entry)
-                              { return connection_entry.second.hasCompletedBootstrap(); });
-            result.success = result.successful_connections == result.requested_connections &&
-                             result.failed_connections == 0 && result.request_timeouts == 0 &&
-                             result.invalid_responses == 0 && result.socket_errors == 0 &&
-                             result.sent_requests == result.received_responses &&
-                             workload_completed;
+                    : result.received_gameplay_responses > 0 && std::ranges::all_of(connections, [](const auto& connection_entry) { return connection_entry.second.hasCompletedBootstrap(); });
+            result.success = result.successful_connections == result.requested_connections && result.failed_connections == 0 && result.request_timeouts == 0 && result.invalid_responses == 0 &&
+                             result.socket_errors == 0 && result.sent_requests == result.received_responses && workload_completed;
             if (!result.success && result.error.empty())
             {
                 result.error = "Load workload did not complete";

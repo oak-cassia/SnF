@@ -51,8 +51,7 @@ namespace snf::runtime
         {
             {
                 std::unique_lock lock{_mutex};
-                _not_full.wait(
-                    lock, [this] { return _cancelled || _closed || _items.size() < _capacity; });
+                _not_full.wait(lock, [this] { return _cancelled || _closed || _items.size() < _capacity; });
 
                 if (_closed || _cancelled)
                 {
@@ -74,10 +73,7 @@ namespace snf::runtime
         {
             {
                 std::unique_lock lock{_mutex};
-                const bool can_push = _not_full.wait(
-                    lock,
-                    stop_token,
-                    [this] { return _cancelled || _closed || _items.size() < _capacity; });
+                const bool can_push = _not_full.wait(lock, stop_token, [this] { return _cancelled || _closed || _items.size() < _capacity; });
 
                 if (!can_push || stop_token.stop_requested() || _closed || _cancelled)
                 {

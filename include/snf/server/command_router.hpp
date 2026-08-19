@@ -13,9 +13,7 @@ namespace snf::server
     {
     public:
         explicit CommandRouter(PlayerCommandIngress& player_commands) noexcept;
-        CommandRouter(PlayerCommandIngress& player_commands,
-                      ZoneActorIngress& zone_commands,
-                      PartyActorIngress& party_commands) noexcept;
+        CommandRouter(PlayerCommandIngress& player_commands, ZoneActorIngress& zone_commands, PartyActorIngress& party_commands) noexcept;
 
         [[nodiscard]] PostResult tryPost(RoutedCommand command) override;
         void close() noexcept override;

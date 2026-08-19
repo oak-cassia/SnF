@@ -40,9 +40,7 @@ namespace snf::server
         [[nodiscard]] snf::net::ConnectionId connection() const noexcept;
 
     private:
-        OutboundReservation(OutboundChannel& channel,
-                            snf::net::ConnectionId connection,
-                            std::size_t slots) noexcept;
+        OutboundReservation(OutboundChannel& channel, snf::net::ConnectionId connection, std::size_t slots) noexcept;
 
         void returnRemainingSlots() noexcept;
 

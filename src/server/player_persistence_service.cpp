@@ -5,8 +5,7 @@
 
 namespace snf::server
 {
-    PlayerPersistenceService::PlayerPersistenceService(PlayerRepository& repository,
-                                                       PlayerPersistenceServiceConfig config)
+    PlayerPersistenceService::PlayerPersistenceService(PlayerRepository& repository, PlayerPersistenceServiceConfig config)
         : _repository(repository)
         , _flush_interval(config.flush_interval)
         , _snapshots(config.queue_capacity)
@@ -67,8 +66,7 @@ namespace snf::server
             }
             else
             {
-                _final_requests[record.player].push_back(
-                    FinalRequest{.record = std::move(record), .completion = std::move(completion)});
+                _final_requests[record.player].push_back(FinalRequest{.record = std::move(record), .completion = std::move(completion)});
             }
         }
 
@@ -145,10 +143,7 @@ namespace snf::server
         std::unique_lock lock{_mutex};
         while (!_stopping)
         {
-            _wake.wait_for(lock,
-                           _flush_interval,
-                           [this]
-                           { return _stopping || _flush_requested || _snapshots.size() != 0; });
+            _wake.wait_for(lock, _flush_interval, [this] { return _stopping || _flush_requested || _snapshots.size() != 0; });
             lock.unlock();
             try
             {
@@ -265,10 +260,7 @@ namespace snf::server
             // an older queued background snapshot, but never jumps over an in-flight
             // save because _in_flight was checked above.
             _pending.erase(player);
-            _in_flight.emplace(player,
-                               InFlight{.record = request.record,
-                                        .final = true,
-                                        .completion = std::move(request.completion)});
+            _in_flight.emplace(player, InFlight{.record = request.record, .final = true, .completion = std::move(request.completion)});
             saves.push_back(StartSave{
                 .player = player,
                 .record = std::move(request.record),
@@ -287,8 +279,7 @@ namespace snf::server
 
             PlayerRecord record = std::move(pending->second);
             pending = _pending.erase(pending);
-            _in_flight.emplace(player,
-                               InFlight{.record = record, .final = false, .completion = {}});
+            _in_flight.emplace(player, InFlight{.record = record, .final = false, .completion = {}});
             saves.push_back(StartSave{
                 .player = player,
                 .record = std::move(record),
@@ -311,20 +302,15 @@ namespace snf::server
 
         try
         {
-            _repository.asyncSave(
-                std::move(save.record),
-                [this, player = save.player](PlayerSaveResult result) mutable noexcept
-                { completeSave(player, std::move(result)); });
+            _repository.asyncSave(std::move(save.record), [this, player = save.player](PlayerSaveResult result) mutable noexcept { completeSave(player, std::move(result)); });
         }
         catch (...)
         {
-            completeSave(save.player,
-                         PlayerSaveResult{.status = PlayerRepositoryStatus::Unavailable});
+            completeSave(save.player, PlayerSaveResult{.status = PlayerRepositoryStatus::Unavailable});
         }
     }
 
-    void PlayerPersistenceService::completeSave(const PlayerId player,
-                                                PlayerSaveResult result) noexcept
+    void PlayerPersistenceService::completeSave(const PlayerId player, PlayerSaveResult result) noexcept
     {
         PlayerSaveCompletion completion;
         bool final = false;
@@ -375,8 +361,7 @@ namespace snf::server
         _idle.notify_all();
     }
 
-    void PlayerPersistenceService::notifyCompletion(PlayerSaveCompletion& completion,
-                                                    PlayerSaveResult result) noexcept
+    void PlayerPersistenceService::notifyCompletion(PlayerSaveCompletion& completion, PlayerSaveResult result) noexcept
     {
         try
         {

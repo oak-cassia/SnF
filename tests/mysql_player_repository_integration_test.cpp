@@ -38,8 +38,7 @@ namespace
         }
         std::uint32_t value = 0;
         const auto [end, error] = std::from_chars(text->data(), text->data() + text->size(), value);
-        if (error != std::errc{} || end != text->data() + text->size() || value == 0 ||
-            value > 65535)
+        if (error != std::errc{} || end != text->data() + text->size() || value == 0 || value > 65535)
         {
             throw std::invalid_argument{"SNF_MYSQL_TEST_PORT is invalid"};
         }
@@ -62,8 +61,7 @@ namespace
         };
     }
 
-    void execute_sql(const snf::server::MySqlPlayerRepositoryConfig& repository_config,
-                     const std::string_view sql)
+    void execute_sql(const snf::server::MySqlPlayerRepositoryConfig& repository_config, const std::string_view sql)
     {
         MYSQL* connection = ::mysql_init(nullptr);
         assert(connection != nullptr);
@@ -97,32 +95,25 @@ namespace
         execute_sql(repository_config, "DELETE FROM snf_players");
     }
 
-    snf::server::PlayerLoadResult load(snf::server::PlayerRepository& repository,
-                                       const snf::server::PlayerId player)
+    snf::server::PlayerLoadResult load(snf::server::PlayerRepository& repository, const snf::server::PlayerId player)
     {
         std::promise<snf::server::PlayerLoadResult> completion;
         auto future = completion.get_future();
-        repository.asyncLoad(player,
-                             [&completion](snf::server::PlayerLoadResult result)
-                             { completion.set_value(std::move(result)); });
+        repository.asyncLoad(player, [&completion](snf::server::PlayerLoadResult result) { completion.set_value(std::move(result)); });
         assert(future.wait_for(5s) == std::future_status::ready);
         return future.get();
     }
 
-    snf::server::PlayerSaveResult save(snf::server::PlayerRepository& repository,
-                                       snf::server::PlayerRecord record)
+    snf::server::PlayerSaveResult save(snf::server::PlayerRepository& repository, snf::server::PlayerRecord record)
     {
         std::promise<snf::server::PlayerSaveResult> completion;
         auto future = completion.get_future();
-        repository.asyncSave(std::move(record),
-                             [&completion](snf::server::PlayerSaveResult result)
-                             { completion.set_value(result); });
+        repository.asyncSave(std::move(record), [&completion](snf::server::PlayerSaveResult result) { completion.set_value(result); });
         assert(future.wait_for(5s) == std::future_status::ready);
         return future.get();
     }
 
-    void test_record_survives_repository_restart(
-        const snf::server::MySqlPlayerRepositoryConfig& repository_config)
+    void test_record_survives_repository_restart(const snf::server::MySqlPlayerRepositoryConfig& repository_config)
     {
         const snf::server::PlayerId player{.value = 1001};
         {
@@ -155,8 +146,7 @@ namespace
         assert(loaded.record->purchased_item_count == 3);
     }
 
-    void test_actor_snapshot_overwrites_the_complete_player_record(
-        const snf::server::MySqlPlayerRepositoryConfig& repository_config)
+    void test_actor_snapshot_overwrites_the_complete_player_record(const snf::server::MySqlPlayerRepositoryConfig& repository_config)
     {
         const snf::server::PlayerId player{.value = 1002};
         snf::server::MySqlPlayerRepository repository{repository_config};
@@ -170,12 +160,11 @@ namespace
                     })
                    .saved());
 
-        snf::server::PlayerPersistenceService persistence{
-            repository,
-            snf::server::PlayerPersistenceServiceConfig{
-                .queue_capacity = 4,
-                .flush_interval = 1ms,
-            }};
+        snf::server::PlayerPersistenceService persistence{repository,
+                                                          snf::server::PlayerPersistenceServiceConfig{
+                                                              .queue_capacity = 4,
+                                                              .flush_interval = 1ms,
+                                                          }};
         assert(persistence.tryEnqueue(snf::server::PlayerRecord{
             .player = player,
             .handled_command_count = 2,
@@ -196,8 +185,7 @@ namespace
     class RunningMySqlServer final
     {
     public:
-        explicit RunningMySqlServer(
-            const snf::server::MySqlPlayerRepositoryConfig& repository_config)
+        explicit RunningMySqlServer(const snf::server::MySqlPlayerRepositoryConfig& repository_config)
             : _server(
                   [&repository_config]
                   {
@@ -273,8 +261,7 @@ namespace
         server.stop();
     }
 
-    void test_game_server_restores_mysql_players_across_restart(
-        const snf::server::MySqlPlayerRepositoryConfig& repository_config)
+    void test_game_server_restores_mysql_players_across_restart(const snf::server::MySqlPlayerRepositoryConfig& repository_config)
     {
         run_zone_cycle(repository_config);
         run_zone_cycle(repository_config);

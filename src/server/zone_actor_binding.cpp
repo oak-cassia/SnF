@@ -43,8 +43,7 @@ namespace snf::server
         }
     }
 
-    ZoneActorBinding::ZoneActorBinding(ZoneActorBindingConfig config,
-                                       CommandLifecycleSink& lifecycle)
+    ZoneActorBinding::ZoneActorBinding(ZoneActorBindingConfig config, CommandLifecycleSink& lifecycle)
         : _actor_config(config.actor)
         , _tick_budget(config.tick_budget)
         , _on_result(std::move(config.on_result))
@@ -117,17 +116,13 @@ namespace snf::server
             PassivatePayload{});
     }
 
-    std::unique_ptr<snf::runtime::ActorSlot>
-    ZoneActorBinding::activate(const snf::runtime::EntityId entity)
+    std::unique_ptr<snf::runtime::ActorSlot> ZoneActorBinding::activate(const snf::runtime::EntityId entity)
     {
         return std::make_unique<ZoneActorSlot>(ZoneId{.value = entity}, _actor_config);
     }
 
     snf::runtime::ActorDispatchResult
-    ZoneActorBinding::dispatch(snf::runtime::ActorSlot& slot,
-                               const snf::runtime::ActorSubmission& submission,
-                               snf::runtime::ActorContext& context,
-                               const std::stop_token stop_token)
+    ZoneActorBinding::dispatch(snf::runtime::ActorSlot& slot, const snf::runtime::ActorSubmission& submission, snf::runtime::ActorContext& context, const std::stop_token stop_token)
     {
         static_cast<void>(stop_token);
         if (submission.accounting() == snf::runtime::ActorAccounting::Control)
@@ -140,8 +135,7 @@ namespace snf::server
         const CommandPayload& payload = payloadAs<CommandPayload>(submission);
         const auto started_at = std::chrono::steady_clock::now();
         ZoneResult result = zone_slot.actor.handle(payload.command.command);
-        const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - started_at);
+        const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started_at);
         _command_execution_nanoseconds.record(elapsed);
         if (std::holds_alternative<ZoneSimulationTick>(payload.command.command))
         {
@@ -172,26 +166,22 @@ namespace snf::server
                         };
                         // ExistingOnly: a tick must not resurrect a Zone that was
                         // evicted between the request and the deadline.
-                        auto timer_submission =
-                            makeSubmission(submission.target(),
-                                           snf::runtime::ActorActivation::ExistingOnly,
-                                           snf::runtime::ActorAccounting::Command,
-                                           CommandPayload{
-                                               .command = std::move(tick_command),
-                                               .release = {},
-                                           });
-                        static_cast<void>(
-                            context.trySchedule(follow_up.delay, std::move(timer_submission)));
+                        auto timer_submission = makeSubmission(submission.target(),
+                                                               snf::runtime::ActorActivation::ExistingOnly,
+                                                               snf::runtime::ActorAccounting::Command,
+                                                               CommandPayload{
+                                                                   .command = std::move(tick_command),
+                                                                   .release = {},
+                                                               });
+                        static_cast<void>(context.trySchedule(follow_up.delay, std::move(timer_submission)));
                     }
                     else if constexpr (std::is_same_v<Action, TellActor>)
                     {
-                        static_cast<void>(
-                            context.tryTell(follow_up.target, std::move(follow_up.payload)));
+                        static_cast<void>(context.tryTell(follow_up.target, std::move(follow_up.payload)));
                     }
                     else
                     {
-                        static_assert(always_false_v<Action>,
-                                      "Unhandled FollowUpAction alternative");
+                        static_assert(always_false_v<Action>, "Unhandled FollowUpAction alternative");
                     }
                 },
                 action);
@@ -204,9 +194,7 @@ namespace snf::server
         return snf::runtime::ActorDispatchResult::KeepActive;
     }
 
-    snf::runtime::ActorDispatchResult ZoneActorBinding::resume(snf::runtime::ActorSlot& slot,
-                                                               snf::runtime::ActorContext& context,
-                                                               const std::stop_token stop_token)
+    snf::runtime::ActorDispatchResult ZoneActorBinding::resume(snf::runtime::ActorSlot& slot, snf::runtime::ActorContext& context, const std::stop_token stop_token)
     {
         static_cast<void>(slot);
         static_cast<void>(context);

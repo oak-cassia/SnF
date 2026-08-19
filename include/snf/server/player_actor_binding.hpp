@@ -35,8 +35,7 @@ namespace snf::server
         // service. When omitted, a standalone persistent binding creates an owned
         // service so the repository is never called directly by the Actor binding.
         PlayerPersistenceService* persistence_service{nullptr};
-        std::size_t max_purchase_idempotency_records_per_player{
-            DEFAULT_PURCHASE_IDEMPOTENCY_CAPACITY};
+        std::size_t max_purchase_idempotency_records_per_player{DEFAULT_PURCHASE_IDEMPOTENCY_CAPACITY};
     };
 
     // Owns Player-specific type erasure at the edge of the generic scheduler.
@@ -49,27 +48,17 @@ namespace snf::server
     class PlayerActorBinding final : public snf::runtime::ActorBinding
     {
     public:
-        PlayerActorBinding(PlayerResponseSink& response_sink,
-                           OutboundSink& outbound,
-                           CommandLifecycleSink& lifecycle,
-                           PlayerActorBindingConfig config = {});
+        PlayerActorBinding(PlayerResponseSink& response_sink, OutboundSink& outbound, CommandLifecycleSink& lifecycle, PlayerActorBindingConfig config = {});
 
         [[nodiscard]] snf::runtime::ActorKind kind() const noexcept override;
         [[nodiscard]] snf::runtime::ActorSubmission makeCommand(PlayerInboundCommand command) const;
-        [[nodiscard]] snf::runtime::ActorSubmission
-        makeConnectionClosed(PlayerActorId actor, ConnectionClosed closed) const;
+        [[nodiscard]] snf::runtime::ActorSubmission makeConnectionClosed(PlayerActorId actor, ConnectionClosed closed) const;
 
     protected:
-        [[nodiscard]] std::unique_ptr<snf::runtime::ActorSlot>
-        activate(snf::runtime::EntityId entity) override;
+        [[nodiscard]] std::unique_ptr<snf::runtime::ActorSlot> activate(snf::runtime::EntityId entity) override;
         [[nodiscard]] snf::runtime::ActorDispatchResult
-        dispatch(snf::runtime::ActorSlot& slot,
-                 const snf::runtime::ActorSubmission& submission,
-                 snf::runtime::ActorContext& context,
-                 std::stop_token stop_token) override;
-        [[nodiscard]] snf::runtime::ActorDispatchResult resume(snf::runtime::ActorSlot& slot,
-                                                               snf::runtime::ActorContext& context,
-                                                               std::stop_token stop_token) override;
+        dispatch(snf::runtime::ActorSlot& slot, const snf::runtime::ActorSubmission& submission, snf::runtime::ActorContext& context, std::stop_token stop_token) override;
+        [[nodiscard]] snf::runtime::ActorDispatchResult resume(snf::runtime::ActorSlot& slot, snf::runtime::ActorContext& context, std::stop_token stop_token) override;
 
     private:
         struct PlayerActorSlot;
@@ -78,18 +67,14 @@ namespace snf::server
 
         // Shared tail of dispatch and resume: drive whichever stage the command is in,
         // and apply its follow-ups once the capacity is in hand.
-        [[nodiscard]] snf::runtime::ActorDispatchResult advance(PlayerActorSlot& slot,
-                                                                snf::runtime::ActorContext& context,
-                                                                std::stop_token stop_token);
-        [[nodiscard]] snf::runtime::ActorDispatchResult applyResponses(
-            PlayerActorSlot& slot, OutboundReservation& reservation, std::stop_token stop_token);
+        [[nodiscard]] snf::runtime::ActorDispatchResult advance(PlayerActorSlot& slot, snf::runtime::ActorContext& context, std::stop_token stop_token);
+        [[nodiscard]] snf::runtime::ActorDispatchResult applyResponses(PlayerActorSlot& slot, OutboundReservation& reservation, std::stop_token stop_token);
         void publishDirtySnapshot(PlayerActorSlot& slot) noexcept;
         // Ends a command that could not acquire capacity at all, either because none
         // could be awaited or because the result asks for more than one connection may
         // ever hold. The connection is closed by the backend, so the command itself ends
         // normally.
-        [[nodiscard]] snf::runtime::ActorDispatchResult
-        abandonResponses(PlayerActorSlot& slot) noexcept;
+        [[nodiscard]] snf::runtime::ActorDispatchResult abandonResponses(PlayerActorSlot& slot) noexcept;
         static void resetPendingCommand(PlayerActorSlot& slot) noexcept;
 
         PlayerResponseSink& _response_sink;
@@ -99,8 +84,7 @@ namespace snf::server
         PlayerRepository* _repository;
         std::function<void(PlayerActorId, const PlayerCommand&)> _on_before_command;
         std::function<void(PlayerActorId)> _on_actor_deactivated;
-        std::function<void(snf::net::ConnectionId, std::optional<PlayerLocation>)>
-            _on_record_loaded;
+        std::function<void(snf::net::ConnectionId, std::optional<PlayerLocation>)> _on_record_loaded;
         std::unique_ptr<PlayerPersistenceService> _owned_persistence_service;
         PlayerPersistenceService* _persistence_service;
         std::size_t _max_purchase_idempotency_records_per_player;

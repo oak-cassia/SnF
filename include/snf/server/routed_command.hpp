@@ -57,11 +57,7 @@ namespace snf::server
         ZoneInboundCommand command;
     };
 
-    using CommandRoute = std::variant<PlayerCommandRoute,
-                                      ConnectionClosedRoute,
-                                      ZoneCommandRoute,
-                                      PartyCommandRoute,
-                                      ZoneHandoffCommandRoute>;
+    using CommandRoute = std::variant<PlayerCommandRoute, ConnectionClosedRoute, ZoneCommandRoute, PartyCommandRoute, ZoneHandoffCommandRoute>;
 
     struct RoutedCommand
     {

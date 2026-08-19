@@ -16,9 +16,7 @@ namespace snf::server
     {
     }
 
-    CommandRouter::CommandRouter(PlayerCommandIngress& player_commands,
-                                 ZoneActorIngress& zone_commands,
-                                 PartyActorIngress& party_commands) noexcept
+    CommandRouter::CommandRouter(PlayerCommandIngress& player_commands, ZoneActorIngress& zone_commands, PartyActorIngress& party_commands) noexcept
         : _player_commands(player_commands)
         , _zone_commands(&zone_commands)
         , _party_commands(&party_commands)
@@ -41,14 +39,13 @@ namespace snf::server
                 }
                 else if constexpr (std::is_same_v<Route, ConnectionClosedRoute>)
                 {
-                    return _player_commands.tryPostConnectionClosed(
-                        route.actor,
-                        ConnectionClosed{
-                            .connection = connection,
-                            .cause = route.cause,
-                            .has_location_snapshot = route.has_location_snapshot,
-                            .last_location = route.last_location,
-                        });
+                    return _player_commands.tryPostConnectionClosed(route.actor,
+                                                                    ConnectionClosed{
+                                                                        .connection = connection,
+                                                                        .cause = route.cause,
+                                                                        .has_location_snapshot = route.has_location_snapshot,
+                                                                        .last_location = route.last_location,
+                                                                    });
                 }
                 else if constexpr (std::is_same_v<Route, ZoneCommandRoute>)
                 {

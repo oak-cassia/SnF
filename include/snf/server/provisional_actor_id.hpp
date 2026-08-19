@@ -16,8 +16,7 @@ namespace snf::server
         [[nodiscard]] bool operator==(const ProvisionalActorId&) const noexcept = default;
     };
 
-    [[nodiscard]] constexpr ProvisionalActorId
-    provisionalActorIdFor(const snf::net::ConnectionId connection) noexcept
+    [[nodiscard]] constexpr ProvisionalActorId provisionalActorIdFor(const snf::net::ConnectionId connection) noexcept
     {
         return ProvisionalActorId{.value = connection.generation};
     }

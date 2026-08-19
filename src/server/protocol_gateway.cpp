@@ -10,16 +10,13 @@ namespace
 {
     std::uint32_t read_u32(std::span<const std::byte> bytes, const std::size_t offset)
     {
-        return (std::to_integer<std::uint32_t>(bytes[offset]) << 24U) |
-               (std::to_integer<std::uint32_t>(bytes[offset + 1]) << 16U) |
-               (std::to_integer<std::uint32_t>(bytes[offset + 2]) << 8U) |
+        return (std::to_integer<std::uint32_t>(bytes[offset]) << 24U) | (std::to_integer<std::uint32_t>(bytes[offset + 1]) << 16U) | (std::to_integer<std::uint32_t>(bytes[offset + 2]) << 8U) |
                std::to_integer<std::uint32_t>(bytes[offset + 3]);
     }
 
     std::uint64_t read_u64(std::span<const std::byte> bytes, const std::size_t offset)
     {
-        return (static_cast<std::uint64_t>(read_u32(bytes, offset)) << 32U) |
-               read_u32(bytes, offset + 4);
+        return (static_cast<std::uint64_t>(read_u32(bytes, offset)) << 32U) | read_u32(bytes, offset + 4);
     }
 
     snf::server::FramePostResult frame_post_result(const snf::server::PostResult result)
@@ -57,20 +54,15 @@ namespace snf::server
         , _zone_results(zone_results)
         , _max_zone_completions_per_turn(config.max_zone_completions_per_turn)
     {
-        if (_max_zone_completions_per_turn == 0 ||
-            _max_zone_completions_per_turn > zone_transitions.capacity())
+        if (_max_zone_completions_per_turn == 0 || _max_zone_completions_per_turn > zone_transitions.capacity())
         {
-            throw std::invalid_argument{
-                "Zone completion turn budget must be positive and no greater than capacity"};
+            throw std::invalid_argument{"Zone completion turn budget must be positive and no greater than capacity"};
         }
         _active_zone_handoffs.reserve(zone_transitions.capacity());
     }
 
-    FramePostResult ProtocolGateway::tryStartZoneHandoff(const FrameEnvelope& envelope,
-                                                         const PlayerId player,
-                                                         const ZoneId target_zone,
-                                                         const ZonePosition requested_position,
-                                                         const SessionRoute& source)
+    FramePostResult
+    ProtocolGateway::tryStartZoneHandoff(const FrameEnvelope& envelope, const PlayerId player, const ZoneId target_zone, const ZonePosition requested_position, const SessionRoute& source)
     {
         if (_handoff_admission_closed)
         {
@@ -85,22 +77,11 @@ namespace snf::server
 
         CommandReleaseToken release{_lifecycle, envelope.connection};
 
-        const auto handoff = _routes.tryBeginHandoff(envelope.connection,
-                                                     player,
-                                                     target_zone,
-                                                     source_location->position,
-                                                     requested_position,
-                                                     envelope.frame.request_id);
+        const auto handoff = _routes.tryBeginHandoff(envelope.connection, player, target_zone, source_location->position, requested_position, envelope.frame.request_id);
         if (!handoff)
         {
-            replyZoneStatus(envelope.connection,
-                            player,
-                            source.zone,
-                            source.route_epoch,
-                            source_location->position,
-                            envelope.frame.request_id,
-                            ZoneReplyKind::Entered,
-                            ZoneCommandStatus::TransferFailed);
+            replyZoneStatus(
+                envelope.connection, player, source.zone, source.route_epoch, source_location->position, envelope.frame.request_id, ZoneReplyKind::Entered, ZoneCommandStatus::TransferFailed);
             ++_handoff_failures_before_source_leave;
             return FramePostResult::Accepted;
         }
@@ -109,14 +90,8 @@ namespace snf::server
         if (!ticket)
         {
             static_cast<void>(_routes.rollbackHandoffBeforeLeave(envelope.connection, handoff->id));
-            replyZoneStatus(envelope.connection,
-                            player,
-                            source.zone,
-                            source.route_epoch,
-                            source_location->position,
-                            envelope.frame.request_id,
-                            ZoneReplyKind::Entered,
-                            ZoneCommandStatus::TransferFailed);
+            replyZoneStatus(
+                envelope.connection, player, source.zone, source.route_epoch, source_location->position, envelope.frame.request_id, ZoneReplyKind::Entered, ZoneCommandStatus::TransferFailed);
             ++_handoff_failures_before_source_leave;
             return FramePostResult::Accepted;
         }
@@ -124,13 +99,12 @@ namespace snf::server
         bool inserted_active = false;
         try
         {
-            const auto [active, inserted] = _active_zone_handoffs.try_emplace(
-                envelope.connection,
-                ActiveZoneHandoff{
-                    .ticket = *ticket,
-                    .release = std::move(release),
-                    .started_at = std::chrono::steady_clock::now(),
-                });
+            const auto [active, inserted] = _active_zone_handoffs.try_emplace(envelope.connection,
+                                                                              ActiveZoneHandoff{
+                                                                                  .ticket = *ticket,
+                                                                                  .release = std::move(release),
+                                                                                  .started_at = std::chrono::steady_clock::now(),
+                                                                              });
             static_cast<void>(active);
             if (!inserted)
             {
@@ -138,17 +112,14 @@ namespace snf::server
             }
             inserted_active = true;
 
-            if (postZoneHandoffStage(*handoff, ZoneHandoffStep::LeaveSource) !=
-                PostResult::Accepted)
+            if (postZoneHandoffStage(*handoff, ZoneHandoffStep::LeaveSource) != PostResult::Accepted)
             {
-                failHandoffBeforeSourceLeave(
-                    envelope.connection, handoff->id, ZoneCommandStatus::TransferFailed);
+                failHandoffBeforeSourceLeave(envelope.connection, handoff->id, ZoneCommandStatus::TransferFailed);
             }
         }
         catch (...)
         {
-            if (const auto active = _active_zone_handoffs.find(envelope.connection);
-                inserted_active && active != _active_zone_handoffs.end())
+            if (const auto active = _active_zone_handoffs.find(envelope.connection); inserted_active && active != _active_zone_handoffs.end())
             {
                 _zone_transitions.release(active->second.ticket);
                 _active_zone_handoffs.erase(active);
@@ -164,8 +135,7 @@ namespace snf::server
         return FramePostResult::Accepted;
     }
 
-    PostResult ProtocolGateway::postZoneHandoffStage(const ZoneHandoff& handoff,
-                                                     const ZoneHandoffStep step)
+    PostResult ProtocolGateway::postZoneHandoffStage(const ZoneHandoff& handoff, const ZoneHandoffStep step)
     {
         const auto active = _active_zone_handoffs.find(handoff.source.connection);
         if (active == _active_zone_handoffs.end())
@@ -251,9 +221,7 @@ namespace snf::server
         });
     }
 
-    void ProtocolGateway::failHandoffBeforeSourceLeave(const snf::net::ConnectionId connection,
-                                                       const ZoneHandoffId handoff_id,
-                                                       const ZoneCommandStatus status)
+    void ProtocolGateway::failHandoffBeforeSourceLeave(const snf::net::ConnectionId connection, const ZoneHandoffId handoff_id, const ZoneCommandStatus status)
     {
         const auto handoff = _routes.handoffFor(connection);
         const auto active = _active_zone_handoffs.find(connection);
@@ -269,16 +237,8 @@ namespace snf::server
             throw std::logic_error{"Zone handoff could not roll back before source leave"};
         }
         _zone_transitions.release(ticket);
-        replyZoneStatus(connection,
-                        handoff->source.player,
-                        handoff->source.zone,
-                        handoff->source.route_epoch,
-                        handoff->last_source_position,
-                        handoff->request_id,
-                        ZoneReplyKind::Entered,
-                        status);
-        _zone_transition_nanoseconds.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - started_at));
+        replyZoneStatus(connection, handoff->source.player, handoff->source.zone, handoff->source.route_epoch, handoff->last_source_position, handoff->request_id, ZoneReplyKind::Entered, status);
+        _zone_transition_nanoseconds.record(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started_at));
         ++_handoff_failures_before_source_leave;
         _active_zone_handoffs.erase(active);
     }
@@ -291,8 +251,7 @@ namespace snf::server
             return;
         }
         _zone_transitions.release(active->second.ticket);
-        _zone_transition_nanoseconds.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - active->second.started_at));
+        _zone_transition_nanoseconds.record(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - active->second.started_at));
         _active_zone_handoffs.erase(active);
     }
 
@@ -305,15 +264,13 @@ namespace snf::server
             return;
         }
         const auto restore = _routes.handoffFor(handoff.source.connection);
-        if (!restore ||
-            postZoneHandoffStage(*restore, ZoneHandoffStep::RestoreSource) != PostResult::Accepted)
+        if (!restore || postZoneHandoffStage(*restore, ZoneHandoffStep::RestoreSource) != PostResult::Accepted)
         {
             finishFatalHandoff(restore.value_or(handoff));
         }
     }
 
-    void ProtocolGateway::finishSourceRestore(const ZoneHandoff& handoff,
-                                              const ZonePosition position)
+    void ProtocolGateway::finishSourceRestore(const ZoneHandoff& handoff, const ZonePosition position)
     {
         const auto active = _active_zone_handoffs.find(handoff.source.connection);
         if (active == _active_zone_handoffs.end())
@@ -337,20 +294,12 @@ namespace snf::server
                                    .zone = route->zone,
                                    .position = position,
                                });
-        replyZoneStatus(handoff.source.connection,
-                        route->player,
-                        route->zone,
-                        route->route_epoch,
-                        position,
-                        handoff.request_id,
-                        ZoneReplyKind::Entered,
-                        ZoneCommandStatus::TransferFailed);
+        replyZoneStatus(handoff.source.connection, route->player, route->zone, route->route_epoch, position, handoff.request_id, ZoneReplyKind::Entered, ZoneCommandStatus::TransferFailed);
         ++_handoffs_compensated;
         finishActiveHandoff(handoff.source.connection);
     }
 
-    void ProtocolGateway::beginDisconnectCleanup(const ZoneHandoff& handoff,
-                                                 const ZoneHandoffStep cleanup_step)
+    void ProtocolGateway::beginDisconnectCleanup(const ZoneHandoff& handoff, const ZoneHandoffStep cleanup_step)
     {
         if (!_routes.beginCleanup(handoff.source.connection, handoff.id, cleanup_step))
         {
@@ -431,35 +380,27 @@ namespace snf::server
             });
     }
 
-    bool ProtocolGateway::isValidCompletion(const ZoneHandoff& handoff,
-                                            const ZoneHandoffCompletion& completion) const noexcept
+    bool ProtocolGateway::isValidCompletion(const ZoneHandoff& handoff, const ZoneHandoffCompletion& completion) const noexcept
     {
-        if (completion.handoff_id != handoff.id ||
-            completion.connection != handoff.source.connection ||
-            completion.player != handoff.source.player || completion.step != handoff.step)
+        if (completion.handoff_id != handoff.id || completion.connection != handoff.source.connection || completion.player != handoff.source.player || completion.step != handoff.step)
         {
             return false;
         }
         if (completion.step == ZoneHandoffStep::LeaveSource)
         {
-            return completion.zone == handoff.source.zone &&
-                   completion.route_epoch == handoff.source.route_epoch;
+            return completion.zone == handoff.source.zone && completion.route_epoch == handoff.source.route_epoch;
         }
         if (completion.step == ZoneHandoffStep::EnterTarget)
         {
-            return completion.zone == handoff.target_zone &&
-                   completion.route_epoch == handoff.target_epoch;
+            return completion.zone == handoff.target_zone && completion.route_epoch == handoff.target_epoch;
         }
-        if (completion.step == ZoneHandoffStep::RestoreSource ||
-            completion.step == ZoneHandoffStep::CleanupSource)
+        if (completion.step == ZoneHandoffStep::RestoreSource || completion.step == ZoneHandoffStep::CleanupSource)
         {
-            return completion.zone == handoff.source.zone && handoff.restore_epoch != 0 &&
-                   completion.route_epoch == handoff.restore_epoch;
+            return completion.zone == handoff.source.zone && handoff.restore_epoch != 0 && completion.route_epoch == handoff.restore_epoch;
         }
         if (completion.step == ZoneHandoffStep::CleanupTarget)
         {
-            return completion.zone == handoff.target_zone &&
-                   completion.route_epoch == handoff.target_epoch;
+            return completion.zone == handoff.target_zone && completion.route_epoch == handoff.target_epoch;
         }
         return false;
     }
@@ -468,8 +409,7 @@ namespace snf::server
     {
         const auto handoff = _routes.handoffFor(completion.connection);
         const auto active = _active_zone_handoffs.find(completion.connection);
-        if (!handoff || active == _active_zone_handoffs.end() ||
-            !isValidCompletion(*handoff, completion))
+        if (!handoff || active == _active_zone_handoffs.end() || !isValidCompletion(*handoff, completion))
         {
             ++_stale_handoff_completions;
             return;
@@ -477,9 +417,7 @@ namespace snf::server
 
         if (completion.step == ZoneHandoffStep::LeaveSource)
         {
-            if (completion.status != ZoneCommandStatus::Applied || !completion.position ||
-                !_routes.noteSourceLeft(
-                    completion.connection, completion.handoff_id, *completion.position))
+            if (completion.status != ZoneCommandStatus::Applied || !completion.position || !_routes.noteSourceLeft(completion.connection, completion.handoff_id, *completion.position))
             {
                 finishFatalHandoff(*handoff);
                 return;
@@ -504,9 +442,7 @@ namespace snf::server
 
         if (completion.step == ZoneHandoffStep::EnterTarget)
         {
-            if ((completion.status != ZoneCommandStatus::Applied &&
-                 completion.status != ZoneCommandStatus::AlreadyPresent) ||
-                !completion.position)
+            if ((completion.status != ZoneCommandStatus::Applied && completion.status != ZoneCommandStatus::AlreadyPresent) || !completion.position)
             {
                 if (active->second.disconnecting)
                 {
@@ -525,8 +461,7 @@ namespace snf::server
                 return;
             }
 
-            const auto route =
-                _routes.completeTargetEnter(completion.connection, completion.handoff_id);
+            const auto route = _routes.completeTargetEnter(completion.connection, completion.handoff_id);
             if (!route)
             {
                 finishFatalHandoff(*handoff);
@@ -538,23 +473,14 @@ namespace snf::server
                                        .position = *completion.position,
                                    });
 
-            replyZoneStatus(completion.connection,
-                            route->player,
-                            route->zone,
-                            route->route_epoch,
-                            *completion.position,
-                            handoff->request_id,
-                            ZoneReplyKind::Entered,
-                            completion.status);
+            replyZoneStatus(completion.connection, route->player, route->zone, route->route_epoch, *completion.position, handoff->request_id, ZoneReplyKind::Entered, completion.status);
             finishActiveHandoff(completion.connection);
             return;
         }
 
         if (completion.step == ZoneHandoffStep::RestoreSource)
         {
-            if ((completion.status != ZoneCommandStatus::Applied &&
-                 completion.status != ZoneCommandStatus::AlreadyPresent) ||
-                !completion.position)
+            if ((completion.status != ZoneCommandStatus::Applied && completion.status != ZoneCommandStatus::AlreadyPresent) || !completion.position)
             {
                 finishFatalHandoff(*handoff);
                 return;
@@ -563,11 +489,9 @@ namespace snf::server
             return;
         }
 
-        if (completion.step == ZoneHandoffStep::CleanupTarget ||
-            completion.step == ZoneHandoffStep::CleanupSource)
+        if (completion.step == ZoneHandoffStep::CleanupTarget || completion.step == ZoneHandoffStep::CleanupSource)
         {
-            if (completion.status != ZoneCommandStatus::Applied &&
-                completion.status != ZoneCommandStatus::PlayerMissing)
+            if (completion.status != ZoneCommandStatus::Applied && completion.status != ZoneCommandStatus::PlayerMissing)
             {
                 finishFatalHandoff(*handoff);
                 return;
@@ -613,16 +537,14 @@ namespace snf::server
 
     FramePostResult ProtocolGateway::tryPost(FrameEnvelope envelope)
     {
-        const auto post_zone =
-            [this, connection = envelope.connection](ZoneCommandRoute route) -> FramePostResult
+        const auto post_zone = [this, connection = envelope.connection](ZoneCommandRoute route) -> FramePostResult
         {
             return frame_post_result(_commands.tryPost(RoutedCommand{
                 .connection = connection,
                 .route = std::move(route),
             }));
         };
-        const auto post_party =
-            [this, connection = envelope.connection](PartyCommandRoute route) -> FramePostResult
+        const auto post_party = [this, connection = envelope.connection](PartyCommandRoute route) -> FramePostResult
         {
             return frame_post_result(_commands.tryPost(RoutedCommand{
                 .connection = connection,
@@ -725,8 +647,7 @@ namespace snf::server
                 .x = static_cast<std::int32_t>(read_u32(payload, 8)),
                 .y = static_cast<std::int32_t>(read_u32(payload, 12)),
             };
-            if (const auto restored = _sessions.locationFor(envelope.connection);
-                restored && restored->zone == zone)
+            if (const auto restored = _sessions.locationFor(envelope.connection); restored && restored->zone == zone)
             {
                 position = restored->position;
             }
@@ -745,8 +666,7 @@ namespace snf::server
                 ++_transition_busy_replies;
                 return FramePostResult::Accepted;
             }
-            if (const auto source = _routes.routeFor(envelope.connection);
-                source && source->zone != zone)
+            if (const auto source = _routes.routeFor(envelope.connection); source && source->zone != zone)
             {
                 return tryStartZoneHandoff(envelope, *player, zone, position, *source);
             }
@@ -782,8 +702,7 @@ namespace snf::server
             }
             else if (admission->created)
             {
-                _sessions.noteLocation(envelope.connection,
-                                       PlayerLocation{.zone = zone, .position = position});
+                _sessions.noteLocation(envelope.connection, PlayerLocation{.zone = zone, .position = position});
             }
             return result;
         }
@@ -879,8 +798,7 @@ namespace snf::server
             });
             if (result == FramePostResult::Accepted)
             {
-                _sessions.noteLocation(envelope.connection,
-                                       PlayerLocation{.zone = route->zone, .position = position});
+                _sessions.noteLocation(envelope.connection, PlayerLocation{.zone = route->zone, .position = position});
             }
             return result;
         }
@@ -933,17 +851,14 @@ namespace snf::server
         DispatchResult dispatch_result = _dispatcher.dispatch(std::move(envelope.frame));
         if (!dispatch_result.handled())
         {
-            return dispatch_result.status == DispatchStatus::HandlerNotFound
-                       ? FramePostResult::UnsupportedMessage
-                       : FramePostResult::InvalidPayload;
+            return dispatch_result.status == DispatchStatus::HandlerNotFound ? FramePostResult::UnsupportedMessage : FramePostResult::InvalidPayload;
         }
 
         PlayerActorId actor = provisionalActorIdFor(envelope.connection);
         std::optional<PlayerId> new_attachment;
         if (const auto* authenticate = std::get_if<AuthenticateCommand>(&*dispatch_result.command))
         {
-            const PlayerAttachResult attach_result =
-                _sessions.tryAttach(envelope.connection, authenticate->player);
+            const PlayerAttachResult attach_result = _sessions.tryAttach(envelope.connection, authenticate->player);
             if (attach_result == PlayerAttachResult::Attached)
             {
                 new_attachment = authenticate->player;
@@ -1013,8 +928,7 @@ namespace snf::server
 
     PostResult ProtocolGateway::tryPostConnectionClosed(ConnectionClosed closed)
     {
-        if (const auto active = _active_zone_handoffs.find(closed.connection);
-            active != _active_zone_handoffs.end())
+        if (const auto active = _active_zone_handoffs.find(closed.connection); active != _active_zone_handoffs.end())
         {
             active->second.disconnecting = true;
             // TcpServer retains this exact lifecycle value in its bounded retry
@@ -1025,13 +939,11 @@ namespace snf::server
 
         if (!closed.has_location_snapshot)
         {
-            const PlayerLocationSnapshot snapshot =
-                _sessions.locationSnapshotFor(closed.connection);
+            const PlayerLocationSnapshot snapshot = _sessions.locationSnapshotFor(closed.connection);
             closed.has_location_snapshot = snapshot.known;
             closed.last_location = snapshot.location;
         }
-        if (const auto current_party = _parties.routeFor(closed.connection);
-            current_party && !current_party->leaving)
+        if (const auto current_party = _parties.routeFor(closed.connection); current_party && !current_party->leaving)
         {
             const auto party = _parties.beginLeave(closed.connection);
             if (!party)
@@ -1095,9 +1007,7 @@ namespace snf::server
         }
 
         const std::optional<PlayerId> player = _sessions.playerFor(closed.connection);
-        const PlayerActorId actor = player
-                                        ? PlayerActorId{*player}
-                                        : PlayerActorId{provisionalActorIdFor(closed.connection)};
+        const PlayerActorId actor = player ? PlayerActorId{*player} : PlayerActorId{provisionalActorIdFor(closed.connection)};
         const bool began_persistent_close = player && _sessions.beginClose(closed.connection);
 
         PostResult result;

@@ -44,9 +44,7 @@ namespace snf::server
     class PlayerPersistenceService final
     {
     public:
-        explicit PlayerPersistenceService(
-            PlayerRepository& repository,
-            PlayerPersistenceServiceConfig config = PlayerPersistenceServiceConfig{});
+        explicit PlayerPersistenceService(PlayerRepository& repository, PlayerPersistenceServiceConfig config = PlayerPersistenceServiceConfig{});
         ~PlayerPersistenceService();
 
         PlayerPersistenceService(const PlayerPersistenceService&) = delete;

@@ -11,16 +11,13 @@ namespace
     class RecordingCommandIngress final : public snf::server::PlayerCommandIngress
     {
     public:
-        [[nodiscard]] snf::runtime::PostResult
-        tryPost(snf::server::PlayerInboundCommand command) override
+        [[nodiscard]] snf::runtime::PostResult tryPost(snf::server::PlayerInboundCommand command) override
         {
             posted = std::move(command);
             return result;
         }
 
-        [[nodiscard]] snf::runtime::PostResult
-        tryPostConnectionClosed(snf::server::PlayerActorId actor,
-                                snf::server::ConnectionClosed closed) override
+        [[nodiscard]] snf::runtime::PostResult tryPostConnectionClosed(snf::server::PlayerActorId actor, snf::server::ConnectionClosed closed) override
         {
             closed_actor = actor;
             closed_connection = closed;
@@ -106,8 +103,7 @@ namespace
         assert(player_commands.closed_connection.has_value());
         assert(player_commands.closed_connection->connection.descriptor == 43);
         assert(player_commands.closed_connection->connection.generation == 10);
-        assert(player_commands.closed_connection->cause ==
-               snf::server::ConnectionCloseCause::ProtocolError);
+        assert(player_commands.closed_connection->cause == snf::server::ConnectionCloseCause::ProtocolError);
         assert(player_commands.closed_connection->has_location_snapshot);
         assert(!player_commands.closed_connection->last_location.has_value());
     }

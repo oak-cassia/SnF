@@ -12,8 +12,7 @@ namespace
 
     constexpr std::uint64_t BYTE_MASK = 0xFFU;
 
-    template <typename Integer>
-    void append_big_endian(std::vector<std::byte>& payload, Integer value)
+    template <typename Integer> void append_big_endian(std::vector<std::byte>& payload, Integer value)
     {
         for (std::size_t remaining = sizeof(Integer); remaining > 0; --remaining)
         {

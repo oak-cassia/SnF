@@ -19,11 +19,7 @@ namespace snf::net
 
         constexpr int reuse_address = 1;
 
-        if (::setsockopt(listener.getDescriptor(),
-                         SOL_SOCKET,
-                         SO_REUSEADDR,
-                         &reuse_address,
-                         sizeof(reuse_address)) == -1)
+        if (::setsockopt(listener.getDescriptor(), SOL_SOCKET, SO_REUSEADDR, &reuse_address, sizeof(reuse_address)) == -1)
         {
             throw_system_error("setsockopt(SO_REUSEADDR)");
         }
@@ -47,9 +43,7 @@ namespace snf::net
 
         constexpr auto address_size = static_cast<socklen_t>(sizeof(address));
 
-        if (::bind(listener.getDescriptor(),
-                   reinterpret_cast<const sockaddr*>(&address),
-                   address_size) == -1)
+        if (::bind(listener.getDescriptor(), reinterpret_cast<const sockaddr*>(&address), address_size) == -1)
         {
             throw_system_error("bind");
         }

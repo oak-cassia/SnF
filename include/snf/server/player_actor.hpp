@@ -21,8 +21,7 @@ namespace snf::server
 
     using PlayerStateComponentMask = std::uint8_t;
 
-    [[nodiscard]] constexpr PlayerStateComponentMask
-    componentMask(const PlayerStateComponent component) noexcept
+    [[nodiscard]] constexpr PlayerStateComponentMask componentMask(const PlayerStateComponent component) noexcept
     {
         return static_cast<PlayerStateComponentMask>(component);
     }
@@ -82,8 +81,7 @@ namespace snf::server
         [[nodiscard]] PlayerStateComponentMask dirtyComponents() const noexcept;
         // Must be called on the owning Worker. It clears all currently dirty
         // components and returns a flat persistence record for the service queue.
-        [[nodiscard]] std::optional<PlayerRecord>
-        takeDirtySnapshot(PlayerStateComponentMask* cleared_components = nullptr);
+        [[nodiscard]] std::optional<PlayerRecord> takeDirtySnapshot(PlayerStateComponentMask* cleared_components = nullptr);
         void restoreDirtyComponents(PlayerStateComponentMask components) noexcept;
         [[nodiscard]] PlayerRecord snapshot() const;
 

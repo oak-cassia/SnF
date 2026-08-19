@@ -75,8 +75,7 @@ namespace snf::server
     // but still crosses the Actor continuation queue because the binding wraps it
     // in an async operation. The mutex also makes it safe for integration tests to
     // inspect records while the owning Worker may complete a save.
-    class InMemoryPlayerRepository final : public PlayerRepository,
-                                           public PlayerRepositoryDiagnostics
+    class InMemoryPlayerRepository final : public PlayerRepository, public PlayerRepositoryDiagnostics
     {
     public:
         void asyncLoad(PlayerId player, PlayerLoadCompletion completion) override;

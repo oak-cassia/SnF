@@ -11,9 +11,7 @@ namespace snf::net
     {
     }
 
-    Session::Session(UniqueFileDescriptor socket,
-                     const ConnectionId connection_id,
-                     const std::size_t max_pending_send_bytes) noexcept
+    Session::Session(UniqueFileDescriptor socket, const ConnectionId connection_id, const std::size_t max_pending_send_bytes) noexcept
         : _socket(std::move(socket))
         , _connection_id(connection_id)
         , _max_pending_send_bytes(max_pending_send_bytes)
@@ -39,8 +37,7 @@ namespace snf::net
     {
         auto encoded_frame = protocol::encode_frame(frame);
 
-        if (_pending_send_byte_count > _max_pending_send_bytes ||
-            encoded_frame.size() > _max_pending_send_bytes - _pending_send_byte_count)
+        if (_pending_send_byte_count > _max_pending_send_bytes || encoded_frame.size() > _max_pending_send_bytes - _pending_send_byte_count)
         {
             return false;
         }

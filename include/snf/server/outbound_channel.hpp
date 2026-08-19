@@ -73,16 +73,12 @@ namespace snf::server
         // a late arrival cannot barge ahead of an actor that is already suspended.
         // Outside saturation there are no waiters and this is the only path taken,
         // which is why the common case starts no async operation at all.
-        [[nodiscard]] std::optional<OutboundReservation>
-        tryReserve(snf::net::ConnectionId connection, std::size_t slots) override;
+        [[nodiscard]] std::optional<OutboundReservation> tryReserve(snf::net::ConnectionId connection, std::size_t slots) override;
 
         // The producer receives a valid reservation once capacity is granted, and an
         // invalid one if the channel is cancelled first. An invalid ticket means the
         // channel was already cancelled and the producer has been completed.
-        [[nodiscard]] ReservationTicket
-        registerWaiter(snf::net::ConnectionId connection,
-                       std::size_t slots,
-                       snf::runtime::AsyncOperationProducer<OutboundReservation> producer) override;
+        [[nodiscard]] ReservationTicket registerWaiter(snf::net::ConnectionId connection, std::size_t slots, snf::runtime::AsyncOperationProducer<OutboundReservation> producer) override;
 
         // Owning Worker only, and only after it has claimed the operation cancelled:
         // withdrawing destroys the producer, so no completion will ever arrive for
@@ -115,8 +111,7 @@ namespace snf::server
         // budget was exceeded (or recording allocated unsuccessfully), so the reactor
         // must apply the fail-safe policy to every current session: the one record that
         // could not be retained must never turn into a silently missing response.
-        [[nodiscard]] bool
-        takePendingAdmissionFailures(std::vector<snf::net::ConnectionId>& failures);
+        [[nodiscard]] bool takePendingAdmissionFailures(std::vector<snf::net::ConnectionId>& failures);
 
         // Callable from any thread. Records a connection whose outbound admission
         // failed before any capacity was reserved, so the reactor can close it under
@@ -208,8 +203,7 @@ namespace snf::server
 
         mutable std::mutex _mutex;
         std::deque<QueuedAction> _items;
-        std::unordered_map<snf::net::ConnectionId, ConnectionUsage, snf::net::ConnectionIdHash>
-            _connections;
+        std::unordered_map<snf::net::ConnectionId, ConnectionUsage, snf::net::ConnectionIdHash> _connections;
         std::deque<snf::net::ConnectionId> _grant_order;
         std::unordered_set<snf::net::ConnectionId, snf::net::ConnectionIdHash> _admission_failures;
         std::size_t _reserved_slots{0};
