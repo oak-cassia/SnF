@@ -36,9 +36,9 @@ namespace snf::server
     {
         RoomCommandStatus status{RoomCommandStatus::Applied};
         RoomPhase phase{RoomPhase::Waiting};
-        std::optional<PlayerId> player;
+        std::optional<PlayerId> player{};
         // How long this battle still needs. Set once, when it starts.
-        std::optional<std::chrono::milliseconds> complete_after;
-        std::vector<StreetExperienceGrant> grants;
+        std::optional<std::chrono::milliseconds> complete_after{};
+        std::vector<StreetExperienceGrant> grants{};
     };
 }

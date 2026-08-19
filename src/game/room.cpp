@@ -41,7 +41,13 @@ namespace snf::server
 
     RoomResult Room::handle(const RoomCommand& command)
     {
-        return std::visit([this](const auto& value) { return handleCommand(value); }, command);
+        return std::visit(
+            [this](const auto& value)
+            {
+                return handleCommand(value);
+            },
+            command
+        );
     }
 
     RoomResult Room::handleCommand(const JoinRoom& command)
@@ -55,7 +61,14 @@ namespace snf::server
             };
         }
 
-        const auto position = std::lower_bound(_participants.begin(), _participants.end(), command.player, [](const PlayerId left, const PlayerId right) { return left.value < right.value; });
+        const auto position = std::ranges::lower_bound(
+            _participants,
+            command.player,
+            [](const PlayerId left, const PlayerId right)
+            {
+                return left.value < right.value;
+            }
+        );
         if (position != _participants.end() && *position == command.player)
         {
             return RoomResult{
@@ -96,14 +109,13 @@ namespace snf::server
 
         _phase = RoomPhase::Running;
 
-        RoomResult result{
-            .status = RoomCommandStatus::Applied,
-            .phase = _phase,
-        };
         // One shot. Combat is a placeholder, so the battle is this delay and nothing
         // else; there is no periodic tick to rearm.
-        result.complete_after = _config.battle_duration;
-        return result;
+        return RoomResult{
+            .status = RoomCommandStatus::Applied,
+            .phase = _phase,
+            .complete_after = _config.battle_duration,
+        };
     }
 
     RoomResult Room::handleCommand(const BattleCompleted&)
@@ -121,18 +133,20 @@ namespace snf::server
 
         _phase = RoomPhase::Cleared;
 
-        RoomResult result{
-            .status = RoomCommandStatus::Applied,
-            .phase = _phase,
-        };
-        result.grants.reserve(_participants.size());
+        std::vector<StreetExperienceGrant> grants;
+        grants.reserve(_participants.size());
         for (const PlayerId participant : _participants)
         {
-            result.grants.push_back(StreetExperienceGrant{
+            grants.push_back(StreetExperienceGrant{
                 .player = participant,
                 .experience = _config.clear_experience,
             });
         }
-        return result;
+
+        return RoomResult{
+            .status = RoomCommandStatus::Applied,
+            .phase = _phase,
+            .grants = std::move(grants),
+        };
     }
 }
