@@ -2,42 +2,24 @@
 
 #include "snf/server/player_id.hpp"
 
-#include <cstdint>
 #include <variant>
 
 namespace snf::server
 {
-    struct ZonePosition
-    {
-        std::int32_t x{0};
-        std::int32_t y{0};
-
-        [[nodiscard]] bool operator==(const ZonePosition&) const noexcept = default;
-    };
-
-    struct EnterZoneCommand
+    struct JoinRoom
     {
         PlayerId player;
-        std::uint64_t route_epoch{0};
-        ZonePosition position;
     };
 
-    struct LeaveZoneCommand
-    {
-        PlayerId player;
-        std::uint64_t route_epoch{0};
-    };
-
-    struct MoveInZoneCommand
-    {
-        PlayerId player;
-        std::uint64_t route_epoch{0};
-        ZonePosition position;
-    };
-
-    struct ZoneSimulationTick
+    struct StartBattle
     {
     };
 
-    using ZoneCommand = std::variant<EnterZoneCommand, LeaveZoneCommand, MoveInZoneCommand, ZoneSimulationTick>;
+    // Posted by the Room's own battle timer, never by a client. It carries no
+    // outcome yet: combat is a placeholder that always clears.
+    struct BattleCompleted
+    {
+    };
+
+    using RoomCommand = std::variant<JoinRoom, StartBattle, BattleCompleted>;
 }

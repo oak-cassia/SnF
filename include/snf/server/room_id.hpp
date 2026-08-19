@@ -6,18 +6,18 @@
 
 namespace snf::server
 {
-    struct ZoneId
+    struct RoomId
     {
         std::uint64_t value{0};
 
-        [[nodiscard]] bool operator==(const ZoneId&) const noexcept = default;
+        [[nodiscard]] bool operator==(const RoomId&) const noexcept = default;
     };
 
-    struct ZoneIdHash
+    struct RoomIdHash
     {
-        [[nodiscard]] std::size_t operator()(const ZoneId zone) const noexcept
+        [[nodiscard]] std::size_t operator()(const RoomId room) const noexcept
         {
-            return std::hash<std::uint64_t>{}(zone.value);
+            return std::hash<std::uint64_t>{}(room.value);
         }
     };
 }

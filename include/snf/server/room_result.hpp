@@ -2,33 +2,37 @@
 
 #include "snf/server/follow_up_action.hpp"
 #include "snf/server/player_id.hpp"
-#include "snf/server/zone_command.hpp"
 
-#include <cstdint>
 #include <optional>
 #include <vector>
 
 namespace snf::server
 {
-    enum class ZoneCommandStatus
+    enum class RoomPhase : std::uint8_t
     {
-        Applied,
-        AlreadyPresent,
-        PlayerMissing,
-        StaleRoute,
-        TransitionInProgress,
-        TransferFailed,
+        Waiting,
+        Running,
+        Cleared,
     };
 
-    struct ZoneResult
+    enum class RoomCommandStatus : std::uint8_t
     {
-        ZoneCommandStatus status{ZoneCommandStatus::Applied};
+        Applied,
+        AlreadyJoined,
+        RoomFull,
+        // The command does not belong to the phase the Room is in. A second
+        // BattleCompleted lands here, which is what keeps a clear from paying out
+        // twice however the timer or the mailbox behaves.
+        WrongPhase,
+    };
+
+    // Non-copyable, because TellActor owns a move-only TellPayload. A recorder in a
+    // test has to keep the fields it asserts on rather than the whole result.
+    struct RoomResult
+    {
+        RoomCommandStatus status{RoomCommandStatus::Applied};
+        RoomPhase phase{RoomPhase::Waiting};
         std::optional<PlayerId> player;
-        std::optional<ZonePosition> position;
-        std::uint64_t route_epoch{0};
-        std::uint64_t tick{0};
-        // Deterministic ascending PlayerId order, excluding the requesting player.
-        std::vector<PlayerId> visible_players;
         std::vector<FollowUpAction> follow_ups;
     };
 }

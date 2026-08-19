@@ -15,6 +15,7 @@ namespace snf::runtime
         Player,
         Zone,
         Party,
+        Room,
     };
 
     using EntityId = std::uint64_t;
