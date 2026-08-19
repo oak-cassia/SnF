@@ -284,15 +284,25 @@ namespace snf::runtime
             return ActorSubmission{this, target, activation, accounting, std::forward<Payload>(payload)};
         }
 
-        template <typename Payload> [[nodiscard]] static const Payload& payloadAs(const ActorSubmission& submission)
+        // Null when the submission carries a different payload type. A binding that
+        // has more than one payload for the same accounting class uses this to pick
+        // a branch; payloadAs is still the right call once the type is settled,
+        // because a mismatch there is a wiring bug rather than a case to handle.
+        template <typename Payload> [[nodiscard]] static const Payload* tryPayloadAs(const ActorSubmission& submission) noexcept
         {
             const auto* payload = dynamic_cast<const ActorSubmission::TypedPayload<Payload>*>(submission._payload.get());
+            return payload == nullptr ? nullptr : &payload->value;
+        }
+
+        template <typename Payload> [[nodiscard]] static const Payload& payloadAs(const ActorSubmission& submission)
+        {
+            const Payload* payload = tryPayloadAs<Payload>(submission);
             if (payload == nullptr)
             {
                 throw std::logic_error{"ActorBinding received an incompatible submission payload"};
             }
 
-            return payload->value;
+            return *payload;
         }
 
         // Implementations create and use a local wrapper that owns their domain
