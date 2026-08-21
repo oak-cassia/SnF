@@ -1,6 +1,6 @@
 #pragma once
 
-#include "snf/server/purchase.hpp"
+#include "snf/game/purchase.hpp"
 
 #include <optional>
 

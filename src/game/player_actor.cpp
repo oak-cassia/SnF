@@ -1,6 +1,6 @@
-#include "snf/server/player_actor.hpp"
+#include "snf/game/player_actor.hpp"
 
-#include "snf/server/product_catalog.hpp"
+#include "snf/game/product_catalog.hpp"
 
 #include <limits>
 #include <stdexcept>
@@ -9,7 +9,7 @@
 
 namespace snf::server
 {
-    PlayerActorId PlayerState::identity() const noexcept
+    std::optional<PlayerId> PlayerState::identity() const noexcept
     {
         return _session.identity;
     }
@@ -51,7 +51,7 @@ namespace snf::server
 
     void PlayerActor::restore(const PlayerRecord& record)
     {
-        if (_state._session.identity != record.player)
+        if (_state._session.identity != std::optional{record.player})
         {
             throw std::invalid_argument{"Player record identity does not match the Actor"};
         }
@@ -117,7 +117,7 @@ namespace snf::server
 
     PlayerRecord PlayerActor::snapshot() const
     {
-        const auto player = _state._session.identity.playerId();
+        const auto player = _state._session.identity;
         if (!player)
         {
             throw std::logic_error{"A provisional Player actor has no persistent snapshot"};
@@ -133,12 +133,12 @@ namespace snf::server
         };
     }
 
-    PlayerActor::PlayerActor(const PlayerActorId identity) noexcept
+    PlayerActor::PlayerActor(std::optional<PlayerId> identity) noexcept
     {
         _state._session.identity = identity;
     }
 
-    PlayerActor::PlayerActor(const PlayerActorId identity, const std::size_t max_purchase_idempotency_records)
+    PlayerActor::PlayerActor(std::optional<PlayerId> identity, const std::size_t max_purchase_idempotency_records)
         : _max_purchase_idempotency_records(max_purchase_idempotency_records)
     {
         if (_max_purchase_idempotency_records == 0)
@@ -172,7 +172,7 @@ namespace snf::server
 
     PlayerResult PlayerActor::handleCommand(const AuthenticateCommand& command)
     {
-        if (_state._session.identity != command.player)
+        if (_state._session.identity != std::optional{command.player})
         {
             throw std::logic_error{"AuthenticateCommand reached a different Player actor"};
         }
@@ -192,7 +192,7 @@ namespace snf::server
 
     PlayerResult PlayerActor::handleCommand(const PurchaseCommand& command)
     {
-        const auto player = _state._session.identity.playerId();
+        const auto player = _state._session.identity;
         if (!player)
         {
             throw std::logic_error{"PurchaseCommand reached a provisional Player actor"};

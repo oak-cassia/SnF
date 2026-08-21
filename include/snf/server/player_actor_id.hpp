@@ -1,7 +1,7 @@
 #pragma once
 
+#include "snf/game/player_id.hpp"
 #include "snf/runtime/actor_key.hpp"
-#include "snf/server/player_id.hpp"
 #include "snf/server/provisional_actor_id.hpp"
 
 #include <cstdint>

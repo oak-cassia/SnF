@@ -1,8 +1,8 @@
 #include "snf/server/player_actor_binding.hpp"
 
-#include "snf/server/street_experience_grant.hpp"
+#include "snf/game/street_experience_grant.hpp"
 
-#include "snf/server/player_actor.hpp"
+#include "snf/game/player_actor.hpp"
 
 #include <cstddef>
 #include <stdexcept>
@@ -99,7 +99,9 @@ namespace snf::server
         };
 
         PlayerActorSlot(PlayerActorId actor_id, std::function<void(PlayerActorId)> on_deactivated, const std::size_t max_purchase_idempotency_records)
-            : actor(actor_id, max_purchase_idempotency_records)
+            // The Actor gets only the persistent identity: which namespace it is
+            // routed in stays here, where routing lives.
+            : actor(actor_id.playerId(), max_purchase_idempotency_records)
             , identity(actor_id)
             , on_deactivated(std::move(on_deactivated))
         {

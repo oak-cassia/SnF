@@ -1,7 +1,7 @@
 #pragma once
 
-#include "snf/server/zone_command.hpp"
-#include "snf/server/zone_id.hpp"
+#include "snf/game/zone_command.hpp"
+#include "snf/game/zone_id.hpp"
 
 namespace snf::server
 {

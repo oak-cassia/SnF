@@ -1,7 +1,7 @@
 #pragma once
 
-#include "snf/server/player_id.hpp"
-#include "snf/server/purchase.hpp"
+#include "snf/game/player_id.hpp"
+#include "snf/game/purchase.hpp"
 
 #include <cstddef>
 #include <variant>

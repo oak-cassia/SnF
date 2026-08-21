@@ -1,4 +1,4 @@
-#include "snf/server/party_actor.hpp"
+#include "snf/game/party_actor.hpp"
 
 #include <cassert>
 #include <vector>

@@ -1,5 +1,6 @@
 #include "snf/net/termination_signal.hpp"
 #include "snf/server/game_server.hpp"
+#include "snf/server/mysql_player_repository.hpp"
 
 #include <charconv>
 #include <chrono>
@@ -8,6 +9,7 @@
 #include <exception>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -136,7 +138,12 @@ int main()
         const auto termination_signal = snf::net::create_termination_signal_listener();
         snf::server::GameServerConfig config;
         config.port = 7777;
-        config.mysql_player_repository = mysql_from_environment();
+        if (auto mysql = mysql_from_environment())
+        {
+            // Choosing the backend, and linking it, stays here rather than in the
+            // server: GameServer only asks for a repository.
+            config.player_repository_factory = [settings = *std::move(mysql)] { return std::make_unique<snf::server::MySqlPlayerRepository>(settings); };
+        }
         config.metrics_report_interval = METRICS_REPORT_INTERVAL;
         // Runs on the reactor thread. Writing to a terminal is acceptable for
         // a development binary; a deployment that ships metrics elsewhere must

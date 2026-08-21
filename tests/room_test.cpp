@@ -1,6 +1,6 @@
-#include "snf/server/room.hpp"
+#include "snf/game/room.hpp"
 
-#include "snf/server/street_experience_grant.hpp"
+#include "snf/game/street_experience_grant.hpp"
 
 #include <cassert>
 #include <chrono>

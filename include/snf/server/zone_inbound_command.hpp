@@ -1,9 +1,9 @@
 #pragma once
 
+#include "snf/game/zone_command.hpp"
+#include "snf/game/zone_id.hpp"
 #include "snf/net/connection_id.hpp"
-#include "snf/server/zone_command.hpp"
 #include "snf/server/zone_handoff.hpp"
-#include "snf/server/zone_id.hpp"
 
 #include <cstdint>
 #include <optional>

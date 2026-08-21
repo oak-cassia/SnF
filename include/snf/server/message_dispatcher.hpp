@@ -1,7 +1,7 @@
 #pragma once
 
+#include "snf/game/player_command.hpp"
 #include "snf/protocol/frame.hpp"
-#include "snf/server/player_command.hpp"
 
 #include <functional>
 #include <optional>

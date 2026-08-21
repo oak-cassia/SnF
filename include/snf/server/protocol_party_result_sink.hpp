@@ -1,8 +1,8 @@
 #pragma once
 
+#include "snf/game/party_result.hpp"
 #include "snf/server/outbound_sink.hpp"
 #include "snf/server/party_inbound_command.hpp"
-#include "snf/server/party_result.hpp"
 
 namespace snf::server
 {

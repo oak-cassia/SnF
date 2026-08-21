@@ -1,8 +1,8 @@
 #pragma once
 
+#include "snf/game/player_command.hpp"
 #include "snf/net/connection_id.hpp"
 #include "snf/server/player_actor_id.hpp"
-#include "snf/server/player_command.hpp"
 
 #include <cstdint>
 

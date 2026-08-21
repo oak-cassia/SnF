@@ -1,6 +1,6 @@
 #pragma once
 
-#include "snf/server/player_id.hpp"
+#include "snf/game/player_id.hpp"
 
 #include <cstdint>
 

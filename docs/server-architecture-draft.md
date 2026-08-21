@@ -39,6 +39,20 @@ domain mutable state만 소유한다. 어느 쪽도 상대 Runtime의 mutable �
 
 ## 3. 상태 소유권
 
+빌드 단위가 이 경계를 지킨다.
+
+```text
+snf_game           도메인 상태 기계와 값. 아무것도 링크하지 않는다.
+  ↑
+snf_server_runtime Binding, ingress, coordinator, sink, repository 포트
+  ↑
+snf_mysql_player_repository   MySQL을 아는 유일한 target
+```
+
+`snf_game_tests`는 `snf_game`만 링크하므로, 게임 코드가 런타임·소켓·스레드의 심볼을
+필요로 하면 빌드가 깨진다. 심볼이 필요 없는 header-only 접근은 링커가 못 잡으므로
+`snf_game_layer` 테스트가 이름으로 한 번 더 검사한다.
+
 | 소유자 | mutable state |
 | --- | --- |
 | Reactor | Session, connection generation, Player/Zone/Party route, handoff control state |

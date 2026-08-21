@@ -1,10 +1,10 @@
 #pragma once
 
+#include "snf/game/player_id.hpp"
+#include "snf/game/zone_command.hpp"
+#include "snf/game/zone_id.hpp"
+#include "snf/game/zone_result.hpp"
 #include "snf/net/connection_id.hpp"
-#include "snf/server/player_id.hpp"
-#include "snf/server/zone_command.hpp"
-#include "snf/server/zone_id.hpp"
-#include "snf/server/zone_result.hpp"
 
 #include <cstdint>
 #include <optional>

@@ -1,8 +1,8 @@
 #pragma once
 
+#include "snf/game/party_actor.hpp"
 #include "snf/runtime/actor_runtime.hpp"
 #include "snf/server/command_terminal.hpp"
-#include "snf/server/party_actor.hpp"
 #include "snf/server/party_inbound_command.hpp"
 
 #include <atomic>

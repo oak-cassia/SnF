@@ -43,6 +43,12 @@
   보상 tell과 passivation
 - Room 입장·시작 요청과, 요청 없이 나가는 clear 알림 (`request_id = 0`)
 
+### 빌드 경계
+
+- `snf_game`: 도메인 상태 기계와 값. runtime·net·protocol·MySQL·threads를 링크하지 않는다
+- `snf_mysql_player_repository`: MySQL을 아는 유일한 target
+- `snf_game_tests`(링크)와 `snf_game_layer`(include 검사)가 경계를 강제한다
+
 ## 현재 정리 기준
 
 - Repository는 Player snapshot의 `load/save`만 담당한다. gameplay 판정은 PlayerActor에서 한다.
