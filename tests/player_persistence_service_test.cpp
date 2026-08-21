@@ -17,6 +17,13 @@ namespace
 {
     using namespace std::chrono_literals;
 
+    // How long a correct implementation could possibly need, not how long it does need: a
+    // passing run never reaches this, so the only cost of a generous bound is how late a
+    // genuine hang is reported. One second was not generous enough -- a save round trip
+    // through the repository worker takes orders of magnitude longer under a sanitizer
+    // than in a plain Debug build, and this suite failed intermittently there.
+    constexpr auto SETTLE_DEADLINE = 30s;
+
     class RecordingRepository final : public snf::server::PlayerRepository
     {
     public:
@@ -45,7 +52,7 @@ namespace
         void waitForSaveCalls(const std::size_t count)
         {
             std::unique_lock lock{_mutex};
-            const bool completed = _wake.wait_for(lock, 1s, [this, count] { return _save_calls >= count; });
+            const bool completed = _wake.wait_for(lock, SETTLE_DEADLINE, [this, count] { return _save_calls >= count; });
             assert(completed);
         }
 
@@ -149,7 +156,7 @@ namespace
         assert(repository.maximumActiveSaves() == 1);
         assert(repository.pendingRecord().handled_command_count == 11);
         repository.completeNext(snf::server::PlayerRepositoryStatus::Success);
-        assert(final_result.wait_for(1s) == std::future_status::ready);
+        assert(final_result.wait_for(SETTLE_DEADLINE) == std::future_status::ready);
         assert(final_result.get().saved());
 
         const auto stats = service.stats();

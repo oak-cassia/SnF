@@ -10,6 +10,7 @@ namespace
 {
     using snf::server::BattleCompleted;
     using snf::server::JoinRoom;
+    using snf::server::LeaveRoom;
     using snf::server::PlayerId;
     using snf::server::Room;
     using snf::server::RoomCommandStatus;
@@ -168,10 +169,108 @@ namespace
         assert(second.grants.empty());
         assert(actor.phase() == RoomPhase::Cleared);
     }
+
+    void test_a_room_keeps_the_stats_each_participant_joined_with()
+    {
+        Room actor{RoomId{.value = 1}, small_room()};
+        const PlayerId weak{.value = 10};
+        const PlayerId strong{.value = 20};
+
+        static_cast<void>(actor.handle(JoinRoom{.player = weak, .stats = {.attack = 10, .health = 100}}));
+        static_cast<void>(actor.handle(JoinRoom{.player = strong, .stats = {.attack = 39, .health = 390}}));
+
+        // Fixed at join. The Room never asks the Player again, so what it stored is
+        // what the battle runs on.
+        assert((actor.statsOf(weak) == snf::server::CombatStats{.attack = 10, .health = 100}));
+        assert((actor.statsOf(strong) == snf::server::CombatStats{.attack = 39, .health = 390}));
+        assert(!actor.statsOf(PlayerId{.value = 30}));
+    }
+
+    void test_leaving_before_the_battle_frees_the_seat()
+    {
+        Room actor{RoomId{.value = 1}, small_room()};
+        static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 1}}));
+        static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 2}}));
+
+        const auto left = actor.handle(LeaveRoom{.player = PlayerId{.value = 1}});
+        assert(left.status == RoomCommandStatus::Applied);
+        assert(left.player == PlayerId{.value = 1});
+        assert(actor.participantCount() == 1);
+        assert(!actor.statsOf(PlayerId{.value = 1}));
+
+        // The seat is genuinely free again, not merely vacated by a flag.
+        const auto joined = actor.handle(JoinRoom{.player = PlayerId{.value = 3}});
+        assert(joined.status == RoomCommandStatus::Applied);
+        assert(actor.participantCount() == 2);
+    }
+
+    void test_leaving_a_room_you_are_not_in_is_refused()
+    {
+        Room actor{RoomId{.value = 1}, small_room()};
+        static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 1}}));
+
+        const auto refused = actor.handle(LeaveRoom{.player = PlayerId{.value = 2}});
+        assert(refused.status == RoomCommandStatus::NotJoined);
+        assert(refused.phase == RoomPhase::Waiting);
+        assert(actor.participantCount() == 1);
+    }
+
+    void test_leaving_mid_battle_forfeits_the_reward()
+    {
+        Room actor{RoomId{.value = 1}, small_room()};
+        static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 1}}));
+        static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 2}}));
+        static_cast<void>(actor.handle(StartBattle{}));
+
+        const auto left = actor.handle(LeaveRoom{.player = PlayerId{.value = 1}});
+        assert(left.status == RoomCommandStatus::Applied);
+        assert(left.phase == RoomPhase::Running);
+
+        // The reward path is never told that anyone left. It pays the participants the
+        // Room still holds, which is what makes the removal the whole policy.
+        const auto cleared = actor.handle(BattleCompleted{});
+        assert(
+            (cleared.grants ==
+             std::vector<StreetExperienceGrant>{
+                 {.player = PlayerId{.value = 2}, .experience = 300},
+             })
+        );
+    }
+
+    void test_the_last_participant_leaving_a_battle_clears_with_no_grants()
+    {
+        Room actor{RoomId{.value = 1}, small_room()};
+        static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 1}}));
+        static_cast<void>(actor.handle(StartBattle{}));
+        static_cast<void>(actor.handle(LeaveRoom{.player = PlayerId{.value = 1}}));
+
+        // The timer was armed before the room emptied, so the completion still
+        // arrives. It has to reach the terminal phase rather than stay Running with
+        // nobody in it.
+        const auto cleared = actor.handle(BattleCompleted{});
+        assert(cleared.status == RoomCommandStatus::Applied);
+        assert(cleared.phase == RoomPhase::Cleared);
+        assert(cleared.grants.empty());
+    }
+
+    void test_leaving_a_cleared_room_is_refused()
+    {
+        Room actor{RoomId{.value = 1}, small_room()};
+        static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 1}}));
+        static_cast<void>(actor.handle(StartBattle{}));
+        static_cast<void>(actor.handle(BattleCompleted{}));
+
+        // A leave racing the clear must not report that it took a seat back, or the
+        // return path would be told to undo an entry that already ended.
+        const auto refused = actor.handle(LeaveRoom{.player = PlayerId{.value = 1}});
+        assert(refused.status == RoomCommandStatus::WrongPhase);
+        assert(refused.phase == RoomPhase::Cleared);
+    }
 }
 
 void run_room_tests()
 {
+    test_a_room_keeps_the_stats_each_participant_joined_with();
     test_a_room_starts_empty_and_waiting();
     test_a_room_refuses_a_duplicate_join();
     test_a_room_refuses_a_join_past_capacity();
@@ -182,4 +281,9 @@ void run_room_tests()
     test_a_completion_before_the_battle_starts_is_refused();
     test_a_clear_rewards_every_participant_in_player_id_order();
     test_a_clear_pays_out_only_once();
+    test_leaving_before_the_battle_frees_the_seat();
+    test_leaving_a_room_you_are_not_in_is_refused();
+    test_leaving_mid_battle_forfeits_the_reward();
+    test_the_last_participant_leaving_a_battle_clears_with_no_grants();
+    test_leaving_a_cleared_room_is_refused();
 }

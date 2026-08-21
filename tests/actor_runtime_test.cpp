@@ -39,7 +39,7 @@ namespace
     using snf::runtime::ActorKind;
     using snf::runtime::ActorRuntime;
     using snf::runtime::ActorRuntimeConfig;
-    using snf::runtime::ActorSlot;
+    using snf::runtime::ActorState;
     using snf::runtime::ActorSubmission;
     using snf::runtime::EntityId;
     using snf::runtime::PostResult;
@@ -257,7 +257,7 @@ namespace
             return makeSubmission(target, ActorActivation::ActivateIfMissing, ActorAccounting::Command, Payload{.value = *value, .evict = false});
         }
 
-        [[nodiscard]] std::unique_ptr<ActorSlot> activate(const EntityId entity) override
+        [[nodiscard]] std::unique_ptr<ActorState> activate(const EntityId entity) override
         {
             std::function<void(EntityId)> on_activate;
             {
@@ -272,7 +272,7 @@ namespace
         }
 
         [[nodiscard]] ActorDispatchResult
-        dispatch(ActorSlot& slot, const ActorSubmission& submission, ActorContext& context, std::stop_token) override
+        dispatch(ActorState& slot, const ActorSubmission& submission, ActorContext& context, std::stop_token) override
         {
             static_cast<void>(dynamic_cast<Slot&>(slot));
             const Payload& payload = payloadAs<Payload>(submission);
@@ -305,13 +305,13 @@ namespace
         }
 
         // This binding never suspends, so the scheduler never resumes it.
-        [[nodiscard]] ActorDispatchResult resume(ActorSlot&, ActorContext&, std::stop_token) override
+        [[nodiscard]] ActorDispatchResult resume(ActorState&, ActorContext&, std::stop_token) override
         {
             throw std::logic_error{"SyntheticBinding does not suspend"};
         }
 
     private:
-        struct Slot final : ActorSlot
+        struct Slot final : ActorState
         {
         };
 

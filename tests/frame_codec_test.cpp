@@ -364,6 +364,26 @@ void test_decoder_can_be_reused_after_an_error()
     assert(decoder.tryDecodeNext().needsMoreData());
 }
 
+void test_decodes_room_handoff_frames()
+{
+    const Frame leave{.type = MessageType::RoomLeave, .request_id = 10, .payload = {}};
+    const Frame left{.type = MessageType::RoomLeft, .request_id = 11, .payload = {std::byte{0x00}}};
+    const Frame returned{.type = MessageType::ReturnedToZone, .request_id = 0, .payload = {std::byte{0x01}, std::byte{0x02}}};
+
+    FrameDecoder decoder{};
+    decoder.push(encode_frame(leave));
+    decoder.push(encode_frame(left));
+    decoder.push(encode_frame(returned));
+
+    const auto first = decoder.tryDecodeNext();
+    assert(first.hasFrame() && first.frame->type == MessageType::RoomLeave);
+    const auto second = decoder.tryDecodeNext();
+    assert(second.hasFrame() && second.frame->type == MessageType::RoomLeft);
+    const auto third = decoder.tryDecodeNext();
+    assert(third.hasFrame() && third.frame->type == MessageType::ReturnedToZone);
+    assert(decoder.tryDecodeNext().needsMoreData());
+}
+
 void run_frame_codec_tests()
 {
     test_encode_frame();
@@ -379,4 +399,5 @@ void run_frame_codec_tests()
     test_rejects_an_unknown_message_type();
     test_append_preserves_valid_frames_before_an_error();
     test_decoder_can_be_reused_after_an_error();
+    test_decodes_room_handoff_frames();
 }

@@ -61,7 +61,7 @@ namespace snf::server
 
     // The repository receives values and completion callbacks only. An adapter
     // may run blocking storage work elsewhere, but it never receives an Actor,
-    // ActorSlot, coroutine handle, or mutable runtime object.
+    // ActorState, coroutine handle, or mutable runtime object.
     class PlayerRepository
     {
     public:

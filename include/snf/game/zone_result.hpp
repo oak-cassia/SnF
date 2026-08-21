@@ -19,6 +19,9 @@ namespace snf::server
         StaleRoute,
         TransitionInProgress,
         TransferFailed,
+        // The player is in a Room, so they are in no Zone at all. Appended rather than
+        // inserted: the status crosses the wire as a byte.
+        InRoom,
     };
 
     struct ZoneResult
@@ -32,6 +35,6 @@ namespace snf::server
         std::vector<PlayerId> visible_players;
         // How long until this Zone wants its next tick. The binding turns it into a
         // timer; the Zone itself never names one.
-        std::optional<std::chrono::milliseconds> tick_after;
+        std::optional<std::chrono::milliseconds> tick_after{};
     };
 }

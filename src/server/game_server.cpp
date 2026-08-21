@@ -123,6 +123,7 @@ namespace snf::server
               }(),
               _outbound_event.getDescriptor())
         , _zone_transition_channel(checked_zone_handoffs(config.max_zone_handoffs, config.connection_lifecycle_capacity), _outbound_event.getDescriptor())
+        , _room_transition_channel(checked_zone_handoffs(config.max_room_entries, config.connection_lifecycle_capacity), _outbound_event.getDescriptor())
         , _player_responses(_outbound_channel)
         , _zone_results(_outbound_channel)
         , _party_results(_outbound_channel)
@@ -153,6 +154,21 @@ namespace snf::server
                       }
                   },
                   .on_record_loaded = [this](const snf::net::ConnectionId connection, std::optional<PlayerLocation> location) { _player_sessions.noteLocation(connection, std::move(location)); },
+                  // The Room never got the join, so the step it would have answered has
+                  // to answer itself. RoomEntryService already ends a refused join by
+                  // rolling the route back, releasing the ticket and replying, so the
+                  // refusal only needs to reach it as the completion it is waiting for.
+                  .on_room_join_undelivered =
+                      [this](const RoomEntryContext& context, const RoomId room)
+                  {
+                      RoomTransitionCompletion completion = completionFrom(context);
+                      completion.room = room;
+                      completion.room_status = RoomCommandStatus::EntryFailed;
+                      if (!_room_transition_channel.publish(context.ticket, completion))
+                      {
+                          _runtime_completion.notifyFailed(snf::runtime::RuntimeId::Logic);
+                      }
+                  },
                   .persistence_service = &_player_persistence_service,
                   .max_purchase_idempotency_records_per_player = config.max_purchase_idempotency_records_per_player,
               })
@@ -167,6 +183,20 @@ namespace snf::server
                   .on_result =
                       [this](const ZoneInboundCommand& command, const ZoneResult& result)
                   {
+                      if (command.room_entry)
+                      {
+                          const RoomEntryContext& context = *command.room_entry;
+                          RoomTransitionCompletion completion = completionFrom(context);
+                          completion.zone = command.zone;
+                          completion.zone_status = result.status;
+                          completion.position = result.position;
+                          if (!_room_transition_channel.publish(context.ticket, completion))
+                          {
+                              _runtime_completion.notifyFailed(snf::runtime::RuntimeId::Logic);
+                          }
+                          return;
+                      }
+
                       if (!command.handoff)
                       {
                           _zone_results.accept(command, result);
@@ -231,7 +261,42 @@ namespace snf::server
                           .max_participants = config.max_room_participants,
                           .clear_experience = config.room_clear_experience,
                       },
-                  .on_result = [this](const RoomInboundCommand& command, const RoomResult& result) { _room_result_sink.accept(command, result); },
+                  .on_result =
+                      [this](const RoomInboundCommand& command, const RoomResult& result)
+                  {
+                      if (command.entry)
+                      {
+                          const RoomEntryContext& context = *command.entry;
+                          RoomTransitionCompletion completion = completionFrom(context);
+                          completion.room = command.room;
+                          completion.room_status = result.status;
+                          if (!_room_transition_channel.publish(context.ticket, completion))
+                          {
+                              _runtime_completion.notifyFailed(snf::runtime::RuntimeId::Logic);
+                          }
+                          return;
+                      }
+
+                      _room_result_sink.accept(command, result);
+
+                      if (result.phase == RoomPhase::Cleared)
+                      {
+                          // This runs on the Worker, so it publishes the fact and stops there.
+                          // RoomEntryService owns route state without a lock because only the
+                          // reactor touches it; calling startReturn from here would race its
+                          // drain. Same reason the completion above goes through the channel.
+                          for (const StreetExperienceGrant& grant : result.grants)
+                          {
+                              if (!_room_transition_channel.tryPublishReturnRequest(RoomReturnRequest{
+                                      .room = command.room,
+                                      .player = grant.player,
+                                  }))
+                              {
+                                  _runtime_completion.notifyFailed(snf::runtime::RuntimeId::Logic);
+                              }
+                          }
+                      }
+                  },
               },
               _command_lifecycle)
         , _logic_runtime(
@@ -250,7 +315,15 @@ namespace snf::server
         , _room_actor_ingress(_logic_runtime, _room_actor_binding, _command_lifecycle)
         , _command_router(_player_actor_ingress, _zone_actor_ingress, _party_actor_ingress, _room_actor_ingress)
         , _zone_handoff_service(_command_router, _player_sessions, _route_coordinator, _zone_transition_channel, _command_lifecycle, _zone_results, config.max_zone_handoff_completions_per_turn)
-        , _protocol_gateway(_command_router, _player_sessions, _route_coordinator, _party_coordinator, _zone_handoff_service, _zone_results, ProtocolGatewayConfig{})
+        , _room_entry_service(_command_router,
+                              _player_sessions,
+                              _route_coordinator,
+                              _room_transition_channel,
+                              _command_lifecycle,
+                              _outbound_channel,
+                              _zone_results,
+                              config.max_room_entry_completions_per_turn)
+        , _protocol_gateway(_command_router, _player_sessions, _route_coordinator, _party_coordinator, _zone_handoff_service, _room_entry_service, ProtocolGatewayConfig{})
         , _tcp_server(
               TcpServerConfig{
                   .port = config.port,
@@ -260,8 +333,8 @@ namespace snf::server
                   .connection_lifecycle_capacity = config.connection_lifecycle_capacity,
                   .metrics_report_interval = config.metrics_report_interval,
                   .on_metrics_interval = [this] { publishMetrics(); },
-                  .on_control_wake = [this] { _protocol_gateway.drainZoneTransitions(); },
-                  .is_control_drained = [this] { return _protocol_gateway.zoneTransitionsDrained(); },
+                  .on_control_wake = [this] { _protocol_gateway.drainTransitions(); },
+                  .is_control_drained = [this] { return _protocol_gateway.transitionsDrained(); },
               },
               _protocol_gateway,
               _outbound_channel,
@@ -346,6 +419,8 @@ namespace snf::server
             .zone_handoffs = _route_coordinator.stats(),
             .zone_handoffs_saga = _protocol_gateway.zoneHandoffStats(),
             .zone_transition_channel = _zone_transition_channel.stats(),
+            .room_entries = _protocol_gateway.roomEntryStats(),
+            .room_transition_channel = _room_transition_channel.stats(),
             .party_actors = _party_actor_binding.stats(),
             .command_terminals = _command_lifecycle.terminalCount(),
             .command_admission_rejections = _command_lifecycle.admissionRejectionCount(),
@@ -432,6 +507,7 @@ namespace snf::server
     {
         _protocol_gateway.cancel();
         _zone_transition_channel.cancel();
+        _room_transition_channel.cancel();
         // Also the path a reactor failure takes, and the reason a Worker suspended on
         // outbound capacity still reaches a terminal outcome when the reactor is gone.
         static_cast<void>(_outbound_channel.cancel());

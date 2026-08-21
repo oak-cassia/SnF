@@ -1,6 +1,7 @@
 #include "snf/server/player_actor_binding.hpp"
 
 #include "snf/game/street_experience_grant.hpp"
+#include "snf/server/room_join_tell.hpp"
 
 #include "snf/game/player.hpp"
 
@@ -86,7 +87,7 @@ namespace
 
 namespace snf::server
 {
-    struct PlayerActorBinding::PlayerActorSlot final : snf::runtime::ActorSlot
+    struct PlayerActorBinding::PlayerActorState final : snf::runtime::ActorState
     {
         // Applying follow-ups needs capacity the handler must not know about, so a command runs
         // in two stages: the handler's own task, then the reservation's.
@@ -98,16 +99,16 @@ namespace snf::server
             Saving,
         };
 
-        PlayerActorSlot(PlayerActorId actor_id, std::function<void(PlayerActorId)> on_deactivated, const std::size_t max_purchase_idempotency_records)
+        PlayerActorState(PlayerActorId actor_id, std::function<void(PlayerActorId)> on_deactivated, const std::size_t max_purchase_idempotency_records)
             // The Actor gets only the persistent identity: which namespace it is
             // routed in stays here, where routing lives.
-            : actor(actor_id.playerId(), max_purchase_idempotency_records)
+            : player(actor_id.playerId(), max_purchase_idempotency_records)
             , identity(actor_id)
             , on_deactivated(std::move(on_deactivated))
         {
         }
 
-        ~PlayerActorSlot() override
+        ~PlayerActorState() override
         {
             if (on_deactivated)
             {
@@ -115,7 +116,7 @@ namespace snf::server
             }
         }
 
-        Player actor;
+        Player player;
         PlayerActorId identity;
         std::function<void(PlayerActorId)> on_deactivated;
         bool loaded{false};
@@ -124,12 +125,12 @@ namespace snf::server
         // Held while the record loads when a tell arrived before it. A grant is not a
         // client request, so it cannot ride in pending_command.
         std::optional<StreetExperienceGrant> pending_grant;
-        // True when a tell, not a connection, brought this slot to life. Such a slot
+        // True when a tell, not a connection, brought this state to life. Such a state
         // has no session keeping it resident, so it passivates once the grant is saved.
         bool activated_by_tell{false};
         snf::runtime::ActorTask<PlayerLoadResult> load_task;
         // Started only when capacity was not immediately available, and owned by the
-        // slot for the same reason.
+        // state for the same reason.
         snf::runtime::ActorTask<OutboundReservation> reservation_task;
         snf::runtime::ActorTask<PlayerSaveResult> save_task;
         // The handler's decisions, held between its normal return and the application
@@ -139,6 +140,11 @@ namespace snf::server
         // responses still have to reach the connection and answer the frame that asked.
         snf::net::ConnectionId connection{};
         std::uint32_t request_id{0};
+        // Captured for the same reason, and kept out of the Player for another one: a
+        // ticket and a connection are reactor identity, and the game model must not
+        // name them. The handler answers with the room and the stats; this says which
+        // entry saga asked.
+        std::optional<RoomEntryContext> room_entry{};
     };
 
     struct PlayerActorBinding::CommandPayload
@@ -168,6 +174,7 @@ namespace snf::server
         , _on_before_command(std::move(config.on_before_command))
         , _on_actor_deactivated(std::move(config.on_actor_deactivated))
         , _on_record_loaded(std::move(config.on_record_loaded))
+        , _on_room_join_undelivered(std::move(config.on_room_join_undelivered))
         , _persistence_service(config.persistence_service)
         , _max_purchase_idempotency_records_per_player(config.max_purchase_idempotency_records_per_player)
     {
@@ -269,16 +276,16 @@ namespace snf::server
         return makeSubmission(target, snf::runtime::ActorActivation::ActivateIfMissing, snf::runtime::ActorAccounting::Command, StreetExperienceGrantPayload{.grant = *grant});
     }
 
-    std::unique_ptr<snf::runtime::ActorSlot> PlayerActorBinding::activate(const snf::runtime::EntityId entity)
+    std::unique_ptr<snf::runtime::ActorState> PlayerActorBinding::activate(const snf::runtime::EntityId entity)
     {
         const PlayerActorId identity = kind() == snf::runtime::ActorKind::Player ? PlayerActorId{PlayerId{.value = entity}} : PlayerActorId{ProvisionalActorId{.value = entity}};
-        return std::make_unique<PlayerActorSlot>(identity, _on_actor_deactivated, _max_purchase_idempotency_records_per_player);
+        return std::make_unique<PlayerActorState>(identity, _on_actor_deactivated, _max_purchase_idempotency_records_per_player);
     }
 
     snf::runtime::ActorDispatchResult
-    PlayerActorBinding::dispatch(snf::runtime::ActorSlot& slot, const snf::runtime::ActorSubmission& submission, snf::runtime::ActorContext& context, const std::stop_token stop_token)
+    PlayerActorBinding::dispatch(snf::runtime::ActorState& state, const snf::runtime::ActorSubmission& submission, snf::runtime::ActorContext& context, const std::stop_token stop_token)
     {
-        auto& player_slot = dynamic_cast<PlayerActorSlot&>(slot);
+        auto& player_state = dynamic_cast<PlayerActorState&>(state);
         if (submission.accounting() == snf::runtime::ActorAccounting::Control)
         {
             const ConnectionClosedPayload& payload = payloadAs<ConnectionClosedPayload>(submission);
@@ -287,49 +294,49 @@ namespace snf::server
                 return snf::runtime::ActorDispatchResult::Evict;
             }
 
-            if (player_slot.stage != PlayerActorSlot::Stage::Idle)
+            if (player_state.stage != PlayerActorState::Stage::Idle)
             {
                 throw std::logic_error{"Persistent Player close arrived before load completed"};
             }
 
-            if (!player_slot.loaded)
+            if (!player_state.loaded)
             {
                 return snf::runtime::ActorDispatchResult::Evict;
             }
 
             if (payload.closed.has_location_snapshot)
             {
-                player_slot.actor.setLastLocation(payload.closed.last_location);
+                player_state.player.setLastLocation(payload.closed.last_location);
             }
 
-            player_slot.stage = PlayerActorSlot::Stage::Saving;
-            player_slot.save_task = awaitPlayerSave(*_persistence_service, context, player_slot.actor.snapshot());
-            return advance(player_slot, context, stop_token);
+            player_state.stage = PlayerActorState::Stage::Saving;
+            player_state.save_task = awaitPlayerSave(*_persistence_service, context, player_state.player.snapshot());
+            return advance(player_state, context, stop_token);
         }
 
-        if (player_slot.stage != PlayerActorSlot::Stage::Idle)
+        if (player_state.stage != PlayerActorState::Stage::Idle)
         {
             throw std::logic_error{"PlayerActorBinding dispatched a command while one was in flight"};
         }
 
         if (const auto* grant = tryPayloadAs<StreetExperienceGrantPayload>(submission))
         {
-            if (!player_slot.loaded)
+            if (!player_state.loaded)
             {
                 // Applying to a default-constructed actor would then save zeros over the
                 // stored currency, so the record loads first exactly as a command makes
                 // it. Evicting instead -- what a close does -- would lose the reward.
-                player_slot.pending_grant = grant->grant;
-                player_slot.activated_by_tell = true;
-                player_slot.stage = PlayerActorSlot::Stage::Loading;
-                player_slot.load_task = awaitPlayerLoad(*_repository, context, *player_slot.identity.playerId());
-                return advance(player_slot, context, stop_token);
+                player_state.pending_grant = grant->grant;
+                player_state.activated_by_tell = true;
+                player_state.stage = PlayerActorState::Stage::Loading;
+                player_state.load_task = awaitPlayerLoad(*_repository, context, *player_state.identity.playerId());
+                return advance(player_state, context, stop_token);
             }
 
             // A tell carries no connection, so nothing here emits a response or takes
             // outbound capacity.
-            player_slot.actor.grantStreetExperience(grant->grant.experience);
-            publishDirtySnapshot(player_slot);
+            player_state.player.grantStreetExperience(grant->grant.experience);
+            publishDirtySnapshot(player_state);
             return snf::runtime::ActorDispatchResult::KeepActive;
         }
 
@@ -339,15 +346,16 @@ namespace snf::server
             _on_before_command(payload.command.actor, payload.command.command);
         }
 
-        player_slot.connection = payload.command.connection;
-        player_slot.request_id = payload.command.request_id;
+        player_state.connection = payload.command.connection;
+        player_state.request_id = payload.command.request_id;
+        player_state.room_entry = payload.command.room_entry;
 
-        if (kind() == snf::runtime::ActorKind::Player && !player_slot.loaded)
+        if (kind() == snf::runtime::ActorKind::Player && !player_state.loaded)
         {
-            player_slot.pending_command = payload.command.command;
-            player_slot.stage = PlayerActorSlot::Stage::Loading;
-            player_slot.load_task = awaitPlayerLoad(*_repository, context, *player_slot.identity.playerId());
-            return advance(player_slot, context, stop_token);
+            player_state.pending_command = payload.command.command;
+            player_state.stage = PlayerActorState::Stage::Loading;
+            player_state.load_task = awaitPlayerLoad(*_repository, context, *player_state.identity.playerId());
+            return advance(player_state, context, stop_token);
         }
 
         if (std::holds_alternative<PurchaseCommand>(payload.command.command))
@@ -358,101 +366,101 @@ namespace snf::server
             }
         }
 
-        runHandler(player_slot, payload.command.command);
-        return advance(player_slot, context, stop_token);
+        runHandler(player_state, payload.command.command, context);
+        return advance(player_state, context, stop_token);
     }
 
-    snf::runtime::ActorDispatchResult PlayerActorBinding::resume(snf::runtime::ActorSlot& slot, snf::runtime::ActorContext& context, const std::stop_token stop_token)
+    snf::runtime::ActorDispatchResult PlayerActorBinding::resume(snf::runtime::ActorState& state, snf::runtime::ActorContext& context, const std::stop_token stop_token)
     {
-        auto& player_slot = dynamic_cast<PlayerActorSlot&>(slot);
-        if (player_slot.stage == PlayerActorSlot::Stage::Idle)
+        auto& player_state = dynamic_cast<PlayerActorState&>(state);
+        if (player_state.stage == PlayerActorState::Stage::Idle)
         {
             throw std::logic_error{"PlayerActorBinding resumed without a command in flight"};
         }
 
-        return advance(player_slot, context, stop_token);
+        return advance(player_state, context, stop_token);
     }
 
-    snf::runtime::ActorDispatchResult PlayerActorBinding::advance(PlayerActorSlot& slot, snf::runtime::ActorContext& context, const std::stop_token stop_token)
+    snf::runtime::ActorDispatchResult PlayerActorBinding::advance(PlayerActorState& state, snf::runtime::ActorContext& context, const std::stop_token stop_token)
     {
-        if (slot.stage == PlayerActorSlot::Stage::Loading)
+        if (state.stage == PlayerActorState::Stage::Loading)
         {
-            if (slot.load_task.resume() == snf::runtime::ActorTaskStatus::Suspended)
+            if (state.load_task.resume() == snf::runtime::ActorTaskStatus::Suspended)
             {
                 return snf::runtime::ActorDispatchResult::Suspended;
             }
 
-            PlayerLoadResult loaded = slot.load_task.takeResult();
-            slot.load_task = {};
+            PlayerLoadResult loaded = state.load_task.takeResult();
+            state.load_task = {};
             if (loaded.status != PlayerRepositoryStatus::Success)
             {
-                slot.pending_command.reset();
-                slot.pending_grant.reset();
-                slot.stage = PlayerActorSlot::Stage::Idle;
-                _outbound.reportAdmissionFailure(slot.connection);
+                state.pending_command.reset();
+                state.pending_grant.reset();
+                state.stage = PlayerActorState::Stage::Idle;
+                _outbound.reportAdmissionFailure(state.connection);
                 return snf::runtime::ActorDispatchResult::KeepActive;
             }
             if (loaded.record)
             {
-                slot.actor.restore(*loaded.record);
+                state.player.restore(*loaded.record);
             }
-            slot.loaded = true;
+            state.loaded = true;
 
             if (_on_record_loaded)
             {
-                _on_record_loaded(slot.connection, loaded.record ? loaded.record->last_location : std::nullopt);
+                _on_record_loaded(state.connection, loaded.record ? loaded.record->last_location : std::nullopt);
             }
 
-            if (slot.pending_grant)
+            if (state.pending_grant)
             {
-                slot.actor.grantStreetExperience(slot.pending_grant->experience);
-                slot.pending_grant.reset();
-                publishDirtySnapshot(slot);
-                slot.stage = PlayerActorSlot::Stage::Idle;
-                // Nothing else is keeping this slot alive, and the snapshot is already
+                state.player.grantStreetExperience(state.pending_grant->experience);
+                state.pending_grant.reset();
+                publishDirtySnapshot(state);
+                state.stage = PlayerActorState::Stage::Idle;
+                // Nothing else is keeping this state alive, and the snapshot is already
                 // queued, so it may go once the mailbox is empty.
-                return slot.activated_by_tell ? snf::runtime::ActorDispatchResult::PassivateIfIdle : snf::runtime::ActorDispatchResult::KeepActive;
+                return state.activated_by_tell ? snf::runtime::ActorDispatchResult::PassivateIfIdle : snf::runtime::ActorDispatchResult::KeepActive;
             }
 
-            if (!slot.pending_command)
+            if (!state.pending_command)
             {
                 throw std::logic_error{"Player load completed without a pending command"};
             }
-            const PlayerCommand command = *slot.pending_command;
-            runHandler(slot, command);
+            const PlayerCommand command = *state.pending_command;
+            runHandler(state, command, context);
         }
 
-        if (slot.stage == PlayerActorSlot::Stage::Reserving && !slot.reservation_task.valid())
+        if (state.stage == PlayerActorState::Stage::Reserving && !state.reservation_task.valid())
         {
-            const std::size_t required_slots = _response_sink.requiredSlots(slot.pending_result);
+            const std::size_t required_slots = _response_sink.requiredSlots(state.pending_result);
             if (!_outbound.canEverReserve(required_slots))
             {
                 // More than one connection may ever hold. Waiting would never end and
                 // throwing would take down every actor this Worker owns, so the command
                 // ends here and the backend closes the connection.
-                return abandonResponses(slot);
+                return abandonResponses(state);
             }
 
-            if (auto reservation = _outbound.tryReserve(slot.connection, required_slots))
+            if (auto reservation = _outbound.tryReserve(state.connection, required_slots))
             {
                 // Outside saturation this is the whole story: no operation is begun, so
                 // no in-flight slot, no continuation and no suspension.
-                return applyResponses(slot, *reservation, stop_token);
+                return applyResponses(state, *reservation, stop_token);
             }
 
-            slot.reservation_task = awaitOutboundReservation(_outbound, context, slot.connection, required_slots);
+            state.reservation_task = awaitOutboundReservation(_outbound, context, state.connection, required_slots);
         }
 
-        if (slot.stage == PlayerActorSlot::Stage::Saving)
+        if (state.stage == PlayerActorState::Stage::Saving)
         {
-            if (slot.save_task.resume() == snf::runtime::ActorTaskStatus::Suspended)
+            if (state.save_task.resume() == snf::runtime::ActorTaskStatus::Suspended)
             {
                 return snf::runtime::ActorDispatchResult::Suspended;
             }
 
-            const PlayerSaveResult saved = slot.save_task.takeResult();
-            slot.save_task = {};
-            slot.stage = PlayerActorSlot::Stage::Idle;
+            const PlayerSaveResult saved = state.save_task.takeResult();
+            state.save_task = {};
+            state.stage = PlayerActorState::Stage::Idle;
             if (!saved.saved())
             {
                 throw std::runtime_error{"Player repository refused a save"};
@@ -460,12 +468,12 @@ namespace snf::server
             return snf::runtime::ActorDispatchResult::Evict;
         }
 
-        if (!slot.reservation_task.valid())
+        if (!state.reservation_task.valid())
         {
             throw std::logic_error{"PlayerActorBinding has no reservation task to advance"};
         }
 
-        if (slot.reservation_task.resume() == snf::runtime::ActorTaskStatus::Suspended)
+        if (state.reservation_task.resume() == snf::runtime::ActorTaskStatus::Suspended)
         {
             return snf::runtime::ActorDispatchResult::Suspended;
         }
@@ -473,25 +481,25 @@ namespace snf::server
         OutboundReservation reservation;
         try
         {
-            reservation = slot.reservation_task.takeResult();
+            reservation = state.reservation_task.takeResult();
         }
         catch (const snf::runtime::AsyncOperationRejected&)
         {
             // Outbound is saturated and this Worker's in-flight budget is exhausted, so
             // the response cannot be emitted. It is not dropped in silence: the backend
             // closes the connection under the same overflow policy inbound uses.
-            return abandonResponses(slot);
+            return abandonResponses(state);
         }
         catch (const snf::runtime::AsyncOperationCancelled&)
         {
-            return abandonResponses(slot);
+            return abandonResponses(state);
         }
 
-        slot.reservation_task = {};
+        state.reservation_task = {};
         if (!reservation.valid())
         {
             // Only a cancelled outbound backend hands back an invalid grant.
-            resetPendingCommand(slot);
+            resetPendingCommand(state);
             if (stop_token.stop_requested())
             {
                 return snf::runtime::ActorDispatchResult::Stopped;
@@ -500,15 +508,15 @@ namespace snf::server
             throw std::runtime_error{"Outbound channel was cancelled while the logic runtime was active"};
         }
 
-        return applyResponses(slot, reservation, stop_token);
+        return applyResponses(state, reservation, stop_token);
     }
 
-    snf::runtime::ActorDispatchResult PlayerActorBinding::applyResponses(PlayerActorSlot& slot, OutboundReservation& reservation, const std::stop_token stop_token)
+    snf::runtime::ActorDispatchResult PlayerActorBinding::applyResponses(PlayerActorState& state, OutboundReservation& reservation, const std::stop_token stop_token)
     {
-        PlayerResult result = std::move(slot.pending_result);
-        const snf::net::ConnectionId connection = slot.connection;
-        const std::uint32_t request_id = slot.request_id;
-        resetPendingCommand(slot);
+        PlayerResult result = std::move(state.pending_result);
+        const snf::net::ConnectionId connection = state.connection;
+        const std::uint32_t request_id = state.request_id;
+        resetPendingCommand(state);
 
         if (_response_sink.applyResponses(connection, request_id, std::move(result), reservation))
         {
@@ -523,52 +531,88 @@ namespace snf::server
         throw std::runtime_error{"Player follow-up application failed while logic runtime was active"};
     }
 
-    void PlayerActorBinding::runHandler(PlayerActorSlot& slot, const PlayerCommand& command)
+    void PlayerActorBinding::runHandler(PlayerActorState& state, const PlayerCommand& command, snf::runtime::ActorContext& context)
     {
-        slot.pending_result = slot.actor.handle(command);
-        publishDirtySnapshot(slot);
-        slot.pending_command.reset();
-        slot.stage = PlayerActorSlot::Stage::Reserving;
+        state.pending_result = state.player.handle(command);
+        if (state.pending_result.room_join)
+        {
+            // Applied after the handler returned, like every other follow-up, and not
+            // priced into the outbound reservation below: a mailbox and a socket are
+            // different resources. A full Room mailbox therefore drops the join rather
+            // than blocking this Player.
+            const RoomId room = state.pending_result.room_join->room;
+            const snf::runtime::PostResult posted = context.tryTell(
+                snf::runtime::ActorKey{
+                    .kind = snf::runtime::ActorKind::Room,
+                    .entity = room.value,
+                },
+                snf::runtime::TellPayload::of(RoomJoinTell{
+                    .player = *state.identity.playerId(),
+                    .request = *state.pending_result.room_join,
+                    .reply =
+                        RoomReplyContext{
+                            .connection = state.connection,
+                            .request_id = state.request_id,
+                            .kind = RoomReplyKind::Joined,
+                        },
+                    .entry = state.room_entry,
+                })
+            );
+            // A dropped join is only harmless when nobody is waiting for it. An entry
+            // saga is, and it has no timeout: without this the connection would sit in
+            // a hidden route forever, so the refusal is reported and becomes the
+            // saga's terminal outcome.
+            if (posted != snf::runtime::PostResult::Accepted && state.room_entry && _on_room_join_undelivered)
+            {
+                _on_room_join_undelivered(*state.room_entry, room);
+            }
+            state.pending_result.room_join.reset();
+            state.room_entry.reset();
+        }
+        publishDirtySnapshot(state);
+        state.pending_command.reset();
+        state.stage = PlayerActorState::Stage::Reserving;
     }
 
-    void PlayerActorBinding::publishDirtySnapshot(PlayerActorSlot& slot) noexcept
+    void PlayerActorBinding::publishDirtySnapshot(PlayerActorState& state) noexcept
     {
-        if (_persistence_service == nullptr || !slot.actor.hasFlushableDirtyState())
+        if (_persistence_service == nullptr || !state.player.hasFlushableDirtyState())
         {
             return;
         }
 
-        PlayerStateComponentMask cleared_components = slot.actor.dirtyComponents();
+        PlayerStateComponentMask cleared_components = state.player.dirtyComponents();
         try
         {
-            auto snapshot = slot.actor.takeDirtySnapshot(&cleared_components);
+            auto snapshot = state.player.takeDirtySnapshot(&cleared_components);
             if (!snapshot)
             {
                 return;
             }
             if (!_persistence_service->tryEnqueue(std::move(*snapshot)))
             {
-                slot.actor.restoreDirtyComponents(cleared_components);
+                state.player.restoreDirtyComponents(cleared_components);
             }
         }
         catch (...)
         {
-            slot.actor.restoreDirtyComponents(cleared_components);
+            state.player.restoreDirtyComponents(cleared_components);
         }
     }
 
-    snf::runtime::ActorDispatchResult PlayerActorBinding::abandonResponses(PlayerActorSlot& slot) noexcept
+    snf::runtime::ActorDispatchResult PlayerActorBinding::abandonResponses(PlayerActorState& state) noexcept
     {
-        slot.reservation_task = {};
-        resetPendingCommand(slot);
-        _outbound.reportAdmissionFailure(slot.connection);
+        state.reservation_task = {};
+        resetPendingCommand(state);
+        _outbound.reportAdmissionFailure(state.connection);
         return snf::runtime::ActorDispatchResult::KeepActive;
     }
 
-    void PlayerActorBinding::resetPendingCommand(PlayerActorSlot& slot) noexcept
+    void PlayerActorBinding::resetPendingCommand(PlayerActorState& state) noexcept
     {
-        slot.pending_command.reset();
-        slot.pending_result = PlayerResult{};
-        slot.stage = PlayerActorSlot::Stage::Idle;
+        state.pending_command.reset();
+        state.pending_result = PlayerResult{};
+        state.room_entry.reset();
+        state.stage = PlayerActorState::Stage::Idle;
     }
 }

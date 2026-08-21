@@ -8,14 +8,14 @@
 
 namespace snf::server
 {
-    struct RoomActorBinding::RoomActorSlot final : snf::runtime::ActorSlot
+    struct RoomActorBinding::RoomActorState final : snf::runtime::ActorState
     {
-        RoomActorSlot(const RoomId room, const RoomConfig config)
-            : actor(room, config)
+        RoomActorState(const RoomId room, const RoomConfig config)
+            : room(room, config)
         {
         }
 
-        Room actor;
+        Room room;
     };
 
     struct RoomActorBinding::CommandPayload
@@ -100,13 +100,59 @@ namespace snf::server
             PassivatePayload{});
     }
 
-    std::unique_ptr<snf::runtime::ActorSlot> RoomActorBinding::activate(const snf::runtime::EntityId entity)
+    std::optional<snf::runtime::ActorSubmission> RoomActorBinding::makeTell(const snf::runtime::ActorKey target, snf::runtime::TellPayload payload)
     {
-        return std::make_unique<RoomActorSlot>(RoomId{.value = entity}, _actor_config);
+        auto join = payload.take<RoomJoinTell>();
+        if (!join)
+        {
+            // A refused take leaves the carrier intact, and the runtime reports the
+            // mismatch as the wiring bug it is rather than inventing a command.
+            return std::nullopt;
+        }
+        if (join->request.room.value != target.entity)
+        {
+            // Only a routing bug puts these out of step, and entering the wrong Room
+            // is worse than failing loudly.
+            return std::nullopt;
+        }
+        CommandReleaseToken release;
+        if (!join->entry)
+        {
+            if (_lifecycle == nullptr)
+            {
+                throw std::logic_error{"Replying Room join requires a lifecycle sink"};
+            }
+            release = CommandReleaseToken{*_lifecycle, join->reply.connection};
+        }
+
+        return makeSubmission(
+            target,
+            snf::runtime::ActorActivation::ActivateIfMissing,
+            snf::runtime::ActorAccounting::Command,
+            CommandPayload{
+                .command =
+                    RoomInboundCommand{
+                        .room = join->request.room,
+                        .command =
+                            JoinRoom{
+                                .player = join->player,
+                                .stats = join->request.stats,
+                            },
+                        .reply = join->entry ? std::nullopt : std::optional{join->reply},
+                        .entry = join->entry,
+                    },
+                .release = std::move(release),
+            }
+        );
+    }
+
+    std::unique_ptr<snf::runtime::ActorState> RoomActorBinding::activate(const snf::runtime::EntityId entity)
+    {
+        return std::make_unique<RoomActorState>(RoomId{.value = entity}, _actor_config);
     }
 
     snf::runtime::ActorDispatchResult
-    RoomActorBinding::dispatch(snf::runtime::ActorSlot& slot, const snf::runtime::ActorSubmission& submission, snf::runtime::ActorContext& context, const std::stop_token stop_token)
+    RoomActorBinding::dispatch(snf::runtime::ActorState& state, const snf::runtime::ActorSubmission& submission, snf::runtime::ActorContext& context, const std::stop_token stop_token)
     {
         static_cast<void>(stop_token);
         if (submission.accounting() == snf::runtime::ActorAccounting::Control)
@@ -115,10 +161,10 @@ namespace snf::server
             return snf::runtime::ActorDispatchResult::Evict;
         }
 
-        auto& room_slot = dynamic_cast<RoomActorSlot&>(slot);
+        auto& room_state = dynamic_cast<RoomActorState&>(state);
         const CommandPayload& payload = payloadAs<CommandPayload>(submission);
         const auto started_at = std::chrono::steady_clock::now();
-        RoomResult result = room_slot.actor.handle(payload.command.command);
+        RoomResult result = room_state.room.handle(payload.command.command);
         _command_execution_nanoseconds.record(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started_at));
         if (_on_result)
         {
@@ -162,16 +208,16 @@ namespace snf::server
         // A cleared Room has emitted its rewards and has nothing left to do, and a
         // Room nobody joined was activated by a stray command. A Running Room must
         // stay resident so its completion timer can land.
-        if (room_slot.actor.phase() == RoomPhase::Cleared || room_slot.actor.participantCount() == 0)
+        if (room_state.room.phase() == RoomPhase::Cleared || room_state.room.participantCount() == 0)
         {
             return snf::runtime::ActorDispatchResult::PassivateIfIdle;
         }
         return snf::runtime::ActorDispatchResult::KeepActive;
     }
 
-    snf::runtime::ActorDispatchResult RoomActorBinding::resume(snf::runtime::ActorSlot& slot, snf::runtime::ActorContext& context, const std::stop_token stop_token)
+    snf::runtime::ActorDispatchResult RoomActorBinding::resume(snf::runtime::ActorState& state, snf::runtime::ActorContext& context, const std::stop_token stop_token)
     {
-        static_cast<void>(slot);
+        static_cast<void>(state);
         static_cast<void>(context);
         static_cast<void>(stop_token);
         throw std::logic_error{"RoomActorBinding has no suspension point"};

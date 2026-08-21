@@ -9,6 +9,7 @@
 #include "snf/server/connection_lifecycle.hpp"
 #include "snf/server/party_inbound_command.hpp"
 #include "snf/server/player_actor_id.hpp"
+#include "snf/server/room_entry.hpp"
 #include "snf/server/room_inbound_command.hpp"
 #include "snf/server/zone_inbound_command.hpp"
 
@@ -25,6 +26,10 @@ namespace snf::server
         PlayerActorId actor;
         PlayerCommand command;
         std::uint32_t request_id{0};
+        // Present only for a JoinRoomRequest that a room entry started. It rides here
+        // rather than on the command because it is reactor identity -- ticket, step,
+        // connection -- and the game layer must not name any of it.
+        std::optional<RoomEntryContext> room_entry{};
     };
 
     struct ConnectionClosedRoute

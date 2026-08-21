@@ -125,7 +125,7 @@ Owning Worker
   → resume or discard stale completion
 ```
 
-외부 executor는 Actor, ActorSlot 또는 coroutine handle을 받지 않는다. success, failure와 cancel 중
+외부 executor는 Actor, ActorState 또는 coroutine handle을 받지 않는다. success, failure와 cancel 중
 하나만 terminal claim에 성공하며, frame resume와 destruction은 owning Worker에서만 수행한다.
 세부 경합 규칙은 [Coroutine Actor 계약](./coroutine-actor-contract.md)에 있다.
 

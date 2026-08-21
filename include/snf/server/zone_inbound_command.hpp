@@ -3,6 +3,7 @@
 #include "snf/game/zone_command.hpp"
 #include "snf/game/zone_id.hpp"
 #include "snf/net/connection_id.hpp"
+#include "snf/server/room_entry.hpp"
 #include "snf/server/zone_handoff.hpp"
 
 #include <cstdint>
@@ -30,5 +31,6 @@ namespace snf::server
         ZoneCommand command;
         std::optional<ZoneReplyContext> reply;
         std::optional<ZoneHandoffContext> handoff;
+        std::optional<RoomEntryContext> room_entry{};
     };
 }

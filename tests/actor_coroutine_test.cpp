@@ -32,7 +32,7 @@ namespace
     using snf::runtime::ActorRuntime;
     using snf::runtime::ActorRuntimeConfig;
     using snf::runtime::ActorRuntimeStats;
-    using snf::runtime::ActorSlot;
+    using snf::runtime::ActorState;
     using snf::runtime::ActorSubmission;
     using snf::runtime::ActorTask;
     using snf::runtime::ActorTaskStatus;
@@ -304,12 +304,12 @@ namespace
         }
 
     protected:
-        [[nodiscard]] std::unique_ptr<ActorSlot> activate(EntityId) override
+        [[nodiscard]] std::unique_ptr<ActorState> activate(EntityId) override
         {
             return std::make_unique<Slot>();
         }
 
-        [[nodiscard]] ActorDispatchResult dispatch(ActorSlot& slot, const ActorSubmission& submission, ActorContext& context, std::stop_token stop_token) override
+        [[nodiscard]] ActorDispatchResult dispatch(ActorState& slot, const ActorSubmission& submission, ActorContext& context, std::stop_token stop_token) override
         {
             auto& typed_slot = dynamic_cast<Slot&>(slot);
             _state->affinity.dispatched.store(std::this_thread::get_id());
@@ -319,14 +319,14 @@ namespace
             return advance(typed_slot, stop_token);
         }
 
-        [[nodiscard]] ActorDispatchResult resume(ActorSlot& slot, ActorContext&, std::stop_token stop_token) override
+        [[nodiscard]] ActorDispatchResult resume(ActorState& slot, ActorContext&, std::stop_token stop_token) override
         {
             _state->affinity.resumed.store(std::this_thread::get_id());
             return advance(dynamic_cast<Slot&>(slot), stop_token);
         }
 
     private:
-        struct Slot final : ActorSlot
+        struct Slot final : ActorState
         {
             ActorTask<Outcome> task;
         };

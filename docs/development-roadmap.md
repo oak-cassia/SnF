@@ -41,7 +41,9 @@
 - Party membership, capacity, stale leave 차단과 passivation
 - Room `Waiting → Running → Cleared`, 자기 timer로 끝나는 placeholder 전투, clear 시 참가자
   보상 tell과 passivation
-- Room 입장·시작 요청과, 요청 없이 나가는 clear 알림 (`request_id = 0`)
+- Zone과 Room 사이의 보상 있는 입장·복귀 handoff. 전투 중 Player는 Zone에 없고, clear·leave·
+  disconnect가 원래 Zone의 원래 좌표로 되돌린다
+- Room 입장·시작·퇴장 요청과, 요청 없이 나가는 clear·복귀 알림 (`request_id = 0`)
 
 ### 빌드 경계
 
@@ -62,8 +64,9 @@ Party가 입장하는 작은 협동 보스 인스턴스다. MMORPG 월드 기능
 소유권이 공유 콘텐츠에서 주는 장점과 비용을 보여주는 것이 목적이다.
 
 > **진행 중.** 상태 기계와 보상 경로가 placeholder 전투(5초 후 무조건 clear)로 동작하고,
-> 클라이언트가 실제 TCP로 입장·시작하고 clear 알림을 받는다. damage가 없어 아래 완료 조건
-> 중 request sequence와 관련된 항목은 아직 검증할 대상 자체가 없다.
+> 클라이언트가 실제 TCP로 Zone에서 입장해 전투를 시작하고, clear 뒤 원래 Zone으로 돌아온다.
+> 입장·복귀 saga와 그 보상은 `docs/room-entry-handoff-contract.md`에 기록돼 있다. damage가 없어
+> 아래 완료 조건 중 request sequence와 관련된 항목은 아직 검증할 대상 자체가 없다.
 
 ### 상태와 명령
 
@@ -84,7 +87,9 @@ Waiting → Running → Cleared
 - 같은 Room 명령이 FIFO로 결정적으로 적용되고 handler 동시 실행이 없다. (충족)
 - 중복 request sequence가 damage나 clear를 두 번 적용하지 않는다.
 - stale connection generation이 이전 Player를 조작하지 못한다.
-- disconnect/reconnect와 timeout 정책이 명시돼 있다.
+- disconnect/reconnect와 timeout 정책이 명시돼 있다. (충족: 입장 handoff 계약 §6. disconnect는
+  좌석을 해제하고 보상을 포기하며, Room 재적을 영속화하지 않으므로 reconnect는 저장된 Zone으로
+  복원된다. mid-battle reconnect는 명시적 비범위다)
 - clear/fail 결과는 한 번만 생성되고 Room은 timer와 mailbox를 정리한 뒤 passivate된다. (충족)
 - 여러 Room 분산 부하와 하나의 hot Room 부하를 비교한다.
 - queue 포화, shutdown 중 tick과 late completion 테스트를 포함한다.
