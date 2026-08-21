@@ -6,14 +6,14 @@
 
 namespace snf::server
 {
-    struct ZoneActorBinding::ZoneActorSlot final : snf::runtime::ActorSlot
+    struct ZoneActorBinding::ZoneActorState final : snf::runtime::ActorState
     {
-        ZoneActorSlot(const ZoneId zone, const ZoneConfig config)
-            : actor(zone, config)
+        ZoneActorState(const ZoneId zone, const ZoneConfig config)
+            : zone(zone, config)
         {
         }
 
-        Zone actor;
+        Zone zone;
     };
 
     struct ZoneActorBinding::CommandPayload
@@ -110,13 +110,13 @@ namespace snf::server
             PassivatePayload{});
     }
 
-    std::unique_ptr<snf::runtime::ActorSlot> ZoneActorBinding::activate(const snf::runtime::EntityId entity)
+    std::unique_ptr<snf::runtime::ActorState> ZoneActorBinding::activate(const snf::runtime::EntityId entity)
     {
-        return std::make_unique<ZoneActorSlot>(ZoneId{.value = entity}, _actor_config);
+        return std::make_unique<ZoneActorState>(ZoneId{.value = entity}, _actor_config);
     }
 
     snf::runtime::ActorDispatchResult
-    ZoneActorBinding::dispatch(snf::runtime::ActorSlot& slot, const snf::runtime::ActorSubmission& submission, snf::runtime::ActorContext& context, const std::stop_token stop_token)
+    ZoneActorBinding::dispatch(snf::runtime::ActorState& state, const snf::runtime::ActorSubmission& submission, snf::runtime::ActorContext& context, const std::stop_token stop_token)
     {
         static_cast<void>(stop_token);
         if (submission.accounting() == snf::runtime::ActorAccounting::Control)
@@ -125,10 +125,10 @@ namespace snf::server
             return snf::runtime::ActorDispatchResult::Evict;
         }
 
-        auto& zone_slot = dynamic_cast<ZoneActorSlot&>(slot);
+        auto& zone_state = dynamic_cast<ZoneActorState&>(state);
         const CommandPayload& payload = payloadAs<CommandPayload>(submission);
         const auto started_at = std::chrono::steady_clock::now();
-        ZoneResult result = zone_slot.actor.handle(payload.command.command);
+        ZoneResult result = zone_state.zone.handle(payload.command.command);
         const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started_at);
         _command_execution_nanoseconds.record(elapsed);
         if (std::holds_alternative<ZoneSimulationTick>(payload.command.command))
@@ -164,16 +164,16 @@ namespace snf::server
             static_cast<void>(context.trySchedule(*result.tick_after, std::move(timer_submission)));
         }
 
-        if (zone_slot.actor.playerCount() == 0)
+        if (zone_state.zone.playerCount() == 0)
         {
             return snf::runtime::ActorDispatchResult::PassivateIfIdle;
         }
         return snf::runtime::ActorDispatchResult::KeepActive;
     }
 
-    snf::runtime::ActorDispatchResult ZoneActorBinding::resume(snf::runtime::ActorSlot& slot, snf::runtime::ActorContext& context, const std::stop_token stop_token)
+    snf::runtime::ActorDispatchResult ZoneActorBinding::resume(snf::runtime::ActorState& state, snf::runtime::ActorContext& context, const std::stop_token stop_token)
     {
-        static_cast<void>(slot);
+        static_cast<void>(state);
         static_cast<void>(context);
         static_cast<void>(stop_token);
         throw std::logic_error{"ZoneActorBinding has no suspension point"};

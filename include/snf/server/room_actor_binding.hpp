@@ -39,16 +39,16 @@ namespace snf::server
         [[nodiscard]] RoomActorBindingStats stats() const noexcept;
 
     protected:
-        [[nodiscard]] std::unique_ptr<snf::runtime::ActorSlot> activate(snf::runtime::EntityId entity) override;
+        [[nodiscard]] std::unique_ptr<snf::runtime::ActorState> activate(snf::runtime::EntityId entity) override;
         [[nodiscard]] snf::runtime::ActorDispatchResult
-        dispatch(snf::runtime::ActorSlot& slot, const snf::runtime::ActorSubmission& submission, snf::runtime::ActorContext& context, std::stop_token stop_token) override;
-        [[nodiscard]] snf::runtime::ActorDispatchResult resume(snf::runtime::ActorSlot& slot, snf::runtime::ActorContext& context, std::stop_token stop_token) override;
+        dispatch(snf::runtime::ActorState& state, const snf::runtime::ActorSubmission& submission, snf::runtime::ActorContext& context, std::stop_token stop_token) override;
+        [[nodiscard]] snf::runtime::ActorDispatchResult resume(snf::runtime::ActorState& state, snf::runtime::ActorContext& context, std::stop_token stop_token) override;
         // Called on the sending Player's Worker, so this stays a read-only
         // transform: no cache, no counter, nothing another Worker could race with.
         [[nodiscard]] std::optional<snf::runtime::ActorSubmission> makeTell(snf::runtime::ActorKey target, snf::runtime::TellPayload payload) override;
 
     private:
-        struct RoomActorSlot;
+        struct RoomActorState;
         struct CommandPayload;
         struct PassivatePayload;
 

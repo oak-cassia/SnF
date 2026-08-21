@@ -56,35 +56,35 @@ namespace snf::server
         [[nodiscard]] snf::runtime::ActorSubmission makeConnectionClosed(PlayerActorId actor, ConnectionClosed closed) const;
 
     protected:
-        [[nodiscard]] std::unique_ptr<snf::runtime::ActorSlot> activate(snf::runtime::EntityId entity) override;
+        [[nodiscard]] std::unique_ptr<snf::runtime::ActorState> activate(snf::runtime::EntityId entity) override;
         [[nodiscard]] snf::runtime::ActorDispatchResult
-        dispatch(snf::runtime::ActorSlot& slot, const snf::runtime::ActorSubmission& submission, snf::runtime::ActorContext& context, std::stop_token stop_token) override;
-        [[nodiscard]] snf::runtime::ActorDispatchResult resume(snf::runtime::ActorSlot& slot, snf::runtime::ActorContext& context, std::stop_token stop_token) override;
+        dispatch(snf::runtime::ActorState& state, const snf::runtime::ActorSubmission& submission, snf::runtime::ActorContext& context, std::stop_token stop_token) override;
+        [[nodiscard]] snf::runtime::ActorDispatchResult resume(snf::runtime::ActorState& state, snf::runtime::ActorContext& context, std::stop_token stop_token) override;
         // Called on the sending actor's Worker, so this stays a read-only transform:
         // no cache, no counter, nothing another Worker could race with.
         [[nodiscard]] std::optional<snf::runtime::ActorSubmission> makeTell(snf::runtime::ActorKey target, snf::runtime::TellPayload payload) override;
 
     private:
-        struct PlayerActorSlot;
+        struct PlayerActorState;
         struct CommandPayload;
         struct ConnectionClosedPayload;
         struct StreetExperienceGrantPayload;
 
         // Shared tail of dispatch and resume: drive whichever stage the command is in,
         // and apply its follow-ups once the capacity is in hand.
-        [[nodiscard]] snf::runtime::ActorDispatchResult advance(PlayerActorSlot& slot, snf::runtime::ActorContext& context, std::stop_token stop_token);
-        [[nodiscard]] snf::runtime::ActorDispatchResult applyResponses(PlayerActorSlot& slot, OutboundReservation& reservation, std::stop_token stop_token);
-        // Runs the handler and leaves the slot ready to reserve outbound capacity.
+        [[nodiscard]] snf::runtime::ActorDispatchResult advance(PlayerActorState& state, snf::runtime::ActorContext& context, std::stop_token stop_token);
+        [[nodiscard]] snf::runtime::ActorDispatchResult applyResponses(PlayerActorState& state, OutboundReservation& reservation, std::stop_token stop_token);
+        // Runs the handler and leaves the state ready to reserve outbound capacity.
         // The handler cannot suspend, so its decisions are complete before any of
         // them is applied -- a throw emits nothing.
-        void runHandler(PlayerActorSlot& slot, const PlayerCommand& command, snf::runtime::ActorContext& context);
-        void publishDirtySnapshot(PlayerActorSlot& slot) noexcept;
+        void runHandler(PlayerActorState& state, const PlayerCommand& command, snf::runtime::ActorContext& context);
+        void publishDirtySnapshot(PlayerActorState& state) noexcept;
         // Ends a command that could not acquire capacity at all, either because none
         // could be awaited or because the result asks for more than one connection may
         // ever hold. The connection is closed by the backend, so the command itself ends
         // normally.
-        [[nodiscard]] snf::runtime::ActorDispatchResult abandonResponses(PlayerActorSlot& slot) noexcept;
-        static void resetPendingCommand(PlayerActorSlot& slot) noexcept;
+        [[nodiscard]] snf::runtime::ActorDispatchResult abandonResponses(PlayerActorState& state) noexcept;
+        static void resetPendingCommand(PlayerActorState& state) noexcept;
 
         PlayerResponseSink& _response_sink;
         OutboundSink& _outbound;

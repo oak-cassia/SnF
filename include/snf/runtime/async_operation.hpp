@@ -67,14 +67,14 @@ namespace snf::runtime
     };
 
     // Everything a producer needs to reach the owning Worker, as a value. It
-    // holds no Actor, no ActorSlot and no coroutine handle.
+    // holds no Actor, no ActorState and no coroutine handle.
     struct ActorCompletionHandle
     {
         std::shared_ptr<ContinuationEndpoint> endpoint;
         ActorContinuation continuation;
     };
 
-    // The type-erased half of an operation state. An actor slot holds this so it
+    // The type-erased half of an operation state. An actor state holds this so it
     // can cancel an operation without knowing the result type.
     class AsyncOperationControl
     {

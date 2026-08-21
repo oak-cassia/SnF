@@ -1,3 +1,4 @@
+#include "snf/game/room_join_request.hpp"
 #include "snf/game/street_experience_grant.hpp"
 #include "snf/runtime/actor_runtime.hpp"
 #include "snf/runtime/runtime_completion.hpp"
@@ -81,13 +82,13 @@ namespace
             );
         }
 
-        [[nodiscard]] std::unique_ptr<snf::runtime::ActorSlot> activate(snf::runtime::EntityId) override
+        [[nodiscard]] std::unique_ptr<snf::runtime::ActorState> activate(snf::runtime::EntityId) override
         {
             return std::make_unique<Slot>();
         }
 
         [[nodiscard]] snf::runtime::ActorDispatchResult
-        dispatch(snf::runtime::ActorSlot&, const snf::runtime::ActorSubmission& submission, snf::runtime::ActorContext&, std::stop_token) override
+        dispatch(snf::runtime::ActorState&, const snf::runtime::ActorSubmission& submission, snf::runtime::ActorContext&, std::stop_token) override
         {
             const GrantPayload& payload = payloadAs<GrantPayload>(submission);
             {
@@ -101,7 +102,7 @@ namespace
             return snf::runtime::ActorDispatchResult::PassivateIfIdle;
         }
 
-        [[nodiscard]] snf::runtime::ActorDispatchResult resume(snf::runtime::ActorSlot&, snf::runtime::ActorContext&, std::stop_token) override
+        [[nodiscard]] snf::runtime::ActorDispatchResult resume(snf::runtime::ActorState&, snf::runtime::ActorContext&, std::stop_token) override
         {
             throw std::logic_error{"RecordingPlayerBinding has no suspension point"};
         }
@@ -112,7 +113,7 @@ namespace
             std::uint64_t experience{0};
         };
 
-        struct Slot final : snf::runtime::ActorSlot
+        struct Slot final : snf::runtime::ActorState
         {
         };
     };

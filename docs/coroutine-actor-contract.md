@@ -7,7 +7,7 @@
 - `ActorKey{ActorKind, EntityId}`는 논리 Actor를 식별한다.
 - `ActorIncarnation`은 같은 Actor가 다시 활성화됐을 때 이전 수명과 구분한다.
 - async task는 `{ActorKey, ActorIncarnation, TaskId}`로 식별한다.
-- coroutine frame과 `ActorSlot`의 resume·destroy는 owning Worker만 수행한다.
+- coroutine frame과 `ActorState`의 resume·destroy는 owning Worker만 수행한다.
 - 외부 executor는 Actor, slot, coroutine handle을 보유하지 않는다. 결과와 identity value만
   continuation ingress에 게시한다.
 - identity가 맞지 않는 late completion은 Actor를 건드리지 않고 폐기한다.
