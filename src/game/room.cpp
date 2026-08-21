@@ -4,6 +4,16 @@
 #include <stdexcept>
 #include <variant>
 
+namespace
+{
+    // The participant list is kept sorted by identity, so every lookup is a binary
+    // search and the insert position falls out of the same call.
+    constexpr auto BY_PLAYER_ID = [](const snf::server::PlayerId left, const snf::server::PlayerId right)
+    {
+        return left.value < right.value;
+    };
+}
+
 namespace snf::server
 {
     Room::Room(const RoomId room, const RoomConfig config)
@@ -41,15 +51,7 @@ namespace snf::server
 
     std::optional<CombatStats> Room::statsOf(const PlayerId player) const
     {
-        const auto position = std::ranges::lower_bound(
-            _participants,
-            player,
-            [](const PlayerId left, const PlayerId right)
-            {
-                return left.value < right.value;
-            },
-            &Participant::player
-        );
+        const auto position = std::ranges::lower_bound(_participants, player, BY_PLAYER_ID, &Participant::player);
         if (position == _participants.end() || position->player != player)
         {
             return std::nullopt;
@@ -79,15 +81,7 @@ namespace snf::server
             };
         }
 
-        const auto position = std::ranges::lower_bound(
-            _participants,
-            command.player,
-            [](const PlayerId left, const PlayerId right)
-            {
-                return left.value < right.value;
-            },
-            &Participant::player
-        );
+        const auto position = std::ranges::lower_bound(_participants, command.player, BY_PLAYER_ID, &Participant::player);
         if (position != _participants.end() && position->player == command.player)
         {
             return RoomResult{
@@ -114,6 +108,42 @@ namespace snf::server
                 .stats = command.stats,
             }
         );
+        return RoomResult{
+            .status = RoomCommandStatus::Applied,
+            .phase = _phase,
+            .player = command.player,
+        };
+    }
+
+    RoomResult Room::handleCommand(const LeaveRoom& command)
+    {
+        // Cleared is terminal. The rewards are out and the Room is on its way to
+        // passivation, so there is no seat left to hand back.
+        if (_phase == RoomPhase::Cleared)
+        {
+            return RoomResult{
+                .status = RoomCommandStatus::WrongPhase,
+                .phase = _phase,
+                .player = command.player,
+            };
+        }
+
+        const auto position = std::ranges::lower_bound(_participants, command.player, BY_PLAYER_ID, &Participant::player);
+        if (position == _participants.end() || position->player != command.player)
+        {
+            return RoomResult{
+                .status = RoomCommandStatus::NotJoined,
+                .phase = _phase,
+                .player = command.player,
+            };
+        }
+
+        // Removal rather than a flag, so the reward path needs to know nothing about
+        // who left: a clear pays the participants still held. The last participant
+        // leaving a running battle therefore clears with no grants, which is the same
+        // outcome an empty room is refused a start for -- but here the timer is
+        // already armed and only the binding can see that the Room is now empty.
+        _participants.erase(position);
         return RoomResult{
             .status = RoomCommandStatus::Applied,
             .phase = _phase,
@@ -162,10 +192,12 @@ namespace snf::server
         grants.reserve(_participants.size());
         for (const Participant& participant : _participants)
         {
-            grants.push_back(StreetExperienceGrant{
-                .player = participant.player,
-                .experience = _config.clear_experience,
-            });
+            grants.push_back(
+                StreetExperienceGrant{
+                    .player = participant.player,
+                    .experience = _config.clear_experience,
+                }
+            );
         }
 
         return RoomResult{

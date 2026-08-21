@@ -26,6 +26,9 @@ namespace snf::server
         // BattleCompleted lands here, which is what keeps a clear from paying out
         // twice however the timer or the mailbox behaves.
         WrongPhase,
+        // Appended rather than inserted: the status crosses the wire as a byte, so
+        // the existing values are part of the protocol.
+        NotJoined,
     };
 
     // What the Room decided, in game terms only. Turning complete_after into a

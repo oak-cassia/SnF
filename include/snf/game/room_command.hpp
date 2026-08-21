@@ -16,6 +16,15 @@ namespace snf::server
         CombatStats stats{};
     };
 
+    // Leaving before the battle frees the seat; leaving during one forfeits the
+    // reward, because a clear pays only the participants the Room still holds. Both
+    // are the same removal, which is why an explicit leave and a disconnect do not
+    // need separate commands.
+    struct LeaveRoom
+    {
+        PlayerId player{};
+    };
+
     struct StartBattle
     {
     };
@@ -26,5 +35,5 @@ namespace snf::server
     {
     };
 
-    using RoomCommand = std::variant<JoinRoom, StartBattle, BattleCompleted>;
+    using RoomCommand = std::variant<JoinRoom, LeaveRoom, StartBattle, BattleCompleted>;
 }

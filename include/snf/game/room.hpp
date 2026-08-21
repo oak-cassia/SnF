@@ -28,6 +28,9 @@ namespace snf::server
     //
     //   Waiting --StartBattle--> Running --BattleCompleted--> Cleared
     //
+    // A LeaveRoom is accepted in either non-terminal phase: before the battle it
+    // frees the seat, during one it forfeits the reward.
+    //
     class Room
     {
     public:
@@ -43,6 +46,7 @@ namespace snf::server
 
     private:
         [[nodiscard]] RoomResult handleCommand(const JoinRoom& command);
+        [[nodiscard]] RoomResult handleCommand(const LeaveRoom& command);
         [[nodiscard]] RoomResult handleCommand(const StartBattle& command);
         [[nodiscard]] RoomResult handleCommand(const BattleCompleted& command);
 
