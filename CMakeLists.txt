@@ -120,6 +120,8 @@ add_library(snf_server_runtime STATIC
     src/server/zone_actor_binding.cpp
     src/server/zone_actor_ingress.cpp
     src/server/zone_transition_channel.cpp
+    src/server/room_entry_service.cpp
+    src/server/room_transition_channel.cpp
     src/server/party_actor_binding.cpp
     src/server/party_actor_ingress.cpp
     src/server/outbound_channel.cpp
@@ -191,6 +193,7 @@ if(BUILD_TESTING)
         tests/unique_file_descriptor_test.cpp
         tests/zone_actor_binding_test.cpp
         tests/zone_transition_channel_test.cpp
+        tests/room_transition_channel_test.cpp
         tests/party_actor_binding_test.cpp
     )
     target_link_libraries(snf_unit_tests PRIVATE snf_server_runtime)

@@ -115,9 +115,14 @@ namespace snf::server
             // is worse than failing loudly.
             return std::nullopt;
         }
-        if (_lifecycle == nullptr)
+        CommandReleaseToken release;
+        if (!join->entry)
         {
-            throw std::logic_error{"Replying Room join requires a lifecycle sink"};
+            if (_lifecycle == nullptr)
+            {
+                throw std::logic_error{"Replying Room join requires a lifecycle sink"};
+            }
+            release = CommandReleaseToken{*_lifecycle, join->reply.connection};
         }
 
         return makeSubmission(
@@ -133,9 +138,10 @@ namespace snf::server
                                 .player = join->player,
                                 .stats = join->request.stats,
                             },
-                        .reply = join->reply,
+                        .reply = join->entry ? std::nullopt : std::optional{join->reply},
+                        .entry = join->entry,
                     },
-                .release = CommandReleaseToken{*_lifecycle, join->reply.connection},
+                .release = std::move(release),
             }
         );
     }

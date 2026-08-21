@@ -5,6 +5,7 @@
 #include "snf/server/party_coordinator.hpp"
 #include "snf/server/player_session_directory.hpp"
 #include "snf/server/protocol_zone_result_sink.hpp"
+#include "snf/server/room_entry_service.hpp"
 #include "snf/server/route_coordinator.hpp"
 #include "snf/server/routed_command_ingress.hpp"
 #include "snf/server/zone_handoff_service.hpp"
@@ -27,14 +28,15 @@ namespace snf::server
                         RouteCoordinator& routes,
                         PartyCoordinator& parties,
                         ZoneHandoffService& handoffs,
-                        ProtocolZoneResultSink& zone_results,
+                        RoomEntryService& room_entries,
                         ProtocolGatewayConfig config);
 
         [[nodiscard]] FramePostResult tryPost(FrameEnvelope envelope) override;
         [[nodiscard]] PostResult tryPostConnectionClosed(ConnectionClosed closed) override;
-        void drainZoneTransitions();
-        [[nodiscard]] bool zoneTransitionsDrained() const noexcept;
+        void drainTransitions();
+        [[nodiscard]] bool transitionsDrained() const noexcept;
         [[nodiscard]] ZoneHandoffStats zoneHandoffStats() const noexcept;
+        [[nodiscard]] RoomEntryStats roomEntryStats() const noexcept;
         void close() noexcept override;
         void cancel() noexcept override;
 
@@ -45,6 +47,6 @@ namespace snf::server
         RouteCoordinator& _routes;
         PartyCoordinator& _parties;
         ZoneHandoffService& _handoffs;
-        ProtocolZoneResultSink& _zone_results;
+        RoomEntryService& _room_entries;
     };
 }

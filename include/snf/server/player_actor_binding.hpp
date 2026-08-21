@@ -32,6 +32,13 @@ namespace snf::server
         // its first response is emitted. Session routing uses the immutable location
         // value to restore a Zone entry without reading Actor state cross-thread.
         std::function<void(snf::net::ConnectionId, std::optional<PlayerLocation>)> on_record_loaded;
+        // Runs on the owning Worker when a room join could not be delivered to its Room.
+        // A refused mailbox is the one way the tell disappears quietly, and the entry
+        // saga is waiting on a completion that will now never arrive -- so the refusal
+        // has to become one. The binding reports the fact and nothing more: where it
+        // gets published is the assembling side's business, which is why the transition
+        // channel is not injected here.
+        std::function<void(const RoomEntryContext&, RoomId)> on_room_join_undelivered;
         // Production persistent bindings route every snapshot save through this
         // service. When omitted, a standalone persistent binding creates an owned
         // service so the repository is never called directly by the Actor binding.
@@ -94,6 +101,7 @@ namespace snf::server
         std::function<void(PlayerActorId, const PlayerCommand&)> _on_before_command;
         std::function<void(PlayerActorId)> _on_actor_deactivated;
         std::function<void(snf::net::ConnectionId, std::optional<PlayerLocation>)> _on_record_loaded;
+        std::function<void(const RoomEntryContext&, RoomId)> _on_room_join_undelivered;
         std::unique_ptr<PlayerPersistenceService> _owned_persistence_service;
         PlayerPersistenceService* _persistence_service;
         std::size_t _max_purchase_idempotency_records_per_player;

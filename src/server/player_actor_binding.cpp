@@ -140,6 +140,11 @@ namespace snf::server
         // responses still have to reach the connection and answer the frame that asked.
         snf::net::ConnectionId connection{};
         std::uint32_t request_id{0};
+        // Captured for the same reason, and kept out of the Player for another one: a
+        // ticket and a connection are reactor identity, and the game model must not
+        // name them. The handler answers with the room and the stats; this says which
+        // entry saga asked.
+        std::optional<RoomEntryContext> room_entry{};
     };
 
     struct PlayerActorBinding::CommandPayload
@@ -169,6 +174,7 @@ namespace snf::server
         , _on_before_command(std::move(config.on_before_command))
         , _on_actor_deactivated(std::move(config.on_actor_deactivated))
         , _on_record_loaded(std::move(config.on_record_loaded))
+        , _on_room_join_undelivered(std::move(config.on_room_join_undelivered))
         , _persistence_service(config.persistence_service)
         , _max_purchase_idempotency_records_per_player(config.max_purchase_idempotency_records_per_player)
     {
@@ -342,6 +348,7 @@ namespace snf::server
 
         player_state.connection = payload.command.connection;
         player_state.request_id = payload.command.request_id;
+        player_state.room_entry = payload.command.room_entry;
 
         if (kind() == snf::runtime::ActorKind::Player && !player_state.loaded)
         {
@@ -531,12 +538,13 @@ namespace snf::server
         {
             // Applied after the handler returned, like every other follow-up, and not
             // priced into the outbound reservation below: a mailbox and a socket are
-            // different resources. Best effort -- a full Room mailbox drops the join
-            // rather than blocking this Player, and the client simply sees no answer.
-            static_cast<void>(context.tryTell(
+            // different resources. A full Room mailbox therefore drops the join rather
+            // than blocking this Player.
+            const RoomId room = state.pending_result.room_join->room;
+            const snf::runtime::PostResult posted = context.tryTell(
                 snf::runtime::ActorKey{
                     .kind = snf::runtime::ActorKind::Room,
-                    .entity = state.pending_result.room_join->room.value,
+                    .entity = room.value,
                 },
                 snf::runtime::TellPayload::of(RoomJoinTell{
                     .player = *state.identity.playerId(),
@@ -547,9 +555,19 @@ namespace snf::server
                             .request_id = state.request_id,
                             .kind = RoomReplyKind::Joined,
                         },
+                    .entry = state.room_entry,
                 })
-            ));
+            );
+            // A dropped join is only harmless when nobody is waiting for it. An entry
+            // saga is, and it has no timeout: without this the connection would sit in
+            // a hidden route forever, so the refusal is reported and becomes the
+            // saga's terminal outcome.
+            if (posted != snf::runtime::PostResult::Accepted && state.room_entry && _on_room_join_undelivered)
+            {
+                _on_room_join_undelivered(*state.room_entry, room);
+            }
             state.pending_result.room_join.reset();
+            state.room_entry.reset();
         }
         publishDirtySnapshot(state);
         state.pending_command.reset();
@@ -594,6 +612,7 @@ namespace snf::server
     {
         state.pending_command.reset();
         state.pending_result = PlayerResult{};
+        state.room_entry.reset();
         state.stage = PlayerActorState::Stage::Idle;
     }
 }

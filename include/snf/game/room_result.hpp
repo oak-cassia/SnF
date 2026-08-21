@@ -29,6 +29,7 @@ namespace snf::server
         // Appended rather than inserted: the status crosses the wire as a byte, so
         // the existing values are part of the protocol.
         NotJoined,
+        EntryFailed,
     };
 
     // What the Room decided, in game terms only. Turning complete_after into a

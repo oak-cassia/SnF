@@ -37,6 +37,7 @@ namespace snf::server
                         .connection = connection,
                         .command = std::move(route.command),
                         .request_id = route.request_id,
+                        .room_entry = route.room_entry,
                     });
                 }
                 else if constexpr (std::is_same_v<Route, ConnectionClosedRoute>)
@@ -120,7 +121,7 @@ namespace snf::server
                 }
                 else if constexpr (std::is_same_v<Route, ZoneHandoffCommandRoute>)
                 {
-                    if (_zone_commands == nullptr || !route.command.handoff || route.command.reply)
+                    if (_zone_commands == nullptr || (!route.command.handoff && !route.command.room_entry) || route.command.reply)
                     {
                         return PostResult::Closed;
                     }

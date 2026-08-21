@@ -7,14 +7,17 @@
 #include "snf/server/player_actor_binding.hpp"
 #include "snf/server/player_repository.hpp"
 #include "snf/server/protocol_player_response_sink.hpp"
+#include "snf/server/room_actor_binding.hpp"
 
 #include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 
 using namespace std::chrono_literals;
 
@@ -192,6 +195,152 @@ namespace
         harness.runtime.join();
         assert(refused);
     }
+
+    // A room join whose Room mailbox refused it. The entry saga that started the join is
+    // waiting on a completion that will now never arrive and has no timeout, so a dropped
+    // tell would strand the connection in a hidden route forever.
+    void test_a_refused_room_join_reports_the_entry_it_belonged_to()
+    {
+        const snf::server::PlayerId player{.value = 46};
+        const snf::server::RoomId room{.value = 90};
+        const snf::net::ConnectionId connection{.descriptor = 7, .generation = 3};
+        const snf::server::RoomEntryContext entry{
+            .entry_id = snf::server::RoomEntryId{.value = 11},
+            .return_id = {},
+            .ticket = snf::server::RoomTransitionTicket{.value = 22},
+            .connection = connection,
+            .player = player,
+            .step = snf::server::RoomEntryStep::JoinRoom,
+        };
+
+        std::mutex reported_mutex;
+        std::optional<std::pair<snf::server::RoomEntryContext, snf::server::RoomId>> reported;
+
+        snf::net::UniqueFileDescriptor outbound_event{snf::test::make_wake_descriptor()};
+        snf::server::OutboundChannel outbound{
+            snf::server::OutboundChannelConfig{
+                .capacity = 8,
+                .max_slots_per_connection = 8,
+            },
+            outbound_event.getDescriptor()};
+        snf::server::ProtocolPlayerResponseSink response_sink{outbound};
+        snf::server::CountingCommandLifecycleSink lifecycle;
+        snf::server::InMemoryPlayerRepository repository;
+        RecordingCompletion completion;
+
+        snf::server::PlayerActorBinding binding{
+            response_sink,
+            outbound,
+            lifecycle,
+            snf::server::PlayerActorBindingConfig{
+                .actor_kind = snf::runtime::ActorKind::Player,
+                .repository = &repository,
+                .on_room_join_undelivered =
+                    [&reported_mutex, &reported](const snf::server::RoomEntryContext& context, const snf::server::RoomId undelivered_room)
+                {
+                    const std::lock_guard guard{reported_mutex};
+                    reported.emplace(context, undelivered_room);
+                },
+            }};
+        // The tell needs a target binding to assemble it, and Room commands are what
+        // fills the worker's ingress below.
+        snf::server::RoomActorBinding room_binding{snf::server::RoomActorBindingConfig{}};
+
+        // Armed by the test thread and read by the Worker, so it has to be atomic: this
+        // test is meant to run clean under TSan.
+        std::atomic<bool> fill_armed{false};
+        // Set before start(), so the threads that read it are created afterwards.
+        snf::runtime::ActorRuntime* runtime_pointer = nullptr;
+        snf::runtime::ActorRuntime runtime{
+            snf::runtime::ActorRuntimeConfig{
+                .worker_count = 1,
+                .queue_capacity_per_worker = 2,
+                .max_in_flight_operations_per_worker = 4,
+                .on_worker_start = {},
+                // Runs on the Worker with the join already dequeued, so filling the
+                // ingress here is what the handler's tell runs into. Saturating from the
+                // test thread could not do it: the slot the join occupied is free again
+                // by the time the handler runs.
+                .on_before_dispatch =
+                    [&fill_armed, &runtime_pointer, &room_binding, room](std::size_t, const snf::runtime::ActorKey& key, const snf::runtime::ActorSubmission&)
+                {
+                    if (!fill_armed.load() || key.kind != snf::runtime::ActorKind::Player || runtime_pointer == nullptr)
+                    {
+                        return;
+                    }
+                    fill_armed.store(false);
+                    for (int attempt = 0; attempt < 64; ++attempt)
+                    {
+                        const auto posted = runtime_pointer->tryPost(room_binding.makeCommand(snf::server::RoomInboundCommand{
+                            .room = room,
+                            .command = snf::server::StartBattle{},
+                            .reply = std::nullopt,
+                        }));
+                        if (posted != snf::runtime::PostResult::Accepted)
+                        {
+                            return;
+                        }
+                    }
+                },
+                .on_worker_failure = {},
+            },
+            completion};
+        runtime_pointer = &runtime;
+        runtime.registerBinding(binding);
+        runtime.registerBinding(room_binding);
+        runtime.start();
+
+        // First command loads the record, so the join below runs in one turn and the
+        // tell happens inside the dispatch the hook above saturated.
+        assert(runtime.tryPost(binding.makeCommand(snf::server::PlayerInboundCommand{
+                   .actor = snf::server::PlayerActorId{player},
+                   .connection = connection,
+                   .command = snf::server::PingCommand{},
+                   .request_id = 1,
+               })) == snf::runtime::PostResult::Accepted);
+        bool ponged = false;
+        for (int attempt = 0; attempt < 500 && !ponged; ++attempt)
+        {
+            ponged = outbound.tryPop().has_value();
+            if (!ponged)
+            {
+                std::this_thread::sleep_for(10ms);
+            }
+        }
+        assert(ponged);
+
+        fill_armed.store(true);
+        assert(runtime.tryPost(binding.makeCommand(snf::server::PlayerInboundCommand{
+                   .actor = snf::server::PlayerActorId{player},
+                   .connection = connection,
+                   .command = snf::server::JoinRoomRequest{.room = room},
+                   .request_id = 2,
+                   .room_entry = entry,
+               })) == snf::runtime::PostResult::Accepted);
+
+        std::optional<std::pair<snf::server::RoomEntryContext, snf::server::RoomId>> observed;
+        for (int attempt = 0; attempt < 500 && !observed; ++attempt)
+        {
+            {
+                const std::lock_guard guard{reported_mutex};
+                observed = reported;
+            }
+            if (!observed)
+            {
+                std::this_thread::sleep_for(10ms);
+            }
+        }
+
+        runtime.close();
+        runtime.join();
+
+        // The refusal carries the saga's whole identity back, which is what lets the
+        // reactor turn it into the completion the entry is waiting for.
+        assert(observed);
+        assert(observed->first == entry);
+        assert(observed->second == room);
+        assert(completion.failed.load() == 0);
+    }
 }
 
 void run_player_tell_tests()
@@ -199,4 +348,5 @@ void run_player_tell_tests()
     test_a_grant_to_an_offline_player_loads_the_record_before_applying();
     test_grants_accumulate_across_tells();
     test_a_grant_naming_another_player_is_refused();
+    test_a_refused_room_join_reports_the_entry_it_belonged_to();
 }
