@@ -24,21 +24,21 @@ namespace snf::server
         PlayerRepository* repository{nullptr};
         // Test-only diagnostic hook. It executes on the Player actor's owner
         // Worker immediately before Player::handle().
-        std::function<void(PlayerActorId, const PlayerCommand&)> on_before_command;
+        std::function<void(PlayerActorId, const PlayerCommand&)> on_before_command{};
         // Runs after the scheduler has removed and destroyed a persistent Player
         // slot. GameServer uses it to finish the Closing -> detached transition.
-        std::function<void(PlayerActorId)> on_actor_deactivated;
+        std::function<void(PlayerActorId)> on_actor_deactivated{};
         // Runs on the owning Worker after a persistent record has loaded and before
         // its first response is emitted. Session routing uses the immutable location
         // value to restore a Zone entry without reading Actor state cross-thread.
-        std::function<void(snf::net::ConnectionId, std::optional<PlayerLocation>)> on_record_loaded;
+        std::function<void(snf::net::ConnectionId, std::optional<PlayerLocation>)> on_record_loaded{};
         // Runs on the owning Worker when a room join could not be delivered to its Room.
         // A refused mailbox is the one way the tell disappears quietly, and the entry
         // saga is waiting on a completion that will now never arrive -- so the refusal
         // has to become one. The binding reports the fact and nothing more: where it
         // gets published is the assembling side's business, which is why the transition
         // channel is not injected here.
-        std::function<void(const RoomEntryContext&, RoomId)> on_room_join_undelivered;
+        std::function<void(const RoomEntryContext&, RoomId)> on_room_join_undelivered{};
         // Production persistent bindings route every snapshot save through this
         // service. When omitted, a standalone persistent binding creates an owned
         // service so the repository is never called directly by the Actor binding.
