@@ -31,6 +31,6 @@ namespace snf::server
         ZoneCommand command;
         std::optional<ZoneReplyContext> reply;
         std::optional<ZoneHandoffContext> handoff;
-        std::optional<RoomEntryContext> room_entry;
+        std::optional<RoomEntryContext> room_entry{};
     };
 }

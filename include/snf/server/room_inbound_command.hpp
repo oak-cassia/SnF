@@ -32,6 +32,6 @@ namespace snf::server
         // the Room's own timer, so there is no request to answer -- the same reason
         // ZoneSimulationTick rides with no reply context.
         std::optional<RoomReplyContext> reply;
-        std::optional<RoomEntryContext> entry;
+        std::optional<RoomEntryContext> entry{};
     };
 }
