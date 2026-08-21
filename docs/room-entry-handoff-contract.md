@@ -2,6 +2,9 @@
 
 > 범위: 한 프로세스 안에서 Player를 `ZoneActor`에서 `RoomActor`로 옮기고, 전투가 끝나면 되돌리는
 > 상태 전이
+>
+> 구성요소별 역할과 tell·completion·saga 선택 기준은
+> [Actor 상호작용 아키텍처](./actor-interaction-architecture.md)에 있다.
 
 ## 1. 해결하는 문제
 

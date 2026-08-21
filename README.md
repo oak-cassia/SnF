@@ -48,11 +48,13 @@ Network Runtime
 - shutdown은 새 입력 차단, Actor와 continuation drain, Player snapshot flush, outbound drain
   순서로 진행한다.
 
-상세한 현재 구조와 트레이드오프는 [서버 아키텍처](docs/server-architecture-draft.md), coroutine
-수명과 경합 규칙은 [Coroutine Actor 계약](docs/coroutine-actor-contract.md), 전체 종료 순서는
+상세한 현재 구조와 트레이드오프는 [서버 아키텍처](docs/server-architecture-draft.md), Actor Runtime의
+구성요소와 실행 흐름은 [Actor Runtime 아키텍처](docs/actor-runtime-architecture.md), Zone·Room·Player의
+협력 방식은 [Actor 상호작용 아키텍처](docs/actor-interaction-architecture.md), coroutine 수명과 경합
+규칙은 [Coroutine Actor 계약](docs/coroutine-actor-contract.md), 전체 종료 순서는
 [Runtime Lifecycle 계약](docs/runtime-lifecycle-contract.md), Actor의 tick·timeout 예약 정책은
-[Actor 주도 Timer Scheduling](docs/actor-driven-timer-scheduling.md), Actor 간 메시지와 게임
-시간 기준은 [Actor 간 메시지와 게임 시간 결정](docs/actor-messaging-and-game-time.md)을 기준으로 한다.
+[Actor 주도 Timer Scheduling](docs/actor-driven-timer-scheduling.md), Actor 간 메시지와 게임 시간
+기준은 [Actor 간 메시지와 게임 시간 결정](docs/actor-messaging-and-game-time.md)을 기준으로 한다.
 
 ## 구현된 vertical slice
 
