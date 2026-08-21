@@ -3,14 +3,16 @@ Language: Cpp
 
 IndentWidth: 4
 ContinuationIndentWidth: 4
-ColumnLimit: 200
+ColumnLimit: 150
 AccessModifierOffset: -4
+AlignAfterOpenBracket: BlockIndent
 
 BreakBeforeBraces: Allman
 AllowShortBlocksOnASingleLine: Never
 AllowShortFunctionsOnASingleLine: None
 AllowShortIfStatementsOnASingleLine: Never
 AllowShortLoopsOnASingleLine: false
+AllowShortLambdasOnASingleLine: None
 BinPackArguments: false
 BinPackParameters: false
 BreakConstructorInitializers: BeforeComma

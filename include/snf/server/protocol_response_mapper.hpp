@@ -7,7 +7,7 @@
 
 namespace snf::server
 {
-    // The outbound protocol boundary. PlayerActor returns domain responses and
+    // The outbound protocol boundary. Player returns domain responses and
     // this stateless mapper turns them into wire frames.
     class ProtocolResponseMapper
     {

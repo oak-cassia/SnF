@@ -1,4 +1,4 @@
-#include "snf/game/party_actor.hpp"
+#include "snf/game/party.hpp"
 
 #include <algorithm>
 #include <stdexcept>
@@ -6,7 +6,7 @@
 
 namespace snf::server
 {
-    PartyActor::PartyActor(const PartyId party, const PartyActorConfig config)
+    Party::Party(const PartyId party, const PartyConfig config)
         : _party(party)
         , _max_members(config.max_members)
     {
@@ -20,17 +20,17 @@ namespace snf::server
         }
     }
 
-    PartyId PartyActor::id() const noexcept
+    PartyId Party::id() const noexcept
     {
         return _party;
     }
 
-    std::size_t PartyActor::memberCount() const noexcept
+    std::size_t Party::memberCount() const noexcept
     {
         return _members.size();
     }
 
-    std::vector<PlayerId> PartyActor::members() const
+    std::vector<PlayerId> Party::members() const
     {
         std::vector<PlayerId> result;
         result.reserve(_members.size());
@@ -43,12 +43,12 @@ namespace snf::server
         return result;
     }
 
-    PartyResult PartyActor::handle(const PartyCommand& command)
+    PartyResult Party::handle(const PartyCommand& command)
     {
         return std::visit([this](const auto& value) { return handleCommand(value); }, command);
     }
 
-    PartyResult PartyActor::handleCommand(const JoinPartyCommand& command)
+    PartyResult Party::handleCommand(const JoinPartyCommand& command)
     {
         if (command.player.value == 0 || command.membership_epoch == 0)
         {
@@ -80,7 +80,7 @@ namespace snf::server
         return result(PartyCommandStatus::Applied, command.player, command.membership_epoch);
     }
 
-    PartyResult PartyActor::handleCommand(const LeavePartyCommand& command)
+    PartyResult Party::handleCommand(const LeavePartyCommand& command)
     {
         if (command.player.value == 0 || command.membership_epoch == 0)
         {
@@ -101,7 +101,7 @@ namespace snf::server
         return result(PartyCommandStatus::Applied, command.player, command.membership_epoch);
     }
 
-    PartyResult PartyActor::result(const PartyCommandStatus status, const PlayerId player, const std::uint64_t membership_epoch) const
+    PartyResult Party::result(const PartyCommandStatus status, const PlayerId player, const std::uint64_t membership_epoch) const
     {
         return PartyResult{
             .status = status,

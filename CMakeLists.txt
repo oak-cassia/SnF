@@ -58,9 +58,9 @@ endfunction()
 # threads. Anything it needed from those would fail to link snf_game_tests below,
 # which is the wall the compiler keeps for us.
 add_library(snf_game STATIC
-    src/game/player_actor.cpp
-    src/game/zone_actor.cpp
-    src/game/party_actor.cpp
+    src/game/player.cpp
+    src/game/zone.cpp
+    src/game/party.cpp
     src/game/room.cpp
     src/game/street_progression.cpp
     src/game/product_catalog.cpp
@@ -101,6 +101,7 @@ snf_configure_target(snf_runtime)
 add_library(snf_server_runtime STATIC
     src/server/message_dispatcher.cpp
     src/server/protocol_gateway.cpp
+    src/server/zone_handoff_service.cpp
     src/server/command_router.cpp
     src/server/protocol_response_mapper.cpp
     src/server/protocol_player_response_sink.cpp
@@ -203,9 +204,9 @@ if(BUILD_TESTING)
         tests/game_test_main.cpp
         tests/street_progression_test.cpp
         tests/room_test.cpp
-        tests/player_actor_test.cpp
-        tests/zone_actor_test.cpp
-        tests/party_actor_test.cpp
+        tests/player_test.cpp
+        tests/zone_test.cpp
+        tests/party_test.cpp
     )
     target_link_libraries(snf_game_tests PRIVATE snf_game)
     snf_configure_target(snf_game_tests)

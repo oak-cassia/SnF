@@ -8,12 +8,12 @@ namespace snf::server
 {
     struct ZoneActorBinding::ZoneActorSlot final : snf::runtime::ActorSlot
     {
-        ZoneActorSlot(const ZoneId zone, const ZoneActorConfig config)
+        ZoneActorSlot(const ZoneId zone, const ZoneConfig config)
             : actor(zone, config)
         {
         }
 
-        ZoneActor actor;
+        Zone actor;
     };
 
     struct ZoneActorBinding::CommandPayload

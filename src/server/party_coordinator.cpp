@@ -156,7 +156,7 @@ namespace snf::server
             static_cast<void>(connection);
             // A leave has already been accepted ahead of any subsequent join to
             // this Party mailbox, so its slot may be reused immediately without
-            // exceeding PartyActor capacity when commands execute in FIFO order.
+            // exceeding Party capacity when commands execute in FIFO order.
             if (route.party == party && !route.leaving)
             {
                 ++count;

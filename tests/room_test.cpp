@@ -122,12 +122,14 @@ namespace
 
     void test_a_clear_rewards_every_participant_in_player_id_order()
     {
-        Room actor{RoomId{.value = 1},
-                   RoomConfig{
-                       .battle_duration = std::chrono::milliseconds{5000},
-                       .max_participants = 3,
-                       .clear_experience = 300,
-                   }};
+        Room actor{
+            RoomId{.value = 1},
+            RoomConfig{
+                .battle_duration = std::chrono::milliseconds{5000},
+                .max_participants = 3,
+                .clear_experience = 300,
+            }
+        };
         // Deliberately out of order: the reward order must come from the identity,
         // not from who happened to join first.
         static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 30}}));
@@ -140,11 +142,14 @@ namespace
         assert(actor.phase() == RoomPhase::Cleared);
         // The reward order is the only place the participant order is observable,
         // and it must follow the identity rather than who joined first.
-        assert((cleared.grants == std::vector<StreetExperienceGrant>{
-                                      {.player = PlayerId{.value = 10}, .experience = 300},
-                                      {.player = PlayerId{.value = 20}, .experience = 300},
-                                      {.player = PlayerId{.value = 30}, .experience = 300},
-                                  }));
+        assert(
+            (cleared.grants ==
+             std::vector<StreetExperienceGrant>{
+                 {.player = PlayerId{.value = 10}, .experience = 300},
+                 {.player = PlayerId{.value = 20}, .experience = 300},
+                 {.player = PlayerId{.value = 30}, .experience = 300},
+             })
+        );
     }
 
     void test_a_clear_pays_out_only_once()

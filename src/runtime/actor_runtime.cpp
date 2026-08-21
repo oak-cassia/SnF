@@ -44,14 +44,27 @@ namespace
         void wait()
         {
             std::unique_lock lock{_mutex};
-            _condition.wait(lock, [this] { return _signalled; });
+            _condition.wait(
+                lock,
+                [this]
+                {
+                    return _signalled;
+                }
+            );
             _signalled = false;
         }
 
         bool waitUntil(const std::chrono::steady_clock::time_point deadline)
         {
             std::unique_lock lock{_mutex};
-            const bool triggered = _condition.wait_until(lock, deadline, [this] { return _signalled; });
+            const bool triggered = _condition.wait_until(
+                lock,
+                deadline,
+                [this]
+                {
+                    return _signalled;
+                }
+            );
             if (triggered)
             {
                 _signalled = false;
@@ -168,6 +181,16 @@ namespace snf::runtime
 
         [[nodiscard]] ActorIncarnation incarnation() const noexcept override;
 
+        void noteTurnStart(const std::chrono::steady_clock::time_point observed_at) noexcept
+        {
+            _observed_at = observed_at;
+        }
+
+        [[nodiscard]] std::chrono::steady_clock::time_point observedAt() const noexcept override
+        {
+            return _observed_at;
+        }
+
         [[nodiscard]] std::optional<ActorCompletionHandle> tryBeginOperation(std::shared_ptr<AsyncOperationControl> operation) override;
 
         void abortOperation() noexcept override;
@@ -183,6 +206,7 @@ namespace snf::runtime
         Worker* _worker{nullptr};
         ActorSlotEntry* _slot{nullptr};
         ActorKey _key{};
+        std::chrono::steady_clock::time_point _observed_at{};
     };
 
     struct ActorRuntime::ActorSlotEntry
@@ -386,13 +410,15 @@ namespace snf::runtime
 
         std::lock_guard lock{_worker->scheduling_mutex};
         const std::uint64_t timer_id = _worker->next_timer_id++;
-        _worker->timers.emplace(deadline,
-                                TimerEntry{
-                                    .target = _key,
-                                    .incarnation = _slot->incarnation,
-                                    .id = timer_id,
-                                    .submission = std::move(submission),
-                                });
+        _worker->timers.emplace(
+            deadline,
+            TimerEntry{
+                .target = _key,
+                .incarnation = _slot->incarnation,
+                .id = timer_id,
+                .submission = std::move(submission),
+            }
+        );
         _worker->counters.timers_scheduled.fetch_add(1, std::memory_order_relaxed);
 
         return TimerHandle{.id = timer_id};
@@ -512,7 +538,10 @@ namespace snf::runtime
             {
                 for (std::size_t worker_index = 0; worker_index < _worker_count; ++worker_index)
                 {
-                    _workers[worker_index]->thread = std::jthread{[this, worker_index] { runWorker(worker_index); }};
+                    _workers[worker_index]->thread = std::jthread{[this, worker_index]
+                                                                  {
+                                                                      runWorker(worker_index);
+                                                                  }};
                 }
             }
             catch (...)
@@ -659,8 +688,10 @@ namespace snf::runtime
 
             _input_state = InputState::Cancelled;
             CompletionState completion = _completion_state.load(std::memory_order_acquire);
-            while (completion != CompletionState::Cancelled && completion != CompletionState::DrainWon && completion != CompletionState::Failed &&
-                   !_completion_state.compare_exchange_weak(completion, CompletionState::Cancelled, std::memory_order_acq_rel, std::memory_order_acquire))
+            while (
+                completion != CompletionState::Cancelled && completion != CompletionState::DrainWon && completion != CompletionState::Failed &&
+                !_completion_state.compare_exchange_weak(completion, CompletionState::Cancelled, std::memory_order_acq_rel, std::memory_order_acquire)
+            )
             {
             }
         }
@@ -733,7 +764,8 @@ namespace snf::runtime
                         ++suspended_task_count;
                     }
 
-                    if (slot.state == ActorExecutionState::Idle && slot.mailbox.empty() && !slot.active_command && !slot.active_operation && !slot.pending_resume)
+                    if (slot.state == ActorExecutionState::Idle && slot.mailbox.empty() && !slot.active_command && !slot.active_operation &&
+                        !slot.pending_resume)
                     {
                         ++passivatable_actor_count;
                     }
@@ -944,7 +976,8 @@ namespace snf::runtime
                 if (actor_iterator != worker.actors.end())
                 {
                     ActorSlotEntry& slot = actor_iterator->second;
-                    if (slot.state == ActorExecutionState::Suspended && slot.incarnation == continuation->incarnation && slot.expected_task == continuation->task)
+                    if (slot.state == ActorExecutionState::Suspended && slot.incarnation == continuation->incarnation &&
+                        slot.expected_task == continuation->task)
                     {
                         matched = true;
                         slot.active_operation.reset();
@@ -1108,14 +1141,16 @@ namespace snf::runtime
                     }
 
                     actor_iterator = worker.actors
-                                         .emplace(key,
-                                                  ActorSlotEntry{
-                                                      .binding = binding,
-                                                      .actor = std::move(activated_actor),
-                                                      .mailbox = {},
-                                                      .state = ActorExecutionState::Idle,
-                                                      .incarnation = ActorIncarnation{.value = worker.next_incarnation++},
-                                                  })
+                                         .emplace(
+                                             key,
+                                             ActorSlotEntry{
+                                                 .binding = binding,
+                                                 .actor = std::move(activated_actor),
+                                                 .mailbox = {},
+                                                 .state = ActorExecutionState::Idle,
+                                                 .incarnation = ActorIncarnation{.value = worker.next_incarnation++},
+                                             }
+                                         )
                                          .first;
                     actor_iterator->second.context = std::move(activated_context);
                     actor_iterator->second.context->bind(*this, worker, actor_iterator->second, actor_iterator->first);
@@ -1210,7 +1245,9 @@ namespace snf::runtime
                     resuming = true;
                     if (slot->active_command)
                     {
-                        worker.counters.suspend_duration.record(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - slot->active_command->suspended_at));
+                        worker.counters.suspend_duration.record(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - slot->active_command->suspended_at
+                        ));
                     }
                 }
                 else if (slot->mailbox.empty())
@@ -1224,12 +1261,19 @@ namespace snf::runtime
                     slot->mailbox.pop_front();
                     worker.counters.mailbox_depth.fetch_sub(1, std::memory_order_relaxed);
 
+                    // One reading per turn, shared by the queue wait metric and by
+                    // ActorContext::observedAt. Taken here rather than at expiry, so a
+                    // command that waited in the mailbox is handled with the time it is
+                    // actually being handled at.
+                    const auto observed_at = std::chrono::steady_clock::now();
+                    slot->context->noteTurnStart(observed_at);
+
                     const bool is_command = queued.submission.accounting() == ActorAccounting::Command;
                     if (is_command)
                     {
                         // Sampled once per command. A resume is not a new
                         // acceptance, so it never lands in this distribution.
-                        worker.counters.queue_wait.record(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - queued.enqueued_at));
+                        worker.counters.queue_wait.record(std::chrono::duration_cast<std::chrono::nanoseconds>(observed_at - queued.enqueued_at));
                     }
 
                     slot->active_command = ActiveCommand{
@@ -1248,7 +1292,9 @@ namespace snf::runtime
                 }
 
                 result = resuming ? slot->binding->resume(*slot->actor, *slot->context, _dispatch_stop_source.get_token())
-                                  : slot->binding->dispatch(*slot->actor, slot->active_command->submission.submission, *slot->context, _dispatch_stop_source.get_token());
+                                  : slot->binding->dispatch(
+                                        *slot->actor, slot->active_command->submission.submission, *slot->context, _dispatch_stop_source.get_token()
+                                    );
             }
             catch (...)
             {
@@ -1419,7 +1465,8 @@ namespace snf::runtime
         for (const auto& [key, slot] : worker.actors)
         {
             static_cast<void>(key);
-            if (!slot.mailbox.empty() || slot.state == ActorExecutionState::Suspended || slot.active_command || slot.active_operation || slot.pending_resume)
+            if (!slot.mailbox.empty() || slot.state == ActorExecutionState::Suspended || slot.active_command || slot.active_operation ||
+                slot.pending_resume)
             {
                 return false;
             }

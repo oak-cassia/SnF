@@ -7,12 +7,12 @@ namespace snf::server
 {
     struct PartyActorBinding::PartyActorSlot final : snf::runtime::ActorSlot
     {
-        PartyActorSlot(const PartyId party, const PartyActorConfig config)
+        PartyActorSlot(const PartyId party, const PartyConfig config)
             : actor(party, config)
         {
         }
 
-        PartyActor actor;
+        Party actor;
     };
 
     struct PartyActorBinding::CommandPayload

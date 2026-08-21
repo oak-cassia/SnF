@@ -14,16 +14,18 @@
 
 namespace snf::server
 {
-    struct ZoneActorConfig
+    struct ZoneConfig
     {
         std::int32_t aoi_radius{1000};
         std::chrono::milliseconds tick_interval{100};
     };
 
-    class ZoneActor
+    // The game model, not the execution unit: being an actor is how a Zone is run,
+    // which is ZoneActorBinding's business.
+    class Zone
     {
     public:
-        explicit ZoneActor(ZoneId zone, ZoneActorConfig config = {});
+        explicit Zone(ZoneId zone, ZoneConfig config = {});
 
         [[nodiscard]] ZoneId id() const noexcept;
         [[nodiscard]] std::size_t playerCount() const noexcept;

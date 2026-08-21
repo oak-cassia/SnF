@@ -13,7 +13,7 @@ namespace snf::server
         std::uint64_t grant_count{0};
     };
 
-    // The owning PlayerActor resolves live purchase rules from this immutable catalog.
+    // The owning Player resolves live purchase rules from this immutable catalog.
     class ProductCatalog final
     {
     public:

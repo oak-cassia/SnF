@@ -68,15 +68,14 @@ namespace
             , transitions(config.transition_capacity, wake.getDescriptor())
             , outbound(snf::server::OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 4}, wake.getDescriptor())
             , zone_results(outbound)
+            , handoffs(commands, sessions, routes, transitions, lifecycle, zone_results, config.max_zone_completions_per_turn)
             , gateway(commands,
                       sessions,
                       routes,
                       parties,
-                      transitions,
-                      lifecycle,
+                      handoffs,
                       zone_results,
                       snf::server::ProtocolGatewayConfig{
-                          .max_zone_completions_per_turn = config.max_zone_completions_per_turn,
                           .dispatcher = std::move(config.dispatcher),
                       })
         {
@@ -91,6 +90,7 @@ namespace
         snf::server::OutboundChannel outbound;
         snf::server::ProtocolZoneResultSink zone_results;
         snf::server::CountingCommandLifecycleSink lifecycle;
+        snf::server::ZoneHandoffService handoffs;
         snf::server::ProtocolGateway gateway;
     };
 

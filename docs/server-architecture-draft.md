@@ -20,6 +20,7 @@ Client
 TcpServer (epoll reactor)
   ↓ FrameEnvelope
 ProtocolGateway / MessageDispatcher
+  ↕ (cross-zone은 ZoneHandoffService)
   ↓ RoutedCommand
 CommandRouter
   ↓ typed ActorSubmission
@@ -193,8 +194,12 @@ ZoneActor는 participant position과 tick을 직렬화한다. 주기적 tick은 
 ActorRuntime Worker의 스케줄러(`trySchedule`)가 예약 시점에 mailbox capacity를 확보한 뒤 같은 Worker
 스레드에서 직접 게시한다. 빈 Zone은 route와 mailbox가 모두 정리된 후 `PassivateIfIdle`로 passivate된다.
 
-cross-zone 이동의 control state는 reactor의 `RouteCoordinator`가 소유한다. source leave, target
-enter와 route publish를 단계적으로 진행하며 Worker completion은 bounded value channel로 돌아온다.
+cross-zone 이동의 control state는 reactor의 `RouteCoordinator`가 소유하고, 단계 진행은
+`ZoneHandoffService`가 맡는다. source leave, target enter와 route publish를 단계적으로 진행하며
+Worker completion은 bounded value channel로 돌아온다.
+
+이 saga는 한때 `ProtocolGateway` 안에 있었다. 한 클래스가 frame 해석과 보상을 가진 다단계
+상태 기계를 동시에 소유하고 있었고, 지금은 gateway가 handoff를 **시작하고 물어보기만** 한다.
 실패 보상과 disconnect/shutdown cleanup은 [Cross-Zone Handoff 계약](./cross-zone-handoff-contract.md)이
 소유한다.
 

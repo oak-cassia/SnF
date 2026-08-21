@@ -1,4 +1,4 @@
-#include "snf/game/party_actor.hpp"
+#include "snf/game/party.hpp"
 
 #include <cassert>
 #include <vector>
@@ -7,7 +7,7 @@ namespace
 {
     void test_party_actor_orders_members_and_enforces_epoch_and_capacity()
     {
-        snf::server::PartyActor actor{snf::server::PartyId{.value = 9}, snf::server::PartyActorConfig{.max_members = 2}};
+        snf::server::Party actor{snf::server::PartyId{.value = 9}, snf::server::PartyConfig{.max_members = 2}};
         const snf::server::PlayerId first{.value = 20};
         const snf::server::PlayerId second{.value = 10};
         const snf::server::PlayerId third{.value = 30};
@@ -63,7 +63,7 @@ namespace
     }
 }
 
-void run_party_actor_tests()
+void run_party_tests()
 {
     test_party_actor_orders_members_and_enforces_epoch_and_capacity();
 }

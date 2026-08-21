@@ -43,7 +43,7 @@ namespace
         const std::thread::id caller = std::this_thread::get_id();
         snf::server::CountingCommandLifecycleSink lifecycle;
         snf::server::PartyActorBinding binding{snf::server::PartyActorBindingConfig{
-                                                   .actor = snf::server::PartyActorConfig{.max_members = 2},
+                                                   .actor = snf::server::PartyConfig{.max_members = 2},
                                                    .on_result =
                                                        [&recorded](const snf::server::PartyInboundCommand&, const snf::server::PartyResult& result)
                                                    {

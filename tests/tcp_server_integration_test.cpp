@@ -1200,8 +1200,8 @@ namespace
         assert(metrics.zone_handoffs.handoffs_started == 1);
         assert(metrics.zone_handoffs.handoffs_completed == 1);
         assert(metrics.zone_handoffs.pending_handoffs == 0);
-        assert(metrics.zone_handoff_gateway.transition_nanoseconds.sample_count == 1);
-        assert(metrics.zone_handoff_gateway.pending == 0);
+        assert(metrics.zone_handoffs_saga.transition_nanoseconds.sample_count == 1);
+        assert(metrics.zone_handoffs_saga.pending == 0);
         assert(metrics.zone_transition_channel.completions_published == 2);
         assert(metrics.zone_transition_channel.completions_consumed == 2);
         assert(metrics.zone_transition_channel.reservations == 0);

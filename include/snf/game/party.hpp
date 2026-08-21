@@ -11,15 +11,17 @@
 
 namespace snf::server
 {
-    struct PartyActorConfig
+    struct PartyConfig
     {
         std::size_t max_members{8};
     };
 
-    class PartyActor
+    // The game model, not the execution unit: being an actor is how a Party is run,
+    // which is PartyActorBinding's business.
+    class Party
     {
     public:
-        explicit PartyActor(PartyId party, PartyActorConfig config = {});
+        explicit Party(PartyId party, PartyConfig config = {});
 
         [[nodiscard]] PartyId id() const noexcept;
         [[nodiscard]] std::size_t memberCount() const noexcept;

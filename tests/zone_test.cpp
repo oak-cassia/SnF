@@ -1,4 +1,4 @@
-#include "snf/game/zone_actor.hpp"
+#include "snf/game/zone.hpp"
 
 #include <cassert>
 #include <chrono>
@@ -21,9 +21,9 @@ namespace
 
     void test_zone_owns_enter_move_leave_and_deterministic_aoi()
     {
-        snf::server::ZoneActor zone{
+        snf::server::Zone zone{
             snf::server::ZoneId{.value = 1},
-            snf::server::ZoneActorConfig{
+            snf::server::ZoneConfig{
                 .aoi_radius = 10,
                 .tick_interval = 50ms,
             },
@@ -89,9 +89,9 @@ namespace
 
     void test_zone_tick_and_distance_math_reject_stale_or_overflowing_inputs()
     {
-        snf::server::ZoneActor zone{
+        snf::server::Zone zone{
             snf::server::ZoneId{.value = 2},
-            snf::server::ZoneActorConfig{
+            snf::server::ZoneConfig{
                 .aoi_radius = std::numeric_limits<std::int32_t>::max(),
                 .tick_interval = 100ms,
             },
@@ -143,7 +143,7 @@ namespace
     }
 }
 
-void run_zone_actor_tests()
+void run_zone_tests()
 {
     test_zone_owns_enter_move_leave_and_deterministic_aoi();
     test_zone_tick_and_distance_math_reject_stale_or_overflowing_inputs();
