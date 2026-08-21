@@ -8,16 +8,27 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#if defined(__linux__)
 #include <sys/eventfd.h>
+#else
+#include <unistd.h>
+#endif
 #include <vector>
 
 namespace snf::test
 {
     inline snf::net::UniqueFileDescriptor make_wake_descriptor()
     {
+#if defined(__linux__)
         const int descriptor = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
         assert(descriptor != -1);
         return snf::net::UniqueFileDescriptor{descriptor};
+#else
+        int fds[2];
+        const int res = ::pipe(fds);
+        assert(res != -1);
+        return snf::net::UniqueFileDescriptor{fds[1]};
+#endif
     }
 
     // Stands in for the runtime's continuation queue. A channel only ever reaches an
