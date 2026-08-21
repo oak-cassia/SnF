@@ -10,8 +10,8 @@ namespace
 {
     std::uint32_t read_u32(std::span<const std::byte> bytes, const std::size_t offset)
     {
-        return (std::to_integer<std::uint32_t>(bytes[offset]) << 24U) | (std::to_integer<std::uint32_t>(bytes[offset + 1]) << 16U) | (std::to_integer<std::uint32_t>(bytes[offset + 2]) << 8U) |
-               std::to_integer<std::uint32_t>(bytes[offset + 3]);
+        return (std::to_integer<std::uint32_t>(bytes[offset]) << 24U) | (std::to_integer<std::uint32_t>(bytes[offset + 1]) << 16U) |
+               (std::to_integer<std::uint32_t>(bytes[offset + 2]) << 8U) | std::to_integer<std::uint32_t>(bytes[offset + 3]);
     }
 
     std::uint64_t read_u64(std::span<const std::byte> bytes, const std::size_t offset)
@@ -36,20 +36,22 @@ namespace
 
 namespace snf::server
 {
-    ProtocolGateway::ProtocolGateway(RoutedCommandIngress& commands,
-                                     PlayerSessionDirectory& sessions,
-                                     RouteCoordinator& routes,
-                                     PartyCoordinator& parties,
-                                     ZoneHandoffService& handoffs,
-                                     ProtocolZoneResultSink& zone_results,
-                                     ProtocolGatewayConfig config)
+    ProtocolGateway::ProtocolGateway(
+        RoutedCommandIngress& commands,
+        PlayerSessionDirectory& sessions,
+        RouteCoordinator& routes,
+        PartyCoordinator& parties,
+        ZoneHandoffService& handoffs,
+        RoomEntryService& room_entries,
+        ProtocolGatewayConfig config
+    )
         : _dispatcher(std::move(config.dispatcher))
         , _commands(commands)
         , _sessions(sessions)
         , _routes(routes)
         , _parties(parties)
         , _handoffs(handoffs)
-        , _zone_results(zone_results)
+        , _room_entries(room_entries)
     {
     }
     FramePostResult ProtocolGateway::tryPost(FrameEnvelope envelope)
@@ -85,8 +87,6 @@ namespace snf::server
                 return FramePostResult::InvalidPayload;
             }
 
-            // The client names the room. There is no matchmaking, which is why nothing
-            // here allocates or looks one up.
             const RoomId room{
                 .value = read_u64(std::span<const std::byte>{envelope.frame.payload}, 0),
             };
@@ -94,18 +94,26 @@ namespace snf::server
             {
                 return FramePostResult::InvalidPayload;
             }
-            return post_room(RoomCommandRoute{
-                .room = room,
-                .command = JoinRoom{.player = *player},
-                .reply_kind = RoomReplyKind::Joined,
-                .request_id = envelope.frame.request_id,
-            });
+
+            if (_room_entries.tryReplyRoomBusy(envelope.connection, envelope.frame.request_id, RoomReplyKind::Joined))
+            {
+                return FramePostResult::Accepted;
+            }
+
+            return _room_entries.tryStart(envelope.connection, envelope.frame.request_id, *player, room);
         }
 
         if (envelope.frame.type == snf::protocol::MessageType::BattleStart)
         {
             constexpr std::size_t BATTLE_START_PAYLOAD_SIZE = 8;
-            if (!_sessions.playerFor(envelope.connection) || envelope.frame.payload.size() != BATTLE_START_PAYLOAD_SIZE)
+            const auto player = _sessions.playerFor(envelope.connection);
+            if (!player || envelope.frame.payload.size() != BATTLE_START_PAYLOAD_SIZE)
+            {
+                return FramePostResult::InvalidPayload;
+            }
+
+            const auto in_room = _routes.inRoomFor(envelope.connection);
+            if (!in_room || in_room->player != *player)
             {
                 return FramePostResult::InvalidPayload;
             }
@@ -113,18 +121,43 @@ namespace snf::server
             const RoomId room{
                 .value = read_u64(std::span<const std::byte>{envelope.frame.payload}, 0),
             };
-            if (room.value == 0)
+            if (room.value == 0 || in_room->room != room)
             {
                 return FramePostResult::InvalidPayload;
             }
-            // Any participant may start it. The Room answers WrongPhase to whoever is
-            // second, so there is nothing to arbitrate here.
+
             return post_room(RoomCommandRoute{
                 .room = room,
                 .command = StartBattle{},
                 .reply_kind = RoomReplyKind::BattleStarted,
                 .request_id = envelope.frame.request_id,
             });
+        }
+
+        if (envelope.frame.type == snf::protocol::MessageType::RoomLeave)
+        {
+            if (!envelope.frame.payload.empty())
+            {
+                return FramePostResult::InvalidPayload;
+            }
+
+            const auto in_room = _routes.inRoomFor(envelope.connection);
+            if (!in_room)
+            {
+                return FramePostResult::InvalidPayload;
+            }
+
+            const FramePostResult result = post_room(RoomCommandRoute{
+                .room = in_room->room,
+                .command = LeaveRoom{.player = in_room->player},
+                .reply_kind = std::nullopt,
+                .request_id = envelope.frame.request_id,
+            });
+            if (result == FramePostResult::Accepted)
+            {
+                _room_entries.startReturn(envelope.connection, in_room->room);
+            }
+            return result;
         }
 
         if (envelope.frame.type == snf::protocol::MessageType::PartyJoin)
@@ -216,6 +249,11 @@ namespace snf::server
                 return FramePostResult::InvalidPayload;
             }
 
+            if (_room_entries.tryReplyZoneBlockedByRoom(envelope.connection, envelope.frame.request_id, ZoneReplyKind::Entered))
+            {
+                return FramePostResult::Accepted;
+            }
+
             const std::span<const std::byte> payload{envelope.frame.payload};
             const ZoneId zone{.value = read_u64(payload, 0)};
             ZonePosition position{
@@ -279,6 +317,10 @@ namespace snf::server
                 return FramePostResult::InvalidPayload;
             }
 
+            if (_room_entries.tryReplyZoneBlockedByRoom(envelope.connection, envelope.frame.request_id, ZoneReplyKind::Left))
+            {
+                return FramePostResult::Accepted;
+            }
             if (_handoffs.tryReplyTransitionInProgress(envelope.connection, envelope.frame.request_id, ZoneReplyKind::Left))
             {
                 return FramePostResult::Accepted;
@@ -315,6 +357,10 @@ namespace snf::server
                 return FramePostResult::InvalidPayload;
             }
 
+            if (_room_entries.tryReplyZoneBlockedByRoom(envelope.connection, envelope.frame.request_id, ZoneReplyKind::Moved))
+            {
+                return FramePostResult::Accepted;
+            }
             if (_handoffs.tryReplyTransitionInProgress(envelope.connection, envelope.frame.request_id, ZoneReplyKind::Moved))
             {
                 return FramePostResult::Accepted;
@@ -344,41 +390,6 @@ namespace snf::server
             if (result == FramePostResult::Accepted)
             {
                 _sessions.noteLocation(envelope.connection, PlayerLocation{.zone = route->zone, .position = position});
-            }
-            return result;
-        }
-
-        if (envelope.frame.type == snf::protocol::MessageType::LeaveZone)
-        {
-            if (!envelope.frame.payload.empty())
-            {
-                return FramePostResult::InvalidPayload;
-            }
-
-            if (_handoffs.tryReplyTransitionInProgress(envelope.connection, envelope.frame.request_id, ZoneReplyKind::Left))
-            {
-                return FramePostResult::Accepted;
-            }
-            const auto route = _routes.routeFor(envelope.connection);
-            if (!route)
-            {
-                return FramePostResult::InvalidPayload;
-            }
-
-            const FramePostResult result = post_zone(ZoneCommandRoute{
-                .zone = route->zone,
-                .command =
-                    LeaveZoneCommand{
-                        .player = route->player,
-                        .route_epoch = route->route_epoch,
-                    },
-                .reply_kind = ZoneReplyKind::Left,
-                .request_id = envelope.frame.request_id,
-            });
-            if (result != FramePostResult::Full)
-            {
-                _routes.completeLeave(*route);
-                _sessions.noteLocation(envelope.connection, std::nullopt);
             }
             return result;
         }
@@ -466,7 +477,7 @@ namespace snf::server
     {
         // TcpServer retains this exact lifecycle value in its bounded retry deque, so
         // the close resumes through the normal Player path once cleanup has run.
-        if (_handoffs.noteDisconnect(closed.connection))
+        if (_handoffs.noteDisconnect(closed.connection) || _room_entries.noteDisconnect(closed.connection))
         {
             return PostResult::Full;
         }
@@ -540,6 +551,25 @@ namespace snf::server
             _routes.completeLeave(*route);
         }
 
+        if (const auto in_room = _routes.inRoomFor(closed.connection))
+        {
+            const PostResult room_result = _commands.tryPost(RoutedCommand{
+                .connection = closed.connection,
+                .route =
+                    RoomCommandRoute{
+                        .room = in_room->room,
+                        .command = LeaveRoom{.player = in_room->player},
+                        .reply_kind = std::nullopt,
+                        .request_id = 0,
+                    },
+            });
+            if (room_result == PostResult::Full)
+            {
+                return PostResult::Full;
+            }
+            _routes.abandon(closed.connection);
+        }
+
         const std::optional<PlayerId> player = _sessions.playerFor(closed.connection);
         const PlayerActorId actor = player ? PlayerActorId{*player} : PlayerActorId{provisionalActorIdFor(closed.connection)};
         const bool began_persistent_close = player && _sessions.beginClose(closed.connection);
@@ -588,14 +618,15 @@ namespace snf::server
         return result;
     }
 
-    void ProtocolGateway::drainZoneTransitions()
+    void ProtocolGateway::drainTransitions()
     {
         _handoffs.drain();
+        _room_entries.drain();
     }
 
-    bool ProtocolGateway::zoneTransitionsDrained() const noexcept
+    bool ProtocolGateway::transitionsDrained() const noexcept
     {
-        return _handoffs.drained();
+        return _handoffs.drained() && _room_entries.drained();
     }
 
     ZoneHandoffStats ProtocolGateway::zoneHandoffStats() const noexcept
@@ -603,15 +634,22 @@ namespace snf::server
         return _handoffs.stats();
     }
 
+    RoomEntryStats ProtocolGateway::roomEntryStats() const noexcept
+    {
+        return _room_entries.stats();
+    }
+
     void ProtocolGateway::close() noexcept
     {
         _handoffs.close();
+        _room_entries.close();
         _commands.close();
     }
 
     void ProtocolGateway::cancel() noexcept
     {
         _handoffs.cancel();
+        _room_entries.cancel();
         _commands.cancel();
     }
 }

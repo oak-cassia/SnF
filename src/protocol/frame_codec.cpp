@@ -56,6 +56,9 @@ namespace
         case snf::protocol::MessageType::BattleStart:
         case snf::protocol::MessageType::BattleStarted:
         case snf::protocol::MessageType::BattleCleared:
+        case snf::protocol::MessageType::RoomLeave:
+        case snf::protocol::MessageType::RoomLeft:
+        case snf::protocol::MessageType::ReturnedToZone:
         case snf::protocol::MessageType::PartyLeft:
             return true;
         }

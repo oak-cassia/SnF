@@ -62,7 +62,7 @@ asyncLoad(PlayerId, PlayerLoadCompletion)
 asyncSave(PlayerRecord, PlayerSaveCompletion)
 ```
 
-Repository는 Actor, ActorSlot, mutable state 또는 coroutine handle을 받지 않는다. in-memory adapter는
+Repository는 Actor, ActorState, mutable state 또는 coroutine handle을 받지 않는다. in-memory adapter는
 결정적 기본 실행에 사용하고, MySQL adapter는 bounded queue와 전용 Worker Pool 뒤에서 blocking C API를
 실행한다.
 

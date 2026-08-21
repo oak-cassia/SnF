@@ -5,11 +5,12 @@
 #include <cassert>
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
 #include <variant>
 
 namespace
 {
-    snf::server::PlayerCommand make_ping(const std::uint32_t request_id)
+    snf::server::PlayerCommand make_ping()
     {
         return snf::server::PingCommand{
             .payload = {},
@@ -21,8 +22,8 @@ namespace
         snf::server::Player actor;
         assert(actor.state().handledCommandCount() == 0);
 
-        const auto first_command = make_ping(100);
-        const auto second_command = make_ping(101);
+        const auto first_command = make_ping();
+        const auto second_command = make_ping();
         const auto first = actor.handle(first_command);
         const auto second = actor.handle(second_command);
 
@@ -73,26 +74,32 @@ namespace
             .purchased_item_count = 3,
         });
 
-        const auto command = make_ping(20);
+        const auto command = make_ping();
         static_cast<void>(actor.handle(command));
         const auto record = actor.snapshot();
         assert(record.player == player);
         assert(record.handled_command_count == 11);
         assert(record.currency_balance == 700);
         assert(record.purchased_item_count == 3);
-        assert((record.last_location == snf::server::PlayerLocation{
-                                            .zone = snf::server::ZoneId{.value = 5},
-                                            .position = {.x = 3, .y = -4},
-                                        }));
+        assert(
+            (record.last_location ==
+             snf::server::PlayerLocation{
+                 .zone = snf::server::ZoneId{.value = 5},
+                 .position = {.x = 3, .y = -4},
+             })
+        );
 
         actor.setLastLocation(snf::server::PlayerLocation{
             .zone = snf::server::ZoneId{.value = 6},
             .position = {.x = 8, .y = 9},
         });
-        assert((actor.snapshot().last_location == snf::server::PlayerLocation{
-                                                      .zone = snf::server::ZoneId{.value = 6},
-                                                      .position = {.x = 8, .y = 9},
-                                                  }));
+        assert(
+            (actor.snapshot().last_location ==
+             snf::server::PlayerLocation{
+                 .zone = snf::server::ZoneId{.value = 6},
+                 .position = {.x = 8, .y = 9},
+             })
+        );
     }
 
     void test_street_experience_grant_marks_progression_dirty()
@@ -260,8 +267,49 @@ namespace
     }
 }
 
+void test_a_room_join_carries_stats_derived_from_experience()
+{
+    const snf::server::PlayerId player{.value = 95};
+    snf::server::Player actor{player};
+    actor.grantStreetExperience(1000);
+
+    const snf::server::PlayerCommand command = snf::server::JoinRoomRequest{
+        .room = snf::server::RoomId{.value = 7},
+    };
+    const auto result = actor.handle(command);
+
+    // Nothing answers the client here: the Room decides whether the join lands.
+    assert(result.responses.empty());
+    assert(result.room_join);
+    assert(result.room_join->room == snf::server::RoomId{.value = 7});
+    // 1000 experience is level 2, which is one step of growth off the base.
+    assert((result.room_join->stats == snf::server::CombatStats{.attack = 11, .health = 110}));
+}
+
+void test_a_provisional_player_cannot_join_a_room()
+{
+    snf::server::Player actor;
+    const snf::server::PlayerCommand command = snf::server::JoinRoomRequest{
+        .room = snf::server::RoomId{.value = 7},
+    };
+
+    bool refused = false;
+    try
+    {
+        static_cast<void>(actor.handle(command));
+    }
+    catch (const std::logic_error&)
+    {
+        refused = true;
+    }
+    // A Room reward is persistent state, so an unauthenticated actor has no
+    // business entering one.
+    assert(refused);
+}
 void run_player_tests()
 {
+    test_a_room_join_carries_stats_derived_from_experience();
+    test_a_provisional_player_cannot_join_a_room();
     test_player_actor_owns_state_and_dispatches_ping();
     test_persistent_player_actor_acknowledges_its_identity();
     test_persistent_player_actor_restores_and_snapshots_state();

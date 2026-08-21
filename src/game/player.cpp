@@ -1,6 +1,7 @@
 #include "snf/game/player.hpp"
 
 #include "snf/game/product_catalog.hpp"
+#include "snf/game/street_progression.hpp"
 
 #include <limits>
 #include <stdexcept>
@@ -186,6 +187,24 @@ namespace snf::server
                                 .player = command.player,
                             },
                     },
+                },
+        };
+    }
+
+    PlayerResult Player::handleCommand(const JoinRoomRequest& command)
+    {
+        if (!_state._session.identity)
+        {
+            throw std::logic_error{"JoinRoomRequest reached a provisional Player actor"};
+        }
+
+        // The stats are read here because the experience they come from is owned here.
+        // Nothing answers the client yet: the Room decides whether the join lands.
+        return PlayerResult{
+            .room_join =
+                RoomJoinRequest{
+                    .room = command.room,
+                    .stats = combatStats(streetLevel(_state._progression.street_experience)),
                 },
         };
     }

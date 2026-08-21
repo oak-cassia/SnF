@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace snf::server
@@ -27,6 +28,9 @@ namespace snf::server
     //
     //   Waiting --StartBattle--> Running --BattleCompleted--> Cleared
     //
+    // A LeaveRoom is accepted in either non-terminal phase: before the battle it
+    // frees the seat, during one it forfeits the reward.
+    //
     class Room
     {
     public:
@@ -35,18 +39,27 @@ namespace snf::server
         [[nodiscard]] RoomId id() const noexcept;
         [[nodiscard]] RoomPhase phase() const noexcept;
         [[nodiscard]] std::size_t participantCount() const noexcept;
+        // The snapshot this player entered with, absent when they are not in.
+        [[nodiscard]] std::optional<CombatStats> statsOf(PlayerId player) const;
 
         [[nodiscard]] RoomResult handle(const RoomCommand& command);
 
     private:
         [[nodiscard]] RoomResult handleCommand(const JoinRoom& command);
+        [[nodiscard]] RoomResult handleCommand(const LeaveRoom& command);
         [[nodiscard]] RoomResult handleCommand(const StartBattle& command);
         [[nodiscard]] RoomResult handleCommand(const BattleCompleted& command);
 
         RoomId _room;
         RoomConfig _config;
         RoomPhase _phase{RoomPhase::Waiting};
+        struct Participant
+        {
+            PlayerId player;
+            CombatStats stats;
+        };
+
         // Ascending PlayerId, so a clear emits its rewards in a deterministic order.
-        std::vector<PlayerId> _participants;
+        std::vector<Participant> _participants;
     };
 }

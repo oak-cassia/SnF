@@ -4,6 +4,8 @@
 #include "snf/game/room_id.hpp"
 #include "snf/net/connection_id.hpp"
 
+#include "snf/server/room_entry.hpp"
+
 #include <cstdint>
 #include <optional>
 
@@ -30,5 +32,6 @@ namespace snf::server
         // the Room's own timer, so there is no request to answer -- the same reason
         // ZoneSimulationTick rides with no reply context.
         std::optional<RoomReplyContext> reply;
+        std::optional<RoomEntryContext> entry;
     };
 }

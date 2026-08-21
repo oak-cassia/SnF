@@ -22,6 +22,8 @@
 #include "snf/server/protocol_zone_result_sink.hpp"
 #include "snf/server/room_actor_binding.hpp"
 #include "snf/server/room_actor_ingress.hpp"
+#include "snf/server/room_entry_service.hpp"
+#include "snf/server/room_transition_channel.hpp"
 #include "snf/server/route_coordinator.hpp"
 #include "snf/server/tcp_server.hpp"
 #include "snf/server/zone_actor_binding.hpp"
@@ -56,6 +58,8 @@ namespace snf::server
         RouteCoordinatorStats zone_handoffs;
         ZoneHandoffStats zone_handoffs_saga;
         ZoneTransitionChannelStats zone_transition_channel;
+        RoomEntryStats room_entries;
+        RoomTransitionChannelStats room_transition_channel;
         PartyActorBindingStats party_actors;
         // Commands that were admitted and reached a final result, counted once each
         // whether or not they answered. If playable slow-command measurements justify
@@ -94,6 +98,8 @@ namespace snf::server
         std::chrono::milliseconds room_battle_duration{5000};
         std::size_t max_room_participants{4};
         std::uint64_t room_clear_experience{300};
+        std::size_t max_room_entries{4096};
+        std::size_t max_room_entry_completions_per_turn{64};
         std::size_t max_zone_handoff_completions_per_turn{64};
         std::size_t outbound_queue_capacity{4096};
         // Bounds the shared outbound capacity one connection may hold at once.
@@ -154,6 +160,7 @@ namespace snf::server
         // sink still cannot reach the reactor-only half.
         OutboundChannel _outbound_channel;
         ZoneTransitionChannel _zone_transition_channel;
+        RoomTransitionChannel _room_transition_channel;
         ProtocolPlayerResponseSink _player_responses;
         ProtocolZoneResultSink _zone_results;
         ProtocolPartyResultSink _party_results;
@@ -181,6 +188,7 @@ namespace snf::server
         RoomActorIngress _room_actor_ingress;
         CommandRouter _command_router;
         ZoneHandoffService _zone_handoff_service;
+        RoomEntryService _room_entry_service;
         ProtocolGateway _protocol_gateway;
         TcpServer _tcp_server;
         bool _has_run{false};

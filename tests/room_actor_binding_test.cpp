@@ -1,9 +1,11 @@
+#include "snf/game/room_join_request.hpp"
 #include "snf/game/street_experience_grant.hpp"
 #include "snf/runtime/actor_runtime.hpp"
 #include "snf/runtime/runtime_completion.hpp"
 #include "snf/server/command_terminal.hpp"
 #include "snf/server/room_actor_binding.hpp"
 #include "snf/server/room_actor_ingress.hpp"
+#include "snf/server/room_join_tell.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -64,22 +66,29 @@ namespace
     protected:
         // Called on whichever Worker owns the sender, so this stays a read-only
         // transform: no cache, no counter, nothing for TSan to find.
-        [[nodiscard]] std::optional<snf::runtime::ActorSubmission> makeTell(const snf::runtime::ActorKey target, snf::runtime::TellPayload payload) override
+        [[nodiscard]] std::optional<snf::runtime::ActorSubmission>
+        makeTell(const snf::runtime::ActorKey target, snf::runtime::TellPayload payload) override
         {
             auto grant = payload.take<snf::server::StreetExperienceGrant>();
             if (!grant)
             {
                 return std::nullopt;
             }
-            return makeSubmission(target, snf::runtime::ActorActivation::ActivateIfMissing, snf::runtime::ActorAccounting::Command, GrantPayload{.experience = grant->experience});
+            return makeSubmission(
+                target,
+                snf::runtime::ActorActivation::ActivateIfMissing,
+                snf::runtime::ActorAccounting::Command,
+                GrantPayload{.experience = grant->experience}
+            );
         }
 
-        [[nodiscard]] std::unique_ptr<snf::runtime::ActorSlot> activate(snf::runtime::EntityId) override
+        [[nodiscard]] std::unique_ptr<snf::runtime::ActorState> activate(snf::runtime::EntityId) override
         {
             return std::make_unique<Slot>();
         }
 
-        [[nodiscard]] snf::runtime::ActorDispatchResult dispatch(snf::runtime::ActorSlot&, const snf::runtime::ActorSubmission& submission, snf::runtime::ActorContext&, std::stop_token) override
+        [[nodiscard]] snf::runtime::ActorDispatchResult
+        dispatch(snf::runtime::ActorState&, const snf::runtime::ActorSubmission& submission, snf::runtime::ActorContext&, std::stop_token) override
         {
             const GrantPayload& payload = payloadAs<GrantPayload>(submission);
             {
@@ -93,7 +102,7 @@ namespace
             return snf::runtime::ActorDispatchResult::PassivateIfIdle;
         }
 
-        [[nodiscard]] snf::runtime::ActorDispatchResult resume(snf::runtime::ActorSlot&, snf::runtime::ActorContext&, std::stop_token) override
+        [[nodiscard]] snf::runtime::ActorDispatchResult resume(snf::runtime::ActorState&, snf::runtime::ActorContext&, std::stop_token) override
         {
             throw std::logic_error{"RecordingPlayerBinding has no suspension point"};
         }
@@ -104,7 +113,7 @@ namespace
             std::uint64_t experience{0};
         };
 
-        struct Slot final : snf::runtime::ActorSlot
+        struct Slot final : snf::runtime::ActorState
         {
         };
     };
@@ -128,16 +137,18 @@ namespace
         auto arrived = player_binding.all_arrived.get_future();
 
         snf::server::CountingCommandLifecycleSink lifecycle;
-        snf::server::RoomActorBinding binding{snf::server::RoomActorBindingConfig{
-                                                  .actor =
-                                                      snf::server::RoomConfig{
-                                                          .battle_duration = 30ms,
-                                                          .max_participants = 4,
-                                                          .clear_experience = 300,
-                                                      },
-                                                  .on_result = {},
-                                              },
-                                              lifecycle};
+        snf::server::RoomActorBinding binding{
+            snf::server::RoomActorBindingConfig{
+                .actor =
+                    snf::server::RoomConfig{
+                        .battle_duration = 30ms,
+                        .max_participants = 4,
+                        .clear_experience = 300,
+                    },
+                .on_result = {},
+            },
+            lifecycle
+        };
         RecordingCompletion completion;
         snf::runtime::ActorRuntime runtime{runtime_config(), completion};
         runtime.registerBinding(binding);
@@ -148,17 +159,21 @@ namespace
         const snf::server::RoomId room{.value = 10};
         for (const std::uint64_t player : {std::uint64_t{20}, std::uint64_t{10}})
         {
-            assert(ingress.tryPost(snf::server::RoomInboundCommand{
-                       .room = room,
-                       .command = snf::server::JoinRoom{.player = snf::server::PlayerId{.value = player}},
-                       .reply = std::nullopt,
-                   }) == snf::runtime::PostResult::Accepted);
+            assert(
+                ingress.tryPost(snf::server::RoomInboundCommand{
+                    .room = room,
+                    .command = snf::server::JoinRoom{.player = snf::server::PlayerId{.value = player}},
+                    .reply = std::nullopt,
+                }) == snf::runtime::PostResult::Accepted
+            );
         }
-        assert(ingress.tryPost(snf::server::RoomInboundCommand{
-                   .room = room,
-                   .command = snf::server::StartBattle{},
-                   .reply = std::nullopt,
-               }) == snf::runtime::PostResult::Accepted);
+        assert(
+            ingress.tryPost(snf::server::RoomInboundCommand{
+                .room = room,
+                .command = snf::server::StartBattle{},
+                .reply = std::nullopt,
+            }) == snf::runtime::PostResult::Accepted
+        );
 
         // Nothing else posts BattleCompleted: the only thing that can finish this
         // battle is the timer the Room armed for itself.
@@ -169,10 +184,13 @@ namespace
 
         std::lock_guard lock{player_binding.mutex};
         std::ranges::sort(player_binding.grants, {}, &RecordingPlayerBinding::Grant::entity);
-        assert((player_binding.grants == std::vector<RecordingPlayerBinding::Grant>{
-                                             {.entity = 10, .experience = 300},
-                                             {.entity = 20, .experience = 300},
-                                         }));
+        assert(
+            (player_binding.grants ==
+             std::vector<RecordingPlayerBinding::Grant>{
+                 {.entity = 10, .experience = 300},
+                 {.entity = 20, .experience = 300},
+             })
+        );
         assert(completion.drained.load() == 1);
         assert(completion.failed.load() == 0);
     }
@@ -191,11 +209,13 @@ namespace
 
         // An empty Room is refused a start, so it must not be left resident holding
         // a slot for a battle that will never run.
-        assert(ingress.tryPost(snf::server::RoomInboundCommand{
-                   .room = snf::server::RoomId{.value = 11},
-                   .command = snf::server::StartBattle{},
-                   .reply = std::nullopt,
-               }) == snf::runtime::PostResult::Accepted);
+        assert(
+            ingress.tryPost(snf::server::RoomInboundCommand{
+                .room = snf::server::RoomId{.value = 11},
+                .command = snf::server::StartBattle{},
+                .reply = std::nullopt,
+            }) == snf::runtime::PostResult::Accepted
+        );
 
         runtime.close();
         runtime.join();
@@ -211,8 +231,55 @@ namespace
     }
 }
 
+void test_a_join_naming_another_room_is_refused()
+{
+    RecordingPlayerBinding player_binding;
+    snf::server::CountingCommandLifecycleSink lifecycle;
+    snf::server::RoomActorBinding binding{snf::server::RoomActorBindingConfig{}, lifecycle};
+    RecordingCompletion completion;
+    snf::runtime::ActorRuntime runtime{runtime_config(), completion};
+    runtime.registerBinding(binding);
+    runtime.registerBinding(player_binding);
+    runtime.start();
+
+    bool refused = false;
+    try
+    {
+        // The key says Room 11, the request says Room 99. Only a routing bug does
+        // that, and entering the wrong Room is worse than failing loudly.
+        static_cast<void>(runtime.tryTell(
+            snf::runtime::ActorKey{
+                .kind = snf::runtime::ActorKind::Room,
+                .entity = 11,
+            },
+            snf::runtime::TellPayload::of(snf::server::RoomJoinTell{
+                .player = snf::server::PlayerId{.value = 5},
+                .request =
+                    snf::server::RoomJoinRequest{
+                        .room = snf::server::RoomId{.value = 99},
+                        .stats = {.attack = 10, .health = 100},
+                    },
+                .reply =
+                    snf::server::RoomReplyContext{
+                        .connection = {.descriptor = 4, .generation = 1},
+                        .request_id = 3,
+                        .kind = snf::server::RoomReplyKind::Joined,
+                    },
+            })
+        ));
+    }
+    catch (const std::logic_error&)
+    {
+        refused = true;
+    }
+
+    runtime.close();
+    runtime.join();
+    assert(refused);
+}
 void run_room_actor_binding_tests()
 {
+    test_a_join_naming_another_room_is_refused();
     test_a_room_clears_from_its_own_timer_and_rewards_every_participant();
     test_a_room_that_never_started_passivates();
 }

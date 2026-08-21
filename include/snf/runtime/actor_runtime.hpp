@@ -262,16 +262,16 @@ namespace snf::runtime
 
     // The scheduler only stores this wrapper type. Domain actors themselves do
     // not implement a common runtime base class.
-    class ActorSlot
+    class ActorState
     {
     public:
-        virtual ~ActorSlot() = default;
+        virtual ~ActorState() = default;
 
-        ActorSlot(const ActorSlot&) = delete;
-        ActorSlot& operator=(const ActorSlot&) = delete;
+        ActorState(const ActorState&) = delete;
+        ActorState& operator=(const ActorState&) = delete;
 
     protected:
-        ActorSlot() = default;
+        ActorState() = default;
     };
 
     class ActorBinding
@@ -317,13 +317,13 @@ namespace snf::runtime
 
         // Implementations create and use a local wrapper that owns their domain
         // actor. No Player/Zone/etc. runtime inheritance is required.
-        [[nodiscard]] virtual std::unique_ptr<ActorSlot> activate(EntityId entity) = 0;
+        [[nodiscard]] virtual std::unique_ptr<ActorState> activate(EntityId entity) = 0;
 
         // Returning Suspended means the handler's task is parked on an operation
-        // begun through the context. The binding keeps the task in its own slot
+        // begun through the context. The binding keeps the task in its own state
         // until resume() finishes it.
         [[nodiscard]] virtual ActorDispatchResult
-        dispatch(ActorSlot& slot, const ActorSubmission& submission, ActorContext& context, std::stop_token stop_token) = 0;
+        dispatch(ActorState& state, const ActorSubmission& submission, ActorContext& context, std::stop_token stop_token) = 0;
 
         // Builds this binding's submission for a tell addressed to one of its
         // actors. Only the binding that owns the payload type can restore it, which
@@ -344,7 +344,7 @@ namespace snf::runtime
         // Called only after a previous dispatch/resume returned Suspended, and
         // only on the owning Worker. Returning Suspended again is allowed: a
         // handler may await more than once in sequence.
-        [[nodiscard]] virtual ActorDispatchResult resume(ActorSlot& slot, ActorContext& context, std::stop_token stop_token) = 0;
+        [[nodiscard]] virtual ActorDispatchResult resume(ActorState& state, ActorContext& context, std::stop_token stop_token) = 0;
 
         friend class ActorRuntime;
     };
@@ -467,7 +467,7 @@ namespace snf::runtime
     private:
         struct QueuedSubmission;
         struct ActiveCommand;
-        struct ActorSlotEntry;
+        struct ActorEntry;
         struct WorkerCounters;
         struct Worker;
         class SlotContext;
@@ -513,7 +513,7 @@ namespace snf::runtime
         void releaseOperation(Worker& worker) noexcept;
         // Applies the terminal half of a command's accounting exactly once,
         // whichever of success, failure or cancellation ended it.
-        void finishActiveCommand(Worker& worker, ActorSlotEntry& slot, bool succeeded) noexcept;
+        void finishActiveCommand(Worker& worker, ActorEntry& entry, bool succeeded) noexcept;
         [[nodiscard]] bool publishContinuation(const ActorContinuation& continuation) noexcept;
         void reportRejectedCompletion(const ActorContinuation& continuation, ContinuationRejection rejection) noexcept;
         void workerFinished() noexcept;

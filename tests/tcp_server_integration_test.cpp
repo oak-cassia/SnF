@@ -9,6 +9,8 @@
 #include <array>
 #include <atomic>
 #include <cassert>
+#include <cstring>
+#include <iostream>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -129,6 +131,21 @@ namespace
                       catch (...)
                       {
                           _server_error = std::current_exception();
+                          // Reported here, not only rethrown from stop(): a server that dies
+                          // mid-test takes every session with it, and the client-side read
+                          // that then fails says nothing about why.
+                          try
+                          {
+                              std::rethrow_exception(_server_error);
+                          }
+                          catch (const std::exception& error)
+                          {
+                              std::cerr << "[server] run() threw: " << error.what() << '\n';
+                          }
+                          catch (...)
+                          {
+                              std::cerr << "[server] run() threw a non-standard exception\n";
+                          }
                       }
                   })
         {
@@ -307,8 +324,12 @@ namespace
                 continue;
             }
 
-            // Names itself, because a receive that times out here is otherwise
-            // indistinguishable from any other failed assertion in the suite.
+            // Names itself, because a receive that fails here is otherwise
+            // indistinguishable from any other failed assertion in the suite. The
+            // distinction that matters is peer-closed versus timed out: one means the
+            // server went away, the other that it never answered.
+            std::cerr << "[recv] fd " << socket_descriptor << " wanted " << expected_byte_count << ", got " << received_byte_count << ", result " << result << ", errno " << errno << " ("
+                      << std::strerror(errno) << ")\n";
             assert(false && "receive_exact: recv failed or timed out");
         }
 
@@ -981,6 +1002,7 @@ namespace
             .room_clear_experience = 300,
         }};
         constexpr std::uint64_t room = 77;
+        constexpr std::uint64_t zone = 88;
         constexpr std::uint64_t first_player = 610;
         constexpr std::uint64_t second_player = 611;
 
@@ -994,6 +1016,32 @@ namespace
             assert_authenticated(receive_exact(socket.get().getDescriptor(), bytes.size()), request_id, player);
         }
 
+        // A Room is entered from a Zone, and it is the Zone the battle hands them back
+        // to. Without this there is nothing to leave and nothing to return to, and the
+        // join is refused.
+        //
+        // The two sit further apart than the AOI radius on purpose: a Zone reply carries
+        // the players it can see, and the fixed-size reader below only holds a reply that
+        // sees none.
+        for (const auto& [socket, request_id, y] : {std::tuple{std::ref(first), std::uint32_t{310}, std::uint32_t{20}}, std::tuple{std::ref(second), std::uint32_t{311}, std::uint32_t{5000}}})
+        {
+            std::vector<std::byte> enter_payload = player_id_payload(zone);
+            append_u32(enter_payload, 10);
+            append_u32(enter_payload, y);
+            send_all(socket.get().getDescriptor(),
+                     snf::protocol::encode_frame(snf::protocol::Frame{
+                         .type = snf::protocol::MessageType::EnterZone,
+                         .request_id = request_id,
+                         .payload = std::move(enter_payload),
+                     }));
+            const auto entered = receive_zone_response(socket.get().getDescriptor());
+            assert(entered.type == snf::protocol::MessageType::ZoneEntered);
+            assert(entered.request_id == request_id);
+            assert(entered.payload[0] == static_cast<std::byte>(snf::server::ZoneCommandStatus::Applied));
+            assert(read_u64(entered.payload, 1) == zone);
+            assert(read_u64(entered.payload, 9) == 1);
+        }
+
         constexpr std::size_t ROOM_REPLY_PAYLOAD_SIZE = 1 + 1 + 8;
         for (const auto& [socket, request_id] : {std::pair{std::ref(first), std::uint32_t{302}}, std::pair{std::ref(second), std::uint32_t{303}}})
         {
@@ -1005,20 +1053,72 @@ namespace
             assert(joined.payload[1] == static_cast<std::byte>(snf::server::RoomPhase::Waiting));
         }
 
+        // In a Room means in no Zone. The Move is answered rather than refused, and it
+        // changes nothing: the position the return restores below is the one they entered
+        // the Room with.
+        send_all(first.getDescriptor(),
+                 snf::protocol::encode_frame(snf::protocol::Frame{
+                     .type = snf::protocol::MessageType::Move,
+                     .request_id = 312,
+                     .payload = [] {
+                         std::vector<std::byte> payload;
+                         append_u32(payload, 99);
+                         append_u32(payload, 99);
+                         return payload;
+                     }(),
+                 }));
+        const auto refused_move = receive_zone_response(first.getDescriptor());
+        assert(refused_move.type == snf::protocol::MessageType::Moved);
+        assert(refused_move.request_id == 312);
+        assert(refused_move.payload[0] == static_cast<std::byte>(snf::server::ZoneCommandStatus::InRoom));
+
         send_all(first.getDescriptor(), snf::protocol::encode_frame(room_frame(snf::protocol::MessageType::BattleStart, 304, room)));
         const auto started = receive_room_frame(first.getDescriptor(), ROOM_REPLY_PAYLOAD_SIZE);
         assert(started.type == snf::protocol::MessageType::BattleStarted);
         assert(started.request_id == 304);
         assert(started.payload[1] == static_cast<std::byte>(snf::server::RoomPhase::Running));
 
-        // Nobody asks for this one. The Room's own timer ends the battle, and both
-        // participants are told -- including the one that never sent BattleStart.
-        for (auto* socket : {&first, &second})
+        // Nobody asks for either of these. The Room's own timer ends the battle, and both
+        // participants are told -- including the one that never sent BattleStart -- and
+        // then put back in the Zone they came from.
+        constexpr std::size_t RETURN_PAYLOAD_SIZE = 8 + 4 + 4;
+        for (const auto& [socket, y] : {std::pair{std::ref(first), std::int32_t{20}}, std::pair{std::ref(second), std::int32_t{5000}}})
         {
-            const auto cleared = receive_room_frame(socket->getDescriptor(), 8);
+            const auto cleared = receive_room_frame(socket.get().getDescriptor(), 8);
             assert(cleared.type == snf::protocol::MessageType::BattleCleared);
             assert(cleared.request_id == snf::protocol::UNSOLICITED_REQUEST_ID);
             assert(cleared.payload == player_id_payload(300));
+
+            const auto returned = receive_room_frame(socket.get().getDescriptor(), RETURN_PAYLOAD_SIZE);
+            assert(returned.type == snf::protocol::MessageType::ReturnedToZone);
+            assert(returned.request_id == snf::protocol::UNSOLICITED_REQUEST_ID);
+            assert(read_u64(returned.payload, 0) == zone);
+            assert(static_cast<std::int32_t>(read_u32(returned.payload, 8)) == 10);
+            assert(static_cast<std::int32_t>(read_u32(returned.payload, 12)) == y);
+        }
+
+        // The route is real again, on a fresh epoch: entering minted 1, the return minted
+        // 2. A Move that lands proves the whole way back, not just the frame announcing
+        // it.
+        for (const auto& [socket, request_id, y] : {std::tuple{std::ref(first), std::uint32_t{320}, std::int32_t{21}}, std::tuple{std::ref(second), std::uint32_t{321}, std::int32_t{5001}}})
+        {
+            std::vector<std::byte> move_payload;
+            append_u32(move_payload, 11);
+            append_u32(move_payload, static_cast<std::uint32_t>(y));
+            send_all(socket.get().getDescriptor(),
+                     snf::protocol::encode_frame(snf::protocol::Frame{
+                         .type = snf::protocol::MessageType::Move,
+                         .request_id = request_id,
+                         .payload = std::move(move_payload),
+                     }));
+            const auto moved = receive_zone_response(socket.get().getDescriptor());
+            assert(moved.type == snf::protocol::MessageType::Moved);
+            assert(moved.request_id == request_id);
+            assert(moved.payload[0] == static_cast<std::byte>(snf::server::ZoneCommandStatus::Applied));
+            assert(read_u64(moved.payload, 1) == zone);
+            assert(read_u64(moved.payload, 9) == 2);
+            assert(static_cast<std::int32_t>(read_u32(moved.payload, 17)) == 11);
+            assert(static_cast<std::int32_t>(read_u32(moved.payload, 21)) == y);
         }
     }
 
@@ -1838,30 +1938,40 @@ namespace
 
 int main()
 {
-    test_returns_pong_for_ping();
-    test_authenticates_one_session_and_allows_reconnect_after_passivation();
-    test_live_purchase_is_memory_authoritative_and_flushes();
-    test_two_players_share_one_party_actor_and_passivate_it_when_empty();
-    test_two_players_clear_a_room_and_are_told_without_asking();
-    test_authenticated_player_enters_moves_and_leaves_a_zone();
-    test_authenticated_player_handoffs_between_zones_and_publishes_target_route();
-    test_zone_position_survives_disconnect_save_and_reconnect();
-    test_collects_baseline_saturation_metrics_for_a_round_trip();
-    test_saturated_outbound_answers_every_request_and_still_drains();
-    test_reports_metrics_periodically_while_running();
-    test_peer_disconnect_evicts_the_player_actor();
-    test_decodes_ping_sent_one_byte_at_a_time();
-    test_decodes_multiple_pings_from_one_send();
-    test_survives_client_close_during_partial_frame();
-    test_closes_connection_for_an_unregistered_message();
-    test_overflowed_actor_queue_closes_only_that_connection();
-    test_request_stop_closes_listener_and_active_sessions();
-    test_closes_slow_client_when_send_queue_exceeds_limit();
-    test_shutdown_forces_slow_client_closed_after_grace_period();
-    test_termination_signal_stops_server(SIGINT);
-    test_termination_signal_stops_server(SIGTERM);
-    test_actor_runtime_failure_aborts_without_waiting_for_grace_period();
-    test_retries_a_full_connection_closed_post_without_duplicate_after_acceptance();
-    test_bounds_pending_connection_closes_and_rejects_new_connections_at_capacity();
-    test_shutdown_waits_for_reactor_control_state_after_logic_drains();
+    // Named on stderr, unbuffered, before each case runs. A suite of this size that
+    // aborts inside a shared receive helper otherwise says only which helper failed,
+    // and the server's own buffered output is no help in placing it.
+    const auto run = [](const char* name, auto&& test)
+    {
+        std::cerr << "[ run  ] " << name << '\n';
+        test();
+        std::cerr << "[  ok  ] " << name << '\n';
+    };
+
+    run("test_returns_pong_for_ping", test_returns_pong_for_ping);
+    run("test_authenticates_one_session_and_allows_reconnect_after_passivation", test_authenticates_one_session_and_allows_reconnect_after_passivation);
+    run("test_live_purchase_is_memory_authoritative_and_flushes", test_live_purchase_is_memory_authoritative_and_flushes);
+    run("test_two_players_share_one_party_actor_and_passivate_it_when_empty", test_two_players_share_one_party_actor_and_passivate_it_when_empty);
+    run("test_two_players_clear_a_room_and_are_told_without_asking", test_two_players_clear_a_room_and_are_told_without_asking);
+    run("test_authenticated_player_enters_moves_and_leaves_a_zone", test_authenticated_player_enters_moves_and_leaves_a_zone);
+    run("test_authenticated_player_handoffs_between_zones_and_publishes_target_route", test_authenticated_player_handoffs_between_zones_and_publishes_target_route);
+    run("test_zone_position_survives_disconnect_save_and_reconnect", test_zone_position_survives_disconnect_save_and_reconnect);
+    run("test_collects_baseline_saturation_metrics_for_a_round_trip", test_collects_baseline_saturation_metrics_for_a_round_trip);
+    run("test_saturated_outbound_answers_every_request_and_still_drains", test_saturated_outbound_answers_every_request_and_still_drains);
+    run("test_reports_metrics_periodically_while_running", test_reports_metrics_periodically_while_running);
+    run("test_peer_disconnect_evicts_the_player_actor", test_peer_disconnect_evicts_the_player_actor);
+    run("test_decodes_ping_sent_one_byte_at_a_time", test_decodes_ping_sent_one_byte_at_a_time);
+    run("test_decodes_multiple_pings_from_one_send", test_decodes_multiple_pings_from_one_send);
+    run("test_survives_client_close_during_partial_frame", test_survives_client_close_during_partial_frame);
+    run("test_closes_connection_for_an_unregistered_message", test_closes_connection_for_an_unregistered_message);
+    run("test_overflowed_actor_queue_closes_only_that_connection", test_overflowed_actor_queue_closes_only_that_connection);
+    run("test_request_stop_closes_listener_and_active_sessions", test_request_stop_closes_listener_and_active_sessions);
+    run("test_closes_slow_client_when_send_queue_exceeds_limit", test_closes_slow_client_when_send_queue_exceeds_limit);
+    run("test_shutdown_forces_slow_client_closed_after_grace_period", test_shutdown_forces_slow_client_closed_after_grace_period);
+    run("test_termination_signal_stops_server(SIGINT)", [] { test_termination_signal_stops_server(SIGINT); });
+    run("test_termination_signal_stops_server(SIGTERM)", [] { test_termination_signal_stops_server(SIGTERM); });
+    run("test_actor_runtime_failure_aborts_without_waiting_for_grace_period", test_actor_runtime_failure_aborts_without_waiting_for_grace_period);
+    run("test_retries_a_full_connection_closed_post_without_duplicate_after_acceptance", test_retries_a_full_connection_closed_post_without_duplicate_after_acceptance);
+    run("test_bounds_pending_connection_closes_and_rejects_new_connections_at_capacity", test_bounds_pending_connection_closes_and_rejects_new_connections_at_capacity);
+    run("test_shutdown_waits_for_reactor_control_state_after_logic_drains", test_shutdown_waits_for_reactor_control_state_after_logic_drains);
 }

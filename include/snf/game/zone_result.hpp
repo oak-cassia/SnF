@@ -19,6 +19,9 @@ namespace snf::server
         StaleRoute,
         TransitionInProgress,
         TransferFailed,
+        // The player is in a Room, so they are in no Zone at all. Appended rather than
+        // inserted: the status crosses the wire as a byte.
+        InRoom,
     };
 
     struct ZoneResult
