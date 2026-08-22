@@ -170,7 +170,7 @@ namespace snf::server
                         .skill = skill,
                         .request_sequence = request_sequence,
                     },
-                .reply_kind = RoomReplyKind::SkillApplied,
+                .reply_kind = RoomReplyKind::SkillAcknowledged,
                 .request_id = envelope.frame.request_id,
             });
         }

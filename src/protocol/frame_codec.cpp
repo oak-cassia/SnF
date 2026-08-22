@@ -63,6 +63,8 @@ namespace
         case snf::protocol::MessageType::UseSkill:
         case snf::protocol::MessageType::SkillApplied:
         case snf::protocol::MessageType::BattleFailed:
+        case snf::protocol::MessageType::BattleDigest:
+        case snf::protocol::MessageType::SkillAcknowledged:
             return true;
         }
 

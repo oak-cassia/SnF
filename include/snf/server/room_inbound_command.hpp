@@ -15,9 +15,9 @@ namespace snf::server
     {
         Joined,
         BattleStarted,
-        // A cast carries what it did, so its reply is not the plain status frame the
-        // other two share.
-        SkillApplied,
+        // The detailed outcome is broadcast later in a BattleDigest. This reply only
+        // correlates the accepted or refused request.
+        SkillAcknowledged,
     };
 
     struct RoomReplyContext

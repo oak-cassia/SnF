@@ -17,6 +17,7 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <variant>
 #include <vector>
 
 using namespace std::chrono_literals;
@@ -33,11 +34,28 @@ namespace
 
         void notifyFailed(snf::runtime::RuntimeId) noexcept override
         {
-            ++failed;
+            if (failed.fetch_add(1) == 0)
+            {
+                try
+                {
+                    failure_reported.set_value();
+                }
+                catch (...)
+                {
+                }
+            }
+        }
+
+        [[nodiscard]] std::future<void> failureReported()
+        {
+            return failure_reported.get_future();
         }
 
         std::atomic<int> drained{0};
         std::atomic<int> failed{0};
+
+    private:
+        std::promise<void> failure_reported;
     };
 
     // Stands in for PlayerActorBinding so this test covers the Room's half of the
@@ -149,6 +167,40 @@ namespace
         std::promise<snf::server::RoomResult> _reached;
     };
 
+    class BossSpawnWatch
+    {
+    public:
+        void observe(const snf::server::RoomResult& result)
+        {
+            std::lock_guard lock{_mutex};
+            if (_signalled || !result.digest)
+            {
+                return;
+            }
+
+            for (const snf::server::BattleEvent& event : result.digest->events)
+            {
+                const auto* spawned = std::get_if<snf::server::EnemySpawned>(&event);
+                if (spawned && spawned->kind == snf::server::EnemyKind::Boss)
+                {
+                    _signalled = true;
+                    _reached.set_value();
+                    return;
+                }
+            }
+        }
+
+        [[nodiscard]] std::future<void> reached()
+        {
+            return _reached.get_future();
+        }
+
+    private:
+        std::mutex _mutex;
+        bool _signalled{false};
+        std::promise<void> _reached;
+    };
+
     [[nodiscard]] snf::runtime::ActorRuntimeConfig runtime_config()
     {
         return snf::runtime::ActorRuntimeConfig{
@@ -161,11 +213,31 @@ namespace
         };
     }
 
+    void test_a_negative_tick_budget_is_rejected()
+    {
+        bool rejected = false;
+        try
+        {
+            static_cast<void>(snf::server::RoomActorBinding{snf::server::RoomActorBindingConfig{
+                .actor = {},
+                .tick_budget = -1ns,
+                .on_result = {},
+            }});
+        }
+        catch (const std::invalid_argument&)
+        {
+            rejected = true;
+        }
+        assert(rejected);
+    }
+
     void test_killing_the_boss_rewards_every_participant()
     {
         RecordingPlayerBinding player_binding;
         player_binding.expected = 2;
         auto arrived = player_binding.all_arrived.get_future();
+        BossSpawnWatch boss_spawn;
+        auto boss_reached = boss_spawn.reached();
 
         snf::server::CountingCommandLifecycleSink lifecycle;
         snf::server::RoomActorBinding binding{
@@ -178,8 +250,18 @@ namespace
                         .max_participants = 4,
                         .clear_experience = 300,
                         .boss_health = 50,
+                        .tick_interval = 5ms,
+                        .wave_interval = 1s,
+                        .wave_count = 0,
+                        .minions_per_wave = 0,
+                        .boss_spawn_after = 10ms,
+                        .max_spawned_enemies = 1,
                     },
-                .on_result = {},
+                .on_result =
+                    [&boss_spawn](const snf::server::RoomInboundCommand&, const snf::server::RoomResult& result)
+                {
+                    boss_spawn.observe(result);
+                },
             },
             lifecycle
         };
@@ -212,6 +294,10 @@ namespace
                 .reply = std::nullopt,
             }) == snf::runtime::PostResult::Accepted
         );
+
+        // The boss does not exist until the one-shot Tick chain reaches its
+        // absolute spawn time. Wait for that digest before casting.
+        assert(boss_reached.wait_for(5s) == std::future_status::ready);
         assert(
             ingress.tryPost(snf::server::RoomInboundCommand{
                 .room = room,
@@ -260,7 +346,14 @@ namespace
                         .max_participants = 4,
                         .clear_experience = 300,
                         .boss_health = 50,
+                        .tick_interval = 5ms,
+                        .wave_interval = 1s,
+                        .wave_count = 0,
+                        .minions_per_wave = 0,
+                        .boss_spawn_after = 10ms,
+                        .max_spawned_enemies = 1,
                     },
+                .tick_budget = 0ns,
                 .on_result =
                     [&watch](const snf::server::RoomInboundCommand&, const snf::server::RoomResult& result)
                 {
@@ -311,6 +404,171 @@ namespace
         std::lock_guard lock{player_binding.mutex};
         // A failure pays nothing, so no tell was ever sent.
         assert(player_binding.grants.empty());
+        assert(completion.failed.load() == 0);
+
+        const auto stats = binding.stats();
+        assert(stats.tick_execution_nanoseconds.sample_count > 0);
+        assert(stats.tick_publish_nanoseconds.sample_count == stats.tick_execution_nanoseconds.sample_count);
+        assert(stats.tick_turn_nanoseconds.sample_count == stats.tick_execution_nanoseconds.sample_count);
+        assert(stats.tick_overruns == stats.tick_turn_nanoseconds.sample_count);
+        assert(stats.tick_schedule_rejections == 0);
+    }
+
+    void test_deadline_schedule_rejection_fails_the_runtime()
+    {
+        RecordingPlayerBinding player_binding;
+        std::promise<void> joined;
+        auto joined_future = joined.get_future();
+        bool join_signalled = false;
+
+        snf::server::CountingCommandLifecycleSink lifecycle;
+        snf::server::RoomActorBinding binding{
+            snf::server::RoomActorBindingConfig{
+                .actor =
+                    snf::server::RoomConfig{
+                        .battle_duration = 30ms,
+                        .tick_interval = 5ms,
+                        .wave_interval = 1s,
+                        .wave_count = 0,
+                        .minions_per_wave = 0,
+                        .boss_spawn_after = 10ms,
+                        .max_spawned_enemies = 1,
+                    },
+                .on_result =
+                    [&joined, &join_signalled](const snf::server::RoomInboundCommand&, const snf::server::RoomResult& result)
+                {
+                    if (!join_signalled && result.phase == snf::server::RoomPhase::Waiting && result.player)
+                    {
+                        join_signalled = true;
+                        joined.set_value();
+                    }
+                },
+            },
+            lifecycle
+        };
+        RecordingCompletion completion;
+        auto failed = completion.failureReported();
+        auto config = runtime_config();
+        config.queue_capacity_per_worker = 1;
+        snf::runtime::ActorRuntime runtime{config, completion};
+        runtime.registerBinding(binding);
+        runtime.registerBinding(player_binding);
+        snf::server::RoomActorIngress ingress{runtime, binding, lifecycle};
+        runtime.start();
+
+        const snf::server::RoomId room{.value = 12};
+        assert(
+            ingress.tryPost(snf::server::RoomInboundCommand{
+                .room = room,
+                .command =
+                    snf::server::JoinRoom{
+                        .player = snf::server::PlayerId{.value = 10},
+                        .stats = {.attack = 50, .health = 100},
+                    },
+                .reply = std::nullopt,
+            }) == snf::runtime::PostResult::Accepted
+        );
+        assert(joined_future.wait_for(5s) == std::future_status::ready);
+        assert(
+            ingress.tryPost(snf::server::RoomInboundCommand{
+                .room = room,
+                .command = snf::server::StartBattle{},
+                .reply = std::nullopt,
+            }) == snf::runtime::PostResult::Accepted
+        );
+
+        // The active command owns the only capacity slot, so the mandatory
+        // deadline cannot be registered and the Worker fails loudly.
+        assert(failed.wait_for(5s) == std::future_status::ready);
+        runtime.close();
+        bool join_failed = false;
+        try
+        {
+            runtime.join();
+        }
+        catch (const std::runtime_error&)
+        {
+            join_failed = true;
+        }
+        assert(join_failed);
+        assert(completion.failed.load() == 1);
+    }
+
+    void test_tick_schedule_rejection_keeps_deadline_backstop()
+    {
+        RecordingPlayerBinding player_binding;
+        TerminalPhaseWatch terminal;
+        auto terminal_future = terminal.reached();
+        std::promise<void> joined;
+        auto joined_future = joined.get_future();
+        bool join_signalled = false;
+
+        snf::server::CountingCommandLifecycleSink lifecycle;
+        snf::server::RoomActorBinding binding{
+            snf::server::RoomActorBindingConfig{
+                .actor =
+                    snf::server::RoomConfig{
+                        .battle_duration = 30ms,
+                        .tick_interval = 5ms,
+                        .wave_interval = 1s,
+                        .wave_count = 0,
+                        .minions_per_wave = 0,
+                        .boss_spawn_after = 10ms,
+                        .max_spawned_enemies = 1,
+                    },
+                .on_result =
+                    [&terminal, &joined, &join_signalled](const snf::server::RoomInboundCommand&, const snf::server::RoomResult& result)
+                {
+                    terminal.observe(result);
+                    if (!join_signalled && result.phase == snf::server::RoomPhase::Waiting && result.player)
+                    {
+                        join_signalled = true;
+                        joined.set_value();
+                    }
+                },
+            },
+            lifecycle
+        };
+        RecordingCompletion completion;
+        auto config = runtime_config();
+        config.queue_capacity_per_worker = 2;
+        snf::runtime::ActorRuntime runtime{config, completion};
+        runtime.registerBinding(binding);
+        runtime.registerBinding(player_binding);
+        snf::server::RoomActorIngress ingress{runtime, binding, lifecycle};
+        runtime.start();
+
+        const snf::server::RoomId room{.value = 13};
+        assert(
+            ingress.tryPost(snf::server::RoomInboundCommand{
+                .room = room,
+                .command =
+                    snf::server::JoinRoom{
+                        .player = snf::server::PlayerId{.value = 10},
+                        .stats = {.attack = 50, .health = 100},
+                    },
+                .reply = std::nullopt,
+            }) == snf::runtime::PostResult::Accepted
+        );
+        assert(joined_future.wait_for(5s) == std::future_status::ready);
+        assert(
+            ingress.tryPost(snf::server::RoomInboundCommand{
+                .room = room,
+                .command = snf::server::StartBattle{},
+                .reply = std::nullopt,
+            }) == snf::runtime::PostResult::Accepted
+        );
+
+        // Start owns one slot and its deadline reserves the second. Tick
+        // registration is rejected, but the deadline still terminates the Room.
+        assert(terminal_future.wait_for(5s) == std::future_status::ready);
+        assert(terminal_future.get().phase == snf::server::RoomPhase::Failed);
+        runtime.close();
+        runtime.join();
+
+        const auto stats = binding.stats();
+        assert(stats.tick_schedule_rejections == 1);
+        assert(stats.tick_execution_nanoseconds.sample_count == 0);
         assert(completion.failed.load() == 0);
     }
 
@@ -398,8 +656,11 @@ void test_a_join_naming_another_room_is_refused()
 }
 void run_room_actor_binding_tests()
 {
+    test_a_negative_tick_budget_is_rejected();
     test_a_join_naming_another_room_is_refused();
     test_killing_the_boss_rewards_every_participant();
     test_a_room_fails_from_its_own_timer_when_the_boss_survives();
+    test_deadline_schedule_rejection_fails_the_runtime();
+    test_tick_schedule_rejection_keeps_deadline_backstop();
     test_a_room_that_never_started_passivates();
 }

@@ -193,6 +193,11 @@ namespace
             return _server.getZoneActorStats();
         }
 
+        [[nodiscard]] snf::server::RoomActorBindingStats getRoomActorStats() const noexcept
+        {
+            return _server.getRoomActorStats();
+        }
+
         [[nodiscard]] snf::server::PartyActorBindingStats getPartyActorStats() const noexcept
         {
             return _server.getPartyActorStats();
@@ -445,6 +450,22 @@ namespace
         assert(decoded.ok());
         assert(decoded.frames.size() == 1);
         return decoded.frames[0];
+    }
+
+    // BattleDigest has a variable payload, so read the length prefix first and
+    // then let the production decoder validate the complete frame.
+    snf::protocol::Frame receive_frame(const int socket_descriptor)
+    {
+        std::vector<std::byte> encoded = receive_exact(socket_descriptor, snf::protocol::FRAME_LENGTH_FIELD_SIZE);
+        const std::size_t body_size = read_u32(encoded, 0);
+        std::vector<std::byte> body = receive_exact(socket_descriptor, body_size);
+        encoded.insert(encoded.end(), body.begin(), body.end());
+
+        snf::protocol::FrameDecoder decoder;
+        const auto decoded = decoder.append(encoded);
+        assert(decoded.ok());
+        assert(decoded.frames.size() == 1);
+        return decoded.frames.front();
     }
 
     void assert_authenticated(const std::vector<std::byte>& response, const std::uint32_t request_id, const std::uint64_t player_id)
@@ -1075,12 +1096,18 @@ namespace
             .shutdown_grace_period = 200ms,
             .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
             .client_send_buffer_size = std::nullopt,
-            // Far longer than this test takes: the boss dying is what has to end this
-            // battle, not the deadline.
-            .room_battle_duration = 5s,
+            // Compressed production rules: one minion appears at start, the boss
+            // appears from the Tick chain, and neither can be mistaken for timeout.
+            .room_battle_duration = 2s,
             .room_clear_experience = 300,
-            // Two casts of a fresh player's attack, which is one each.
-            .room_boss_health = 20,
+            .room_boss_health = snf::server::BASE_ATTACK,
+            .room_tick_interval = 5ms,
+            .room_wave_interval = 100ms,
+            .room_wave_count = 1,
+            .room_minions_per_wave = 1,
+            .room_minion_health = snf::server::BASE_ATTACK,
+            .room_boss_spawn_after = 200ms,
+            .max_room_spawned_enemies = 2,
         }};
         constexpr std::uint64_t room = 77;
         constexpr std::uint64_t zone = 88;
@@ -1168,9 +1195,24 @@ namespace
         assert(started.request_id == 304);
         assert(started.payload[1] == static_cast<std::byte>(snf::server::RoomPhase::Running));
 
-        // The battle is decided by casts, and the server decides what a cast does: the
-        // frames below carry a skill id and a sequence number, never a damage value.
-        constexpr std::size_t SKILL_PAYLOAD_SIZE = 1 + 1 + 8 + 4 + 8 + 8;
+        // StartBattle spawns the first wave immediately. BattleDigest is unsolicited
+        // and identical for every participant, including the player who started it.
+        const auto first_wave = receive_frame(first.getDescriptor());
+        const auto observed_first_wave = receive_frame(second.getDescriptor());
+        assert(first_wave.type == snf::protocol::MessageType::BattleDigest);
+        assert(first_wave.request_id == snf::protocol::UNSOLICITED_REQUEST_ID);
+        assert(first_wave.payload == observed_first_wave.payload);
+        assert(read_u64(first_wave.payload, 0) == 1);
+        assert(first_wave.payload[8] == static_cast<std::byte>(snf::server::RoomPhase::Running));
+        assert(read_u16(first_wave.payload, 9) == 1);
+        assert(first_wave.payload[11] == static_cast<std::byte>(snf::server::BattleEventKind::EnemySpawned));
+        assert(read_u32(first_wave.payload, 12) == 1);
+        assert(first_wave.payload[16] == static_cast<std::byte>(snf::server::EnemyKind::Minion));
+        assert(read_u64(first_wave.payload, 17) == snf::server::BASE_ATTACK);
+
+        // A cast carries only the Room, skill and client sequence. The server picks
+        // the first living enemy and acknowledges the request separately from the
+        // observation stream.
         const auto use_skill_frame = [](const std::uint32_t request_id, const std::uint64_t sequence)
         {
             std::vector<std::byte> payload = player_id_payload(room);
@@ -1184,48 +1226,62 @@ namespace
         };
 
         send_all(first.getDescriptor(), snf::protocol::encode_frame(use_skill_frame(305, 1)));
-        const auto first_cast = receive_room_frame(first.getDescriptor(), SKILL_PAYLOAD_SIZE);
-        assert(first_cast.type == snf::protocol::MessageType::SkillApplied);
-        assert(first_cast.request_id == 305);
-        assert(first_cast.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::Applied));
-        assert(first_cast.payload[1] == static_cast<std::byte>(snf::server::RoomPhase::Running));
-        assert(read_u64(first_cast.payload, 2) == first_player);
-        assert(read_u32(first_cast.payload, 10) == snf::server::SLASH.value);
-        // A fresh player is level 1, and Slash is all of their attack.
-        assert(read_u64(first_cast.payload, 14) == snf::server::BASE_ATTACK);
-        assert(read_u64(first_cast.payload, 22) == 20 - snf::server::BASE_ATTACK);
+        const auto first_ack = receive_frame(first.getDescriptor());
+        assert(first_ack.type == snf::protocol::MessageType::SkillAcknowledged);
+        assert(first_ack.request_id == 305);
+        assert(
+            (first_ack.payload ==
+             std::vector<std::byte>{
+                 static_cast<std::byte>(snf::server::RoomCommandStatus::Applied),
+                 static_cast<std::byte>(snf::server::RoomPhase::Running),
+             })
+        );
 
-        // The other participant is told about a cast nobody asked them about.
-        const auto observed_cast = receive_room_frame(second.getDescriptor(), SKILL_PAYLOAD_SIZE);
-        assert(observed_cast.type == snf::protocol::MessageType::SkillApplied);
-        assert(observed_cast.request_id == snf::protocol::UNSOLICITED_REQUEST_ID);
-        assert(observed_cast.payload == first_cast.payload);
+        // The following Tick flushes the atomic Damage+Died group. Both clients
+        // observe the same event order even though only one sent UseSkill.
+        const auto minion_killed = receive_frame(first.getDescriptor());
+        const auto observed_minion_killed = receive_frame(second.getDescriptor());
+        assert(minion_killed.type == snf::protocol::MessageType::BattleDigest);
+        assert(minion_killed.payload == observed_minion_killed.payload);
+        assert(read_u64(minion_killed.payload, 0) == 2);
+        assert(read_u16(minion_killed.payload, 9) == 2);
+        assert(minion_killed.payload[11] == static_cast<std::byte>(snf::server::BattleEventKind::EnemyDamaged));
+        assert(read_u32(minion_killed.payload, 12) == 1);
+        assert(read_u64(minion_killed.payload, 16) == first_player);
+        assert(read_u64(minion_killed.payload, 28) == snf::server::BASE_ATTACK);
+        assert(read_u64(minion_killed.payload, 36) == 0);
+        assert(minion_killed.payload[44] == static_cast<std::byte>(snf::server::BattleEventKind::EnemyDied));
+        assert(read_u32(minion_killed.payload, 45) == 1);
 
-        // The same sequence again, which is what a client retry looks like on the wire.
-        // It is answered, and the boss is untouched.
-        send_all(first.getDescriptor(), snf::protocol::encode_frame(use_skill_frame(306, 1)));
-        const auto resent = receive_room_frame(first.getDescriptor(), SKILL_PAYLOAD_SIZE);
-        assert(resent.type == snf::protocol::MessageType::SkillApplied);
-        assert(resent.request_id == 306);
-        assert(resent.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::DuplicateRequest));
-        assert(read_u64(resent.payload, 14) == 0);
-        assert(read_u64(resent.payload, 22) == 20 - snf::server::BASE_ATTACK);
+        // A later Tick creates the boss with the next monotonic EnemyId.
+        const auto boss_spawned = receive_frame(first.getDescriptor());
+        const auto observed_boss_spawned = receive_frame(second.getDescriptor());
+        assert(boss_spawned.type == snf::protocol::MessageType::BattleDigest);
+        assert(boss_spawned.payload == observed_boss_spawned.payload);
+        assert(read_u64(boss_spawned.payload, 0) == 3);
+        assert(read_u16(boss_spawned.payload, 9) == 1);
+        assert(boss_spawned.payload[11] == static_cast<std::byte>(snf::server::BattleEventKind::EnemySpawned));
+        assert(read_u32(boss_spawned.payload, 12) == 2);
+        assert(boss_spawned.payload[16] == static_cast<std::byte>(snf::server::EnemyKind::Boss));
 
-        // The second participant's own sequence starts at 1 as well: the counter belongs
-        // to the caster, not to the battle. This one kills the boss.
+        // The second participant has an independent client sequence and kills the
+        // boss. Ack, terminal Digest and BattleCleared are distinct ordered frames.
         send_all(second.getDescriptor(), snf::protocol::encode_frame(use_skill_frame(307, 1)));
-        const auto killing_blow = receive_room_frame(second.getDescriptor(), SKILL_PAYLOAD_SIZE);
-        assert(killing_blow.type == snf::protocol::MessageType::SkillApplied);
-        assert(killing_blow.request_id == 307);
-        assert(killing_blow.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::Applied));
-        // The cast and the clear it caused arrive as one fact.
-        assert(killing_blow.payload[1] == static_cast<std::byte>(snf::server::RoomPhase::Cleared));
-        assert(read_u64(killing_blow.payload, 22) == 0);
+        const auto killing_ack = receive_frame(second.getDescriptor());
+        assert(killing_ack.type == snf::protocol::MessageType::SkillAcknowledged);
+        assert(killing_ack.request_id == 307);
+        assert(killing_ack.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::Applied));
+        assert(killing_ack.payload[1] == static_cast<std::byte>(snf::server::RoomPhase::Cleared));
 
-        const auto observed_killing_blow = receive_room_frame(first.getDescriptor(), SKILL_PAYLOAD_SIZE);
-        assert(observed_killing_blow.type == snf::protocol::MessageType::SkillApplied);
-        assert(observed_killing_blow.request_id == snf::protocol::UNSOLICITED_REQUEST_ID);
-        assert(observed_killing_blow.payload == killing_blow.payload);
+        const auto killing_digest = receive_frame(second.getDescriptor());
+        const auto observed_killing_digest = receive_frame(first.getDescriptor());
+        assert(killing_digest.type == snf::protocol::MessageType::BattleDigest);
+        assert(killing_digest.payload == observed_killing_digest.payload);
+        assert(read_u64(killing_digest.payload, 0) == 4);
+        assert(killing_digest.payload[8] == static_cast<std::byte>(snf::server::RoomPhase::Cleared));
+        assert(read_u16(killing_digest.payload, 9) == 2);
+        assert(killing_digest.payload[44] == static_cast<std::byte>(snf::server::BattleEventKind::EnemyDied));
+        assert(read_u32(killing_digest.payload, 45) == 2);
 
         // Nobody asks for either of these. The clear rewards both participants --
         // including the one that never sent BattleStart -- and puts them back in the Zone
@@ -1233,7 +1289,7 @@ namespace
         constexpr std::size_t RETURN_PAYLOAD_SIZE = 8 + 4 + 4;
         for (const auto& [socket, y] : {std::pair{std::ref(first), std::int32_t{20}}, std::pair{std::ref(second), std::int32_t{5000}}})
         {
-            const auto cleared = receive_room_frame(socket.get().getDescriptor(), 8);
+            const auto cleared = receive_frame(socket.get().getDescriptor());
             assert(cleared.type == snf::protocol::MessageType::BattleCleared);
             assert(cleared.request_id == snf::protocol::UNSOLICITED_REQUEST_ID);
             assert(cleared.payload == player_id_payload(300));
@@ -1273,6 +1329,12 @@ namespace
             assert(static_cast<std::int32_t>(read_u32(moved.payload, 17)) == 11);
             assert(static_cast<std::int32_t>(read_u32(moved.payload, 21)) == y);
         }
+
+        const auto room_metrics = server.getRoomActorStats();
+        assert(room_metrics.tick_execution_nanoseconds.sample_count > 0);
+        assert(room_metrics.tick_publish_nanoseconds.sample_count == room_metrics.tick_execution_nanoseconds.sample_count);
+        assert(room_metrics.tick_turn_nanoseconds.sample_count == room_metrics.tick_execution_nanoseconds.sample_count);
+        assert(room_metrics.tick_schedule_rejections == 0);
     }
 
     void test_authenticated_player_enters_moves_and_leaves_a_zone()

@@ -176,22 +176,27 @@ struct RoomResult
     RoomCommandStatus status;
     RoomPhase phase;
     std::optional<std::chrono::milliseconds> deadline_after;
+    std::optional<std::chrono::milliseconds> tick_after;
     std::uint64_t boss_health;
-    std::optional<SkillOutcome> skill;
+    bool boss_spawned;
+    std::optional<BattleDigest> digest;
+    std::optional<BattleOutcome> outcome;
     std::vector<PlayerId> audience;
     std::vector<StreetExperienceGrant> grants;
 };
 ```
 
-Player는 “이 Room에 이 스탯으로 들어가고 싶다”고 말하고, Room은 “보스를 잡을 시간이 얼마 남았고, 이
-cast가 무엇을 했고, 누가 그것을 봐야 하고, 누구에게 얼마를 지급한다”고 말한다. 어느 문장에도
-connection은 없다. Binding과 sink가 이를 Runtime·network 동작으로 번역한다.
+Player는 “이 Room에 이 스탯으로 들어가고 싶다”고 말하고, Room은 “다음 tick과 deadline은 언제고,
+어떤 전투 이벤트가 어떤 순서로 일어났으며, 누가 그것을 봐야 하고, 누구에게 얼마를 지급한다”고
+말한다. 어느 문장에도 connection은 없다. Binding과 sink가 이를 Runtime·network 동작으로 번역한다.
 
 ```text
 PlayerResult.room_join       → RoomJoinTell → tryTell(Room)
 RoomResult.deadline_after    → trySchedule(BattleDeadline)
+RoomResult.tick_after        → trySchedule(RoomSimulationTick, ExistingOnly)
+RoomResult.digest            → BattleDigest(request_id=0) fanout
 RoomResult.grants            → tryTell(Player)
-RoomResult.audience          → PlayerId를 connection으로 풀어 fanout, 그리고 Zone 복귀 요청
+RoomResult.outcome+audience  → terminal 알림과 Zone 복귀 요청
 ```
 
 `audience`가 `grants`와 별개인 이유는 실패다. 실패는 아무에게도 지급하지 않으므로 보상 목록이 비고,
@@ -307,12 +312,13 @@ sequenceDiagram
     participant C as Client
 
     C->>R: UseSkill(skill, sequence)
-    R->>R: 중복·cooldown 판정 → damage → boss 0 → Cleared
+    R->>R: 중복·cooldown 판정 → 첫 생존 적 damage → boss 0 → Cleared
     par reward
         R->>P: StreetExperienceGrant via tryTell
     and notification
-        R->>PS: RoomResult.skill + audience + grants
-        PS-->>C: SkillApplied(요청자에게는 답, 나머지는 request_id=0)
+        R->>PS: RoomResult.digest + outcome + audience + grants
+        PS-->>C: SkillAcknowledged(원 요청 request_id)
+        PS-->>C: BattleDigest(request_id=0, caster 포함 fanout)
         PS-->>C: BattleCleared(request_id=0)
     and return fact
         R->>Q: RoomReturnRequest(room, player)
@@ -330,9 +336,30 @@ sequenceDiagram
 ```
 
 보스가 deadline까지 살아남으면 같은 그림에서 첫 두 줄만 바뀐다. Room의 자기 timer가 `BattleDeadline`을
-넣고, Room은 `Failed`가 되며 보상 없이 `BattleFailed`와 복귀 요청만 나간다.
+넣거나 deadline에 도달한 tick/늦은 `UseSkill`이 동일 failure helper를 호출한다. Room은 한 번만
+`Failed`가 되며 pending `BattleDigest`, 보상 없는 `BattleFailed`와 복귀 요청이 순서대로 나간다.
 
-### 8.1 보상
+### 8.1 Room tick과 관찰 경계
+
+`StartBattle`은 deadline timer를 먼저 예약하고 100ms `ExistingOnly` one-shot tick을 예약한다. 각 tick
+결과의 `tick_after`가 다음 timer 하나를 만든다. terminal result는 `PassivateIfIdle`을 반환하므로 Runtime이
+남은 tick/deadline timer를 activation과 함께 제거한다. deadline 예약 실패는 Running Room을 노출할 수
+없는 오류라 Logic Runtime 실패로 승격하고, tick 예약 실패는 metric만 올린 뒤 이미 예약된 deadline을
+종결 backstop으로 사용한다.
+
+`UseSkill`은 tick까지 기다리지 않고 즉시 상태를 바꾼다. 발생한 `EnemyDamaged`, `EnemyDied`,
+`SkillWhiffed`는 Room의 ordered buffer에 쌓이고 다음 tick이 `BattleDigest`로 비운다. threshold를 넘으면
+해당 command가 만든 이벤트 그룹을 전부 추가한 다음 조기 flush하므로 Damage+Died가 갈라지지 않는다.
+wave와 boss spawn도 같은 이벤트 스트림에 들어간다.
+
+Room tick metric의 범위는 다음과 같다.
+
+- `tick_execution`: 순수 Room handle
+- `tick_publish`: protocol payload 생성과 `OutboundChannel` enqueue. reactor의 frame encoding과 실제 TCP
+  송신은 포함하지 않는다
+- `tick_turn`: Room handle 시작부터 timer 예약과 ResultSink publish 완료까지이며 budget overrun 기준이다
+
+### 8.2 보상
 
 Room은 clear 시점에 남아 있는 participant를 기준으로 `StreetExperienceGrant`를 만든다. Room Binding은
 각 grant를 persistent Player Actor로 tell한다. 대상이 offline이어도 `ActivateIfMissing`으로 Player를
@@ -343,7 +370,7 @@ Room은 clear 시점에 남아 있는 participant를 기준으로 `StreetExperie
 경로이므로 알림이 도착했다고 persistence까지 보장되는 것은 아니다. 보상을 반드시 보존해야 한다면
 outbox, durable event 또는 bounded retry를 별도 요구사항으로 추가해야 한다.
 
-### 8.2 복귀
+### 8.3 복귀
 
 Room Worker는 route를 직접 읽거나 수정하지 않고 “이 Player를 돌려보내야 한다”는 사실만 게시한다.
 reactor는 live session을 확인하고 `RoomEntryService::startReturn()`에서 새 saga를 시작한다.
@@ -436,12 +463,13 @@ return을 명시적으로 정리한다. 단순히 Actor mailbox가 비었다는 
 | completion reservation, 재사용과 동시 publish | [`room_transition_channel_test.cpp`](../tests/room_transition_channel_test.cpp) |
 | entry, InRoom, return과 epoch 상태 전이 | [`route_coordinator_test.cpp`](../tests/route_coordinator_test.cpp) |
 | 정상 입장, 실패 보상과 InRoom command fence | [`protocol_gateway_test.cpp`](../tests/protocol_gateway_test.cpp) |
-| 실제 TCP Zone→Room→Zone 왕복 | [`tcp_server_integration_test.cpp`](../tests/tcp_server_integration_test.cpp) |
+| 실제 TCP wave→minion kill→boss→clear→Zone 왕복 | [`tcp_server_integration_test.cpp`](../tests/tcp_server_integration_test.cpp) |
 | unsolicited clear와 outbound 포화 | [`protocol_room_result_sink_test.cpp`](../tests/protocol_room_result_sink_test.cpp) |
 
-통합 테스트는 두 Player가 Zone에 들어가 Room에 합류하고, 한 명이 전투를 시작한 뒤 둘 모두 unsolicited
-`BattleCleared`와 `ReturnedToZone`을 받는 경로를 실행한다. 복귀 후 새 epoch의 Move가 적용되는 것까지
-검증해 frame만 전송되고 route가 복원되지 않은 false positive를 막는다.
+통합 테스트는 두 Player가 Zone에 들어가 Room에 합류하고, 첫 wave 등장, minion 처치, tick에서 boss
+등장, clear까지의 unsolicited `BattleDigest`를 양쪽 실제 socket에서 확인한다. 이어 두 Player가
+`BattleCleared`와 `ReturnedToZone`을 받고 새 epoch의 Move까지 적용되는지 검증해 frame만 전송되고
+route가 복원되지 않은 false positive를 막는다.
 
 ## 13. 구현이 발전한 순서
 

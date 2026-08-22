@@ -109,6 +109,15 @@ namespace
                   << "Zone tick execution ns: " << format_distribution(zones.tick_execution_nanoseconds) << ", " << zones.tick_overruns
                   << " budget overruns\n";
 
+        const auto& rooms = metrics.room_actors;
+        std::cout << "Room command execution ns: " << format_distribution(rooms.command_execution_nanoseconds) << '\n'
+                  << "Room tick execution ns: " << format_distribution(rooms.tick_execution_nanoseconds) << '\n'
+                  << "Room tick publish ns (payload + outbound enqueue; excludes reactor encode/TCP): "
+                  << format_distribution(rooms.tick_publish_nanoseconds) << '\n'
+                  << "Room tick turn ns: " << format_distribution(rooms.tick_turn_nanoseconds) << ", " << rooms.tick_overruns << " budget overruns, "
+                  << rooms.tick_schedule_rejections << " schedule rejections\n"
+                  << "Room oversized battle digests: " << metrics.room_protocol.oversized_battle_digests << '\n';
+
         const auto& parties = metrics.party_actors;
         std::cout << "Party actors: " << parties.commands << " commands, " << parties.rejected << " rejected, " << parties.passivation_requests
                   << " passivation requests\n";

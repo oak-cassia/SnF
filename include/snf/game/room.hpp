@@ -1,5 +1,6 @@
 #pragma once
 
+#include "snf/game/enemy.hpp"
 #include "snf/game/room_command.hpp"
 #include "snf/game/room_id.hpp"
 #include "snf/game/room_result.hpp"
@@ -15,27 +16,25 @@ namespace snf::server
 {
     struct RoomConfig
     {
-        // The battle's deadline rather than its length: the boss surviving it is
-        // what fails the battle. Nothing can kill a participant yet, so this is the
-        // only way to fail.
-        std::chrono::milliseconds battle_duration{5000};
+        std::chrono::milliseconds battle_duration{90000};
         std::size_t max_participants{4};
         std::uint64_t clear_experience{300};
         std::uint64_t boss_health{1000};
+        std::chrono::milliseconds tick_interval{100};
+        std::chrono::milliseconds wave_interval{20000};
+        std::size_t wave_count{2};
+        std::size_t minions_per_wave{10};
+        std::uint64_t minion_health{30};
+        std::chrono::milliseconds boss_spawn_after{40000};
+        // A lifetime spawn bound, not merely the number alive at once.
+        std::size_t max_spawned_enemies{64};
+        // A flush threshold rather than a drop boundary. The command that crosses
+        // it stays atomic and may take the final count slightly above this value.
+        std::size_t digest_flush_threshold{512};
     };
 
-    // The game model, not the execution unit: being an actor is how a Room is run,
-    // which is RoomActorBinding's business. This is a pure state machine with no
-    // clock, no sockets and no runtime types, which is what keeps its tests
-    // deterministic. It is told when the turn handling a command began instead of
-    // reading a clock -- see docs/actor-messaging-and-game-time.md.
-    //
-    //   Waiting --StartBattle--> Running --boss reaches 0 HP--> Cleared
-    //                                    --BattleDeadline-----> Failed
-    //
-    // A LeaveRoom is accepted in either non-terminal phase: before the battle it
-    // frees the seat, during one it forfeits the reward.
-    //
+    // A clock-free state machine. Its binding supplies observed_at and translates
+    // deadline_after/tick_after into Worker-local timers.
     class Room
     {
     public:
@@ -44,21 +43,17 @@ namespace snf::server
         [[nodiscard]] RoomId id() const noexcept;
         [[nodiscard]] RoomPhase phase() const noexcept;
         [[nodiscard]] std::size_t participantCount() const noexcept;
+        [[nodiscard]] std::size_t enemyCount() const noexcept;
+        [[nodiscard]] bool bossSpawned() const noexcept;
         [[nodiscard]] std::uint64_t bossHealth() const noexcept;
-        // The snapshot this player entered with, absent when they are not in.
         [[nodiscard]] std::optional<CombatStats> statsOf(PlayerId player) const;
 
-        // observed_at is when the turn handling this command began, which the owning
-        // Worker knows and the Room must not go looking for.
         [[nodiscard]] RoomResult handle(const RoomCommand& command, std::chrono::steady_clock::time_point observed_at);
 
     private:
         struct SkillCooldown
         {
             SkillId skill;
-            // The first moment this skill may be cast again. A deadline rather than
-            // a counter that something has to decrement: nothing needs to visit a
-            // participant on a schedule just to let time pass.
             std::chrono::steady_clock::time_point ready_at;
         };
 
@@ -66,11 +61,7 @@ namespace snf::server
         {
             PlayerId player;
             CombatStats stats;
-            // High-water mark, not a set of seen values: sequences increase, so one
-            // number rejects every resend and cannot grow without bound. It only
-            // advances when a cast is applied, so a rejected sequence stays usable.
             std::uint64_t applied_sequence{0};
-            // Ascending SkillId. One entry per skill actually cast.
             std::vector<SkillCooldown> cooldowns;
         };
 
@@ -79,18 +70,32 @@ namespace snf::server
         [[nodiscard]] RoomResult handleCommand(const StartBattle& command, std::chrono::steady_clock::time_point observed_at);
         [[nodiscard]] RoomResult handleCommand(const UseSkill& command, std::chrono::steady_clock::time_point observed_at);
         [[nodiscard]] RoomResult handleCommand(const BattleDeadline& command, std::chrono::steady_clock::time_point observed_at);
+        [[nodiscard]] RoomResult handleCommand(const RoomSimulationTick& command, std::chrono::steady_clock::time_point observed_at);
 
         [[nodiscard]] Participant* findParticipant(PlayerId player);
-        // Every participant the Room still holds, ascending PlayerId.
+        [[nodiscard]] Enemy* firstLivingEnemy();
+        [[nodiscard]] const Enemy* boss() const noexcept;
         [[nodiscard]] std::vector<PlayerId> audience() const;
-        [[nodiscard]] RoomResult refuse(RoomCommandStatus status, std::optional<PlayerId> player) const;
+        [[nodiscard]] RoomResult baseResult(RoomCommandStatus status, std::optional<PlayerId> player) const;
+        [[nodiscard]] RoomResult failBattle(RoomCommandStatus status, std::optional<PlayerId> player);
+        [[nodiscard]] std::optional<BattleDigest> takeDigest();
+        void spawnWave();
+        void spawnBoss();
+        void rewardClear(RoomResult& result) const;
 
         RoomId _room;
         RoomConfig _config;
         RoomPhase _phase{RoomPhase::Waiting};
-        std::uint64_t _boss_health{0};
+        std::chrono::steady_clock::time_point _battle_deadline_at{};
+        std::chrono::steady_clock::time_point _next_wave_at{};
+        std::chrono::steady_clock::time_point _boss_spawn_at{};
+        std::size_t _spawned_wave_count{0};
+        std::uint32_t _next_enemy_id{1};
+        std::uint64_t _digest_sequence{0};
+        bool _boss_spawned{false};
 
-        // Ascending PlayerId, so a clear emits its rewards in a deterministic order.
         std::vector<Participant> _participants;
+        std::vector<Enemy> _enemies;
+        std::vector<BattleEvent> _pending_events;
     };
 }

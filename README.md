@@ -88,20 +88,21 @@ Network Runtime
 
 ### Battle Room과 street 성장
 
-- `Waiting → Running → Cleared | Failed` 상태 기계와 Room 자신이 예약하는 전투 deadline timer
+- `Waiting → Running → Cleared | Failed` 상태 기계, 100ms one-shot tick 사슬과 별도 전투 deadline timer
 - client는 skill id와 request sequence만 보낸다. damage, cooldown, boss HP는 서버가 소유한다
 - 같은 request sequence는 damage를 두 번 적용하지 않고, cooldown은 turn 시작 시각과 비교하는
   deadline이다 (`ActorContext::observedAt`)
-- 한 cast의 결과는 참가자 전원에게 나간다. 요청한 client는 답으로, 나머지는 `request_id = 0`으로
+- 첫 wave와 minion, 정해진 절대 시각에 마지막으로 생성되는 boss를 Room이 소유한다. 현재 targeting은
+  spawn 순서상 첫 생존 적이다
+- `UseSkill`은 즉시 판정하고 요청자에게 `SkillAcknowledged`를 보낸다. damage/death/spawn은 순서를
+  보존한 `BattleDigest(request_id = 0)`로 caster를 포함한 참가자 전원에게 fanout한다
 - clear 시 참가자마다 `tryTell`로 street 경험치 전달, 미상주 Player는 레코드를 먼저 로드
 - 누적 경험치만 저장하고 레벨과 공격/체력은 파생 (레벨당 +10% 선형, 상한 30)
-- `RoomJoin`/`BattleStart`/`UseSkill` 요청과, 요청 없이 나가는 `SkillApplied`·`BattleCleared`·
-  `BattleFailed` 알림
+- `RoomJoin`/`BattleStart`/`UseSkill` 요청과, 요청 없이 나가는 `BattleDigest`·`BattleCleared`·
+  `BattleFailed` 알림. 기존 `SkillApplied` wire 번호는 예약 상태로 남아 있다
 
-전투에는 아직 적도 위치도 없다. boss 하나와 단일 대상 skill 하나이고, 실패는 deadline까지 boss가
-살아남는 것뿐이다. 이 slice의 목적은 전투 수치가 아니라 요청 중복 방어, Actor 수명주기, timer,
-Actor 간 전달과 영속 필드가 끝까지 이어지는지 확인하는 것이다. matchmaking은 없다. 클라이언트가
-room id를 지정한다.
+적 공격과 참가자 HP/사망, threat targeting은 아직 없다. 따라서 실패는 deadline까지 boss가 살아남는
+경우뿐이다. matchmaking도 없으며 클라이언트가 room id를 지정한다.
 
 ## Actor 모델로 검증하는 것
 

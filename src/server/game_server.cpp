@@ -282,7 +282,16 @@ namespace snf::server
                           .max_participants = config.max_room_participants,
                           .clear_experience = config.room_clear_experience,
                           .boss_health = config.room_boss_health,
+                          .tick_interval = config.room_tick_interval,
+                          .wave_interval = config.room_wave_interval,
+                          .wave_count = config.room_wave_count,
+                          .minions_per_wave = config.room_minions_per_wave,
+                          .minion_health = config.room_minion_health,
+                          .boss_spawn_after = config.room_boss_spawn_after,
+                          .max_spawned_enemies = config.max_room_spawned_enemies,
+                          .digest_flush_threshold = config.room_digest_flush_threshold,
                       },
+                  .tick_budget = config.room_tick_budget,
                   .on_result =
                       [this](const RoomInboundCommand& command, const RoomResult& result)
                   {
@@ -301,7 +310,7 @@ namespace snf::server
 
                       _room_result_sink.accept(command, result);
 
-                      if (result.phase == RoomPhase::Cleared || result.phase == RoomPhase::Failed)
+                      if (result.outcome)
                       {
                           // The audience rather than the grants: a failed battle pays nobody and
                           // still has to send everybody home.
@@ -461,6 +470,11 @@ namespace snf::server
         return _zone_actor_binding.stats();
     }
 
+    RoomActorBindingStats GameServer::getRoomActorStats() const noexcept
+    {
+        return _room_actor_binding.stats();
+    }
+
     PartyActorBindingStats GameServer::getPartyActorStats() const noexcept
     {
         return _party_actor_binding.stats();
@@ -474,6 +488,8 @@ namespace snf::server
             .actor_runtime = _logic_runtime.getStats(),
             .player_repository = repository_diagnostics(*_player_repository).stats(),
             .zone_actors = _zone_actor_binding.stats(),
+            .room_actors = _room_actor_binding.stats(),
+            .room_protocol = _room_result_sink.stats(),
             .zone_handoffs = _route_coordinator.stats(),
             .zone_handoffs_saga = _protocol_gateway.zoneHandoffStats(),
             .zone_transition_channel = _zone_transition_channel.stats(),

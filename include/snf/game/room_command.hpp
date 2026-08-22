@@ -48,5 +48,11 @@ namespace snf::server
     {
     };
 
-    using RoomCommand = std::variant<JoinRoom, LeaveRoom, StartBattle, UseSkill, BattleDeadline>;
+    // A one-shot timer command posted back to the same Room by its binding. A
+    // Running Room asks for the next one in the result of the current tick.
+    struct RoomSimulationTick
+    {
+    };
+
+    using RoomCommand = std::variant<JoinRoom, LeaveRoom, StartBattle, UseSkill, BattleDeadline, RoomSimulationTick>;
 }

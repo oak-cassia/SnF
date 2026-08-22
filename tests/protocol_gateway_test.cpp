@@ -1054,7 +1054,7 @@ namespace
         const auto* cast_route = std::get_if<snf::server::RoomCommandRoute>(&fixture.commands.posted->route);
         assert(cast_route != nullptr);
         assert(cast_route->room == room);
-        assert(cast_route->reply_kind == snf::server::RoomReplyKind::SkillApplied);
+        assert(cast_route->reply_kind == snf::server::RoomReplyKind::SkillAcknowledged);
         const auto* cast = std::get_if<snf::server::UseSkill>(&cast_route->command);
         assert(cast != nullptr);
         // The player comes from the session, not from the frame.

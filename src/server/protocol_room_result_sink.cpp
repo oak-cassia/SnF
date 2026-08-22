@@ -1,15 +1,26 @@
 #include "snf/server/protocol_room_result_sink.hpp"
 
+#include "snf/protocol/frame.hpp"
 #include "snf/server/outbound_action.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace
 {
     constexpr std::uint32_t BYTE_MASK = 0xFFU;
+    constexpr std::size_t DIGEST_HEADER_SIZE = 8 + 1 + 2;
+
+    void append_u16(std::vector<std::byte>& bytes, const std::uint16_t value)
+    {
+        bytes.push_back(static_cast<std::byte>((value >> 8U) & BYTE_MASK));
+        bytes.push_back(static_cast<std::byte>(value & BYTE_MASK));
+    }
 
     void append_u32(std::vector<std::byte>& bytes, const std::uint32_t value)
     {
@@ -24,6 +35,73 @@ namespace
         append_u32(bytes, static_cast<std::uint32_t>(value >> 32U));
         append_u32(bytes, static_cast<std::uint32_t>(value));
     }
+
+    [[nodiscard]] constexpr std::size_t encoded_event_size(const snf::server::BattleEvent& event) noexcept
+    {
+        return std::visit(
+            [](const auto& value) -> std::size_t
+            {
+                using Event = std::decay_t<decltype(value)>;
+                if constexpr (std::is_same_v<Event, snf::server::EnemySpawned>)
+                {
+                    return 1 + 4 + 1 + 8;
+                }
+                else if constexpr (std::is_same_v<Event, snf::server::EnemyDamaged>)
+                {
+                    return 1 + 4 + 8 + 4 + 8 + 8;
+                }
+                else if constexpr (std::is_same_v<Event, snf::server::EnemyDied>)
+                {
+                    return 1 + 4;
+                }
+                else
+                {
+                    static_assert(std::is_same_v<Event, snf::server::SkillWhiffed>);
+                    return 1 + 8 + 4;
+                }
+            },
+            event
+        );
+    }
+
+    void append_event(std::vector<std::byte>& payload, const snf::server::BattleEvent& event)
+    {
+        std::visit(
+            [&payload](const auto& value)
+            {
+                using Event = std::decay_t<decltype(value)>;
+                if constexpr (std::is_same_v<Event, snf::server::EnemySpawned>)
+                {
+                    payload.push_back(static_cast<std::byte>(snf::server::BattleEventKind::EnemySpawned));
+                    append_u32(payload, value.id.value);
+                    payload.push_back(static_cast<std::byte>(value.kind));
+                    append_u64(payload, value.health);
+                }
+                else if constexpr (std::is_same_v<Event, snf::server::EnemyDamaged>)
+                {
+                    payload.push_back(static_cast<std::byte>(snf::server::BattleEventKind::EnemyDamaged));
+                    append_u32(payload, value.target.value);
+                    append_u64(payload, value.actor.value);
+                    append_u32(payload, value.skill.value);
+                    append_u64(payload, value.amount);
+                    append_u64(payload, value.health);
+                }
+                else if constexpr (std::is_same_v<Event, snf::server::EnemyDied>)
+                {
+                    payload.push_back(static_cast<std::byte>(snf::server::BattleEventKind::EnemyDied));
+                    append_u32(payload, value.id.value);
+                }
+                else
+                {
+                    static_assert(std::is_same_v<Event, snf::server::SkillWhiffed>);
+                    payload.push_back(static_cast<std::byte>(snf::server::BattleEventKind::SkillWhiffed));
+                    append_u64(payload, value.actor.value);
+                    append_u32(payload, value.skill.value);
+                }
+            },
+            event
+        );
+    }
 }
 
 namespace snf::server
@@ -34,29 +112,19 @@ namespace snf::server
     {
     }
 
+    ProtocolRoomResultSinkStats ProtocolRoomResultSink::stats() const noexcept
+    {
+        return ProtocolRoomResultSinkStats{
+            .oversized_battle_digests = _oversized_battle_digests.load(std::memory_order_relaxed),
+        };
+    }
+
     void ProtocolRoomResultSink::accept(const RoomInboundCommand& command, const RoomResult& result)
     {
         publishReply(command, result);
-        publishSkill(command, result);
+        publishDigest(result);
         publishClear(result);
         publishFailure(result);
-    }
-
-    std::vector<std::byte> ProtocolRoomResultSink::skillPayload(const RoomResult& result) const
-    {
-        // One layout for the reply and for the copy every other participant gets, so
-        // an observer reads the same frame the caster does and compares the actor to
-        // itself. A rejected cast fills the outcome fields with zeroes: it names the
-        // player who asked, and reports that nothing landed.
-        std::vector<std::byte> payload;
-        payload.reserve(1 + 1 + 8 + 4 + 8 + 8);
-        payload.push_back(static_cast<std::byte>(static_cast<std::uint8_t>(result.status)));
-        payload.push_back(static_cast<std::byte>(static_cast<std::uint8_t>(result.phase)));
-        append_u64(payload, result.skill ? result.skill->actor.value : result.player.value_or(PlayerId{}).value);
-        append_u32(payload, result.skill ? result.skill->skill.value : 0);
-        append_u64(payload, result.skill ? result.skill->damage : 0);
-        append_u64(payload, result.boss_health);
-        return payload;
     }
 
     void ProtocolRoomResultSink::publishReply(const RoomInboundCommand& command, const RoomResult& result)
@@ -66,14 +134,18 @@ namespace snf::server
             return;
         }
 
-        if (command.reply->kind == RoomReplyKind::SkillApplied)
+        if (command.reply->kind == RoomReplyKind::SkillAcknowledged)
         {
+            std::vector<std::byte> payload{
+                static_cast<std::byte>(result.status),
+                static_cast<std::byte>(result.phase),
+            };
             static_cast<void>(send(
                 command.reply->connection,
                 snf::protocol::Frame{
-                    .type = snf::protocol::MessageType::SkillApplied,
+                    .type = snf::protocol::MessageType::SkillAcknowledged,
                     .request_id = command.reply->request_id,
-                    .payload = skillPayload(result),
+                    .payload = std::move(payload),
                 }
             ));
             return;
@@ -81,8 +153,8 @@ namespace snf::server
 
         std::vector<std::byte> payload;
         payload.reserve(1 + 1 + 8);
-        payload.push_back(static_cast<std::byte>(static_cast<std::uint8_t>(result.status)));
-        payload.push_back(static_cast<std::byte>(static_cast<std::uint8_t>(result.phase)));
+        payload.push_back(static_cast<std::byte>(result.status));
+        payload.push_back(static_cast<std::byte>(result.phase));
         append_u64(payload, command.room.value);
 
         static_cast<void>(send(
@@ -96,46 +168,63 @@ namespace snf::server
         ));
     }
 
-    void ProtocolRoomResultSink::publishSkill(const RoomInboundCommand& command, const RoomResult& result)
+    std::optional<std::size_t> ProtocolRoomResultSink::digestPayloadSize(const BattleDigest& digest) const noexcept
     {
-        if (!result.skill)
+        if (digest.events.size() > std::numeric_limits<std::uint16_t>::max())
         {
-            return;
+            return std::nullopt;
         }
 
-        for (const PlayerId player : result.audience)
+        std::size_t size = DIGEST_HEADER_SIZE;
+        for (const BattleEvent& event : digest.events)
         {
-            // The caster was answered above. Sending them the unsolicited copy as
-            // well would report one cast twice.
-            if (player == result.skill->actor && command.reply)
+            const std::size_t event_size = encoded_event_size(event);
+            if (event_size > snf::protocol::MAX_PAYLOAD_SIZE - size)
             {
-                continue;
+                return std::nullopt;
             }
-            const auto connection = _sessions.connectionFor(player);
-            if (!connection)
-            {
-                // Offline, or on the way out. A cast is not owed to anyone the way a
-                // reward is -- the battle state they missed is gone with them.
-                continue;
-            }
-            static_cast<void>(send(
-                *connection,
-                snf::protocol::Frame{
-                    .type = snf::protocol::MessageType::SkillApplied,
-                    .request_id = snf::protocol::UNSOLICITED_REQUEST_ID,
-                    .payload = skillPayload(result),
-                }
-            ));
+            size += event_size;
         }
+        return size;
     }
 
-    void ProtocolRoomResultSink::publishFailure(const RoomResult& result)
+    std::vector<std::byte> ProtocolRoomResultSink::digestPayload(const RoomResult& result) const
     {
-        if (result.phase != RoomPhase::Failed || result.status != RoomCommandStatus::Applied)
+        const BattleDigest& digest = *result.digest;
+        const std::size_t size = *digestPayloadSize(digest);
+        std::vector<std::byte> payload;
+        payload.reserve(size);
+        append_u64(payload, digest.sequence);
+        payload.push_back(static_cast<std::byte>(result.phase));
+        append_u16(payload, static_cast<std::uint16_t>(digest.events.size()));
+        for (const BattleEvent& event : digest.events)
+        {
+            append_event(payload, event);
+        }
+        return payload;
+    }
+
+    void ProtocolRoomResultSink::publishDigest(const RoomResult& result)
+    {
+        if (!result.digest)
         {
             return;
         }
 
+        if (!digestPayloadSize(*result.digest))
+        {
+            _oversized_battle_digests.fetch_add(1, std::memory_order_relaxed);
+            for (const PlayerId player : result.audience)
+            {
+                if (const auto connection = _sessions.connectionFor(player))
+                {
+                    _outbound.reportAdmissionFailure(*connection);
+                }
+            }
+            return;
+        }
+
+        const std::vector<std::byte> payload = digestPayload(result);
         for (const PlayerId player : result.audience)
         {
             const auto connection = _sessions.connectionFor(player);
@@ -143,18 +232,12 @@ namespace snf::server
             {
                 continue;
             }
-
-            std::vector<std::byte> payload;
-            payload.reserve(8);
-            // What the boss had left, which is the only thing a failure has to say.
-            append_u64(payload, result.boss_health);
-
             static_cast<void>(send(
                 *connection,
                 snf::protocol::Frame{
-                    .type = snf::protocol::MessageType::BattleFailed,
+                    .type = snf::protocol::MessageType::BattleDigest,
                     .request_id = snf::protocol::UNSOLICITED_REQUEST_ID,
-                    .payload = std::move(payload),
+                    .payload = payload,
                 }
             ));
         }
@@ -162,25 +245,56 @@ namespace snf::server
 
     void ProtocolRoomResultSink::publishClear(const RoomResult& result)
     {
+        if (result.outcome != BattleOutcome::Cleared)
+        {
+            return;
+        }
+
         for (const StreetExperienceGrant& grant : result.grants)
         {
             const auto connection = _sessions.connectionFor(grant.player);
             if (!connection)
             {
-                // Offline, or on the way out. The reward itself is not lost -- the tell
-                // that carries it applies against the stored record either way -- so the
-                // player sees the new level on the next login.
                 continue;
             }
 
             std::vector<std::byte> payload;
             payload.reserve(8);
             append_u64(payload, grant.experience);
-
             static_cast<void>(send(
                 *connection,
                 snf::protocol::Frame{
                     .type = snf::protocol::MessageType::BattleCleared,
+                    .request_id = snf::protocol::UNSOLICITED_REQUEST_ID,
+                    .payload = std::move(payload),
+                }
+            ));
+        }
+    }
+
+    void ProtocolRoomResultSink::publishFailure(const RoomResult& result)
+    {
+        if (result.outcome != BattleOutcome::Failed)
+        {
+            return;
+        }
+
+        for (const PlayerId player : result.audience)
+        {
+            const auto connection = _sessions.connectionFor(player);
+            if (!connection)
+            {
+                continue;
+            }
+
+            std::vector<std::byte> payload;
+            payload.reserve(8 + 1);
+            append_u64(payload, result.boss_health);
+            payload.push_back(static_cast<std::byte>(result.boss_spawned ? 1 : 0));
+            static_cast<void>(send(
+                *connection,
+                snf::protocol::Frame{
+                    .type = snf::protocol::MessageType::BattleFailed,
                     .request_id = snf::protocol::UNSOLICITED_REQUEST_ID,
                     .payload = std::move(payload),
                 }

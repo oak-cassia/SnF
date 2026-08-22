@@ -7,7 +7,9 @@
 #include "snf/server/room_inbound_command.hpp"
 #include "snf/server/room_join_tell.hpp"
 
+#include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 
@@ -16,6 +18,7 @@ namespace snf::server
     struct RoomActorBindingConfig
     {
         RoomConfig actor;
+        std::chrono::nanoseconds tick_budget{std::chrono::milliseconds{5}};
         // Result delivery is intentionally a binding concern. Production routing
         // can replace this callback with a typed sink without putting connection
         // or protocol state inside Room.
@@ -25,6 +28,13 @@ namespace snf::server
     struct RoomActorBindingStats
     {
         snf::runtime::DistributionSnapshot command_execution_nanoseconds;
+        snf::runtime::DistributionSnapshot tick_execution_nanoseconds;
+        // ResultSink payload construction and OutboundChannel enqueue only. Reactor
+        // frame encoding and TCP transmission happen later on another thread.
+        snf::runtime::DistributionSnapshot tick_publish_nanoseconds;
+        snf::runtime::DistributionSnapshot tick_turn_nanoseconds;
+        std::uint64_t tick_overruns{0};
+        std::uint64_t tick_schedule_rejections{0};
     };
 
     class RoomActorBinding final : public snf::runtime::ActorBinding
@@ -59,8 +69,14 @@ namespace snf::server
         struct PassivatePayload;
 
         RoomConfig _actor_config;
+        std::chrono::nanoseconds _tick_budget;
         std::function<void(const RoomInboundCommand&, const RoomResult&)> _on_result;
         CommandLifecycleSink* _lifecycle{nullptr};
         snf::runtime::Distribution _command_execution_nanoseconds;
+        snf::runtime::Distribution _tick_execution_nanoseconds;
+        snf::runtime::Distribution _tick_publish_nanoseconds;
+        snf::runtime::Distribution _tick_turn_nanoseconds;
+        std::atomic<std::uint64_t> _tick_overruns{0};
+        std::atomic<std::uint64_t> _tick_schedule_rejections{0};
     };
 }
