@@ -163,6 +163,20 @@ ctest --preset debug --output-on-failure
   --requests-per-second 20
 ```
 
+Room 전투 부하는 방별 최대 4명으로 나누고, 모든 참가자가 입장한 뒤 방별 leader 하나가 전투를
+시작한다. worker 확장 비교는 서버의 `SNF_ACTOR_WORKER_COUNT`를 1·2·4로 바꿔 같은 명령을 반복한다.
+
+```bash
+SNF_ACTOR_WORKER_COUNT=1 ./build/release/snf_server
+
+./build/release/snf_load_client \
+  --connections 128 \
+  --scenario battle \
+  --players-per-room 4 \
+  --duration 30 \
+  --requests-per-second 20
+```
+
 MySQL adapter는 다음 환경 변수가 있을 때 선택된다. MySQL 통합 테스트는 별도의 test database를
 사용해야 하며 `SNF_MYSQL_TEST_HOST`가 없으면 skip된다.
 

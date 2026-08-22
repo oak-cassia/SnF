@@ -42,6 +42,22 @@ namespace
         return static_cast<std::uint16_t>(value);
     }
 
+    std::size_t actor_worker_count_from_environment()
+    {
+        const auto text = environment("SNF_ACTOR_WORKER_COUNT");
+        if (!text)
+        {
+            return 2;
+        }
+        std::size_t value = 0;
+        const auto [end, error] = std::from_chars(text->data(), text->data() + text->size(), value);
+        if (error != std::errc{} || end != text->data() + text->size() || value == 0)
+        {
+            throw std::invalid_argument{"SNF_ACTOR_WORKER_COUNT is invalid"};
+        }
+        return value;
+    }
+
     std::optional<snf::server::MySqlPlayerRepositoryConfig> mysql_from_environment()
     {
         const auto host = environment("SNF_MYSQL_HOST");
@@ -165,6 +181,7 @@ int main()
         const auto termination_signal = snf::net::create_termination_signal_listener();
         snf::server::GameServerConfig config;
         config.port = 7777;
+        config.actor_worker_count = actor_worker_count_from_environment();
         if (auto mysql = mysql_from_environment())
         {
             // Choosing the backend, and linking it, stays here rather than in the
@@ -185,7 +202,7 @@ int main()
         };
         snf::server::GameServer server{config};
 
-        std::cout << "Listening on port 7777\n";
+        std::cout << "Listening on port 7777 with " << config.actor_worker_count << " actor workers\n";
         server.run(termination_signal.getDescriptor());
 
         std::cout << "--- server summary ---\n";
