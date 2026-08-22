@@ -637,6 +637,19 @@ namespace
         };
     }
 
+    snf::protocol::Frame
+    use_skill_frame(const std::uint32_t request_id, const std::uint64_t room, const snf::server::SkillId skill, const std::uint64_t sequence)
+    {
+        std::vector<std::byte> payload = player_id_payload(room);
+        append_u32(payload, skill.value);
+        append_u64(payload, sequence);
+        return snf::protocol::Frame{
+            .type = snf::protocol::MessageType::UseSkill,
+            .request_id = request_id,
+            .payload = std::move(payload),
+        };
+    }
+
     // status + phase + room id
     snf::protocol::Frame receive_room_frame(const int socket_descriptor, const std::size_t payload_size)
     {
@@ -2395,6 +2408,197 @@ namespace
         server.stop();
     }
 
+    void test_slow_battle_client_is_closed_while_healthy_participants_clear_the_room()
+    {
+        RunningServer server{snf::server::GameServerConfig{
+            .port = 0,
+            .shutdown_grace_period = 200ms,
+            .max_pending_send_bytes = 2048,
+            .client_send_buffer_size = 1024,
+            .room_battle_duration = 4s,
+            .room_boss_health = snf::server::BASE_ATTACK,
+            .room_tick_interval = 1ms,
+            .room_wave_interval = 1s,
+            .room_wave_count = 0,
+            .room_minions_per_wave = 0,
+            .room_minion_health = snf::server::BASE_ATTACK,
+            .room_boss_spawn_after = 1s,
+            .max_room_spawned_enemies = 1,
+            .room_arena_width = 20,
+            .room_arena_height = 2000,
+            .room_player_move_speed = 4,
+            .room_participant_spawn_spacing = 2,
+            .room_minion_spawn_radius = 5,
+        }};
+        constexpr std::uint64_t room = 901;
+        constexpr std::array<std::uint64_t, 4> players{910, 911, 912, 913};
+        constexpr std::size_t SLOW_INDEX = 0;
+        constexpr std::size_t FIRST_HEALTHY_INDEX = 1;
+        constexpr std::size_t ROOM_REPLY_PAYLOAD_SIZE = 1 + 1 + 8;
+
+        std::array<snf::net::UniqueFileDescriptor, 4> clients{
+            connect_client(server.getPort(), 1024),
+            connect_client(server.getPort()),
+            connect_client(server.getPort()),
+            connect_client(server.getPort()),
+        };
+
+        for (std::size_t index = 0; index < clients.size(); ++index)
+        {
+            const auto auth = authentication_frame(400 + static_cast<std::uint32_t>(index), players[index]);
+            const auto auth_bytes = snf::protocol::encode_frame(auth);
+            send_all(clients[index].getDescriptor(), auth_bytes);
+            assert_authenticated(receive_exact(clients[index].getDescriptor(), auth_bytes.size()), auth.request_id, players[index]);
+
+            std::vector<std::byte> enter_payload = player_id_payload(920 + index);
+            append_u32(enter_payload, 10);
+            append_u32(enter_payload, 10);
+            send_all(
+                clients[index].getDescriptor(),
+                snf::protocol::encode_frame(snf::protocol::Frame{
+                    .type = snf::protocol::MessageType::EnterZone,
+                    .request_id = 410 + static_cast<std::uint32_t>(index),
+                    .payload = std::move(enter_payload),
+                })
+            );
+            const auto entered = receive_zone_response(clients[index].getDescriptor());
+            assert(entered.type == snf::protocol::MessageType::ZoneEntered);
+            assert(entered.payload[0] == static_cast<std::byte>(snf::server::ZoneCommandStatus::Applied));
+
+            send_all(
+                clients[index].getDescriptor(),
+                snf::protocol::encode_frame(room_frame(snf::protocol::MessageType::RoomJoin, 420 + static_cast<std::uint32_t>(index), room))
+            );
+            const auto joined = receive_room_frame(clients[index].getDescriptor(), ROOM_REPLY_PAYLOAD_SIZE);
+            assert(joined.type == snf::protocol::MessageType::RoomJoined);
+            assert(joined.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::Applied));
+        }
+
+        send_all(
+            clients[FIRST_HEALTHY_INDEX].getDescriptor(), snf::protocol::encode_frame(room_frame(snf::protocol::MessageType::BattleStart, 430, room))
+        );
+        const auto started = receive_room_frame(clients[FIRST_HEALTHY_INDEX].getDescriptor(), ROOM_REPLY_PAYLOAD_SIZE);
+        assert(started.type == snf::protocol::MessageType::BattleStarted);
+        assert(started.payload[1] == static_cast<std::byte>(snf::server::RoomPhase::Running));
+
+        struct HealthyObservation
+        {
+            std::uint64_t last_digest_sequence{0};
+            std::uint64_t participant_left_sequence{0};
+            bool saw_boss{false};
+            bool saw_clear{false};
+        };
+        std::array<HealthyObservation, 3> observations{};
+
+        const auto observe = [&players](const snf::protocol::Frame& frame, HealthyObservation& observation)
+        {
+            if (frame.type == snf::protocol::MessageType::BattleDigest)
+            {
+                const std::uint64_t sequence = read_u64(frame.payload, 0);
+                assert(sequence == observation.last_digest_sequence + 1);
+                observation.last_digest_sequence = sequence;
+
+                if (const auto left = digest_event_offset(frame, snf::server::BattleEventKind::ParticipantLeft))
+                {
+                    assert(read_u64(frame.payload, *left + 1) == players[SLOW_INDEX]);
+                    observation.participant_left_sequence = sequence;
+                }
+                if (const auto spawned = digest_event_offset(frame, snf::server::BattleEventKind::EnemySpawned))
+                {
+                    if (frame.payload[*spawned + 5] == static_cast<std::byte>(snf::server::EnemyKind::Boss))
+                    {
+                        observation.saw_boss = true;
+                    }
+                }
+            }
+            else if (frame.type == snf::protocol::MessageType::BattleCleared)
+            {
+                assert(frame.request_id == snf::protocol::UNSOLICITED_REQUEST_ID);
+                observation.saw_clear = true;
+            }
+        };
+
+        for (std::size_t index = 0; index < clients.size(); ++index)
+        {
+            const auto initial = receive_frame(clients[index].getDescriptor());
+            assert(initial.type == snf::protocol::MessageType::BattleDigest);
+            assert(read_u64(initial.payload, 0) == 1);
+            if (index != SLOW_INDEX)
+            {
+                observe(initial, observations[index - FIRST_HEALTHY_INDEX]);
+            }
+        }
+
+        // The slow participant stops reading after the initial state. All four move
+        // north so every Tick produces a digest until the boss appears at the edge.
+        for (std::size_t index = 0; index < clients.size(); ++index)
+        {
+            send_all(
+                clients[index].getDescriptor(),
+                snf::protocol::encode_frame(set_move_intent_frame(440 + static_cast<std::uint32_t>(index), room, snf::server::MoveDirection::North, 1)
+                )
+            );
+        }
+
+        const auto all_healthy = [&observations](const auto predicate)
+        {
+            return std::ranges::all_of(observations, predicate);
+        };
+        const auto drain_unsatisfied_round = [&clients, &observations, &observe](const auto predicate)
+        {
+            for (std::size_t index = FIRST_HEALTHY_INDEX; index < clients.size(); ++index)
+            {
+                HealthyObservation& observation = observations[index - FIRST_HEALTHY_INDEX];
+                if (!predicate(observation))
+                {
+                    observe(receive_frame(clients[index].getDescriptor()), observation);
+                }
+            }
+        };
+
+        constexpr std::size_t MAX_DRAIN_ROUNDS = 5000;
+        std::size_t drain_round = 0;
+        const auto saw_participant_left = [](const HealthyObservation& observation)
+        {
+            return observation.participant_left_sequence != 0;
+        };
+        while (!all_healthy(saw_participant_left) && drain_round++ < MAX_DRAIN_ROUNDS)
+        {
+            drain_unsatisfied_round(saw_participant_left);
+        }
+        assert(all_healthy(saw_participant_left));
+
+        const auto saw_boss = [](const HealthyObservation& observation)
+        {
+            return observation.saw_boss;
+        };
+        while (!all_healthy(saw_boss) && drain_round++ < MAX_DRAIN_ROUNDS)
+        {
+            drain_unsatisfied_round(saw_boss);
+        }
+        assert(all_healthy(saw_boss));
+
+        send_all(clients[FIRST_HEALTHY_INDEX].getDescriptor(), snf::protocol::encode_frame(use_skill_frame(450, room, snf::server::SLASH, 1)));
+        const auto saw_clear = [](const HealthyObservation& observation)
+        {
+            return observation.saw_clear;
+        };
+        while (!all_healthy(saw_clear) && drain_round++ < MAX_DRAIN_ROUNDS)
+        {
+            drain_unsatisfied_round(saw_clear);
+        }
+        assert(all_healthy(saw_clear));
+        for (const HealthyObservation& observation : observations)
+        {
+            assert(observation.last_digest_sequence > observation.participant_left_sequence);
+        }
+
+        receive_until_closed(clients[SLOW_INDEX].getDescriptor());
+        server.stop();
+        assert(server.getStats().accepted_connections == 4);
+        assert(server.getStats().closed_connections == 4);
+    }
+
     void test_shutdown_forces_slow_client_closed_after_grace_period()
     {
         constexpr auto shutdown_grace_period = 150ms;
@@ -2725,6 +2929,8 @@ int main()
     run("test_overflowed_actor_queue_closes_only_that_connection", test_overflowed_actor_queue_closes_only_that_connection);
     run("test_request_stop_closes_listener_and_active_sessions", test_request_stop_closes_listener_and_active_sessions);
     run("test_closes_slow_client_when_send_queue_exceeds_limit", test_closes_slow_client_when_send_queue_exceeds_limit);
+    run("test_slow_battle_client_is_closed_while_healthy_participants_clear_the_room",
+        test_slow_battle_client_is_closed_while_healthy_participants_clear_the_room);
     run("test_shutdown_forces_slow_client_closed_after_grace_period", test_shutdown_forces_slow_client_closed_after_grace_period);
     run("test_termination_signal_stops_server(SIGINT)",
         []
