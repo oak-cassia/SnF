@@ -35,12 +35,19 @@ namespace snf::server
         // The command reached a Running Room at or after its absolute deadline.
         // Appended because command statuses cross the wire as one byte.
         BattleExpired,
+        ParticipantDead,
     };
 
     enum class BattleOutcome : std::uint8_t
     {
         Cleared,
         Failed,
+    };
+
+    enum class BattleFailureReason : std::uint8_t
+    {
+        Deadline = 0,
+        PartyDefeated = 1,
     };
 
     // Crosses the wire as an event tag. Keep existing values fixed and append new
@@ -51,6 +58,13 @@ namespace snf::server
         EnemyDamaged = 1,
         EnemyDied = 2,
         SkillWhiffed = 3,
+        ArenaStarted = 4,
+        ParticipantSpawned = 5,
+        ParticipantMoved = 6,
+        EnemyPositioned = 7,
+        ParticipantDamaged = 8,
+        ParticipantDied = 9,
+        ParticipantLeft = 10,
     };
 
     struct EnemySpawned
@@ -88,7 +102,77 @@ namespace snf::server
         [[nodiscard]] bool operator==(const SkillWhiffed&) const noexcept = default;
     };
 
-    using BattleEvent = std::variant<EnemySpawned, EnemyDamaged, EnemyDied, SkillWhiffed>;
+    struct ArenaStarted
+    {
+        std::uint32_t width{0};
+        std::uint32_t height{0};
+
+        [[nodiscard]] bool operator==(const ArenaStarted&) const noexcept = default;
+    };
+
+    struct ParticipantSpawned
+    {
+        PlayerId player{};
+        ArenaPosition position{};
+        std::uint64_t health{0};
+
+        [[nodiscard]] bool operator==(const ParticipantSpawned&) const noexcept = default;
+    };
+
+    struct ParticipantMoved
+    {
+        PlayerId player{};
+        ArenaPosition position{};
+
+        [[nodiscard]] bool operator==(const ParticipantMoved&) const noexcept = default;
+    };
+
+    // This absolute position update is used both immediately after EnemySpawned
+    // and for later movement, so clients need only one position update handler.
+    struct EnemyPositioned
+    {
+        EnemyId enemy{};
+        ArenaPosition position{};
+
+        [[nodiscard]] bool operator==(const EnemyPositioned&) const noexcept = default;
+    };
+
+    struct ParticipantDamaged
+    {
+        PlayerId target{};
+        EnemyId attacker{};
+        std::uint64_t amount{0};
+        std::uint64_t health{0};
+
+        [[nodiscard]] bool operator==(const ParticipantDamaged&) const noexcept = default;
+    };
+
+    struct ParticipantDied
+    {
+        PlayerId player{};
+
+        [[nodiscard]] bool operator==(const ParticipantDied&) const noexcept = default;
+    };
+
+    struct ParticipantLeft
+    {
+        PlayerId player{};
+
+        [[nodiscard]] bool operator==(const ParticipantLeft&) const noexcept = default;
+    };
+
+    using BattleEvent = std::variant<
+        EnemySpawned,
+        EnemyDamaged,
+        EnemyDied,
+        SkillWhiffed,
+        ArenaStarted,
+        ParticipantSpawned,
+        ParticipantMoved,
+        EnemyPositioned,
+        ParticipantDamaged,
+        ParticipantDied,
+        ParticipantLeft>;
 
     // One ordered observation window. The sequence advances only when a digest is
     // actually emitted, including start, capacity and terminal flushes outside a
@@ -111,6 +195,8 @@ namespace snf::server
         std::optional<BattleDigest> digest{};
         // Present only on the result that changed Running into a terminal phase.
         std::optional<BattleOutcome> outcome{};
+        // Present exactly when outcome is Failed.
+        std::optional<BattleFailureReason> failure_reason{};
         std::vector<PlayerId> audience{};
         std::vector<StreetExperienceGrant> grants{};
     };

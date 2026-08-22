@@ -21,11 +21,13 @@ namespace snf::server
         // rather than a change to how damage is derived.
         std::uint64_t attack_percent{0};
         std::chrono::milliseconds cooldown{0};
+        std::uint32_t range{0};
     };
 
     inline constexpr SkillId SLASH{.value = 1};
     inline constexpr std::uint64_t SLASH_ATTACK_PERCENT = 100;
     inline constexpr std::chrono::milliseconds SLASH_COOLDOWN{1000};
+    inline constexpr std::uint32_t SLASH_RANGE = 12;
     inline constexpr std::uint64_t ATTACK_PERCENT_DENOMINATOR = 100;
 
     // Slash is the whole catalogue on purpose. A skill that hits several enemies

@@ -256,6 +256,10 @@ namespace
                         .minions_per_wave = 0,
                         .boss_spawn_after = 10ms,
                         .max_spawned_enemies = 1,
+                        .arena_width = 20,
+                        .arena_height = 20,
+                        .participant_spawn_spacing = 2,
+                        .minion_spawn_radius = 5,
                     },
                 .on_result =
                     [&boss_spawn](const snf::server::RoomInboundCommand&, const snf::server::RoomResult& result)

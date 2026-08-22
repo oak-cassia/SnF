@@ -1,5 +1,6 @@
 #pragma once
 
+#include "snf/game/arena.hpp"
 #include "snf/game/player_id.hpp"
 #include "snf/game/skill_id.hpp"
 #include "snf/game/street_progression.hpp"
@@ -54,5 +55,14 @@ namespace snf::server
     {
     };
 
-    using RoomCommand = std::variant<JoinRoom, LeaveRoom, StartBattle, UseSkill, BattleDeadline, RoomSimulationTick>;
+    // A separate sequence lets movement and skill input progress independently.
+    // The intent changes now; the Room's next simulation Tick changes position.
+    struct SetMoveIntent
+    {
+        PlayerId player{};
+        MoveDirection direction{MoveDirection::Stop};
+        std::uint64_t request_sequence{0};
+    };
+
+    using RoomCommand = std::variant<JoinRoom, LeaveRoom, StartBattle, UseSkill, BattleDeadline, RoomSimulationTick, SetMoveIntent>;
 }

@@ -18,6 +18,7 @@ namespace snf::server
         // The detailed outcome is broadcast later in a BattleDigest. This reply only
         // correlates the accepted or refused request.
         SkillAcknowledged,
+        MoveAcknowledged,
     };
 
     struct RoomReplyContext

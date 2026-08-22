@@ -65,6 +65,8 @@ namespace
         case snf::protocol::MessageType::BattleFailed:
         case snf::protocol::MessageType::BattleDigest:
         case snf::protocol::MessageType::SkillAcknowledged:
+        case snf::protocol::MessageType::SetMoveIntent:
+        case snf::protocol::MessageType::MoveAcknowledged:
             return true;
         }
 

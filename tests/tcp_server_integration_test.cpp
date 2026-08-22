@@ -441,6 +441,20 @@ namespace
         };
     }
 
+    snf::protocol::Frame set_move_intent_frame(
+        const std::uint32_t request_id, const std::uint64_t room, const snf::server::MoveDirection direction, const std::uint64_t sequence
+    )
+    {
+        std::vector<std::byte> payload = player_id_payload(room);
+        payload.push_back(static_cast<std::byte>(direction));
+        append_u64(payload, sequence);
+        return snf::protocol::Frame{
+            .type = snf::protocol::MessageType::SetMoveIntent,
+            .request_id = request_id,
+            .payload = std::move(payload),
+        };
+    }
+
     // status + phase + room id
     snf::protocol::Frame receive_room_frame(const int socket_descriptor, const std::size_t payload_size)
     {
@@ -466,6 +480,112 @@ namespace
         assert(decoded.ok());
         assert(decoded.frames.size() == 1);
         return decoded.frames.front();
+    }
+
+    [[nodiscard]] std::size_t battle_event_size(const snf::server::BattleEventKind kind)
+    {
+        switch (kind)
+        {
+        case snf::server::BattleEventKind::EnemySpawned:
+            return 1 + 4 + 1 + 8;
+        case snf::server::BattleEventKind::EnemyDamaged:
+            return 1 + 4 + 8 + 4 + 8 + 8;
+        case snf::server::BattleEventKind::EnemyDied:
+            return 1 + 4;
+        case snf::server::BattleEventKind::SkillWhiffed:
+            return 1 + 8 + 4;
+        case snf::server::BattleEventKind::ArenaStarted:
+            return 1 + 4 + 4;
+        case snf::server::BattleEventKind::ParticipantSpawned:
+            return 1 + 8 + 4 + 4 + 8;
+        case snf::server::BattleEventKind::ParticipantMoved:
+            return 1 + 8 + 4 + 4;
+        case snf::server::BattleEventKind::EnemyPositioned:
+            return 1 + 4 + 4 + 4;
+        case snf::server::BattleEventKind::ParticipantDamaged:
+            return 1 + 8 + 4 + 8 + 8;
+        case snf::server::BattleEventKind::ParticipantDied:
+        case snf::server::BattleEventKind::ParticipantLeft:
+            return 1 + 8;
+        }
+        assert(false && "unknown BattleEventKind");
+        return 0;
+    }
+
+    [[nodiscard]] std::vector<std::pair<snf::server::BattleEventKind, std::size_t>> digest_events(const snf::protocol::Frame& frame)
+    {
+        assert(frame.type == snf::protocol::MessageType::BattleDigest);
+        assert(frame.payload.size() >= 11);
+        const std::size_t event_count = read_u16(frame.payload, 9);
+        std::size_t offset = 11;
+        std::vector<std::pair<snf::server::BattleEventKind, std::size_t>> events;
+        events.reserve(event_count);
+        for (std::size_t index = 0; index < event_count; ++index)
+        {
+            assert(offset < frame.payload.size());
+            const auto kind = static_cast<snf::server::BattleEventKind>(std::to_integer<std::uint8_t>(frame.payload[offset]));
+            const std::size_t size = battle_event_size(kind);
+            assert(size <= frame.payload.size() - offset);
+            events.emplace_back(kind, offset);
+            offset += size;
+        }
+        assert(offset == frame.payload.size());
+        return events;
+    }
+
+    [[nodiscard]] std::optional<std::size_t> digest_event_offset(const snf::protocol::Frame& frame, const snf::server::BattleEventKind wanted)
+    {
+        if (frame.type != snf::protocol::MessageType::BattleDigest)
+        {
+            return std::nullopt;
+        }
+        for (const auto& [kind, offset] : digest_events(frame))
+        {
+            if (kind == wanted)
+            {
+                return offset;
+            }
+        }
+        return std::nullopt;
+    }
+
+    [[nodiscard]] snf::protocol::Frame receive_until(const int socket_descriptor, const std::function<bool(const snf::protocol::Frame&)>& wanted)
+    {
+        constexpr std::size_t MAX_SKIPPED_FRAMES = 1024;
+        for (std::size_t index = 0; index < MAX_SKIPPED_FRAMES; ++index)
+        {
+            snf::protocol::Frame frame = receive_frame(socket_descriptor);
+            if (wanted(frame))
+            {
+                return frame;
+            }
+        }
+        assert(false && "wanted frame did not arrive");
+        return snf::protocol::Frame{};
+    }
+
+    [[nodiscard]] snf::protocol::Frame receive_until_type(
+        const int socket_descriptor, const snf::protocol::MessageType type, const std::optional<std::uint32_t> request_id = std::nullopt
+    )
+    {
+        return receive_until(
+            socket_descriptor,
+            [type, request_id](const snf::protocol::Frame& frame)
+            {
+                return frame.type == type && (!request_id || frame.request_id == *request_id);
+            }
+        );
+    }
+
+    [[nodiscard]] snf::protocol::Frame receive_until_digest_event(const int socket_descriptor, const snf::server::BattleEventKind kind)
+    {
+        return receive_until(
+            socket_descriptor,
+            [kind](const snf::protocol::Frame& frame)
+            {
+                return digest_event_offset(frame, kind).has_value();
+            }
+        );
     }
 
     void assert_authenticated(const std::vector<std::byte>& response, const std::uint32_t request_id, const std::uint64_t player_id)
@@ -1108,6 +1228,10 @@ namespace
             .room_minion_health = snf::server::BASE_ATTACK,
             .room_boss_spawn_after = 200ms,
             .max_room_spawned_enemies = 2,
+            .room_arena_width = 20,
+            .room_arena_height = 20,
+            .room_participant_spawn_spacing = 2,
+            .room_minion_spawn_radius = 5,
         }};
         constexpr std::uint64_t room = 77;
         constexpr std::uint64_t zone = 88;
@@ -1202,13 +1326,27 @@ namespace
         assert(first_wave.type == snf::protocol::MessageType::BattleDigest);
         assert(first_wave.request_id == snf::protocol::UNSOLICITED_REQUEST_ID);
         assert(first_wave.payload == observed_first_wave.payload);
-        assert(read_u64(first_wave.payload, 0) == 1);
         assert(first_wave.payload[8] == static_cast<std::byte>(snf::server::RoomPhase::Running));
-        assert(read_u16(first_wave.payload, 9) == 1);
-        assert(first_wave.payload[11] == static_cast<std::byte>(snf::server::BattleEventKind::EnemySpawned));
-        assert(read_u32(first_wave.payload, 12) == 1);
-        assert(first_wave.payload[16] == static_cast<std::byte>(snf::server::EnemyKind::Minion));
-        assert(read_u64(first_wave.payload, 17) == snf::server::BASE_ATTACK);
+        assert(read_u16(first_wave.payload, 9) == 5);
+        const auto arena_offset = digest_event_offset(first_wave, snf::server::BattleEventKind::ArenaStarted);
+        const auto first_enemy_offset = digest_event_offset(first_wave, snf::server::BattleEventKind::EnemySpawned);
+        const auto first_position_offset = digest_event_offset(first_wave, snf::server::BattleEventKind::EnemyPositioned);
+        assert(arena_offset && read_u32(first_wave.payload, *arena_offset + 1) == 20 && read_u32(first_wave.payload, *arena_offset + 5) == 20);
+        assert(first_enemy_offset && read_u32(first_wave.payload, *first_enemy_offset + 1) == 1);
+        assert(first_wave.payload[*first_enemy_offset + 5] == static_cast<std::byte>(snf::server::EnemyKind::Minion));
+        assert(read_u64(first_wave.payload, *first_enemy_offset + 6) == snf::server::BASE_ATTACK);
+        assert(first_position_offset && read_u32(first_wave.payload, *first_position_offset + 1) == 1);
+
+        // Movement is a request/acknowledgement pair, while the actual position
+        // change remains an unsolicited observation from the next Tick.
+        send_all(first.getDescriptor(), snf::protocol::encode_frame(set_move_intent_frame(313, room, snf::server::MoveDirection::NorthEast, 1)));
+        const auto move_ack = receive_until_type(first.getDescriptor(), snf::protocol::MessageType::MoveAcknowledged, 313);
+        assert(move_ack.payload == (std::vector<std::byte>{std::byte{0}, std::byte{1}}));
+        const auto movement = receive_until_digest_event(first.getDescriptor(), snf::server::BattleEventKind::ParticipantMoved);
+        const auto observed_movement = receive_until_digest_event(second.getDescriptor(), snf::server::BattleEventKind::ParticipantMoved);
+        assert(movement.payload == observed_movement.payload);
+        send_all(first.getDescriptor(), snf::protocol::encode_frame(set_move_intent_frame(314, room, snf::server::MoveDirection::Stop, 2)));
+        static_cast<void>(receive_until_type(first.getDescriptor(), snf::protocol::MessageType::MoveAcknowledged, 314));
 
         // A cast carries only the Room, skill and client sequence. The server picks
         // the first living enemy and acknowledges the request separately from the
@@ -1226,7 +1364,7 @@ namespace
         };
 
         send_all(first.getDescriptor(), snf::protocol::encode_frame(use_skill_frame(305, 1)));
-        const auto first_ack = receive_frame(first.getDescriptor());
+        const auto first_ack = receive_until_type(first.getDescriptor(), snf::protocol::MessageType::SkillAcknowledged, 305);
         assert(first_ack.type == snf::protocol::MessageType::SkillAcknowledged);
         assert(first_ack.request_id == 305);
         assert(
@@ -1239,49 +1377,46 @@ namespace
 
         // The following Tick flushes the atomic Damage+Died group. Both clients
         // observe the same event order even though only one sent UseSkill.
-        const auto minion_killed = receive_frame(first.getDescriptor());
-        const auto observed_minion_killed = receive_frame(second.getDescriptor());
+        const auto minion_killed = receive_until_digest_event(first.getDescriptor(), snf::server::BattleEventKind::EnemyDied);
+        const auto observed_minion_killed = receive_until_digest_event(second.getDescriptor(), snf::server::BattleEventKind::EnemyDied);
         assert(minion_killed.type == snf::protocol::MessageType::BattleDigest);
         assert(minion_killed.payload == observed_minion_killed.payload);
-        assert(read_u64(minion_killed.payload, 0) == 2);
         assert(read_u16(minion_killed.payload, 9) == 2);
-        assert(minion_killed.payload[11] == static_cast<std::byte>(snf::server::BattleEventKind::EnemyDamaged));
-        assert(read_u32(minion_killed.payload, 12) == 1);
-        assert(read_u64(minion_killed.payload, 16) == first_player);
-        assert(read_u64(minion_killed.payload, 28) == snf::server::BASE_ATTACK);
-        assert(read_u64(minion_killed.payload, 36) == 0);
-        assert(minion_killed.payload[44] == static_cast<std::byte>(snf::server::BattleEventKind::EnemyDied));
-        assert(read_u32(minion_killed.payload, 45) == 1);
+        const auto minion_damage_offset = digest_event_offset(minion_killed, snf::server::BattleEventKind::EnemyDamaged);
+        const auto minion_death_offset = digest_event_offset(minion_killed, snf::server::BattleEventKind::EnemyDied);
+        assert(minion_damage_offset && read_u32(minion_killed.payload, *minion_damage_offset + 1) == 1);
+        assert(read_u64(minion_killed.payload, *minion_damage_offset + 5) == first_player);
+        assert(read_u64(minion_killed.payload, *minion_damage_offset + 17) == snf::server::BASE_ATTACK);
+        assert(read_u64(minion_killed.payload, *minion_damage_offset + 25) == 0);
+        assert(minion_death_offset && read_u32(minion_killed.payload, *minion_death_offset + 1) == 1);
 
         // A later Tick creates the boss with the next monotonic EnemyId.
-        const auto boss_spawned = receive_frame(first.getDescriptor());
-        const auto observed_boss_spawned = receive_frame(second.getDescriptor());
+        const auto boss_spawned = receive_until_digest_event(first.getDescriptor(), snf::server::BattleEventKind::EnemySpawned);
+        const auto observed_boss_spawned = receive_until_digest_event(second.getDescriptor(), snf::server::BattleEventKind::EnemySpawned);
         assert(boss_spawned.type == snf::protocol::MessageType::BattleDigest);
         assert(boss_spawned.payload == observed_boss_spawned.payload);
-        assert(read_u64(boss_spawned.payload, 0) == 3);
-        assert(read_u16(boss_spawned.payload, 9) == 1);
-        assert(boss_spawned.payload[11] == static_cast<std::byte>(snf::server::BattleEventKind::EnemySpawned));
-        assert(read_u32(boss_spawned.payload, 12) == 2);
-        assert(boss_spawned.payload[16] == static_cast<std::byte>(snf::server::EnemyKind::Boss));
+        assert(read_u16(boss_spawned.payload, 9) == 2);
+        const auto boss_spawn_offset = digest_event_offset(boss_spawned, snf::server::BattleEventKind::EnemySpawned);
+        assert(boss_spawn_offset && read_u32(boss_spawned.payload, *boss_spawn_offset + 1) == 2);
+        assert(boss_spawned.payload[*boss_spawn_offset + 5] == static_cast<std::byte>(snf::server::EnemyKind::Boss));
 
         // The second participant has an independent client sequence and kills the
         // boss. Ack, terminal Digest and BattleCleared are distinct ordered frames.
         send_all(second.getDescriptor(), snf::protocol::encode_frame(use_skill_frame(307, 1)));
-        const auto killing_ack = receive_frame(second.getDescriptor());
+        const auto killing_ack = receive_until_type(second.getDescriptor(), snf::protocol::MessageType::SkillAcknowledged, 307);
         assert(killing_ack.type == snf::protocol::MessageType::SkillAcknowledged);
         assert(killing_ack.request_id == 307);
         assert(killing_ack.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::Applied));
         assert(killing_ack.payload[1] == static_cast<std::byte>(snf::server::RoomPhase::Cleared));
 
-        const auto killing_digest = receive_frame(second.getDescriptor());
-        const auto observed_killing_digest = receive_frame(first.getDescriptor());
+        const auto killing_digest = receive_until_digest_event(second.getDescriptor(), snf::server::BattleEventKind::EnemyDied);
+        const auto observed_killing_digest = receive_until_digest_event(first.getDescriptor(), snf::server::BattleEventKind::EnemyDied);
         assert(killing_digest.type == snf::protocol::MessageType::BattleDigest);
         assert(killing_digest.payload == observed_killing_digest.payload);
-        assert(read_u64(killing_digest.payload, 0) == 4);
         assert(killing_digest.payload[8] == static_cast<std::byte>(snf::server::RoomPhase::Cleared));
         assert(read_u16(killing_digest.payload, 9) == 2);
-        assert(killing_digest.payload[44] == static_cast<std::byte>(snf::server::BattleEventKind::EnemyDied));
-        assert(read_u32(killing_digest.payload, 45) == 2);
+        const auto boss_death_offset = digest_event_offset(killing_digest, snf::server::BattleEventKind::EnemyDied);
+        assert(boss_death_offset && read_u32(killing_digest.payload, *boss_death_offset + 1) == 2);
 
         // Nobody asks for either of these. The clear rewards both participants --
         // including the one that never sent BattleStart -- and puts them back in the Zone
@@ -1289,7 +1424,7 @@ namespace
         constexpr std::size_t RETURN_PAYLOAD_SIZE = 8 + 4 + 4;
         for (const auto& [socket, y] : {std::pair{std::ref(first), std::int32_t{20}}, std::pair{std::ref(second), std::int32_t{5000}}})
         {
-            const auto cleared = receive_frame(socket.get().getDescriptor());
+            const auto cleared = receive_until_type(socket.get().getDescriptor(), snf::protocol::MessageType::BattleCleared);
             assert(cleared.type == snf::protocol::MessageType::BattleCleared);
             assert(cleared.request_id == snf::protocol::UNSOLICITED_REQUEST_ID);
             assert(cleared.payload == player_id_payload(300));
@@ -1335,6 +1470,94 @@ namespace
         assert(room_metrics.tick_publish_nanoseconds.sample_count == room_metrics.tick_execution_nanoseconds.sample_count);
         assert(room_metrics.tick_turn_nanoseconds.sample_count == room_metrics.tick_execution_nanoseconds.sample_count);
         assert(room_metrics.tick_schedule_rejections == 0);
+    }
+
+    void test_a_party_defeat_reports_its_reason_and_returns_the_player_to_the_zone()
+    {
+        RunningServer server{snf::server::GameServerConfig{
+            .port = 0,
+            .shutdown_grace_period = 200ms,
+            .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
+            .client_send_buffer_size = std::nullopt,
+            .room_battle_duration = 2s,
+            .room_boss_health = 1000,
+            .room_tick_interval = 5ms,
+            .room_wave_interval = 100ms,
+            .room_wave_count = 1,
+            .room_minions_per_wave = 1,
+            .room_minion_health = 1000,
+            .room_boss_spawn_after = 500ms,
+            .max_room_spawned_enemies = 2,
+            .room_arena_width = 10,
+            .room_arena_height = 10,
+            .room_participant_spawn_spacing = 2,
+            .room_minion_spawn_radius = 1,
+            .room_minion_move_speed = 1,
+            .room_minion_attack_damage = snf::server::BASE_HEALTH,
+            .room_minion_attack_range = 2,
+            .room_minion_attack_cooldown = 5ms,
+        }};
+        constexpr std::uint64_t player = 612;
+        constexpr std::uint64_t zone = 89;
+        constexpr std::uint64_t room = 78;
+        auto client = connect_client(server.getPort());
+
+        const auto auth = authentication_frame(330, player);
+        const auto auth_bytes = snf::protocol::encode_frame(auth);
+        send_all(client.getDescriptor(), auth_bytes);
+        assert_authenticated(receive_exact(client.getDescriptor(), auth_bytes.size()), auth.request_id, player);
+
+        std::vector<std::byte> enter_payload = player_id_payload(zone);
+        append_u32(enter_payload, 17);
+        append_u32(enter_payload, 23);
+        send_all(
+            client.getDescriptor(),
+            snf::protocol::encode_frame(snf::protocol::Frame{
+                .type = snf::protocol::MessageType::EnterZone,
+                .request_id = 331,
+                .payload = std::move(enter_payload),
+            })
+        );
+        const auto entered = receive_zone_response(client.getDescriptor());
+        assert(entered.type == snf::protocol::MessageType::ZoneEntered);
+        assert(entered.payload[0] == static_cast<std::byte>(snf::server::ZoneCommandStatus::Applied));
+
+        constexpr std::size_t ROOM_REPLY_PAYLOAD_SIZE = 1 + 1 + 8;
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(room_frame(snf::protocol::MessageType::RoomJoin, 332, room)));
+        const auto joined = receive_room_frame(client.getDescriptor(), ROOM_REPLY_PAYLOAD_SIZE);
+        assert(joined.type == snf::protocol::MessageType::RoomJoined);
+        assert(joined.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::Applied));
+
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(room_frame(snf::protocol::MessageType::BattleStart, 333, room)));
+        const auto started = receive_room_frame(client.getDescriptor(), ROOM_REPLY_PAYLOAD_SIZE);
+        assert(started.type == snf::protocol::MessageType::BattleStarted);
+        assert(started.payload[1] == static_cast<std::byte>(snf::server::RoomPhase::Running));
+
+        const auto initial = receive_until_digest_event(client.getDescriptor(), snf::server::BattleEventKind::EnemySpawned);
+        assert(initial.payload[8] == static_cast<std::byte>(snf::server::RoomPhase::Running));
+
+        const auto defeat = receive_until_digest_event(client.getDescriptor(), snf::server::BattleEventKind::ParticipantDied);
+        assert(defeat.payload[8] == static_cast<std::byte>(snf::server::RoomPhase::Failed));
+        const auto damaged_offset = digest_event_offset(defeat, snf::server::BattleEventKind::ParticipantDamaged);
+        const auto died_offset = digest_event_offset(defeat, snf::server::BattleEventKind::ParticipantDied);
+        assert(damaged_offset && read_u64(defeat.payload, *damaged_offset + 1) == player);
+        assert(read_u64(defeat.payload, *damaged_offset + 13) == snf::server::BASE_HEALTH);
+        assert(read_u64(defeat.payload, *damaged_offset + 21) == 0);
+        assert(died_offset && read_u64(defeat.payload, *died_offset + 1) == player);
+
+        const auto failed = receive_until_type(client.getDescriptor(), snf::protocol::MessageType::BattleFailed);
+        assert(failed.request_id == snf::protocol::UNSOLICITED_REQUEST_ID);
+        assert(failed.payload.size() == 10);
+        assert(read_u64(failed.payload, 0) == 0);
+        assert(failed.payload[8] == std::byte{0});
+        assert(failed.payload[9] == static_cast<std::byte>(snf::server::BattleFailureReason::PartyDefeated));
+
+        constexpr std::size_t RETURN_PAYLOAD_SIZE = 8 + 4 + 4;
+        const auto returned = receive_room_frame(client.getDescriptor(), RETURN_PAYLOAD_SIZE);
+        assert(returned.type == snf::protocol::MessageType::ReturnedToZone);
+        assert(read_u64(returned.payload, 0) == zone);
+        assert(read_u32(returned.payload, 8) == 17);
+        assert(read_u32(returned.payload, 12) == 23);
     }
 
     void test_authenticated_player_enters_moves_and_leaves_a_zone()
@@ -2214,6 +2437,8 @@ int main()
     run("test_live_purchase_is_memory_authoritative_and_flushes", test_live_purchase_is_memory_authoritative_and_flushes);
     run("test_two_players_share_one_party_actor_and_passivate_it_when_empty", test_two_players_share_one_party_actor_and_passivate_it_when_empty);
     run("test_two_players_kill_a_boss_and_are_told_without_asking", test_two_players_kill_a_boss_and_are_told_without_asking);
+    run("test_a_party_defeat_reports_its_reason_and_returns_the_player_to_the_zone",
+        test_a_party_defeat_reports_its_reason_and_returns_the_player_to_the_zone);
     run("test_authenticated_player_enters_moves_and_leaves_a_zone", test_authenticated_player_enters_moves_and_leaves_a_zone);
     run("test_authenticated_player_handoffs_between_zones_and_publishes_target_route",
         test_authenticated_player_handoffs_between_zones_and_publishes_target_route);

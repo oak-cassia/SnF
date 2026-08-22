@@ -175,6 +175,45 @@ namespace snf::server
             });
         }
 
+        if (envelope.frame.type == snf::protocol::MessageType::SetMoveIntent)
+        {
+            constexpr std::size_t SET_MOVE_INTENT_PAYLOAD_SIZE = 17;
+            const auto player = _sessions.playerFor(envelope.connection);
+            if (!player || envelope.frame.payload.size() != SET_MOVE_INTENT_PAYLOAD_SIZE)
+            {
+                return FramePostResult::InvalidPayload;
+            }
+
+            const auto in_room = _routes.inRoomFor(envelope.connection);
+            if (!in_room || in_room->player != *player)
+            {
+                return FramePostResult::InvalidPayload;
+            }
+
+            const std::span<const std::byte> payload{envelope.frame.payload};
+            const RoomId room{.value = read_u64(payload, 0)};
+            const std::uint8_t raw_direction = std::to_integer<std::uint8_t>(payload[8]);
+            const std::uint64_t request_sequence = read_u64(payload, 9);
+            // Unlike unset ids and sequences, zero is deliberately the valid Stop
+            // direction. The enum's upper bound is still checked at the wire edge.
+            if (room.value == 0 || in_room->room != room || !isValidMoveDirection(raw_direction) || request_sequence == 0)
+            {
+                return FramePostResult::InvalidPayload;
+            }
+
+            return post_room(RoomCommandRoute{
+                .room = room,
+                .command =
+                    SetMoveIntent{
+                        .player = *player,
+                        .direction = static_cast<MoveDirection>(raw_direction),
+                        .request_sequence = request_sequence,
+                    },
+                .reply_kind = RoomReplyKind::MoveAcknowledged,
+                .request_id = envelope.frame.request_id,
+            });
+        }
+
         if (envelope.frame.type == snf::protocol::MessageType::RoomLeave)
         {
             if (!envelope.frame.payload.empty())
