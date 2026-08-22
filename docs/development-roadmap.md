@@ -155,6 +155,11 @@ Room 정원은 4명이므로 참가자를 더 넣어 hot actor를 만드는 축�
   Room 수를 늘려 tick budget 초과가 처음 나타나는 지점을 찾는다. 같은 sweep을 worker 2·4에서
   반복해 수용 Room 수가 worker 수에 따라 확장되는지 비교한다
 
+두 축 모두 tick budget 경계보다 load generator나 공유 server 자원의 경계가 먼저 나타날 수 있다.
+그 경우 관측하지 못한 tick 붕괴점을 외삽하지 않고, 마지막 성공점과 먼저 나타난 경계 및 그 근거를
+기록하는 것으로 측정을 닫는다. 실제 측정에서는 축 A의 client generator 퇴행과 축 B의 player close
+reservation·shared outbound 포화가 tick budget 초과보다 먼저 나타났다.
+
 측정 workload는 `RoomJoin` 뒤 방별 leader 하나가 `BattleStart`를 보내고, 모든 참가자가
 `UseSkill`과 `SetMoveIntent`를 반복한다. `request_id == 0`인 `BattleDigest`, `BattleCleared`,
 `BattleFailed`, `ReturnedToZone`은 request/response 오류가 아닌 server push다. load client는 push
@@ -232,6 +237,19 @@ request_sequence       → transport/요청 중복
 connection generation  → admission/routing에서 session 수명을 넘긴 stale 명령
 계측된 허용 유실       → 프로세스 장애를 넘는 영속 보장의 명시적 비범위
 ```
+
+### 측정으로 확인한 후속 용량 경계
+
+- **player close reservation:** worker별 async in-flight 상한 1,024가 대량 동시 종료에서 먼저
+  찼다. active 전투 부하는 처리하더라도 종료 drain은 별도 admission 부하가 되므로, 더 큰 동시 접속
+  목표를 잡을 때 close burst의 backpressure와 capacity 계약을 먼저 정한다
+- **shared outbound:** 모든 worker가 공유하는 queue capacity 4,096은 4 workers × 1,000 Room에서
+  포화됐고, 4 workers × 800 Room은 high-water 3,806으로 정상 종료했다. worker 수만 늘려서는
+  비례 확장되지 않으므로 더 큰 Room 수를 목표로 할 때 capacity·credit 또는 sharding 계약을 먼저
+  정한다
+
+두 항목은 Step 5의 미완료 조건이 아니라 현재 구성에서 측정된 확장 경계다. 목표 규모가 이 경계에
+도달하기 전에는 TimerService, Room hash co-location이나 resync snapshot 작업을 열지 않는다.
 
 ### 비범위
 

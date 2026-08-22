@@ -44,11 +44,12 @@ SNF_ACTOR_WORKER_COUNT=1 ./build/release/snf_server
 | 1,000 | 3,982.8 | 0.187/0.242ms | 16.4/64.2/64.2µs | 100.137/101.013/101.019ms | 0 |
 | 10,000 | 2,028.2 | 0.197/0.327ms | 16.4/61.8/61.8µs | 100.689/109.889/109.909ms | 0 |
 
-1,000 RPS/client까지 Room queue와 tick은 안정적이었다. 10,000 목표에서 실효 처리량이 낮아졌지만
-server worker queue high-water는 8, mailbox high-water는 5, `rejected_full`은 0이고 tick turn도
-변하지 않았다. 하나의 outstanding request만 만드는 load client의 100µs timer/epoll 생성 한계가
-Room보다 먼저 나타난 것이다. 따라서 이 실행이 보장하는 단일 Room 하한은 약 3,983 response/s이고,
-Room 자체의 붕괴점은 이 generator로 관측되지 않았다.
+1,000 RPS/client까지 Room queue와 tick은 안정적이었다. 10,000 목표에서 실효 처리량이 낮아진 것은
+server 한계나 처리량 plateau가 아니라 load generator 퇴행이다. server worker queue high-water는
+8, mailbox high-water는 5, `rejected_full`은 0이고 tick turn도 변하지 않았다. 하나의 outstanding
+request만 만드는 load client의 100µs timer/epoll 생성 한계가 Room보다 먼저 나타난 것이다. 따라서
+이 실행이 보장하는 단일 Room 하한은 약 3,983 response/s이고, Room 자체의 붕괴점은 이 generator로
+관측되지 않았다.
 
 ## 축 B — worker와 Room 수
 
@@ -94,10 +95,12 @@ fanout은 4 workers × 800 Room 실행에서 184,674 frames, 39,625,488 bytes였
 0이었다. 4 workers × 1,000 Room의 연결 종료는 digest 손실 복구 문제가 아니라 shared outbound
 admission 포화의 연결 격리 정책이 작동한 결과다.
 
-느린 client 통합 시나리오는 1 Room × 4명에서 한 socket만 읽기를 중단했다. 2KiB per-session send
-한계에 닿은 연결 1개만 닫혔고, 남은 세 client는 digest sequence를 한 번도 건너뛰지 않은 채
-`ParticipantLeft`를 관찰하고 boss clear까지 진행했다. 닫힌 연결 수 대 계속 진행한 Room 수는
-1 대 1이다. 살아 있는 client의 event gap이 없으므로 주기적 resync snapshot은 만들지 않는다.
+느린 client 통합 시나리오는 1 Room × 4명에서 한 socket만 읽기를 중단했다. 포화를 결정적으로
+유도하기 위해 테스트의 `max_pending_send_bytes`를 `GameServerConfig` 기본값 1MiB에서 2KiB로
+낮췄다. 이 테스트 설정의 per-session send 한계에 닿은 연결 1개만 닫혔고, 남은 세 client는 digest
+sequence를 한 번도 건너뛰지 않은 채 `ParticipantLeft`를 관찰하고 boss clear까지 진행했다. 닫힌
+연결 수 대 계속 진행한 Room 수는 1 대 1이다. 살아 있는 client의 event gap이 없으므로 주기적
+resync snapshot은 만들지 않는다.
 
 ## 검증
 
