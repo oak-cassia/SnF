@@ -1,3 +1,4 @@
+#include "snf/game/skill_catalog.hpp"
 #include "snf/net/socket_options.hpp"
 #include "snf/net/termination_signal.hpp"
 #include "snf/net/unique_file_descriptor.hpp"
@@ -1067,16 +1068,19 @@ namespace
         server.stop();
     }
 
-    void test_two_players_clear_a_room_and_are_told_without_asking()
+    void test_two_players_kill_a_boss_and_are_told_without_asking()
     {
         RunningServer server{snf::server::GameServerConfig{
             .port = 0,
             .shutdown_grace_period = 200ms,
             .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
             .client_send_buffer_size = std::nullopt,
-            // Short enough that the test does not sit through a real battle.
-            .room_battle_duration = 40ms,
+            // Far longer than this test takes: the boss dying is what has to end this
+            // battle, not the deadline.
+            .room_battle_duration = 5s,
             .room_clear_experience = 300,
+            // Two casts of a fresh player's attack, which is one each.
+            .room_boss_health = 20,
         }};
         constexpr std::uint64_t room = 77;
         constexpr std::uint64_t zone = 88;
@@ -1164,9 +1168,68 @@ namespace
         assert(started.request_id == 304);
         assert(started.payload[1] == static_cast<std::byte>(snf::server::RoomPhase::Running));
 
-        // Nobody asks for either of these. The Room's own timer ends the battle, and both
-        // participants are told -- including the one that never sent BattleStart -- and
-        // then put back in the Zone they came from.
+        // The battle is decided by casts, and the server decides what a cast does: the
+        // frames below carry a skill id and a sequence number, never a damage value.
+        constexpr std::size_t SKILL_PAYLOAD_SIZE = 1 + 1 + 8 + 4 + 8 + 8;
+        const auto use_skill_frame = [](const std::uint32_t request_id, const std::uint64_t sequence)
+        {
+            std::vector<std::byte> payload = player_id_payload(room);
+            append_u32(payload, snf::server::SLASH.value);
+            append_u64(payload, sequence);
+            return snf::protocol::Frame{
+                .type = snf::protocol::MessageType::UseSkill,
+                .request_id = request_id,
+                .payload = std::move(payload),
+            };
+        };
+
+        send_all(first.getDescriptor(), snf::protocol::encode_frame(use_skill_frame(305, 1)));
+        const auto first_cast = receive_room_frame(first.getDescriptor(), SKILL_PAYLOAD_SIZE);
+        assert(first_cast.type == snf::protocol::MessageType::SkillApplied);
+        assert(first_cast.request_id == 305);
+        assert(first_cast.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::Applied));
+        assert(first_cast.payload[1] == static_cast<std::byte>(snf::server::RoomPhase::Running));
+        assert(read_u64(first_cast.payload, 2) == first_player);
+        assert(read_u32(first_cast.payload, 10) == snf::server::SLASH.value);
+        // A fresh player is level 1, and Slash is all of their attack.
+        assert(read_u64(first_cast.payload, 14) == snf::server::BASE_ATTACK);
+        assert(read_u64(first_cast.payload, 22) == 20 - snf::server::BASE_ATTACK);
+
+        // The other participant is told about a cast nobody asked them about.
+        const auto observed_cast = receive_room_frame(second.getDescriptor(), SKILL_PAYLOAD_SIZE);
+        assert(observed_cast.type == snf::protocol::MessageType::SkillApplied);
+        assert(observed_cast.request_id == snf::protocol::UNSOLICITED_REQUEST_ID);
+        assert(observed_cast.payload == first_cast.payload);
+
+        // The same sequence again, which is what a client retry looks like on the wire.
+        // It is answered, and the boss is untouched.
+        send_all(first.getDescriptor(), snf::protocol::encode_frame(use_skill_frame(306, 1)));
+        const auto resent = receive_room_frame(first.getDescriptor(), SKILL_PAYLOAD_SIZE);
+        assert(resent.type == snf::protocol::MessageType::SkillApplied);
+        assert(resent.request_id == 306);
+        assert(resent.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::DuplicateRequest));
+        assert(read_u64(resent.payload, 14) == 0);
+        assert(read_u64(resent.payload, 22) == 20 - snf::server::BASE_ATTACK);
+
+        // The second participant's own sequence starts at 1 as well: the counter belongs
+        // to the caster, not to the battle. This one kills the boss.
+        send_all(second.getDescriptor(), snf::protocol::encode_frame(use_skill_frame(307, 1)));
+        const auto killing_blow = receive_room_frame(second.getDescriptor(), SKILL_PAYLOAD_SIZE);
+        assert(killing_blow.type == snf::protocol::MessageType::SkillApplied);
+        assert(killing_blow.request_id == 307);
+        assert(killing_blow.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::Applied));
+        // The cast and the clear it caused arrive as one fact.
+        assert(killing_blow.payload[1] == static_cast<std::byte>(snf::server::RoomPhase::Cleared));
+        assert(read_u64(killing_blow.payload, 22) == 0);
+
+        const auto observed_killing_blow = receive_room_frame(first.getDescriptor(), SKILL_PAYLOAD_SIZE);
+        assert(observed_killing_blow.type == snf::protocol::MessageType::SkillApplied);
+        assert(observed_killing_blow.request_id == snf::protocol::UNSOLICITED_REQUEST_ID);
+        assert(observed_killing_blow.payload == killing_blow.payload);
+
+        // Nobody asks for either of these. The clear rewards both participants --
+        // including the one that never sent BattleStart -- and puts them back in the Zone
+        // they came from.
         constexpr std::size_t RETURN_PAYLOAD_SIZE = 8 + 4 + 4;
         for (const auto& [socket, y] : {std::pair{std::ref(first), std::int32_t{20}}, std::pair{std::ref(second), std::int32_t{5000}}})
         {
@@ -2088,7 +2151,7 @@ int main()
         test_authenticates_one_session_and_allows_reconnect_after_passivation);
     run("test_live_purchase_is_memory_authoritative_and_flushes", test_live_purchase_is_memory_authoritative_and_flushes);
     run("test_two_players_share_one_party_actor_and_passivate_it_when_empty", test_two_players_share_one_party_actor_and_passivate_it_when_empty);
-    run("test_two_players_clear_a_room_and_are_told_without_asking", test_two_players_clear_a_room_and_are_told_without_asking);
+    run("test_two_players_kill_a_boss_and_are_told_without_asking", test_two_players_kill_a_boss_and_are_told_without_asking);
     run("test_authenticated_player_enters_moves_and_leaves_a_zone", test_authenticated_player_enters_moves_and_leaves_a_zone);
     run("test_authenticated_player_handoffs_between_zones_and_publishes_target_route",
         test_authenticated_player_handoffs_between_zones_and_publishes_target_route);

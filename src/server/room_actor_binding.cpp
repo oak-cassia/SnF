@@ -170,7 +170,9 @@ namespace snf::server
         auto& room_state = dynamic_cast<RoomActorState&>(state);
         const CommandPayload& payload = payloadAs<CommandPayload>(submission);
         const auto started_at = std::chrono::steady_clock::now();
-        RoomResult result = room_state.room.handle(payload.command.command);
+        // observedAt, not the reading above: the Room derives cooldowns from when its
+        // turn began, while the reading here exists to measure how long the turn took.
+        RoomResult result = room_state.room.handle(payload.command.command, context.observedAt());
         _command_execution_nanoseconds.record(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started_at));
         if (_on_result)
         {
@@ -179,26 +181,26 @@ namespace snf::server
 
         // The Room decided in game terms; naming a mailbox and a timer is this
         // binding's job.
-        if (result.complete_after)
+        if (result.deadline_after)
         {
-            RoomInboundCommand completion_command{
+            RoomInboundCommand deadline_command{
                 .room = payload.command.room,
-                .command = BattleCompleted{},
+                .command = BattleDeadline{},
                 .reply = std::nullopt,
             };
-            // ExistingOnly: if the Room is gone there is nobody left to reward, so a
-            // completion must not resurrect it. A Running Room stays resident, which
-            // is what keeps this deliverable.
+            // ExistingOnly: if the Room is gone there is nobody left to fail the
+            // battle for, so the deadline must not resurrect it. A Running Room stays
+            // resident, which is what keeps this deliverable.
             auto timer_submission = makeSubmission(
                 submission.target(),
                 snf::runtime::ActorActivation::ExistingOnly,
                 snf::runtime::ActorAccounting::Command,
                 CommandPayload{
-                    .command = std::move(completion_command),
+                    .command = std::move(deadline_command),
                     .release = {},
                 }
             );
-            static_cast<void>(context.trySchedule(*result.complete_after, std::move(timer_submission)));
+            static_cast<void>(context.trySchedule(*result.deadline_after, std::move(timer_submission)));
         }
 
         for (const StreetExperienceGrant& grant : result.grants)
@@ -214,10 +216,11 @@ namespace snf::server
             ));
         }
 
-        // A cleared Room has emitted its rewards and has nothing left to do, and a
-        // Room nobody joined was activated by a stray command. A Running Room must
-        // stay resident so its completion timer can land.
-        if (room_state.room.phase() == RoomPhase::Cleared || room_state.room.participantCount() == 0)
+        // A decided Room has emitted whatever it owed and has nothing left to do, and
+        // a Room nobody joined was activated by a stray command. A Running Room must
+        // stay resident so its deadline timer can land.
+        const RoomPhase phase = room_state.room.phase();
+        if (phase == RoomPhase::Cleared || phase == RoomPhase::Failed || room_state.room.participantCount() == 0)
         {
             return snf::runtime::ActorDispatchResult::PassivateIfIdle;
         }

@@ -134,6 +134,47 @@ namespace snf::server
             });
         }
 
+        if (envelope.frame.type == snf::protocol::MessageType::UseSkill)
+        {
+            constexpr std::size_t USE_SKILL_PAYLOAD_SIZE = 20;
+            const auto player = _sessions.playerFor(envelope.connection);
+            if (!player || envelope.frame.payload.size() != USE_SKILL_PAYLOAD_SIZE)
+            {
+                return FramePostResult::InvalidPayload;
+            }
+
+            // The route decides which battle this connection is in. Taking the room
+            // from the payload alone would let a client cast into someone else's.
+            const auto in_room = _routes.inRoomFor(envelope.connection);
+            if (!in_room || in_room->player != *player)
+            {
+                return FramePostResult::InvalidPayload;
+            }
+
+            const std::span<const std::byte> payload{envelope.frame.payload};
+            const RoomId room{.value = read_u64(payload, 0)};
+            const SkillId skill{.value = read_u32(payload, 8)};
+            const std::uint64_t request_sequence = read_u64(payload, 12);
+            // A zero skill or sequence is a malformed frame rather than a cast the
+            // Room should judge: both are the value a field left unset carries.
+            if (room.value == 0 || in_room->room != room || skill.value == 0 || request_sequence == 0)
+            {
+                return FramePostResult::InvalidPayload;
+            }
+
+            return post_room(RoomCommandRoute{
+                .room = room,
+                .command =
+                    UseSkill{
+                        .player = *player,
+                        .skill = skill,
+                        .request_sequence = request_sequence,
+                    },
+                .reply_kind = RoomReplyKind::SkillApplied,
+                .request_id = envelope.frame.request_id,
+            });
+        }
+
         if (envelope.frame.type == snf::protocol::MessageType::RoomLeave)
         {
             if (!envelope.frame.payload.empty())

@@ -175,19 +175,28 @@ struct RoomResult
 {
     RoomCommandStatus status;
     RoomPhase phase;
-    std::optional<std::chrono::milliseconds> complete_after;
+    std::optional<std::chrono::milliseconds> deadline_after;
+    std::uint64_t boss_health;
+    std::optional<SkillOutcome> skill;
+    std::vector<PlayerId> audience;
     std::vector<StreetExperienceGrant> grants;
 };
 ```
 
-Player는 “이 Room에 이 스탯으로 들어가고 싶다”고 말하고, Room은 “다음 완료까지 얼마 남았고 누구에게
-얼마를 지급한다”고 말한다. Binding이 이를 Runtime 동작으로 번역한다.
+Player는 “이 Room에 이 스탯으로 들어가고 싶다”고 말하고, Room은 “보스를 잡을 시간이 얼마 남았고, 이
+cast가 무엇을 했고, 누가 그것을 봐야 하고, 누구에게 얼마를 지급한다”고 말한다. 어느 문장에도
+connection은 없다. Binding과 sink가 이를 Runtime·network 동작으로 번역한다.
 
 ```text
 PlayerResult.room_join       → RoomJoinTell → tryTell(Room)
-RoomResult.complete_after    → trySchedule(BattleCompleted)
+RoomResult.deadline_after    → trySchedule(BattleDeadline)
 RoomResult.grants            → tryTell(Player)
+RoomResult.audience          → PlayerId를 connection으로 풀어 fanout, 그리고 Zone 복귀 요청
 ```
+
+`audience`가 `grants`와 별개인 이유는 실패다. 실패는 아무에게도 지급하지 않으므로 보상 목록이 비고,
+그래도 참가자 전원에게 결과를 알리고 전원을 원래 Zone으로 되돌려야 한다. 두 목록을 하나로 합치면
+`Failed` 경로에서 사람들이 Room에 갇힌다.
 
 반대로 `RoomEntryContext`는 game command 안이 아니라 server command envelope 옆에 붙는다.
 
@@ -297,12 +306,13 @@ sequenceDiagram
     participant Z as Return Zone Actor
     participant C as Client
 
-    R->>R: own timer → BattleCompleted
-    R->>R: Cleared + grants 생성
+    C->>R: UseSkill(skill, sequence)
+    R->>R: 중복·cooldown 판정 → damage → boss 0 → Cleared
     par reward
         R->>P: StreetExperienceGrant via tryTell
     and notification
-        R->>PS: RoomResult.grants
+        R->>PS: RoomResult.skill + audience + grants
+        PS-->>C: SkillApplied(요청자에게는 답, 나머지는 request_id=0)
         PS-->>C: BattleCleared(request_id=0)
     and return fact
         R->>Q: RoomReturnRequest(room, player)
@@ -318,6 +328,9 @@ sequenceDiagram
     RC-->>S: Stable(zone, fresh epoch)
     S-->>C: ReturnedToZone(request_id=0)
 ```
+
+보스가 deadline까지 살아남으면 같은 그림에서 첫 두 줄만 바뀐다. Room의 자기 timer가 `BattleDeadline`을
+넣고, Room은 `Failed`가 되며 보상 없이 `BattleFailed`와 복귀 요청만 나간다.
 
 ### 8.1 보상
 

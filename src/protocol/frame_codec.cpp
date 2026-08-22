@@ -60,6 +60,9 @@ namespace
         case snf::protocol::MessageType::RoomLeft:
         case snf::protocol::MessageType::ReturnedToZone:
         case snf::protocol::MessageType::PartyLeft:
+        case snf::protocol::MessageType::UseSkill:
+        case snf::protocol::MessageType::SkillApplied:
+        case snf::protocol::MessageType::BattleFailed:
             return true;
         }
 

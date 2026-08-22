@@ -98,6 +98,7 @@ namespace snf::server
         std::chrono::milliseconds room_battle_duration{5000};
         std::size_t max_room_participants{4};
         std::uint64_t room_clear_experience{300};
+        std::uint64_t room_boss_health{1000};
         std::size_t max_room_entries{4096};
         std::size_t max_room_entry_completions_per_turn{64};
         std::size_t max_zone_handoff_completions_per_turn{64};

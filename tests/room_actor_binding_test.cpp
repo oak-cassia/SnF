@@ -118,6 +118,37 @@ namespace
         };
     };
 
+    // A failure emits no tell, so there is nothing to wait on the way a clear's
+    // rewards can be waited on. This watches the result stream instead.
+    class TerminalPhaseWatch
+    {
+    public:
+        void observe(const snf::server::RoomResult& result)
+        {
+            std::lock_guard lock{_mutex};
+            if (_signalled || result.status != snf::server::RoomCommandStatus::Applied)
+            {
+                return;
+            }
+            if (result.phase != snf::server::RoomPhase::Failed && result.phase != snf::server::RoomPhase::Cleared)
+            {
+                return;
+            }
+            _signalled = true;
+            _reached.set_value(result);
+        }
+
+        [[nodiscard]] std::future<snf::server::RoomResult> reached()
+        {
+            return _reached.get_future();
+        }
+
+    private:
+        std::mutex _mutex;
+        bool _signalled{false};
+        std::promise<snf::server::RoomResult> _reached;
+    };
+
     [[nodiscard]] snf::runtime::ActorRuntimeConfig runtime_config()
     {
         return snf::runtime::ActorRuntimeConfig{
@@ -130,7 +161,7 @@ namespace
         };
     }
 
-    void test_a_room_clears_from_its_own_timer_and_rewards_every_participant()
+    void test_killing_the_boss_rewards_every_participant()
     {
         RecordingPlayerBinding player_binding;
         player_binding.expected = 2;
@@ -141,9 +172,12 @@ namespace
             snf::server::RoomActorBindingConfig{
                 .actor =
                     snf::server::RoomConfig{
-                        .battle_duration = 30ms,
+                        // Far longer than this test takes, so the deadline cannot be
+                        // what ends the battle. One cast is enough to kill the boss.
+                        .battle_duration = 5s,
                         .max_participants = 4,
                         .clear_experience = 300,
+                        .boss_health = 50,
                     },
                 .on_result = {},
             },
@@ -162,7 +196,11 @@ namespace
             assert(
                 ingress.tryPost(snf::server::RoomInboundCommand{
                     .room = room,
-                    .command = snf::server::JoinRoom{.player = snf::server::PlayerId{.value = player}},
+                    .command =
+                        snf::server::JoinRoom{
+                            .player = snf::server::PlayerId{.value = player},
+                            .stats = {.attack = 50, .health = 100},
+                        },
                     .reply = std::nullopt,
                 }) == snf::runtime::PostResult::Accepted
             );
@@ -174,9 +212,21 @@ namespace
                 .reply = std::nullopt,
             }) == snf::runtime::PostResult::Accepted
         );
+        assert(
+            ingress.tryPost(snf::server::RoomInboundCommand{
+                .room = room,
+                .command =
+                    snf::server::UseSkill{
+                        .player = snf::server::PlayerId{.value = 10},
+                        .skill = snf::server::SLASH,
+                        .request_sequence = 1,
+                    },
+                .reply = std::nullopt,
+            }) == snf::runtime::PostResult::Accepted
+        );
 
-        // Nothing else posts BattleCompleted: the only thing that can finish this
-        // battle is the timer the Room armed for itself.
+        // One player landed the killing blow; both are rewarded, and the reward
+        // reaches the Player through a tell the target binding restores.
         assert(arrived.wait_for(5s) == std::future_status::ready);
 
         runtime.close();
@@ -192,6 +242,75 @@ namespace
              })
         );
         assert(completion.drained.load() == 1);
+        assert(completion.failed.load() == 0);
+    }
+
+    void test_a_room_fails_from_its_own_timer_when_the_boss_survives()
+    {
+        RecordingPlayerBinding player_binding;
+        TerminalPhaseWatch watch;
+        auto reached = watch.reached();
+
+        snf::server::CountingCommandLifecycleSink lifecycle;
+        snf::server::RoomActorBinding binding{
+            snf::server::RoomActorBindingConfig{
+                .actor =
+                    snf::server::RoomConfig{
+                        .battle_duration = 30ms,
+                        .max_participants = 4,
+                        .clear_experience = 300,
+                        .boss_health = 50,
+                    },
+                .on_result =
+                    [&watch](const snf::server::RoomInboundCommand&, const snf::server::RoomResult& result)
+                {
+                    watch.observe(result);
+                },
+            },
+            lifecycle
+        };
+        RecordingCompletion completion;
+        snf::runtime::ActorRuntime runtime{runtime_config(), completion};
+        runtime.registerBinding(binding);
+        runtime.registerBinding(player_binding);
+        snf::server::RoomActorIngress ingress{runtime, binding, lifecycle};
+        runtime.start();
+
+        const snf::server::RoomId room{.value = 10};
+        assert(
+            ingress.tryPost(snf::server::RoomInboundCommand{
+                .room = room,
+                .command =
+                    snf::server::JoinRoom{
+                        .player = snf::server::PlayerId{.value = 10},
+                        .stats = {.attack = 50, .health = 100},
+                    },
+                .reply = std::nullopt,
+            }) == snf::runtime::PostResult::Accepted
+        );
+        assert(
+            ingress.tryPost(snf::server::RoomInboundCommand{
+                .room = room,
+                .command = snf::server::StartBattle{},
+                .reply = std::nullopt,
+            }) == snf::runtime::PostResult::Accepted
+        );
+
+        // Nobody casts anything. The only thing that can decide this battle is the
+        // deadline the Room armed for itself, and it decides against the party.
+        assert(reached.wait_for(5s) == std::future_status::ready);
+        const snf::server::RoomResult result = reached.get();
+        assert(result.phase == snf::server::RoomPhase::Failed);
+        assert(result.grants.empty());
+        // Still names everyone, because the return to a Zone reads this list.
+        assert((result.audience == std::vector<snf::server::PlayerId>{snf::server::PlayerId{.value = 10}}));
+
+        runtime.close();
+        runtime.join();
+
+        std::lock_guard lock{player_binding.mutex};
+        // A failure pays nothing, so no tell was ever sent.
+        assert(player_binding.grants.empty());
         assert(completion.failed.load() == 0);
     }
 
@@ -280,6 +399,7 @@ void test_a_join_naming_another_room_is_refused()
 void run_room_actor_binding_tests()
 {
     test_a_join_naming_another_room_is_refused();
-    test_a_room_clears_from_its_own_timer_and_rewards_every_participant();
+    test_killing_the_boss_rewards_every_participant();
+    test_a_room_fails_from_its_own_timer_when_the_boss_survives();
     test_a_room_that_never_started_passivates();
 }

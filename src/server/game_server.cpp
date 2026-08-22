@@ -281,6 +281,7 @@ namespace snf::server
                           .battle_duration = config.room_battle_duration,
                           .max_participants = config.max_room_participants,
                           .clear_experience = config.room_clear_experience,
+                          .boss_health = config.room_boss_health,
                       },
                   .on_result =
                       [this](const RoomInboundCommand& command, const RoomResult& result)
@@ -300,17 +301,20 @@ namespace snf::server
 
                       _room_result_sink.accept(command, result);
 
-                      if (result.phase == RoomPhase::Cleared)
+                      if (result.phase == RoomPhase::Cleared || result.phase == RoomPhase::Failed)
                       {
+                          // The audience rather than the grants: a failed battle pays nobody and
+                          // still has to send everybody home.
+                          //
                           // This runs on the Worker, so it publishes the fact and stops there.
                           // RoomEntryService owns route state without a lock because only the
                           // reactor touches it; calling startReturn from here would race its
                           // drain. Same reason the completion above goes through the channel.
-                          for (const StreetExperienceGrant& grant : result.grants)
+                          for (const PlayerId player : result.audience)
                           {
                               if (!_room_transition_channel.tryPublishReturnRequest(RoomReturnRequest{
                                       .room = command.room,
-                                      .player = grant.player,
+                                      .player = player,
                                   }))
                               {
                                   _runtime_completion.notifyFailed(snf::runtime::RuntimeId::Logic);

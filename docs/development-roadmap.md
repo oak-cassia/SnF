@@ -39,8 +39,8 @@
 - Zone enter/move/leave, periodic tick, AOI와 빈 Actor passivation
 - route epoch과 failure-safe cross-zone handoff
 - Party membership, capacity, stale leave 차단과 passivation
-- Room `Waiting → Running → Cleared`, 자기 timer로 끝나는 placeholder 전투, clear 시 참가자
-  보상 tell과 passivation
+- Room `Waiting → Running → Cleared | Failed`. client가 보내는 skill id로 boss HP를 깎고, damage와
+  cooldown과 중복 판정은 서버가 소유한다. clear 시 참가자 보상 tell, 종결 뒤 passivation
 - Zone과 Room 사이의 보상 있는 입장·복귀 handoff. 전투 중 Player는 Zone에 없고, clear·leave·
   disconnect가 원래 Zone의 원래 좌표로 되돌린다
 - Room 입장·시작·퇴장 요청과, 요청 없이 나가는 clear·복귀 알림 (`request_id = 0`)
@@ -66,10 +66,10 @@ Party가 입장하는 작은 협동 인스턴스다. MMORPG 월드 기능을 넓
 위치·이동·충돌을 빼면 "client는 skill ID만 보내고 서버가 damage를 판정한다"는 성질이 1/3
 비용으로 남는다.
 
-> **진행 중.** 상태 기계와 보상 경로가 placeholder 전투(5초 후 무조건 clear)로 동작하고,
-> 클라이언트가 실제 TCP로 Zone에서 입장해 전투를 시작하고, clear 뒤 원래 Zone으로 돌아온다.
-> 입장·복귀 saga와 그 보상은 `docs/room-entry-handoff-contract.md`에 기록돼 있다. damage가 없어
-> 아래 완료 조건 중 request sequence와 관련된 항목은 아직 검증할 대상 자체가 없다.
+> **진행 중 — 구현 순서 1 완료.** 클라이언트가 실제 TCP로 Zone에서 입장해 `UseSkill`로 boss를 잡고,
+> clear 또는 deadline 실패 뒤 원래 Zone으로 돌아온다. 중복 request sequence와 cooldown 거절도 wire에서
+> 관측된다. 입장·복귀 saga와 그 보상은 `docs/room-entry-handoff-contract.md`에 기록돼 있다.
+> 아직 적도 위치도 tick도 없으므로, 참가자 사망과 그에 딸린 규칙은 구현 순서 2와 함께 온다.
 
 ### 상태와 명령
 
@@ -89,7 +89,7 @@ Waiting → Running → Cleared
 ### 구현 순서
 
 1. **최소 전투** — `UseSkill`, boss HP, deadline 기반 cooldown, request sequence 중복 방어,
-   `Cleared`/`Failed`, 참가자 fanout. enemy도 tick도 없다
+   `Cleared`/`Failed`, 참가자 fanout. enemy도 tick도 없다. (완료)
 2. **Wave simulation** — 100ms tick, enemy(HP·attack·cooldown·threat), wave spawn, 결정적
    tie-break, `TickDigest` 브로드캐스트, tick 예산 측정
 3. **Session 안정성** — connection generation으로 stale 명령 거부
@@ -125,7 +125,7 @@ vertical slice가 아니다.
 ### 완료 조건
 
 - 같은 Room 명령이 FIFO로 결정적으로 적용되고 handler 동시 실행이 없다. (충족)
-- 중복 request sequence가 damage나 clear를 두 번 적용하지 않는다.
+- 중복 request sequence가 damage나 clear를 두 번 적용하지 않는다. (충족)
 - stale connection generation이 이전 Player를 조작하지 못한다.
 - 같은 `battle_id`의 결과가 두 번 도착해도 보상이 두 번 지급되지 않는다.
 - 같은 입력에서 같은 `TickDigest` 순서가 나온다.

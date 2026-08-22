@@ -1,8 +1,10 @@
 #pragma once
 
 #include "snf/game/player_id.hpp"
+#include "snf/game/skill_id.hpp"
 #include "snf/game/street_progression.hpp"
 
+#include <cstdint>
 #include <variant>
 
 namespace snf::server
@@ -29,11 +31,22 @@ namespace snf::server
     {
     };
 
-    // Posted by the Room's own battle timer, never by a client. It carries no
-    // outcome yet: combat is a placeholder that always clears.
-    struct BattleCompleted
+    // The client names a skill; the Room decides everything else. request_sequence
+    // is the caster's own counter for this battle and has to increase: anything at
+    // or below the highest sequence already applied is a resend of a cast that
+    // landed, not a new one.
+    struct UseSkill
+    {
+        PlayerId player{};
+        SkillId skill{};
+        std::uint64_t request_sequence{0};
+    };
+
+    // Posted by the Room's own deadline timer, never by a client. It carries no
+    // outcome because reaching it *is* the outcome: the boss outlived the battle.
+    struct BattleDeadline
     {
     };
 
-    using RoomCommand = std::variant<JoinRoom, LeaveRoom, StartBattle, BattleCompleted>;
+    using RoomCommand = std::variant<JoinRoom, LeaveRoom, StartBattle, UseSkill, BattleDeadline>;
 }

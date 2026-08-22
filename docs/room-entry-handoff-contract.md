@@ -73,7 +73,7 @@ cross-zone handoff에서 가장 비싼 경로다. 이 순서에서는 입장 경
 복귀는 client 요청이 아니다.
 
 ```text
-BattleCleared(Room 자기 timer) | LeaveRoom | Disconnected
+BattleCleared(boss 사망) | BattleFailed(Room 자기 deadline) | LeaveRoom | Disconnected
 → Returning 기록과 return_epoch 발급
 → return Zone EnterZone(return_epoch, return position)
 → Applied 또는 AlreadyPresent 확인
@@ -86,6 +86,9 @@ BattleCleared(Room 자기 timer) | LeaveRoom | Disconnected
 - return Zone은 그동안 passivate됐을 수 있다. `ActivateIfMissing`으로 다시 활성화되고, Zone은 순수
   in-memory 상태 기계이므로 빈 Zone의 첫 참가자로 들어간다. 이는 정상 동작이다.
 - clear는 요청이 없으므로 release token도 없다. `BattleCleared`가 이미 unsolicited인 것과 같은 이유다.
+- 복귀는 보상이 아니라 종결에 달려 있다. 실패는 아무에게도 지급하지 않으므로, 복귀 요청은
+  `RoomResult::grants`가 아니라 `audience`(Room이 아직 들고 있는 참가자 전원)를 읽는다. 그래야
+  `Cleared`와 `Failed`가 같은 경로로 모두를 원래 Zone에 돌려놓는다.
 
 ## 5. 실패와 보상
 
