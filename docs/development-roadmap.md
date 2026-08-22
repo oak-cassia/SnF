@@ -56,8 +56,8 @@
 
 ## 현재 정리 기준
 
-- Repository는 현재 Player snapshot의 `load/save`만 담당한다. gameplay 판정은 PlayerActor에서 한다.
-  아래 구현 순서 4의 durable grant intent와 Player별 원자 적용이 이 기준을 넓히는 첫 변경이다.
+- Repository는 Player snapshot의 `load/save`만 담당한다. gameplay 판정은 PlayerActor에서 한다.
+  구현 순서 4도 이 기준을 넓히지 않는다. 보상은 새 저장 경로 없이 기존 snapshot 경로로만 내려간다.
 - Runtime, network와 콘텐츠는 typed command/result로만 연결한다.
 - 구현되지 않은 executor, network backend와 분산 구조는 문서에도 선행 설계하지 않는다.
 - 기능 수보다 하나의 콘텐츠가 정상·포화·disconnect·shutdown까지 종결되는지를 우선한다.
@@ -101,8 +101,8 @@ Waiting → Running → Cleared
      attack/cooldown, participant HP/death와 결정적 ID tie-break. (완료)
 3. **Session 안정성** — generation 기반 admission/routing 방어, Closing 동안 reconnect 차단과
    Player·Connection exact-match passivation. Actor 내부에 중복 generation guard를 두지 않는다. (완료)
-4. **Durable per-Player Battle Grant** — DB가 발급한 `battle_id`, durable grant intent와 Player별
-   idempotent progression 적용. 여러 Player progression을 하나의 transaction으로 묶지 않는다
+4. **보상 인계 책임 전달** — tell 수락과 최초 load 성공 뒤의 책임 이전, 스냅샷 큐 수락까지
+   PlayerActor 상주, tell·load·큐 거절 계측. 프로세스 장애를 넘는 보상 복구는 보장하지 않는다
 5. **Room 부하 실측** — hot Room 하나와 분산 Room N개 비교, 느린 client의 outbound 포화 격리.
    shutdown은 시나리오 종료 smoke로만 확인하고 별도 부하 축으로 만들지 않는다
 
@@ -110,39 +110,38 @@ Waiting → Running → Cleared
 그것이다. 내부에서 몬스터가 spawn하고 공격하는데 client가 알 수 없으면 그 단계는 완결된
 vertical slice가 아니다.
 
-### Step 4 영속화 계약
+### Step 4 보상 인계 계약
 
-현재 reward tell은 mailbox admission이 거절되면 반환값을 버리고 Room이 passivate하므로 영구 유실된다.
-Step 4는 범용 saga나 retry driver를 추가하지 않고 다음 단일 테이블로 이 비대칭을 닫는다.
+현재 보상 전달에는 아무도 책임지지 않는 지점이 세 곳이다. reward tell이 거절되면 Room은 반환값을
+버리고 passivate한다. offline Player를 tell로 활성화한 뒤 최초 record load가 실패하면
+`pending_grant`를 지운다. load가 성공해 전달을 인수해도 `publishDirtySnapshot`의 큐 admission이
+거절되면 dirty mask를 되돌린 직후 `PassivateIfIdle`로 떠나므로 그 mask를 flush할 주체가 함께
+사라진다. await하는 최종 저장은 연결 close 경로에만 있다. Step 4는 durable grant 테이블 없이 큐
+거절 뒤의 구멍을 닫고 tell·load 실패를 계측된 허용 유실로 확정한다.
 
-```text
-snf_battle_grants(
-  battle_id  BIGINT UNSIGNED AUTO_INCREMENT,
-  player_id  BIGINT UNSIGNED,
-  experience BIGINT UNSIGNED,
-  applied    BOOLEAN,
-  PRIMARY KEY (battle_id, player_id)
-)
-```
+- 일반 전투 보상은 tell이 수락되고 최초 record load가 성공한 순간 PlayerActor가 책임을 인수한다.
+  PlayerActor는 보상을 메모리에 반영하고 스냅샷이 저장 큐에 수락될 때까지 상주한다
+- 큐 수락 이후에는 `PlayerPersistenceService`가 프로세스 생존 범위에서 저장을 재시도하므로
+  PlayerActor는 저장 성공을 기다리지 않는다. 저장 성공까지 붙잡으면 DB 장애 동안 clear한 방마다
+  actor가 상주로 누적되고, 보호하려던 용량이 먼저 무너진다
+- 큐 수락 재시도는 tick과 같은 방식이다. `trySchedule`로 one-shot timer를 걸고 `ExistingOnly`로
+  자기에게 돌아온다. 새 mechanism을 만들지 않는다. tick과 달리 backstop이 없으므로 timer 예약이
+  거절되면 그 보상은 아래 허용 유실로 떨어지고 같은 카운터에 남는다
+- tell 거절, 최초 load 실패와 저장 큐 거절은 각각 계측한다. `_tick_schedule_rejections`와 같은
+  방식이며, 유실을 허용한다는 정책과 유실을 관측하지 못하는 상태를 구분하는 장치다
+- tell 거절, 최초 load 실패와 프로세스 장애로 인한 보상 유실은 허용한다. mailbox는 actor별이 아니라 worker당
+  `queue_capacity_per_worker`(현재 4096)이고 clear 하나가 만드는 tell은 최대 참가자 수다. 거절되려면
+  그 worker 큐가 이미 포화여야 하며, 그 상태에서 무너지는 것은 보상 하나가 아니다
+- Room은 terminal 정리와 passivation을 유지하고 재전달 timer를 갖지 않는다. 프로세스가 살아 있어도
+  Room에 재시도를 얹을 자리가 없다. 같은 turn 안의 반복은 대상 mailbox를 비워줄 주체를 돌리지
+  못하고, timer는 이미 충족된 terminal passivation 조건을 무른다
+- 고가치 보상은 durable 원장과 멱등 키로 별도 처리한다. 진행 중 전투 자체가 프로세스 장애로
+  사라지는 세션형 서버에서 일반 경험치만 완전 복구하는 것은 비대칭이다
 
-- clear의 terminal turn에서만 grant batch를 한 번 저장한다. 첫 participant 행의 auto-increment 값을
-  `battle_id`로 받고 나머지 행은 같은 값을 명시해 하나의 transaction으로 commit한다. 이 DB 왕복은
-  100ms tick이나 `tick_turn`에 포함되지 않는다
-- 이 batch transaction은 immutable grant intent만 만들며 어떤 Player progression도 수정하지 않는다.
-  durable insert가 실패하면 clear를 성공한 것처럼 publish하거나 passivate하지 않고 Logic Runtime
-  failure로 승격한다
-- commit 뒤 기존 `tryTell`로 즉시 전달한다. admission 성공 시 PlayerActor가 자기
-  `(battle_id, player_id)` 행만 처리한다. `snf_players.street_experience` 갱신과 `applied = true`는
-  단일 Player transaction이며 이미 applied이면 성공 no-op다
-- tell admission 거절에는 즉시 재시도하지 않는다. 다음 Player activation의 `asyncLoad`가 해당
-  Player의 미적용 행을 함께 적용하고 갱신된 snapshot을 반환한다. 보상은 재접속까지 지연될 수 있지만
-  유실되거나 중복 지급되지 않는다
-- Room은 Player별 ack를 기다리지 않고 durable insert와 tell 시도 뒤 기존 terminal 정리와
-  passivation을 유지한다
-
-Step 4에서는 여러 Player progression의 all-or-nothing transaction, 범용 transaction framework,
-범용 saga/outbox, 과거 전체 `Transaction` abstraction 복원, 새 client protocol과 reward 적용 순서
-보장을 만들지 않는다.
+Step 4에서는 durable grant 테이블, 여러 Player progression의 all-or-nothing transaction, 범용
+transaction framework, 범용 saga/outbox, 과거 전체 `Transaction` abstraction 복원, 새 client
+protocol과 reward 적용 순서 보장을 만들지 않는다. 전달이 at-most-once이고 저장이 record 전체
+덮어쓰기이므로 이 범위에는 멱등 키가 들어갈 자리가 없다.
 
 ### 확정한 계약
 
@@ -178,24 +177,28 @@ Step 4에서는 여러 Player progression의 all-or-nothing transaction, 범용 
 - 중복 request sequence가 damage나 clear를 두 번 적용하지 않는다. (충족)
 - stale connection generation이 admission/routing 경계에서 이전 Player를 조작하지 못하며, 이전
   connection의 늦은 deactivation이 새 Closing 세션을 제거하지 않는다. (충족)
-- 같은 `battle_id`의 결과가 두 번 도착해도 보상이 두 번 지급되지 않는다.
-- reward tell이 거절돼도 durable row가 남고 다음 Player activation에서 정확히 한 번 적용된다.
+- 보상 tell이 수락되고 최초 record load가 성공하면 스냅샷이 저장 큐에 수락될 때까지 PlayerActor가
+  상주한다.
+- tell 거절, 최초 load 실패와 저장 큐 거절이 각각 카운터로 남는다. 프로세스 장애를 넘는 보상 복구는
+  완료 조건이 아니다.
 - 같은 입력에서 같은 `BattleDigest` 이벤트 순서가 나온다. (충족)
 - disconnect/reconnect와 timeout 정책이 명시돼 있다. (충족: 입장 handoff 계약 §6. disconnect는
   좌석을 해제하고 보상을 포기하며, Room 재적을 영속화하지 않으므로 reconnect는 저장된 Zone으로
   복원된다. mid-battle reconnect는 명시적 비범위다)
 - clear/fail 결과는 한 번만 생성되고 Room은 timer와 mailbox를 정리한 뒤 passivate된다. (충족)
 - 여러 Room 분산 부하와 하나의 hot Room 부하를 비교한다.
+- 부하 리포트가 보상 tell 거절, 최초 load 실패와 저장 큐 거절 카운터 값을 포함한다. 카운터를 만드는 것은 구현
+  순서 4이고, 포화 상황에서 그 값을 보고하는 것이 이 축이다.
 - 느린 client가 outbound를 포화시키면 해당 연결만 종료되고 Room과 건강한 참가자는 계속 진행한다.
 - deadline/Tick 예약 포화와 terminal 뒤 stale timer 정리를 포함한다. (충족)
 - Debug, TCP integration, ASan·UBSan과 TSan을 통과한다. (충족)
 
-세 계층의 중복 방어를 하나의 콘텐츠에서 보여주는 것이 이 목록의 핵심이다.
+두 계층의 중복 방어와 명시된 유실 경계를 하나의 콘텐츠에서 보여주는 것이 이 목록의 핵심이다.
 
 ```text
 request_sequence       → transport/요청 중복
 connection generation  → admission/routing에서 session 수명을 넘긴 stale 명령
-battle_id              → 영속 연산 중복
+계측된 허용 유실       → 프로세스 장애를 넘는 영속 보장의 명시적 비범위
 ```
 
 ### 비범위
@@ -207,7 +210,7 @@ battle_id              → 영속 연산 중복
 - matchmaking service
 - 복잡한 전투 수치와 클라이언트 표현
 - skill unlock, loadout과 추가 skill 콘텐츠. 현재 단일 Slash 카탈로그를 유지한다
-- 별도 projection이나 read model. 단일 `snf_battle_grants` 테이블만 구현 순서 4의 예외로 들어온다
+- 별도 projection, read model, 보상 원장 테이블. 구현 순서 4도 새 테이블을 만들지 않는다
 - Runtime 통합, io_uring 또는 Actor 내부 병렬화
 
 ## 콘텐츠 완료 후 포트폴리오 산출물

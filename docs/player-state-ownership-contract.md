@@ -89,23 +89,24 @@ Repository는 Actor, ActorState, mutable state 또는 coroutine handle을 받지
 변경이 사라질 수 있다. 이는 무료/게임 내 NPC 상품을 가정한 명시적 정책이지 durable transaction과
 동일한 보장이 아니다.
 
-구현 순서 4의 battle reward는 이 한계를 Player 소유권을 유지한 채 좁힌다. Room은 DB가 발급한
-`battle_id`와 Player별 grant intent를 `snf_battle_grants` 한 테이블에 먼저 저장하지만 Player
-progression을 직접 변경하지 않는다. 각 PlayerActor만 자기 `(battle_id, player_id)`를 적용하며 다음 두
-변경을 하나의 transaction으로 묶는다.
+구현 순서 4의 battle reward도 이 한계를 없애지 않고 책임 경계만 명확히 한다. Room은 새 테이블을
+만들지 않고 grant를 tell할 뿐이며, tell이 수락되고 최초 record load가 성공한 순간 보상의 책임은
+대상 PlayerActor로 넘어간다.
 
 ```text
-snf_players.street_experience 갱신
-snf_battle_grants.applied = true
+tell 수락 + 최초 load 성공 → PlayerActor가 메모리에 반영하고 스냅샷 큐 수락까지 상주
+큐 수락 이후             → PlayerPersistenceService가 프로세스 생존 범위에서 재시도
+tell 거절                 → 계측된 허용 유실. Room은 재전달 timer를 갖지 않는다
+최초 load 실패            → 계측된 허용 유실. grant를 적용하지 않는다
 ```
 
-이미 applied인 grant는 성공 no-op다. 정상 경로는 Room의 tell을 즉시 처리하고, tell admission이
-거절되면 다음 activation의 `asyncLoad`가 미적용 grant를 함께 반영한다. Player별 ack, retry timer,
-여러 Player progression의 all-or-nothing transaction은 만들지 않는다.
+PlayerActor는 저장 성공을 기다리지 않는다. 큐에 들어간 스냅샷은 서비스가 자체 타이머로 재시도하므로
+actor 수명과 무관하고, 저장 성공까지 붙잡으면 DB 장애 동안 actor가 상주로 누적된다. 전달이
+at-most-once이고 저장이 record 전체 덮어쓰기이므로 멱등 키는 이 경로에 들어갈 자리가 없다.
 
-구매나 외부 결제의 durability는 이 grant 전용 계약으로 해결된 것으로 간주하지 않는다. 기존 handler에
-boolean 옵션을 추가하지 않고 필요한 atomicity, retry window와 authority를 별도 vertical slice로
-정의한다.
+구매나 외부 결제의 durability는 이 계약으로 해결된 것으로 간주하지 않는다. 고가치 보상과 결제는
+durable 원장과 멱등 키가 필요하며, 기존 handler에 boolean 옵션을 추가하지 않고 필요한 atomicity,
+retry window와 authority를 별도 vertical slice로 정의한다.
 
 ## 8. 검증
 

@@ -385,21 +385,23 @@ Room은 clear 시점에 남아 있는 participant를 기준으로 `StreetExperie
 현재 구조만으로는 부족하다. 반면 Room join은 `on_room_join_undelivered`가 거절을 terminal completion으로
 바꾸므로 두 tell 경로의 유실 정책도 현재 서로 다르다.
 
-구현 순서 4는 범용 outbox나 retry timer 대신 durable per-Player grant로 이 차이를 닫는다.
+구현 순서 4는 durable grant 테이블 대신 프로세스 내부의 책임 전달로 이 차이를 좁힌다.
 
 ```text
 Room clear terminal turn
-  → snf_battle_grants batch commit + DB-issued battle_id
   → best-effort grant tell
-      → admitted: PlayerActor가 즉시 자기 grant를 원자 적용
-      → refused: durable pending row 유지
-  → 다음 Player activation의 asyncLoad가 pending grant 적용
+      → admitted + first load succeeded: PlayerActor가 책임 인수, 메모리 반영 후 큐 수락까지 상주
+      → refused: 계측된 허용 유실. Room은 재전달 timer를 갖지 않는다
+      → first load failed: 계측된 허용 유실. grant를 적용하지 않는다
+  → 큐 수락 이후 PlayerPersistenceService가 프로세스 생존 범위에서 저장을 재시도
 ```
 
-batch commit은 grant intent만 저장하고 Player progression은 건드리지 않는다. 각 PlayerActor가
-`snf_players` 갱신과 자기 `(battle_id, player_id)` 행의 `applied = true`를 하나의 Player-local
-transaction으로 처리한다. Room은 Player ack나 재시도를 기다리지 않고 terminal 정리와 passivation을
-유지한다. 이 DB 왕복은 전투 종결 turn에 한 번만 있으며 Room tick과 `tick_turn` 측정 범위가 아니다.
+tell이 수락되고 offline Player의 최초 record load가 성공한 순간 보상의 책임은 PlayerActor로
+넘어간다. PlayerActor는 스냅샷이 저장 큐에 수락될 때까지만 상주하고 저장 성공은 기다리지 않는다.
+큐에 들어간 스냅샷은 서비스가 자체 타이머로 재시도하므로 actor 수명과 무관하며, 저장 성공까지
+붙잡으면 DB 장애 동안 clear한 방마다 actor가 누적된다. tell 거절, 최초 load 실패와 큐 거절은 각각
+계측하고, 그 경로의 유실과 프로세스 장애로 인한 유실은 허용한다. 고가치 보상은 durable 원장과 멱등
+키로 별도 처리한다.
 
 ### 8.3 복귀
 
