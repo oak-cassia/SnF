@@ -8,6 +8,7 @@ namespace snf::load
     {
         Ping,
         Zone,
+        Battle,
     };
 
     struct ClientWorkload
@@ -15,5 +16,7 @@ namespace snf::load
         LoadScenario scenario{LoadScenario::Ping};
         std::uint64_t player_id{0};
         std::uint64_t zone_id{0};
+        std::uint64_t room_id{0};
+        bool starts_battle{false};
     };
 }

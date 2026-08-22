@@ -1,5 +1,8 @@
 #include "snf/load/client_connection.hpp"
 
+#include "snf/game/arena.hpp"
+#include "snf/game/room_result.hpp"
+#include "snf/game/skill_catalog.hpp"
 #include "snf/net/socket_options.hpp"
 #include "snf/net/system_error.hpp"
 
@@ -20,6 +23,7 @@
 namespace
 {
     constexpr std::size_t RECEIVE_BUFFER_SIZE = 4096;
+    constexpr std::size_t ENCODED_FRAME_OVERHEAD = snf::protocol::FRAME_LENGTH_FIELD_SIZE + snf::protocol::MIN_BODY_SIZE;
 
     std::string describe_error(const std::string_view operation, const int error_number)
     {
@@ -89,15 +93,21 @@ namespace
 
 namespace snf::load
 {
-    ClientConnection::ClientConnection(const std::string_view host, const std::uint16_t port, const std::chrono::milliseconds connect_timeout, const ClientWorkload workload)
+    ClientConnection::ClientConnection(
+        const std::string_view host, const std::uint16_t port, const std::chrono::milliseconds connect_timeout, const ClientWorkload workload
+    )
         : _socket(create_client_socket())
         , _connect_deadline(std::chrono::steady_clock::now() + connect_timeout)
         , _workload(workload)
         , _workload_stage(workload.scenario == LoadScenario::Ping ? WorkloadStage::Ping : WorkloadStage::Authenticate)
     {
-        if (_workload.scenario == LoadScenario::Zone && (_workload.player_id == 0 || _workload.zone_id == 0))
+        if (_workload.scenario != LoadScenario::Ping && (_workload.player_id == 0 || _workload.zone_id == 0))
         {
-            throw std::invalid_argument{"Zone workload identities must be non-zero"};
+            throw std::invalid_argument{"Authenticated workload identities must be non-zero"};
+        }
+        if (_workload.scenario == LoadScenario::Battle && _workload.room_id == 0)
+        {
+            throw std::invalid_argument{"Battle workload Room identity must be non-zero"};
         }
         snf::net::enable_tcp_no_delay(_socket.getDescriptor());
 
@@ -164,7 +174,8 @@ namespace snf::load
 
     bool ClientConnection::canStartRequest() const noexcept
     {
-        return isConnected() && _pending_send_bytes.empty() && !_outstanding_request.has_value();
+        return isConnected() && _pending_send_bytes.empty() && !_outstanding_request.has_value() &&
+               _workload_stage != WorkloadStage::AwaitBattleStart && _workload_stage != WorkloadStage::Complete;
     }
 
     bool ClientConnection::isIdle() const noexcept
@@ -189,7 +200,20 @@ namespace snf::load
 
     bool ClientConnection::hasCompletedBootstrap() const noexcept
     {
-        return _workload_stage == WorkloadStage::Ping || _workload_stage == WorkloadStage::Move;
+        return _workload_stage == WorkloadStage::Ping || _workload_stage == WorkloadStage::Move || _workload_stage == WorkloadStage::BattleAction ||
+               _workload_stage == WorkloadStage::Complete;
+    }
+
+    bool ClientConnection::hasJoinedRoom() const noexcept
+    {
+        return _workload.scenario == LoadScenario::Battle &&
+               (_workload_stage == WorkloadStage::BattleStart || _workload_stage == WorkloadStage::AwaitBattleStart ||
+                _workload_stage == WorkloadStage::BattleAction || _workload_stage == WorkloadStage::Complete);
+    }
+
+    bool ClientConnection::needsBattleStart() const noexcept
+    {
+        return _workload_stage == WorkloadStage::BattleStart;
     }
 
     void ClientConnection::enqueueNextRequest(const std::chrono::milliseconds request_timeout)
@@ -234,6 +258,36 @@ namespace snf::load
             append_big_endian(payload, expected_y);
             break;
         }
+        case WorkloadStage::RoomJoin:
+            request_type = snf::protocol::MessageType::RoomJoin;
+            append_big_endian(payload, _workload.room_id);
+            bootstrap = true;
+            break;
+        case WorkloadStage::BattleStart:
+            request_type = snf::protocol::MessageType::BattleStart;
+            append_big_endian(payload, _workload.room_id);
+            bootstrap = true;
+            break;
+        case WorkloadStage::BattleAction:
+            if (_next_battle_action_is_skill)
+            {
+                request_type = snf::protocol::MessageType::UseSkill;
+                append_big_endian(payload, _workload.room_id);
+                append_big_endian(payload, snf::server::SLASH.value);
+                append_big_endian(payload, ++_skill_sequence);
+            }
+            else
+            {
+                request_type = snf::protocol::MessageType::SetMoveIntent;
+                append_big_endian(payload, _workload.room_id);
+                const auto direction = static_cast<snf::server::MoveDirection>((_move_sequence % 8U) + 1U);
+                payload.push_back(static_cast<std::byte>(direction));
+                append_big_endian(payload, ++_move_sequence);
+            }
+            break;
+        case WorkloadStage::AwaitBattleStart:
+        case WorkloadStage::Complete:
+            throw std::logic_error{"Battle workload is not ready for another request"};
         }
 
         const snf::protocol::Frame request{
@@ -281,7 +335,8 @@ namespace snf::load
         // 현재 request를 모두 보내거나 socket이 EAGAIN을 반환할 때까지 전송한다.
         while (_send_offset < _pending_send_bytes.size())
         {
-            const auto sent_byte_count = ::send(_socket.getDescriptor(), _pending_send_bytes.data() + _send_offset, _pending_send_bytes.size() - _send_offset, MSG_NOSIGNAL);
+            const auto sent_byte_count =
+                ::send(_socket.getDescriptor(), _pending_send_bytes.data() + _send_offset, _pending_send_bytes.size() - _send_offset, MSG_NOSIGNAL);
 
             if (sent_byte_count > 0)
             {
@@ -344,13 +399,24 @@ namespace snf::load
 
                 for (const auto& response : decode_result.frames)
                 {
+                    const auto received_at = std::chrono::steady_clock::now();
+                    if (response.request_id == snf::protocol::UNSOLICITED_REQUEST_ID)
+                    {
+                        if (const auto validation_error = recordUnsolicitedFrame(response, received_at, result))
+                        {
+                            result.error = validation_error;
+                            return result;
+                        }
+                        continue;
+                    }
+
                     if (const auto validation_error = validateResponse(response))
                     {
                         result.error = validation_error;
                         return result;
                     }
 
-                    const auto round_trip_time = std::chrono::steady_clock::now() - _outstanding_request->started_at;
+                    const auto round_trip_time = received_at - _outstanding_request->started_at;
                     result.round_trip_times.push_back(round_trip_time);
                     if (_outstanding_request->bootstrap)
                     {
@@ -430,6 +496,18 @@ namespace snf::load
         case snf::protocol::MessageType::Move:
             expected_type = snf::protocol::MessageType::Moved;
             break;
+        case snf::protocol::MessageType::RoomJoin:
+            expected_type = snf::protocol::MessageType::RoomJoined;
+            break;
+        case snf::protocol::MessageType::BattleStart:
+            expected_type = snf::protocol::MessageType::BattleStarted;
+            break;
+        case snf::protocol::MessageType::UseSkill:
+            expected_type = snf::protocol::MessageType::SkillAcknowledged;
+            break;
+        case snf::protocol::MessageType::SetMoveIntent:
+            expected_type = snf::protocol::MessageType::MoveAcknowledged;
+            break;
         default:
             return protocol_error("Unsupported load request type");
         }
@@ -443,7 +521,8 @@ namespace snf::load
             return protocol_error("Response request ID does not match the request");
         }
 
-        if (_outstanding_request->request_type == snf::protocol::MessageType::Ping || _outstanding_request->request_type == snf::protocol::MessageType::Authenticate)
+        if (_outstanding_request->request_type == snf::protocol::MessageType::Ping ||
+            _outstanding_request->request_type == snf::protocol::MessageType::Authenticate)
         {
             if (response.payload != _outstanding_request->payload)
             {
@@ -452,14 +531,43 @@ namespace snf::load
             return std::nullopt;
         }
 
+        if (_outstanding_request->request_type == snf::protocol::MessageType::RoomJoin ||
+            _outstanding_request->request_type == snf::protocol::MessageType::BattleStart)
+        {
+            constexpr std::size_t ROOM_RESPONSE_SIZE = 1 + 1 + 8;
+            const auto expected_phase = _outstanding_request->request_type == snf::protocol::MessageType::RoomJoin ? snf::server::RoomPhase::Waiting
+                                                                                                                   : snf::server::RoomPhase::Running;
+            if (response.payload.size() != ROOM_RESPONSE_SIZE ||
+                response.payload[0] != static_cast<std::byte>(snf::server::RoomCommandStatus::Applied) ||
+                response.payload[1] != static_cast<std::byte>(expected_phase) ||
+                read_big_endian<std::uint64_t>(response.payload, 2) != _workload.room_id)
+            {
+                return protocol_error("Room response fields do not match the request");
+            }
+            return std::nullopt;
+        }
+
+        if (_outstanding_request->request_type == snf::protocol::MessageType::UseSkill ||
+            _outstanding_request->request_type == snf::protocol::MessageType::SetMoveIntent)
+        {
+            if (response.payload.size() != 2 ||
+                std::to_integer<std::uint8_t>(response.payload[0]) > static_cast<std::uint8_t>(snf::server::RoomCommandStatus::ParticipantDead) ||
+                std::to_integer<std::uint8_t>(response.payload[1]) > static_cast<std::uint8_t>(snf::server::RoomPhase::Failed))
+            {
+                return protocol_error("Battle acknowledgement fields are invalid");
+            }
+            return std::nullopt;
+        }
+
         constexpr std::size_t FIXED_ZONE_RESPONSE_SIZE = 1 + 8 + 8 + 4 + 4 + 2;
-        if (response.payload.size() < FIXED_ZONE_RESPONSE_SIZE || std::to_integer<std::uint8_t>(response.payload[0]) != 0 || read_big_endian<std::uint64_t>(response.payload, 1) != _workload.zone_id ||
-            read_big_endian<std::uint64_t>(response.payload, 9) == 0)
+        if (response.payload.size() < FIXED_ZONE_RESPONSE_SIZE || std::to_integer<std::uint8_t>(response.payload[0]) != 0 ||
+            read_big_endian<std::uint64_t>(response.payload, 1) != _workload.zone_id || read_big_endian<std::uint64_t>(response.payload, 9) == 0)
         {
             return protocol_error("Zone response fields do not match the request");
         }
         if (_outstanding_request->request_type == snf::protocol::MessageType::Move &&
-            (read_big_endian<std::int32_t>(response.payload, 17) != _outstanding_request->expected_x || read_big_endian<std::int32_t>(response.payload, 21) != _outstanding_request->expected_y))
+            (read_big_endian<std::int32_t>(response.payload, 17) != _outstanding_request->expected_x ||
+             read_big_endian<std::int32_t>(response.payload, 21) != _outstanding_request->expected_y))
         {
             return protocol_error("Move response position does not match the request");
         }
@@ -483,6 +591,76 @@ namespace snf::load
         return std::nullopt;
     }
 
+    std::optional<ClientError> ClientConnection::recordUnsolicitedFrame(
+        const snf::protocol::Frame& response, const std::chrono::steady_clock::time_point received_at, ReadResult& result
+    )
+    {
+        ++result.unsolicited_frames;
+        result.unsolicited_bytes += ENCODED_FRAME_OVERHEAD + response.payload.size();
+
+        switch (response.type)
+        {
+        case snf::protocol::MessageType::BattleDigest:
+        {
+            constexpr std::size_t DIGEST_HEADER_SIZE = 8 + 1 + 2;
+            if (response.payload.size() < DIGEST_HEADER_SIZE)
+            {
+                return protocol_error("Battle digest is shorter than its header");
+            }
+            const std::uint64_t sequence = read_big_endian<std::uint64_t>(response.payload, 0);
+            if (sequence == 0 || (_last_battle_digest_sequence && sequence != *_last_battle_digest_sequence + 1))
+            {
+                return protocol_error("Battle digest sequence is not continuous");
+            }
+            if (_last_battle_digest_at)
+            {
+                result.battle_digest_intervals.push_back(received_at - *_last_battle_digest_at);
+            }
+            _last_battle_digest_sequence = sequence;
+            _last_battle_digest_at = received_at;
+            ++result.battle_digest_frames;
+            result.battle_digest_bytes += ENCODED_FRAME_OVERHEAD + response.payload.size();
+            if (_workload_stage == WorkloadStage::AwaitBattleStart)
+            {
+                _workload_stage = WorkloadStage::BattleAction;
+            }
+            return std::nullopt;
+        }
+        case snf::protocol::MessageType::BattleCleared:
+            if (response.payload.size() != sizeof(std::uint64_t))
+            {
+                return protocol_error("Battle clear payload is invalid");
+            }
+            ++result.battle_cleared_frames;
+            _workload_stage = WorkloadStage::Complete;
+            return std::nullopt;
+        case snf::protocol::MessageType::BattleFailed:
+        {
+            constexpr std::size_t BATTLE_FAILED_PAYLOAD_SIZE = 8 + 1 + 1;
+            if (response.payload.size() != BATTLE_FAILED_PAYLOAD_SIZE)
+            {
+                return protocol_error("Battle failure payload is invalid");
+            }
+            ++result.battle_failed_frames;
+            _workload_stage = WorkloadStage::Complete;
+            return std::nullopt;
+        }
+        case snf::protocol::MessageType::ReturnedToZone:
+        {
+            constexpr std::size_t RETURNED_TO_ZONE_PAYLOAD_SIZE = 8 + 4 + 4;
+            if (response.payload.size() != RETURNED_TO_ZONE_PAYLOAD_SIZE)
+            {
+                return protocol_error("Returned-to-Zone payload is invalid");
+            }
+            ++result.returned_to_zone_frames;
+            _workload_stage = WorkloadStage::Complete;
+            return std::nullopt;
+        }
+        default:
+            return protocol_error("Unsupported unsolicited frame type");
+        }
+    }
+
     void ClientConnection::completeRequest(const snf::protocol::MessageType request_type) noexcept
     {
         if (request_type == snf::protocol::MessageType::Authenticate)
@@ -491,7 +669,19 @@ namespace snf::load
         }
         else if (request_type == snf::protocol::MessageType::EnterZone)
         {
-            _workload_stage = WorkloadStage::Move;
+            _workload_stage = _workload.scenario == LoadScenario::Battle ? WorkloadStage::RoomJoin : WorkloadStage::Move;
+        }
+        else if (request_type == snf::protocol::MessageType::RoomJoin)
+        {
+            _workload_stage = _workload.starts_battle ? WorkloadStage::BattleStart : WorkloadStage::AwaitBattleStart;
+        }
+        else if (request_type == snf::protocol::MessageType::BattleStart)
+        {
+            _workload_stage = WorkloadStage::BattleAction;
+        }
+        else if (request_type == snf::protocol::MessageType::UseSkill || request_type == snf::protocol::MessageType::SetMoveIntent)
+        {
+            _next_battle_action_is_skill = !_next_battle_action_is_skill;
         }
     }
 }

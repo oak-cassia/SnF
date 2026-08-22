@@ -28,7 +28,26 @@ namespace
                       {
                           _server_error = std::current_exception();
                       }
-                  })
+                  }
+              )
+        {
+        }
+
+        explicit RunningServer(const snf::server::GameServerConfig& config)
+            : _server(config)
+            , _thread(
+                  [this]
+                  {
+                      try
+                      {
+                          _server.run();
+                      }
+                      catch (...)
+                      {
+                          _server_error = std::current_exception();
+                      }
+                  }
+              )
         {
         }
 
@@ -163,6 +182,53 @@ namespace
 
         server.stop();
     }
+
+    void test_completes_battle_workload_and_accounts_for_push_frames()
+    {
+        snf::server::GameServerConfig server_config;
+        server_config.port = 0;
+        server_config.shutdown_grace_period = 200ms;
+        server_config.room_battle_duration = 5s;
+        server_config.room_tick_interval = 20ms;
+        server_config.room_wave_count = 1;
+        server_config.room_minions_per_wave = 1;
+        server_config.room_minion_health = 1'000'000;
+        server_config.room_boss_spawn_after = 4s;
+
+        RunningServer server{server_config};
+        const snf::load::LoadClient client{snf::load::LoadClientConfig{
+            .host = "127.0.0.1",
+            .port = server.getPort(),
+            .connections = 4,
+            .duration = 700ms,
+            .requests_per_second = 50,
+            .scenario = snf::load::LoadScenario::Battle,
+            .players_per_zone = 4,
+            .players_per_room = 4,
+            .connect_timeout = 1s,
+            .request_timeout = 1s,
+        }};
+
+        const auto result = client.run();
+
+        assert(result.success);
+        assert(result.error.empty());
+        assert(result.successful_connections == 4);
+        assert(result.failed_connections == 0);
+        assert(result.sent_bootstrap_requests == 13); // auth + Zone + Room for all, BattleStart for one leader
+        assert(result.received_bootstrap_responses == result.sent_bootstrap_requests);
+        assert(result.sent_gameplay_requests > 0);
+        assert(result.received_gameplay_responses == result.sent_gameplay_requests);
+        assert(result.battle_digest_frames > 4);
+        assert(result.battle_digest_bytes > result.battle_digest_frames * snf::protocol::MIN_BODY_SIZE);
+        assert(result.unsolicited_frames == result.battle_digest_frames);
+        assert(!result.battle_digest_intervals.empty());
+        assert(result.request_timeouts == 0);
+        assert(result.invalid_responses == 0);
+        assert(result.socket_errors == 0);
+
+        server.stop();
+    }
 }
 
 int main()
@@ -170,4 +236,5 @@ int main()
     test_completes_non_blocking_ping_pong();
     test_reports_connection_failure();
     test_completes_authenticated_zone_movement_workload();
+    test_completes_battle_workload_and_accounts_for_push_frames();
 }

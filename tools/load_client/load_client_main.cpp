@@ -20,7 +20,7 @@ namespace
     {
         std::cout << "Usage: " << program_name
                   << " [--host 127.0.0.1] [--port 7777] [--connections 100]"
-                     " [--scenario ping|zone] [--players-per-zone 50]"
+                     " [--scenario ping|zone|battle] [--players-per-zone 50] [--players-per-room 4]"
                      " [--duration 30] [--requests-per-second 1]"
                      " [--connect-timeout-ms 5000] [--request-timeout-ms 3000]\n";
     }
@@ -77,8 +77,9 @@ int main(const int argument_count, char* arguments[])
             return 0;
         }
 
-        if (argument != "--host" && argument != "--port" && argument != "--connections" && argument != "--duration" && argument != "--requests-per-second" && argument != "--scenario" &&
-            argument != "--players-per-zone" && argument != "--connect-timeout-ms" && argument != "--request-timeout-ms")
+        if (argument != "--host" && argument != "--port" && argument != "--connections" && argument != "--duration" &&
+            argument != "--requests-per-second" && argument != "--scenario" && argument != "--players-per-zone" && argument != "--players-per-room" &&
+            argument != "--connect-timeout-ms" && argument != "--request-timeout-ms")
         {
             std::cerr << "Unknown option: " << argument << '\n';
             return 1;
@@ -150,6 +151,10 @@ int main(const int argument_count, char* arguments[])
             {
                 config.scenario = snf::load::LoadScenario::Zone;
             }
+            else if (value == "battle")
+            {
+                config.scenario = snf::load::LoadScenario::Battle;
+            }
             else
             {
                 std::cerr << "Invalid scenario: " << value << '\n';
@@ -165,6 +170,16 @@ int main(const int argument_count, char* arguments[])
                 return 1;
             }
             config.players_per_zone = *players;
+        }
+        else if (argument == "--players-per-room")
+        {
+            const auto players = parse_positive_size(value, 4);
+            if (!players)
+            {
+                std::cerr << "Invalid players per Room: " << value << '\n';
+                return 1;
+            }
+            config.players_per_room = *players;
         }
         else if (argument == "--connect-timeout-ms")
         {
@@ -214,25 +229,42 @@ int main(const int argument_count, char* arguments[])
     }
     std::ranges::sort(gameplay_round_trip_milliseconds);
 
-    const double average_round_trip_milliseconds = round_trip_milliseconds.empty() ? 0.0 : total_round_trip_milliseconds / round_trip_milliseconds.size();
+    std::vector<double> battle_digest_interval_milliseconds;
+    battle_digest_interval_milliseconds.reserve(result.battle_digest_intervals.size());
+    for (const auto interval : result.battle_digest_intervals)
+    {
+        battle_digest_interval_milliseconds.push_back(std::chrono::duration<double, std::milli>{interval}.count());
+    }
+    std::ranges::sort(battle_digest_interval_milliseconds);
+
+    const double average_round_trip_milliseconds =
+        round_trip_milliseconds.empty() ? 0.0 : total_round_trip_milliseconds / round_trip_milliseconds.size();
 
     const double load_duration_seconds = std::chrono::duration<double>{result.load_duration}.count();
     const double throughput = load_duration_seconds > 0.0 ? static_cast<double>(result.received_responses) / load_duration_seconds : 0.0;
 
-    std::cout << "Connections: " << result.successful_connections << '/' << result.requested_connections << " succeeded, " << result.failed_connections << " failed, peak active "
-              << result.maximum_active_connections << '\n';
-    std::cout << "Requests: " << result.sent_requests << " sent, " << result.received_responses << " received, " << result.request_timeouts << " timeout, " << result.invalid_responses << " invalid, "
-              << result.socket_errors << " socket error\n";
-    std::cout << "Workload: " << result.sent_bootstrap_requests << '/' << result.received_bootstrap_responses << " bootstrap sent/received, " << result.sent_gameplay_requests << '/'
-              << result.received_gameplay_responses << " gameplay sent/received\n";
+    std::cout << "Connections: " << result.successful_connections << '/' << result.requested_connections << " succeeded, "
+              << result.failed_connections << " failed, peak active " << result.maximum_active_connections << '\n';
+    std::cout << "Requests: " << result.sent_requests << " sent, " << result.received_responses << " received, " << result.request_timeouts
+              << " timeout, " << result.invalid_responses << " invalid, " << result.socket_errors << " socket error\n";
+    std::cout << "Workload: " << result.sent_bootstrap_requests << '/' << result.received_bootstrap_responses << " bootstrap sent/received, "
+              << result.sent_gameplay_requests << '/' << result.received_gameplay_responses << " gameplay sent/received\n";
+    std::cout << "Push: " << result.unsolicited_frames << " frames, " << result.unsolicited_bytes << " bytes; " << result.battle_digest_frames
+              << " battle digests, " << result.battle_digest_bytes << " digest bytes; terminal clear/fail/return " << result.battle_cleared_frames
+              << '/' << result.battle_failed_frames << '/' << result.returned_to_zone_frames << '\n';
 
     std::cout << std::fixed << std::setprecision(3) << "Throughput: " << throughput << " responses/s\n"
-              << "RTT ms: avg " << average_round_trip_milliseconds << ", p50 " << percentile(round_trip_milliseconds, 0.50) << ", p95 " << percentile(round_trip_milliseconds, 0.95) << ", p99 "
-              << percentile(round_trip_milliseconds, 0.99) << '\n';
+              << "RTT ms: avg " << average_round_trip_milliseconds << ", p50 " << percentile(round_trip_milliseconds, 0.50) << ", p95 "
+              << percentile(round_trip_milliseconds, 0.95) << ", p99 " << percentile(round_trip_milliseconds, 0.99) << '\n';
     if (!gameplay_round_trip_milliseconds.empty())
     {
-        std::cout << "Gameplay RTT ms: p50 " << percentile(gameplay_round_trip_milliseconds, 0.50) << ", p95 " << percentile(gameplay_round_trip_milliseconds, 0.95) << ", p99 "
-                  << percentile(gameplay_round_trip_milliseconds, 0.99) << '\n';
+        std::cout << "Gameplay RTT ms: p50 " << percentile(gameplay_round_trip_milliseconds, 0.50) << ", p95 "
+                  << percentile(gameplay_round_trip_milliseconds, 0.95) << ", p99 " << percentile(gameplay_round_trip_milliseconds, 0.99) << '\n';
+    }
+    if (!battle_digest_interval_milliseconds.empty())
+    {
+        std::cout << "Battle digest interval ms: p50 " << percentile(battle_digest_interval_milliseconds, 0.50) << ", p99 "
+                  << percentile(battle_digest_interval_milliseconds, 0.99) << ", max " << battle_digest_interval_milliseconds.back() << '\n';
     }
 
     if (!result.success)

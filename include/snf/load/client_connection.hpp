@@ -39,8 +39,16 @@ namespace snf::load
     {
         std::vector<std::chrono::steady_clock::duration> round_trip_times;
         std::vector<std::chrono::steady_clock::duration> gameplay_round_trip_times;
+        std::vector<std::chrono::steady_clock::duration> battle_digest_intervals;
         std::size_t bootstrap_responses{0};
         std::size_t gameplay_responses{0};
+        std::size_t unsolicited_frames{0};
+        std::size_t unsolicited_bytes{0};
+        std::size_t battle_digest_frames{0};
+        std::size_t battle_digest_bytes{0};
+        std::size_t battle_cleared_frames{0};
+        std::size_t battle_failed_frames{0};
+        std::size_t returned_to_zone_frames{0};
         std::optional<ClientError> error;
     };
 
@@ -63,6 +71,8 @@ namespace snf::load
         [[nodiscard]] bool isIdle() const noexcept;
         [[nodiscard]] std::chrono::steady_clock::time_point getDeadline() const noexcept;
         [[nodiscard]] bool hasCompletedBootstrap() const noexcept;
+        [[nodiscard]] bool hasJoinedRoom() const noexcept;
+        [[nodiscard]] bool needsBattleStart() const noexcept;
 
         void enqueueNextRequest(std::chrono::milliseconds request_timeout);
         [[nodiscard]] WriteResult handleWritable();
@@ -89,6 +99,8 @@ namespace snf::load
         };
 
         [[nodiscard]] std::optional<ClientError> validateResponse(const snf::protocol::Frame& response) const;
+        [[nodiscard]] std::optional<ClientError>
+        recordUnsolicitedFrame(const snf::protocol::Frame& response, std::chrono::steady_clock::time_point received_at, ReadResult& result);
         void completeRequest(snf::protocol::MessageType request_type) noexcept;
 
         enum class WorkloadStage
@@ -97,6 +109,11 @@ namespace snf::load
             Authenticate,
             EnterZone,
             Move,
+            RoomJoin,
+            BattleStart,
+            AwaitBattleStart,
+            BattleAction,
+            Complete,
         };
 
         snf::net::UniqueFileDescriptor _socket;
@@ -110,5 +127,9 @@ namespace snf::load
         ClientWorkload _workload;
         WorkloadStage _workload_stage{WorkloadStage::Ping};
         std::uint64_t _move_sequence{0};
+        std::uint64_t _skill_sequence{0};
+        bool _next_battle_action_is_skill{true};
+        std::optional<std::uint64_t> _last_battle_digest_sequence;
+        std::optional<std::chrono::steady_clock::time_point> _last_battle_digest_at;
     };
 }

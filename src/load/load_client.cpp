@@ -156,12 +156,24 @@ namespace
 
     bool has_connecting_connection(const std::unordered_map<int, snf::load::ClientConnection>& connections)
     {
-        return std::ranges::any_of(connections, [](const auto& connection_entry) { return connection_entry.second.isConnecting(); });
+        return std::ranges::any_of(
+            connections,
+            [](const auto& connection_entry)
+            {
+                return connection_entry.second.isConnecting();
+            }
+        );
     }
 
     bool all_connections_idle(const std::unordered_map<int, snf::load::ClientConnection>& connections)
     {
-        return std::ranges::all_of(connections, [](const auto& connection_entry) { return connection_entry.second.isIdle(); });
+        return std::ranges::all_of(
+            connections,
+            [](const auto& connection_entry)
+            {
+                return connection_entry.second.isIdle();
+            }
+        );
     }
 
     void record_runtime_error(snf::load::LoadClientResult& result, const snf::load::ClientError& error)
@@ -204,9 +216,17 @@ namespace snf::load
             .request_timeouts = 0,
             .invalid_responses = 0,
             .socket_errors = 0,
+            .unsolicited_frames = 0,
+            .unsolicited_bytes = 0,
+            .battle_digest_frames = 0,
+            .battle_digest_bytes = 0,
+            .battle_cleared_frames = 0,
+            .battle_failed_frames = 0,
+            .returned_to_zone_frames = 0,
             .load_duration = _config.duration,
             .round_trip_times = {},
             .gameplay_round_trip_times = {},
+            .battle_digest_intervals = {},
         };
 
         try
@@ -231,13 +251,20 @@ namespace snf::load
                 result.error = "Players per Zone must be positive";
                 return result;
             }
-            if (_config.scenario != LoadScenario::Ping && _config.scenario != LoadScenario::Zone)
+            constexpr std::size_t MAX_ROOM_PARTICIPANTS = 4;
+            if (_config.players_per_room == 0 || _config.players_per_room > MAX_ROOM_PARTICIPANTS)
+            {
+                result.error = "Players per Room must be between 1 and 4";
+                return result;
+            }
+            if (_config.scenario != LoadScenario::Ping && _config.scenario != LoadScenario::Zone && _config.scenario != LoadScenario::Battle)
             {
                 result.error = "Load scenario is invalid";
                 return result;
             }
 
-            if (_config.duration <= std::chrono::milliseconds::zero() || _config.connect_timeout <= std::chrono::milliseconds::zero() || _config.request_timeout <= std::chrono::milliseconds::zero())
+            if (_config.duration <= std::chrono::milliseconds::zero() || _config.connect_timeout <= std::chrono::milliseconds::zero() ||
+                _config.request_timeout <= std::chrono::milliseconds::zero())
             {
                 result.error = "Duration and timeout values must be positive";
                 return result;
@@ -252,6 +279,7 @@ namespace snf::load
                 {
                     const std::uint64_t player_id = connection_index + 1;
                     const std::uint64_t zone_id = connection_index / _config.players_per_zone + 1;
+                    const std::uint64_t room_id = connection_index / _config.players_per_room + 1;
                     ClientConnection connection{
                         _config.host,
                         _config.port,
@@ -260,6 +288,8 @@ namespace snf::load
                             .scenario = _config.scenario,
                             .player_id = player_id,
                             .zone_id = zone_id,
+                            .room_id = room_id,
+                            .starts_battle = connection_index % _config.players_per_room == 0,
                         },
                     };
 
@@ -404,8 +434,10 @@ namespace snf::load
                     break;
                 }
 
-                const auto wait_deadline = generation_complete ? earliest_connection_deadline(connections) : std::min(load_ends_at, earliest_connection_deadline(connections));
-                const int ready_event_count = ::epoll_wait(epoll.getDescriptor(), events.data(), static_cast<int>(events.size()), get_wait_timeout(wait_deadline));
+                const auto wait_deadline = generation_complete ? earliest_connection_deadline(connections)
+                                                               : std::min(load_ends_at, earliest_connection_deadline(connections));
+                const int ready_event_count =
+                    ::epoll_wait(epoll.getDescriptor(), events.data(), static_cast<int>(events.size()), get_wait_timeout(wait_deadline));
 
                 if (ready_event_count == -1)
                 {
@@ -427,10 +459,22 @@ namespace snf::load
 
                         if (!generation_complete && std::chrono::steady_clock::now() < load_ends_at)
                         {
+                            const bool all_battle_participants_joined =
+                                _config.scenario != LoadScenario::Battle || std::ranges::all_of(
+                                                                                connections,
+                                                                                [](const auto& connection_entry)
+                                                                                {
+                                                                                    return connection_entry.second.hasJoinedRoom();
+                                                                                }
+                                                                            );
                             for (auto& connection_entry : connections)
                             {
                                 ClientConnection& connection = connection_entry.second;
                                 if (!connection.canStartRequest())
+                                {
+                                    continue;
+                                }
+                                if (connection.needsBattleStart() && !all_battle_participants_joined)
                                 {
                                     continue;
                                 }
@@ -467,8 +511,26 @@ namespace snf::load
                         result.received_responses += read_result.round_trip_times.size();
                         result.received_bootstrap_responses += read_result.bootstrap_responses;
                         result.received_gameplay_responses += read_result.gameplay_responses;
-                        result.round_trip_times.insert(result.round_trip_times.end(), read_result.round_trip_times.begin(), read_result.round_trip_times.end());
-                        result.gameplay_round_trip_times.insert(result.gameplay_round_trip_times.end(), read_result.gameplay_round_trip_times.begin(), read_result.gameplay_round_trip_times.end());
+                        result.unsolicited_frames += read_result.unsolicited_frames;
+                        result.unsolicited_bytes += read_result.unsolicited_bytes;
+                        result.battle_digest_frames += read_result.battle_digest_frames;
+                        result.battle_digest_bytes += read_result.battle_digest_bytes;
+                        result.battle_cleared_frames += read_result.battle_cleared_frames;
+                        result.battle_failed_frames += read_result.battle_failed_frames;
+                        result.returned_to_zone_frames += read_result.returned_to_zone_frames;
+                        result.round_trip_times.insert(
+                            result.round_trip_times.end(), read_result.round_trip_times.begin(), read_result.round_trip_times.end()
+                        );
+                        result.gameplay_round_trip_times.insert(
+                            result.gameplay_round_trip_times.end(),
+                            read_result.gameplay_round_trip_times.begin(),
+                            read_result.gameplay_round_trip_times.end()
+                        );
+                        result.battle_digest_intervals.insert(
+                            result.battle_digest_intervals.end(),
+                            read_result.battle_digest_intervals.begin(),
+                            read_result.battle_digest_intervals.end()
+                        );
                         connection_error = std::move(read_result.error);
                     }
 
@@ -513,12 +575,20 @@ namespace snf::load
                 }
             }
 
-            const bool workload_completed =
-                _config.scenario == LoadScenario::Ping
-                    ? result.received_gameplay_responses > 0
-                    : result.received_gameplay_responses > 0 && std::ranges::all_of(connections, [](const auto& connection_entry) { return connection_entry.second.hasCompletedBootstrap(); });
-            result.success = result.successful_connections == result.requested_connections && result.failed_connections == 0 && result.request_timeouts == 0 && result.invalid_responses == 0 &&
-                             result.socket_errors == 0 && result.sent_requests == result.received_responses && workload_completed;
+            const bool bootstrap_completed = std::ranges::all_of(
+                connections,
+                [](const auto& connection_entry)
+                {
+                    return connection_entry.second.hasCompletedBootstrap();
+                }
+            );
+            const bool workload_completed = _config.scenario == LoadScenario::Ping ? result.received_gameplay_responses > 0
+                                            : _config.scenario == LoadScenario::Zone
+                                                ? result.received_gameplay_responses > 0 && bootstrap_completed
+                                                : result.received_gameplay_responses > 0 && result.battle_digest_frames > 0 && bootstrap_completed;
+            result.success = result.successful_connections == result.requested_connections && result.failed_connections == 0 &&
+                             result.request_timeouts == 0 && result.invalid_responses == 0 && result.socket_errors == 0 &&
+                             result.sent_requests == result.received_responses && workload_completed;
             if (!result.success && result.error.empty())
             {
                 result.error = "Load workload did not complete";
