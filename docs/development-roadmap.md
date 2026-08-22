@@ -102,7 +102,7 @@ Waiting → Running → Cleared
 3. **Session 안정성** — generation 기반 admission/routing 방어, Closing 동안 reconnect 차단과
    Player·Connection exact-match passivation. Actor 내부에 중복 generation guard를 두지 않는다. (완료)
 4. **보상 인계 책임 전달** — tell 수락과 최초 load 성공 뒤의 책임 이전, 스냅샷 큐 수락까지
-   PlayerActor 상주, tell·load·큐 거절 계측. 프로세스 장애를 넘는 보상 복구는 보장하지 않는다
+   PlayerActor 상주, tell·load·큐 거절 계측. 프로세스 장애를 넘는 보상 복구는 보장하지 않는다. (완료)
 5. **Room 부하 실측** — hot Room 하나와 분산 Room N개 비교, 느린 client의 outbound 포화 격리.
    shutdown은 시나리오 종료 smoke로만 확인하고 별도 부하 축으로 만들지 않는다
 
@@ -178,9 +178,9 @@ protocol과 reward 적용 순서 보장을 만들지 않는다. 전달이 at-mos
 - stale connection generation이 admission/routing 경계에서 이전 Player를 조작하지 못하며, 이전
   connection의 늦은 deactivation이 새 Closing 세션을 제거하지 않는다. (충족)
 - 보상 tell이 수락되고 최초 record load가 성공하면 스냅샷이 저장 큐에 수락될 때까지 PlayerActor가
-  상주한다.
+  상주한다. (충족)
 - tell 거절, 최초 load 실패와 저장 큐 거절이 각각 카운터로 남는다. 프로세스 장애를 넘는 보상 복구는
-  완료 조건이 아니다.
+  완료 조건이 아니다. (충족)
 - 같은 입력에서 같은 `BattleDigest` 이벤트 순서가 나온다. (충족)
 - disconnect/reconnect와 timeout 정책이 명시돼 있다. (충족: 입장 handoff 계약 §6. disconnect는
   좌석을 해제하고 보상을 포기하며, Room 재적을 영속화하지 않으므로 reconnect는 저장된 Zone으로
