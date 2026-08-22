@@ -23,8 +23,8 @@ namespace
 
     std::uint32_t read_u32_big_endian(std::span<const std::byte> bytes, std::size_t offset)
     {
-        return (std::to_integer<std::uint32_t>(bytes[offset]) << 24U) | (std::to_integer<std::uint32_t>(bytes[offset + 1]) << 16U) | (std::to_integer<std::uint32_t>(bytes[offset + 2]) << 8U) |
-               std::to_integer<std::uint32_t>(bytes[offset + 3]);
+        return (std::to_integer<std::uint32_t>(bytes[offset]) << 24U) | (std::to_integer<std::uint32_t>(bytes[offset + 1]) << 16U) |
+               (std::to_integer<std::uint32_t>(bytes[offset + 2]) << 8U) | std::to_integer<std::uint32_t>(bytes[offset + 3]);
     }
 
     std::uint16_t read_u16_big_endian(std::span<const std::byte> bytes, std::size_t offset)

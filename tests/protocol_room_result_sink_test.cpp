@@ -73,12 +73,14 @@ namespace
         const PlayerId player{.value = 10};
         const auto connection = fixture.attach(4, player);
 
-        fixture.sink.accept(join_command(connection, player, 8),
-                            RoomResult{
-                                .status = RoomCommandStatus::Applied,
-                                .phase = RoomPhase::Waiting,
-                                .player = player,
-                            });
+        fixture.sink.accept(
+            join_command(connection, player, 8),
+            RoomResult{
+                .status = RoomCommandStatus::Applied,
+                .phase = RoomPhase::Waiting,
+                .player = player,
+            }
+        );
 
         const auto frame = fixture.pop();
         assert(frame);
@@ -102,7 +104,8 @@ namespace
             RoomResult{
                 .status = RoomCommandStatus::WrongPhase,
                 .phase = RoomPhase::Cleared,
-            });
+            }
+        );
 
         assert(!fixture.pop());
     }
@@ -129,7 +132,8 @@ namespace
                         StreetExperienceGrant{.player = first, .experience = 300},
                         StreetExperienceGrant{.player = second, .experience = 300},
                     },
-            });
+            }
+        );
 
         for (int index = 0; index < 2; ++index)
         {
@@ -163,7 +167,8 @@ namespace
                         StreetExperienceGrant{.player = offline, .experience = 300},
                         StreetExperienceGrant{.player = online, .experience = 300},
                     },
-            });
+            }
+        );
 
         // The reward itself still reached the offline player: the tell that carries it
         // applies against the stored record. Only the notification has nowhere to go.
@@ -195,7 +200,8 @@ namespace
                         StreetExperienceGrant{.player = first, .experience = 300},
                         StreetExperienceGrant{.player = second, .experience = 300},
                     },
-            });
+            }
+        );
 
         // One slot for two notifications. The second is dropped rather than blocking
         // the Worker, and the reward it announced is already durable.

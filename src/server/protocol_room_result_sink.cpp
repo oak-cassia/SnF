@@ -53,12 +53,15 @@ namespace snf::server
         payload.push_back(static_cast<std::byte>(static_cast<std::uint8_t>(result.phase)));
         append_u64(payload, command.room.value);
 
-        static_cast<void>(send(command.reply->connection,
-                               snf::protocol::Frame{
-                                   .type = command.reply->kind == RoomReplyKind::Joined ? snf::protocol::MessageType::RoomJoined : snf::protocol::MessageType::BattleStarted,
-                                   .request_id = command.reply->request_id,
-                                   .payload = std::move(payload),
-                               }));
+        static_cast<void>(send(
+            command.reply->connection,
+            snf::protocol::Frame{
+                .type =
+                    command.reply->kind == RoomReplyKind::Joined ? snf::protocol::MessageType::RoomJoined : snf::protocol::MessageType::BattleStarted,
+                .request_id = command.reply->request_id,
+                .payload = std::move(payload),
+            }
+        ));
     }
 
     void ProtocolRoomResultSink::publishClear(const RoomResult& result)
@@ -78,12 +81,14 @@ namespace snf::server
             payload.reserve(8);
             append_u64(payload, grant.experience);
 
-            static_cast<void>(send(*connection,
-                                   snf::protocol::Frame{
-                                       .type = snf::protocol::MessageType::BattleCleared,
-                                       .request_id = snf::protocol::UNSOLICITED_REQUEST_ID,
-                                       .payload = std::move(payload),
-                                   }));
+            static_cast<void>(send(
+                *connection,
+                snf::protocol::Frame{
+                    .type = snf::protocol::MessageType::BattleCleared,
+                    .request_id = snf::protocol::UNSOLICITED_REQUEST_ID,
+                    .payload = std::move(payload),
+                }
+            ));
         }
     }
 
@@ -95,11 +100,13 @@ namespace snf::server
             _outbound.reportAdmissionFailure(connection);
             return false;
         }
-        if (!_outbound.commit(*reservation,
-                              SendFrame{
-                                  .connection = connection,
-                                  .frame = std::move(frame),
-                              }))
+        if (!_outbound.commit(
+                *reservation,
+                SendFrame{
+                    .connection = connection,
+                    .frame = std::move(frame),
+                }
+            ))
         {
             _outbound.reportAdmissionFailure(connection);
             return false;

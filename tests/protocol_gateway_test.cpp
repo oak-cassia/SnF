@@ -72,16 +72,20 @@ namespace
             , outbound(snf::server::OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 4}, wake.getDescriptor())
             , zone_results(outbound)
             , handoffs(commands, sessions, routes, transitions, lifecycle, zone_results, config.max_zone_completions_per_turn)
-            , room_entries(commands, sessions, routes, room_transitions, lifecycle, outbound, zone_results, config.max_room_entry_completions_per_turn)
-            , gateway(commands,
-                      sessions,
-                      routes,
-                      parties,
-                      handoffs,
-                      room_entries,
-                      snf::server::ProtocolGatewayConfig{
-                          .dispatcher = std::move(config.dispatcher),
-                      })
+            , room_entries(
+                  commands, sessions, routes, room_transitions, lifecycle, outbound, zone_results, config.max_room_entry_completions_per_turn
+              )
+            , gateway(
+                  commands,
+                  sessions,
+                  routes,
+                  parties,
+                  handoffs,
+                  room_entries,
+                  snf::server::ProtocolGatewayConfig{
+                      .dispatcher = std::move(config.dispatcher),
+                  }
+              )
         {
         }
 
@@ -139,7 +143,8 @@ namespace
         append_u32(payload, static_cast<std::uint32_t>(value));
     }
 
-    snf::server::FrameEnvelope make_enter_frame(const snf::net::ConnectionId connection, const std::uint64_t zone, const std::int32_t x, const std::int32_t y)
+    snf::server::FrameEnvelope
+    make_enter_frame(const snf::net::ConnectionId connection, const std::uint64_t zone, const std::int32_t x, const std::int32_t y)
     {
         std::vector<std::byte> payload;
         append_u64(payload, zone);
@@ -233,7 +238,13 @@ namespace
     void test_rejects_unsupported_and_invalid_frames_before_routing()
     {
         snf::server::MessageDispatcher dispatcher;
-        assert(dispatcher.registerHandler(snf::protocol::MessageType::Pong, [](snf::protocol::Frame) -> std::optional<snf::server::PlayerCommand> { return std::nullopt; }));
+        assert(dispatcher.registerHandler(
+            snf::protocol::MessageType::Pong,
+            [](snf::protocol::Frame) -> std::optional<snf::server::PlayerCommand>
+            {
+                return std::nullopt;
+            }
+        ));
         GatewayFixture fixture{GatewayFixtureConfig{.dispatcher = std::move(dispatcher)}};
 
         const snf::protocol::Frame unknown_frame{
@@ -241,10 +252,12 @@ namespace
             .request_id = 1,
             .payload = {},
         };
-        assert(fixture.gateway.tryPost(snf::server::FrameEnvelope{
-                   .connection = snf::net::ConnectionId{.descriptor = 1, .generation = 1},
-                   .frame = unknown_frame,
-               }) == snf::server::FramePostResult::UnsupportedMessage);
+        assert(
+            fixture.gateway.tryPost(snf::server::FrameEnvelope{
+                .connection = snf::net::ConnectionId{.descriptor = 1, .generation = 1},
+                .frame = unknown_frame,
+            }) == snf::server::FramePostResult::UnsupportedMessage
+        );
         assert(fixture.gateway.tryPost(make_frame(snf::protocol::MessageType::Pong)) == snf::server::FramePostResult::InvalidPayload);
         assert(fixture.commands.post_count == 0);
     }
@@ -347,15 +360,17 @@ namespace
         const int post_count = fixture.commands.post_count;
         assert(fixture.gateway.tryPost(make_party_join_frame(connection, 8)) == snf::server::FramePostResult::InvalidPayload);
         assert(fixture.commands.post_count == post_count);
-        assert(fixture.gateway.tryPost(snf::server::FrameEnvelope{
-                   .connection = connection,
-                   .frame =
-                       snf::protocol::Frame{
-                           .type = snf::protocol::MessageType::PartyLeave,
-                           .request_id = 11,
-                           .payload = {},
-                       },
-               }) == snf::server::FramePostResult::Accepted);
+        assert(
+            fixture.gateway.tryPost(snf::server::FrameEnvelope{
+                .connection = connection,
+                .frame =
+                    snf::protocol::Frame{
+                        .type = snf::protocol::MessageType::PartyLeave,
+                        .request_id = 11,
+                        .payload = {},
+                    },
+            }) == snf::server::FramePostResult::Accepted
+        );
         route = std::get_if<snf::server::PartyCommandRoute>(&fixture.commands.posted->route);
         assert(route != nullptr);
         assert(std::holds_alternative<snf::server::LeavePartyCommand>(route->command));
@@ -370,12 +385,14 @@ namespace
         assert(fixture.gateway.tryPost(make_party_join_frame(connection, 9)) == snf::server::FramePostResult::Accepted);
 
         const std::size_t before = fixture.commands.route_indices.size();
-        assert(fixture.gateway.tryPostConnectionClosed(snf::server::ConnectionClosed{
-                   .connection = connection,
-                   .cause = snf::server::ConnectionCloseCause::PeerClosed,
-                   .has_location_snapshot = false,
-                   .last_location = std::nullopt,
-               }) == snf::server::PostResult::Accepted);
+        assert(
+            fixture.gateway.tryPostConnectionClosed(snf::server::ConnectionClosed{
+                .connection = connection,
+                .cause = snf::server::ConnectionCloseCause::PeerClosed,
+                .has_location_snapshot = false,
+                .last_location = std::nullopt,
+            }) == snf::server::PostResult::Accepted
+        );
         assert(fixture.commands.route_indices.size() == before + 2);
         assert(fixture.commands.route_indices[before] == 3);
         assert(fixture.commands.route_indices[before + 1] == 1);
@@ -439,11 +456,13 @@ namespace
 
         assert(fixture.gateway.tryPost(make_enter_frame(connection, 5, 1, 2)) == snf::server::FramePostResult::InvalidPayload);
         assert(fixture.gateway.tryPost(make_auth_frame(connection, player)) == snf::server::FramePostResult::Accepted);
-        fixture.sessions.noteLocation(connection,
-                                      snf::server::PlayerLocation{
-                                          .zone = snf::server::ZoneId{.value = 5},
-                                          .position = {.x = 8, .y = 9},
-                                      });
+        fixture.sessions.noteLocation(
+            connection,
+            snf::server::PlayerLocation{
+                .zone = snf::server::ZoneId{.value = 5},
+                .position = {.x = 8, .y = 9},
+            }
+        );
 
         fixture.commands.result = snf::server::PostResult::Full;
         assert(fixture.gateway.tryPost(make_enter_frame(connection, 5, 1, 2)) == snf::server::FramePostResult::Full);
@@ -468,15 +487,17 @@ namespace
         assert(move->route_epoch == route_epoch);
         assert((move->position == snf::server::ZonePosition{.x = -3, .y = 4}));
 
-        assert(fixture.gateway.tryPost(snf::server::FrameEnvelope{
-                   .connection = connection,
-                   .frame =
-                       snf::protocol::Frame{
-                           .type = snf::protocol::MessageType::LeaveZone,
-                           .request_id = 32,
-                           .payload = {},
-                       },
-               }) == snf::server::FramePostResult::Accepted);
+        assert(
+            fixture.gateway.tryPost(snf::server::FrameEnvelope{
+                .connection = connection,
+                .frame =
+                    snf::protocol::Frame{
+                        .type = snf::protocol::MessageType::LeaveZone,
+                        .request_id = 32,
+                        .payload = {},
+                    },
+            }) == snf::server::FramePostResult::Accepted
+        );
         zone = std::get_if<snf::server::ZoneCommandRoute>(&fixture.commands.posted->route);
         assert(zone != nullptr);
         const auto* leave = std::get_if<snf::server::LeaveZoneCommand>(&zone->command);
@@ -498,21 +519,26 @@ namespace
         assert(fixture.gateway.tryPost(make_move_frame(connection, -7, 12)) == snf::server::FramePostResult::Accepted);
 
         const std::size_t before = fixture.commands.route_indices.size();
-        assert(fixture.gateway.tryPostConnectionClosed(snf::server::ConnectionClosed{
-                   .connection = connection,
-                   .cause = snf::server::ConnectionCloseCause::PeerClosed,
-                   .has_location_snapshot = false,
-                   .last_location = std::nullopt,
-               }) == snf::server::PostResult::Accepted);
+        assert(
+            fixture.gateway.tryPostConnectionClosed(snf::server::ConnectionClosed{
+                .connection = connection,
+                .cause = snf::server::ConnectionCloseCause::PeerClosed,
+                .has_location_snapshot = false,
+                .last_location = std::nullopt,
+            }) == snf::server::PostResult::Accepted
+        );
         assert(fixture.commands.route_indices.size() == before + 2);
         assert(fixture.commands.route_indices[before] == 2);
         assert(fixture.commands.route_indices[before + 1] == 1);
         const auto* close = std::get_if<snf::server::ConnectionClosedRoute>(&fixture.commands.posted->route);
         assert(close != nullptr);
-        assert((close->last_location == snf::server::PlayerLocation{
-                                            .zone = snf::server::ZoneId{.value = 6},
-                                            .position = {.x = -7, .y = 12},
-                                        }));
+        assert(
+            (close->last_location ==
+             snf::server::PlayerLocation{
+                 .zone = snf::server::ZoneId{.value = 6},
+                 .position = {.x = -7, .y = 12},
+             })
+        );
     }
 
     void test_cross_zone_handoff_hides_route_until_target_completion()
@@ -539,17 +565,19 @@ namespace
         assert(source_context.step == snf::server::ZoneHandoffStep::LeaveSource);
         assert(!fixture.routes.routeFor(connection));
 
-        assert(fixture.transitions.publish(source_context.ticket,
-                                           snf::server::ZoneHandoffCompletion{
-                                               .handoff_id = source_context.handoff_id,
-                                               .connection = snf::net::ConnectionId{.descriptor = 999, .generation = 999},
-                                               .player = player,
-                                               .zone = source_zone,
-                                               .route_epoch = source_context.route_epoch,
-                                               .step = source_context.step,
-                                               .status = snf::server::ZoneCommandStatus::Applied,
-                                               .position = snf::server::ZonePosition{.x = 1, .y = 2},
-                                           }));
+        assert(fixture.transitions.publish(
+            source_context.ticket,
+            snf::server::ZoneHandoffCompletion{
+                .handoff_id = source_context.handoff_id,
+                .connection = snf::net::ConnectionId{.descriptor = 999, .generation = 999},
+                .player = player,
+                .zone = source_zone,
+                .route_epoch = source_context.route_epoch,
+                .step = source_context.step,
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .position = snf::server::ZonePosition{.x = 1, .y = 2},
+            }
+        ));
         fixture.gateway.drainTransitions();
         assert(fixture.gateway.zoneHandoffStats().stale_completions == 1);
         assert(!fixture.routes.routeFor(connection));
@@ -565,17 +593,19 @@ namespace
         assert(busy_send->frame.payload[0] == static_cast<std::byte>(snf::server::ZoneCommandStatus::TransitionInProgress));
         assert(fixture.lifecycle.terminalCount() == 1);
 
-        assert(fixture.transitions.publish(source_context.ticket,
-                                           snf::server::ZoneHandoffCompletion{
-                                               .handoff_id = source_context.handoff_id,
-                                               .connection = connection,
-                                               .player = player,
-                                               .zone = source_zone,
-                                               .route_epoch = source_context.route_epoch,
-                                               .step = source_context.step,
-                                               .status = snf::server::ZoneCommandStatus::Applied,
-                                               .position = snf::server::ZonePosition{.x = 1, .y = 2},
-                                           }));
+        assert(fixture.transitions.publish(
+            source_context.ticket,
+            snf::server::ZoneHandoffCompletion{
+                .handoff_id = source_context.handoff_id,
+                .connection = connection,
+                .player = player,
+                .zone = source_zone,
+                .route_epoch = source_context.route_epoch,
+                .step = source_context.step,
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .position = snf::server::ZonePosition{.x = 1, .y = 2},
+            }
+        ));
         fixture.gateway.drainTransitions();
         const auto* target_stage = std::get_if<snf::server::ZoneHandoffCommandRoute>(&fixture.commands.posted->route);
         assert(target_stage != nullptr && target_stage->command.handoff);
@@ -583,25 +613,30 @@ namespace
         assert(target_context.step == snf::server::ZoneHandoffStep::EnterTarget);
         assert(!fixture.routes.routeFor(connection));
 
-        assert(fixture.transitions.publish(target_context.ticket,
-                                           snf::server::ZoneHandoffCompletion{
-                                               .handoff_id = target_context.handoff_id,
-                                               .connection = connection,
-                                               .player = player,
-                                               .zone = target_zone,
-                                               .route_epoch = target_context.route_epoch,
-                                               .step = target_context.step,
-                                               .status = snf::server::ZoneCommandStatus::Applied,
-                                               .position = snf::server::ZonePosition{.x = 3, .y = 4},
-                                           }));
+        assert(fixture.transitions.publish(
+            target_context.ticket,
+            snf::server::ZoneHandoffCompletion{
+                .handoff_id = target_context.handoff_id,
+                .connection = connection,
+                .player = player,
+                .zone = target_zone,
+                .route_epoch = target_context.route_epoch,
+                .step = target_context.step,
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .position = snf::server::ZonePosition{.x = 3, .y = 4},
+            }
+        ));
         fixture.gateway.drainTransitions();
 
         const auto route = fixture.routes.routeFor(connection);
         assert(route && route->zone == target_zone && route->route_epoch == 2);
-        assert((fixture.sessions.locationFor(connection) == snf::server::PlayerLocation{
-                                                                .zone = target_zone,
-                                                                .position = {.x = 3, .y = 4},
-                                                            }));
+        assert(
+            (fixture.sessions.locationFor(connection) ==
+             snf::server::PlayerLocation{
+                 .zone = target_zone,
+                 .position = {.x = 3, .y = 4},
+             })
+        );
         const auto entered = fixture.outbound.tryPop();
         assert(entered);
         const auto* entered_send = std::get_if<snf::server::SendFrame>(&entered->action);
@@ -631,34 +666,38 @@ namespace
         const snf::server::ZoneHandoffContext compensation_leave = *source_stage->command.handoff;
         fixture.commands.results.push_back(snf::server::PostResult::Full);
         fixture.commands.results.push_back(snf::server::PostResult::Accepted);
-        assert(fixture.transitions.publish(compensation_leave.ticket,
-                                           snf::server::ZoneHandoffCompletion{
-                                               .handoff_id = compensation_leave.handoff_id,
-                                               .connection = connection,
-                                               .player = player,
-                                               .zone = target_zone,
-                                               .route_epoch = compensation_leave.route_epoch,
-                                               .step = compensation_leave.step,
-                                               .status = snf::server::ZoneCommandStatus::Applied,
-                                               .position = snf::server::ZonePosition{.x = 3, .y = 4},
-                                           }));
+        assert(fixture.transitions.publish(
+            compensation_leave.ticket,
+            snf::server::ZoneHandoffCompletion{
+                .handoff_id = compensation_leave.handoff_id,
+                .connection = connection,
+                .player = player,
+                .zone = target_zone,
+                .route_epoch = compensation_leave.route_epoch,
+                .step = compensation_leave.step,
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .position = snf::server::ZonePosition{.x = 3, .y = 4},
+            }
+        ));
         fixture.gateway.drainTransitions();
         const auto* restore_stage = std::get_if<snf::server::ZoneHandoffCommandRoute>(&fixture.commands.posted->route);
         assert(restore_stage != nullptr && restore_stage->command.handoff);
         const snf::server::ZoneHandoffContext restore_context = *restore_stage->command.handoff;
         assert(restore_context.step == snf::server::ZoneHandoffStep::RestoreSource);
         assert(restore_context.route_epoch == 5);
-        assert(fixture.transitions.publish(restore_context.ticket,
-                                           snf::server::ZoneHandoffCompletion{
-                                               .handoff_id = restore_context.handoff_id,
-                                               .connection = connection,
-                                               .player = player,
-                                               .zone = target_zone,
-                                               .route_epoch = restore_context.route_epoch,
-                                               .step = restore_context.step,
-                                               .status = snf::server::ZoneCommandStatus::Applied,
-                                               .position = snf::server::ZonePosition{.x = 3, .y = 4},
-                                           }));
+        assert(fixture.transitions.publish(
+            restore_context.ticket,
+            snf::server::ZoneHandoffCompletion{
+                .handoff_id = restore_context.handoff_id,
+                .connection = connection,
+                .player = player,
+                .zone = target_zone,
+                .route_epoch = restore_context.route_epoch,
+                .step = restore_context.step,
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .position = snf::server::ZonePosition{.x = 3, .y = 4},
+            }
+        ));
         fixture.gateway.drainTransitions();
         const auto compensated_route = fixture.routes.routeFor(connection);
         assert(compensated_route && compensated_route->zone == target_zone && compensated_route->route_epoch == 5);
@@ -678,17 +717,19 @@ namespace
         const snf::server::ZoneHandoffContext fatal_leave = *source_stage->command.handoff;
         fixture.commands.results.push_back(snf::server::PostResult::Full);
         fixture.commands.results.push_back(snf::server::PostResult::Full);
-        assert(fixture.transitions.publish(fatal_leave.ticket,
-                                           snf::server::ZoneHandoffCompletion{
-                                               .handoff_id = fatal_leave.handoff_id,
-                                               .connection = connection,
-                                               .player = player,
-                                               .zone = target_zone,
-                                               .route_epoch = fatal_leave.route_epoch,
-                                               .step = fatal_leave.step,
-                                               .status = snf::server::ZoneCommandStatus::Applied,
-                                               .position = snf::server::ZonePosition{.x = 3, .y = 4},
-                                           }));
+        assert(fixture.transitions.publish(
+            fatal_leave.ticket,
+            snf::server::ZoneHandoffCompletion{
+                .handoff_id = fatal_leave.handoff_id,
+                .connection = connection,
+                .player = player,
+                .zone = target_zone,
+                .route_epoch = fatal_leave.route_epoch,
+                .step = fatal_leave.step,
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .position = snf::server::ZonePosition{.x = 3, .y = 4},
+            }
+        ));
         fixture.gateway.drainTransitions();
         assert(!fixture.routes.routeFor(connection));
         const auto fatal_location = fixture.sessions.locationSnapshotFor(connection);
@@ -735,17 +776,19 @@ namespace
         const snf::server::PlayerId first_player{.value = 110};
         const auto first_source = begin_transfer(first_connection, first_player);
         assert(fixture.gateway.tryPostConnectionClosed(close_value(first_connection)) == snf::server::PostResult::Full);
-        assert(fixture.transitions.publish(first_source.ticket,
-                                           snf::server::ZoneHandoffCompletion{
-                                               .handoff_id = first_source.handoff_id,
-                                               .connection = first_connection,
-                                               .player = first_player,
-                                               .zone = source_zone,
-                                               .route_epoch = first_source.route_epoch,
-                                               .step = first_source.step,
-                                               .status = snf::server::ZoneCommandStatus::Applied,
-                                               .position = snf::server::ZonePosition{.x = 1, .y = 2},
-                                           }));
+        assert(fixture.transitions.publish(
+            first_source.ticket,
+            snf::server::ZoneHandoffCompletion{
+                .handoff_id = first_source.handoff_id,
+                .connection = first_connection,
+                .player = first_player,
+                .zone = source_zone,
+                .route_epoch = first_source.route_epoch,
+                .step = first_source.step,
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .position = snf::server::ZonePosition{.x = 1, .y = 2},
+            }
+        ));
         fixture.gateway.drainTransitions();
         assert(fixture.gateway.transitionsDrained());
         assert(!fixture.routes.routeFor(first_connection));
@@ -758,49 +801,55 @@ namespace
         const snf::net::ConnectionId second_connection{.descriptor = 71, .generation = 41};
         const snf::server::PlayerId second_player{.value = 111};
         const auto second_source = begin_transfer(second_connection, second_player);
-        assert(fixture.transitions.publish(second_source.ticket,
-                                           snf::server::ZoneHandoffCompletion{
-                                               .handoff_id = second_source.handoff_id,
-                                               .connection = second_connection,
-                                               .player = second_player,
-                                               .zone = source_zone,
-                                               .route_epoch = second_source.route_epoch,
-                                               .step = second_source.step,
-                                               .status = snf::server::ZoneCommandStatus::Applied,
-                                               .position = snf::server::ZonePosition{.x = 1, .y = 2},
-                                           }));
+        assert(fixture.transitions.publish(
+            second_source.ticket,
+            snf::server::ZoneHandoffCompletion{
+                .handoff_id = second_source.handoff_id,
+                .connection = second_connection,
+                .player = second_player,
+                .zone = source_zone,
+                .route_epoch = second_source.route_epoch,
+                .step = second_source.step,
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .position = snf::server::ZonePosition{.x = 1, .y = 2},
+            }
+        ));
         fixture.gateway.drainTransitions();
         const auto* target_stage = std::get_if<snf::server::ZoneHandoffCommandRoute>(&fixture.commands.posted->route);
         assert(target_stage != nullptr && target_stage->command.handoff);
         const snf::server::ZoneHandoffContext target_context = *target_stage->command.handoff;
         assert(fixture.gateway.tryPostConnectionClosed(close_value(second_connection)) == snf::server::PostResult::Full);
-        assert(fixture.transitions.publish(target_context.ticket,
-                                           snf::server::ZoneHandoffCompletion{
-                                               .handoff_id = target_context.handoff_id,
-                                               .connection = second_connection,
-                                               .player = second_player,
-                                               .zone = target_zone,
-                                               .route_epoch = target_context.route_epoch,
-                                               .step = target_context.step,
-                                               .status = snf::server::ZoneCommandStatus::Applied,
-                                               .position = snf::server::ZonePosition{.x = 3, .y = 4},
-                                           }));
+        assert(fixture.transitions.publish(
+            target_context.ticket,
+            snf::server::ZoneHandoffCompletion{
+                .handoff_id = target_context.handoff_id,
+                .connection = second_connection,
+                .player = second_player,
+                .zone = target_zone,
+                .route_epoch = target_context.route_epoch,
+                .step = target_context.step,
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .position = snf::server::ZonePosition{.x = 3, .y = 4},
+            }
+        ));
         fixture.gateway.drainTransitions();
         const auto* cleanup_stage = std::get_if<snf::server::ZoneHandoffCommandRoute>(&fixture.commands.posted->route);
         assert(cleanup_stage != nullptr && cleanup_stage->command.handoff);
         const snf::server::ZoneHandoffContext cleanup_context = *cleanup_stage->command.handoff;
         assert(cleanup_context.step == snf::server::ZoneHandoffStep::CleanupTarget);
-        assert(fixture.transitions.publish(cleanup_context.ticket,
-                                           snf::server::ZoneHandoffCompletion{
-                                               .handoff_id = cleanup_context.handoff_id,
-                                               .connection = second_connection,
-                                               .player = second_player,
-                                               .zone = target_zone,
-                                               .route_epoch = cleanup_context.route_epoch,
-                                               .step = cleanup_context.step,
-                                               .status = snf::server::ZoneCommandStatus::Applied,
-                                               .position = snf::server::ZonePosition{.x = 3, .y = 4},
-                                           }));
+        assert(fixture.transitions.publish(
+            cleanup_context.ticket,
+            snf::server::ZoneHandoffCompletion{
+                .handoff_id = cleanup_context.handoff_id,
+                .connection = second_connection,
+                .player = second_player,
+                .zone = target_zone,
+                .route_epoch = cleanup_context.route_epoch,
+                .step = cleanup_context.step,
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .position = snf::server::ZonePosition{.x = 3, .y = 4},
+            }
+        ));
         fixture.gateway.drainTransitions();
         assert(fixture.gateway.transitionsDrained());
         assert(fixture.gateway.tryPostConnectionClosed(close_value(second_connection)) == snf::server::PostResult::Accepted);
@@ -891,15 +940,17 @@ namespace
         const snf::server::RoomEntryContext join_context = *join_stage->room_entry;
 
         // 2. RoomActor completes JoinRoom -> Applied
-        assert(fixture.room_transitions.publish(join_context.ticket,
-                                                snf::server::RoomTransitionCompletion{
-                                                    .entry_id = join_context.entry_id,
-                                                    .connection = connection,
-                                                    .player = player,
-                                                    .room = room,
-                                                    .step = snf::server::RoomEntryStep::JoinRoom,
-                                                    .room_status = snf::server::RoomCommandStatus::Applied,
-                                                }));
+        assert(fixture.room_transitions.publish(
+            join_context.ticket,
+            snf::server::RoomTransitionCompletion{
+                .entry_id = join_context.entry_id,
+                .connection = connection,
+                .player = player,
+                .room = room,
+                .step = snf::server::RoomEntryStep::JoinRoom,
+                .room_status = snf::server::RoomCommandStatus::Applied,
+            }
+        ));
         fixture.gateway.drainTransitions();
 
         // 3. Next step posted: LeaveSource on source zone
@@ -909,16 +960,18 @@ namespace
         assert(leave_context.step == snf::server::RoomEntryStep::LeaveSource);
 
         // 4. ZoneActor completes LeaveZone -> Applied with position {15, 25}
-        assert(fixture.room_transitions.publish(leave_context.ticket,
-                                                snf::server::RoomTransitionCompletion{
-                                                    .entry_id = leave_context.entry_id,
-                                                    .connection = connection,
-                                                    .player = player,
-                                                    .zone = zone,
-                                                    .step = snf::server::RoomEntryStep::LeaveSource,
-                                                    .zone_status = snf::server::ZoneCommandStatus::Applied,
-                                                    .position = snf::server::ZonePosition{.x = 15, .y = 25},
-                                                }));
+        assert(fixture.room_transitions.publish(
+            leave_context.ticket,
+            snf::server::RoomTransitionCompletion{
+                .entry_id = leave_context.entry_id,
+                .connection = connection,
+                .player = player,
+                .zone = zone,
+                .step = snf::server::RoomEntryStep::LeaveSource,
+                .zone_status = snf::server::ZoneCommandStatus::Applied,
+                .position = snf::server::ZonePosition{.x = 15, .y = 25},
+            }
+        ));
         fixture.gateway.drainTransitions();
 
         // Now InRoom! Zone route is erased, connection is authoritative in Room
@@ -966,17 +1019,19 @@ namespace
         const snf::server::RoomEntryContext return_context = *enter_return_stage->command.room_entry;
 
         // ZoneActor completes EnterZone
-        assert(fixture.room_transitions.publish(return_context.ticket,
-                                                snf::server::RoomTransitionCompletion{
-                                                    .entry_id = return_context.entry_id,
-                                                    .return_id = return_context.return_id,
-                                                    .connection = connection,
-                                                    .player = player,
-                                                    .zone = zone,
-                                                    .step = return_context.step,
-                                                    .zone_status = snf::server::ZoneCommandStatus::Applied,
-                                                    .position = snf::server::ZonePosition{.x = 15, .y = 25},
-                                                }));
+        assert(fixture.room_transitions.publish(
+            return_context.ticket,
+            snf::server::RoomTransitionCompletion{
+                .entry_id = return_context.entry_id,
+                .return_id = return_context.return_id,
+                .connection = connection,
+                .player = player,
+                .zone = zone,
+                .step = return_context.step,
+                .zone_status = snf::server::ZoneCommandStatus::Applied,
+                .position = snf::server::ZonePosition{.x = 15, .y = 25},
+            }
+        ));
         fixture.gateway.drainTransitions();
 
         // Restored to Zone!
@@ -1017,15 +1072,17 @@ namespace
         // What the Room answers when it refuses, and what the Player's binding publishes
         // when the join never reached a Room at all: the same completion, so the same
         // ending. EntryFailed is the second case.
-        assert(fixture.room_transitions.publish(join_context.ticket,
-                                                snf::server::RoomTransitionCompletion{
-                                                    .entry_id = join_context.entry_id,
-                                                    .connection = connection,
-                                                    .player = player,
-                                                    .room = room,
-                                                    .step = snf::server::RoomEntryStep::JoinRoom,
-                                                    .room_status = snf::server::RoomCommandStatus::EntryFailed,
-                                                }));
+        assert(fixture.room_transitions.publish(
+            join_context.ticket,
+            snf::server::RoomTransitionCompletion{
+                .entry_id = join_context.entry_id,
+                .connection = connection,
+                .player = player,
+                .room = room,
+                .step = snf::server::RoomEntryStep::JoinRoom,
+                .room_status = snf::server::RoomCommandStatus::EntryFailed,
+            }
+        ));
         fixture.gateway.drainTransitions();
 
         const auto reply = fixture.outbound.tryPop();
@@ -1098,28 +1155,32 @@ namespace
         assert(fixture.gateway.tryPost(make_room_join_frame(connection, room.value)) == snf::server::FramePostResult::Accepted);
         const auto* join_stage = std::get_if<snf::server::PlayerCommandRoute>(&fixture.commands.posted->route);
         assert(join_stage != nullptr && join_stage->room_entry.has_value());
-        assert(fixture.room_transitions.publish(join_stage->room_entry->ticket,
-                                                snf::server::RoomTransitionCompletion{
-                                                    .entry_id = join_stage->room_entry->entry_id,
-                                                    .connection = connection,
-                                                    .player = player,
-                                                    .room = room,
-                                                    .step = snf::server::RoomEntryStep::JoinRoom,
-                                                    .room_status = snf::server::RoomCommandStatus::Applied,
-                                                }));
+        assert(fixture.room_transitions.publish(
+            join_stage->room_entry->ticket,
+            snf::server::RoomTransitionCompletion{
+                .entry_id = join_stage->room_entry->entry_id,
+                .connection = connection,
+                .player = player,
+                .room = room,
+                .step = snf::server::RoomEntryStep::JoinRoom,
+                .room_status = snf::server::RoomCommandStatus::Applied,
+            }
+        ));
         fixture.gateway.drainTransitions();
         const auto* leave_stage = std::get_if<snf::server::ZoneHandoffCommandRoute>(&fixture.commands.posted->route);
         assert(leave_stage != nullptr && leave_stage->command.room_entry.has_value());
-        assert(fixture.room_transitions.publish(leave_stage->command.room_entry->ticket,
-                                                snf::server::RoomTransitionCompletion{
-                                                    .entry_id = leave_stage->command.room_entry->entry_id,
-                                                    .connection = connection,
-                                                    .player = player,
-                                                    .zone = zone,
-                                                    .step = snf::server::RoomEntryStep::LeaveSource,
-                                                    .zone_status = snf::server::ZoneCommandStatus::Applied,
-                                                    .position = snf::server::ZonePosition{.x = 15, .y = 25},
-                                                }));
+        assert(fixture.room_transitions.publish(
+            leave_stage->command.room_entry->ticket,
+            snf::server::RoomTransitionCompletion{
+                .entry_id = leave_stage->command.room_entry->entry_id,
+                .connection = connection,
+                .player = player,
+                .zone = zone,
+                .step = snf::server::RoomEntryStep::LeaveSource,
+                .zone_status = snf::server::ZoneCommandStatus::Applied,
+                .position = snf::server::ZonePosition{.x = 15, .y = 25},
+            }
+        ));
         fixture.gateway.drainTransitions();
         assert(fixture.routes.inRoomFor(connection).has_value());
         static_cast<void>(fixture.outbound.tryPop()); // the RoomJoined that was granted
@@ -1155,31 +1216,35 @@ namespace
         const auto* join_stage = std::get_if<snf::server::PlayerCommandRoute>(&fixture.commands.posted->route);
         const snf::server::RoomEntryContext join_context = *join_stage->room_entry;
 
-        assert(fixture.room_transitions.publish(join_context.ticket,
-                                                snf::server::RoomTransitionCompletion{
-                                                    .entry_id = join_context.entry_id,
-                                                    .connection = connection,
-                                                    .player = player,
-                                                    .room = room,
-                                                    .step = snf::server::RoomEntryStep::JoinRoom,
-                                                    .room_status = snf::server::RoomCommandStatus::Applied,
-                                                }));
+        assert(fixture.room_transitions.publish(
+            join_context.ticket,
+            snf::server::RoomTransitionCompletion{
+                .entry_id = join_context.entry_id,
+                .connection = connection,
+                .player = player,
+                .room = room,
+                .step = snf::server::RoomEntryStep::JoinRoom,
+                .room_status = snf::server::RoomCommandStatus::Applied,
+            }
+        ));
         fixture.gateway.drainTransitions();
 
         const auto* leave_stage = std::get_if<snf::server::ZoneHandoffCommandRoute>(&fixture.commands.posted->route);
         assert(leave_stage != nullptr && leave_stage->command.room_entry.has_value());
         const snf::server::RoomEntryContext leave_context = *leave_stage->command.room_entry;
 
-        assert(fixture.room_transitions.publish(leave_context.ticket,
-                                                snf::server::RoomTransitionCompletion{
-                                                    .entry_id = leave_context.entry_id,
-                                                    .connection = connection,
-                                                    .player = player,
-                                                    .zone = zone,
-                                                    .step = snf::server::RoomEntryStep::LeaveSource,
-                                                    .zone_status = snf::server::ZoneCommandStatus::Applied,
-                                                    .position = snf::server::ZonePosition{.x = 15, .y = 25},
-                                                }));
+        assert(fixture.room_transitions.publish(
+            leave_context.ticket,
+            snf::server::RoomTransitionCompletion{
+                .entry_id = leave_context.entry_id,
+                .connection = connection,
+                .player = player,
+                .zone = zone,
+                .step = snf::server::RoomEntryStep::LeaveSource,
+                .zone_status = snf::server::ZoneCommandStatus::Applied,
+                .position = snf::server::ZonePosition{.x = 15, .y = 25},
+            }
+        ));
         fixture.gateway.drainTransitions();
         assert(fixture.routes.inRoomFor(connection).has_value());
 

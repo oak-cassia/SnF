@@ -192,12 +192,10 @@ namespace snf::server
         grants.reserve(_participants.size());
         for (const Participant& participant : _participants)
         {
-            grants.push_back(
-                StreetExperienceGrant{
-                    .player = participant.player,
-                    .experience = _config.clear_experience,
-                }
-            );
+            grants.push_back(StreetExperienceGrant{
+                .player = participant.player,
+                .experience = _config.clear_experience,
+            });
         }
 
         return RoomResult{

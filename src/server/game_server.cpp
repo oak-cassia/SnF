@@ -72,7 +72,8 @@ namespace
     {
         constexpr std::size_t FIXED_PARTY_RESPONSE_PAYLOAD_SIZE = 1 + 8 + 8 + 2;
         constexpr std::size_t MAX_MEMBERS_BY_PAYLOAD = (snf::protocol::MAX_PAYLOAD_SIZE - FIXED_PARTY_RESPONSE_PAYLOAD_SIZE) / 8;
-        constexpr std::size_t MAX_WIRE_MEMBERS = std::min(MAX_MEMBERS_BY_PAYLOAD, static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()));
+        constexpr std::size_t MAX_WIRE_MEMBERS =
+            std::min(MAX_MEMBERS_BY_PAYLOAD, static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()));
         if (max_members == 0 || max_members > MAX_WIRE_MEMBERS)
         {
             throw std::invalid_argument{"Party member capacity exceeds its wire response"};
@@ -98,10 +99,12 @@ namespace snf::server
         , _outbound_channel(
               [&config]
               {
-                  const std::size_t total_in_flight_budget =
-                      checked_product(config.actor_worker_count, config.actor_max_in_flight_operations_per_worker, "Actor in-flight operation budget exceeds size_t");
-                  const std::size_t total_actor_outstanding_budget =
-                      checked_product(config.actor_worker_count, config.actor_queue_capacity_per_worker, "Actor outstanding command budget exceeds size_t");
+                  const std::size_t total_in_flight_budget = checked_product(
+                      config.actor_worker_count, config.actor_max_in_flight_operations_per_worker, "Actor in-flight operation budget exceeds size_t"
+                  );
+                  const std::size_t total_actor_outstanding_budget = checked_product(
+                      config.actor_worker_count, config.actor_queue_capacity_per_worker, "Actor outstanding command budget exceeds size_t"
+                  );
 
                   return OutboundChannelConfig{
                       .capacity = config.outbound_queue_capacity,
@@ -118,23 +121,32 @@ namespace snf::server
                       // command that was already admitted when its session disappeared.
                       // Cover both populations; the channel still has a no-throw
                       // close-all fail-safe if this accounting invariant is ever broken.
-                      .max_pending_admission_failures = checked_sum(config.connection_lifecycle_capacity, total_actor_outstanding_budget, "Outbound admission failure budget exceeds size_t"),
+                      .max_pending_admission_failures = checked_sum(
+                          config.connection_lifecycle_capacity, total_actor_outstanding_budget, "Outbound admission failure budget exceeds size_t"
+                      ),
                   };
               }(),
-              _outbound_event.getDescriptor())
-        , _zone_transition_channel(checked_zone_handoffs(config.max_zone_handoffs, config.connection_lifecycle_capacity), _outbound_event.getDescriptor())
-        , _room_transition_channel(checked_zone_handoffs(config.max_room_entries, config.connection_lifecycle_capacity), _outbound_event.getDescriptor())
+              _outbound_event.getDescriptor()
+          )
+        , _zone_transition_channel(
+              checked_zone_handoffs(config.max_zone_handoffs, config.connection_lifecycle_capacity), _outbound_event.getDescriptor()
+          )
+        , _room_transition_channel(
+              checked_zone_handoffs(config.max_room_entries, config.connection_lifecycle_capacity), _outbound_event.getDescriptor()
+          )
         , _player_responses(_outbound_channel)
         , _zone_results(_outbound_channel)
         , _party_results(_outbound_channel)
         , _route_coordinator(checked_zone_handoffs(config.max_zone_handoffs, config.connection_lifecycle_capacity))
         , _party_coordinator(checked_party_members(config.max_party_members))
         , _player_repository(make_player_repository(config))
-        , _player_persistence_service(*_player_repository,
-                                      PlayerPersistenceServiceConfig{
-                                          .queue_capacity = config.player_persistence_queue_capacity,
-                                          .flush_interval = config.player_persistence_flush_interval,
-                                      })
+        , _player_persistence_service(
+              *_player_repository,
+              PlayerPersistenceServiceConfig{
+                  .queue_capacity = config.player_persistence_queue_capacity,
+                  .flush_interval = config.player_persistence_flush_interval,
+              }
+          )
         , _runtime_completion(snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic), _outbound_event.getDescriptor())
         , _player_actor_binding(_player_responses, _outbound_channel, _command_lifecycle)
         , _persistent_player_actor_binding(
@@ -153,7 +165,11 @@ namespace snf::server
                           _player_sessions.completePassivation(*player);
                       }
                   },
-                  .on_record_loaded = [this](const snf::net::ConnectionId connection, std::optional<PlayerLocation> location) { _player_sessions.noteLocation(connection, std::move(location)); },
+                  .on_record_loaded =
+                      [this](const snf::net::ConnectionId connection, std::optional<PlayerLocation> location)
+                  {
+                      _player_sessions.noteLocation(connection, std::move(location));
+                  },
                   // The Room never got the join, so the step it would have answered has
                   // to answer itself. RoomEntryService already ends a refused join by
                   // rolling the route back, releasing the ticket and replying, so the
@@ -171,7 +187,8 @@ namespace snf::server
                   },
                   .persistence_service = &_player_persistence_service,
                   .max_purchase_idempotency_records_per_player = config.max_purchase_idempotency_records_per_player,
-              })
+              }
+          )
         , _zone_actor_binding(
               ZoneActorBindingConfig{
                   .actor =
@@ -204,23 +221,26 @@ namespace snf::server
                       }
 
                       const ZoneHandoffContext& context = *command.handoff;
-                      if (!_zone_transition_channel.publish(context.ticket,
-                                                            ZoneHandoffCompletion{
-                                                                .handoff_id = context.handoff_id,
-                                                                .connection = context.connection,
-                                                                .player = context.player,
-                                                                .zone = command.zone,
-                                                                .route_epoch = context.route_epoch,
-                                                                .step = context.step,
-                                                                .status = result.status,
-                                                                .position = result.position,
-                                                            }))
+                      if (!_zone_transition_channel.publish(
+                              context.ticket,
+                              ZoneHandoffCompletion{
+                                  .handoff_id = context.handoff_id,
+                                  .connection = context.connection,
+                                  .player = context.player,
+                                  .zone = command.zone,
+                                  .route_epoch = context.route_epoch,
+                                  .step = context.step,
+                                  .status = result.status,
+                                  .position = result.position,
+                              }
+                          ))
                       {
                           _runtime_completion.notifyFailed(snf::runtime::RuntimeId::Logic);
                       }
                   },
               },
-              _command_lifecycle)
+              _command_lifecycle
+          )
         , _party_actor_binding(
               PartyActorBindingConfig{
                   .actor = PartyConfig{.max_members = checked_party_members(config.max_party_members)},
@@ -251,7 +271,8 @@ namespace snf::server
                       _party_results.accept(command, result);
                   },
               },
-              _command_lifecycle)
+              _command_lifecycle
+          )
         , _room_result_sink(_outbound_channel, _player_sessions)
         , _room_actor_binding(
               RoomActorBindingConfig{
@@ -298,7 +319,8 @@ namespace snf::server
                       }
                   },
               },
-              _command_lifecycle)
+              _command_lifecycle
+          )
         , _logic_runtime(
               [config]
               {
@@ -308,22 +330,41 @@ namespace snf::server
                   runtime_config.max_in_flight_operations_per_worker = config.actor_max_in_flight_operations_per_worker;
                   return runtime_config;
               }(),
-              _runtime_completion)
+              _runtime_completion
+          )
         , _player_actor_ingress(_logic_runtime, _player_actor_binding, _persistent_player_actor_binding, _command_lifecycle)
         , _zone_actor_ingress(_logic_runtime, _zone_actor_binding, _command_lifecycle)
         , _party_actor_ingress(_logic_runtime, _party_actor_binding, _command_lifecycle)
         , _room_actor_ingress(_logic_runtime, _room_actor_binding, _command_lifecycle)
         , _command_router(_player_actor_ingress, _zone_actor_ingress, _party_actor_ingress, _room_actor_ingress)
-        , _zone_handoff_service(_command_router, _player_sessions, _route_coordinator, _zone_transition_channel, _command_lifecycle, _zone_results, config.max_zone_handoff_completions_per_turn)
-        , _room_entry_service(_command_router,
-                              _player_sessions,
-                              _route_coordinator,
-                              _room_transition_channel,
-                              _command_lifecycle,
-                              _outbound_channel,
-                              _zone_results,
-                              config.max_room_entry_completions_per_turn)
-        , _protocol_gateway(_command_router, _player_sessions, _route_coordinator, _party_coordinator, _zone_handoff_service, _room_entry_service, ProtocolGatewayConfig{})
+        , _zone_handoff_service(
+              _command_router,
+              _player_sessions,
+              _route_coordinator,
+              _zone_transition_channel,
+              _command_lifecycle,
+              _zone_results,
+              config.max_zone_handoff_completions_per_turn
+          )
+        , _room_entry_service(
+              _command_router,
+              _player_sessions,
+              _route_coordinator,
+              _room_transition_channel,
+              _command_lifecycle,
+              _outbound_channel,
+              _zone_results,
+              config.max_room_entry_completions_per_turn
+          )
+        , _protocol_gateway(
+              _command_router,
+              _player_sessions,
+              _route_coordinator,
+              _party_coordinator,
+              _zone_handoff_service,
+              _room_entry_service,
+              ProtocolGatewayConfig{}
+          )
         , _tcp_server(
               TcpServerConfig{
                   .port = config.port,
@@ -332,14 +373,27 @@ namespace snf::server
                   .client_send_buffer_size = config.client_send_buffer_size,
                   .connection_lifecycle_capacity = config.connection_lifecycle_capacity,
                   .metrics_report_interval = config.metrics_report_interval,
-                  .on_metrics_interval = [this] { publishMetrics(); },
-                  .on_control_wake = [this] { _protocol_gateway.drainTransitions(); },
-                  .is_control_drained = [this] { return _protocol_gateway.transitionsDrained(); },
+                  .on_metrics_interval =
+                      [this]
+                  {
+                      publishMetrics();
+                  },
+                  .on_control_wake =
+                      [this]
+                  {
+                      _protocol_gateway.drainTransitions();
+                  },
+                  .is_control_drained =
+                      [this]
+                  {
+                      return _protocol_gateway.transitionsDrained();
+                  },
               },
               _protocol_gateway,
               _outbound_channel,
               _runtime_completion,
-              _outbound_event.getDescriptor())
+              _outbound_event.getDescriptor()
+          )
     {
         _logic_runtime.registerBinding(_player_actor_binding);
         _logic_runtime.registerBinding(_persistent_player_actor_binding);

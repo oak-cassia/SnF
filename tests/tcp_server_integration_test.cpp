@@ -9,16 +9,16 @@
 #include <array>
 #include <atomic>
 #include <cassert>
-#include <cstring>
-#include <iostream>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <functional>
 #include <future>
+#include <iostream>
 #include <mutex>
 #include <numeric>
 #include <optional>
@@ -114,11 +114,14 @@ namespace
                       .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
                       .client_send_buffer_size = std::nullopt,
                   },
-                  termination_signal_descriptor)
+                  termination_signal_descriptor
+              )
         {
         }
 
-        explicit RunningServer(snf::server::GameServerConfig config, const int termination_signal_descriptor = snf::net::UniqueFileDescriptor::INVALID_FD)
+        explicit RunningServer(
+            snf::server::GameServerConfig config, const int termination_signal_descriptor = snf::net::UniqueFileDescriptor::INVALID_FD
+        )
             : _server(config)
             , _termination_signal_descriptor(termination_signal_descriptor)
             , _thread(
@@ -147,7 +150,8 @@ namespace
                               std::cerr << "[server] run() threw a non-standard exception\n";
                           }
                       }
-                  })
+                  }
+              )
         {
         }
 
@@ -328,8 +332,8 @@ namespace
             // indistinguishable from any other failed assertion in the suite. The
             // distinction that matters is peer-closed versus timed out: one means the
             // server went away, the other that it never answered.
-            std::cerr << "[recv] fd " << socket_descriptor << " wanted " << expected_byte_count << ", got " << received_byte_count << ", result " << result << ", errno " << errno << " ("
-                      << std::strerror(errno) << ")\n";
+            std::cerr << "[recv] fd " << socket_descriptor << " wanted " << expected_byte_count << ", got " << received_byte_count << ", result "
+                      << result << ", errno " << errno << " (" << std::strerror(errno) << ")\n";
             assert(false && "receive_exact: recv failed or timed out");
         }
 
@@ -376,13 +380,15 @@ namespace
 
     std::uint32_t read_u32(const std::vector<std::byte>& payload, const std::size_t offset)
     {
-        return (std::to_integer<std::uint32_t>(payload[offset]) << 24U) | (std::to_integer<std::uint32_t>(payload[offset + 1]) << 16U) | (std::to_integer<std::uint32_t>(payload[offset + 2]) << 8U) |
-               std::to_integer<std::uint32_t>(payload[offset + 3]);
+        return (std::to_integer<std::uint32_t>(payload[offset]) << 24U) | (std::to_integer<std::uint32_t>(payload[offset + 1]) << 16U) |
+               (std::to_integer<std::uint32_t>(payload[offset + 2]) << 8U) | std::to_integer<std::uint32_t>(payload[offset + 3]);
     }
 
     std::uint16_t read_u16(const std::vector<std::byte>& payload, const std::size_t offset)
     {
-        return static_cast<std::uint16_t>((std::to_integer<std::uint16_t>(payload[offset]) << 8U) | std::to_integer<std::uint16_t>(payload[offset + 1]));
+        return static_cast<std::uint16_t>(
+            (std::to_integer<std::uint16_t>(payload[offset]) << 8U) | std::to_integer<std::uint16_t>(payload[offset + 1])
+        );
     }
 
     std::uint64_t read_u64(const std::vector<std::byte>& payload, const std::size_t offset)
@@ -455,7 +461,8 @@ namespace
     snf::protocol::Frame receive_zone_response(const int socket_descriptor)
     {
         constexpr std::size_t ZONE_RESPONSE_PAYLOAD_SIZE = 27;
-        constexpr std::size_t ZONE_RESPONSE_FRAME_SIZE = snf::protocol::FRAME_LENGTH_FIELD_SIZE + snf::protocol::MIN_BODY_SIZE + ZONE_RESPONSE_PAYLOAD_SIZE;
+        constexpr std::size_t ZONE_RESPONSE_FRAME_SIZE =
+            snf::protocol::FRAME_LENGTH_FIELD_SIZE + snf::protocol::MIN_BODY_SIZE + ZONE_RESPONSE_PAYLOAD_SIZE;
         snf::protocol::FrameDecoder decoder;
         const auto decoded = decoder.append(receive_exact(socket_descriptor, ZONE_RESPONSE_FRAME_SIZE));
         assert(decoded.ok());
@@ -466,7 +473,8 @@ namespace
     snf::protocol::Frame receive_purchase_response(const int socket_descriptor)
     {
         constexpr std::size_t PURCHASE_RESPONSE_PAYLOAD_SIZE = 30;
-        constexpr std::size_t PURCHASE_RESPONSE_FRAME_SIZE = snf::protocol::FRAME_LENGTH_FIELD_SIZE + snf::protocol::MIN_BODY_SIZE + PURCHASE_RESPONSE_PAYLOAD_SIZE;
+        constexpr std::size_t PURCHASE_RESPONSE_FRAME_SIZE =
+            snf::protocol::FRAME_LENGTH_FIELD_SIZE + snf::protocol::MIN_BODY_SIZE + PURCHASE_RESPONSE_PAYLOAD_SIZE;
         snf::protocol::FrameDecoder decoder;
         const auto decoded = decoder.append(receive_exact(socket_descriptor, PURCHASE_RESPONSE_FRAME_SIZE));
         assert(decoded.ok());
@@ -477,7 +485,8 @@ namespace
     snf::protocol::Frame receive_party_response(const int socket_descriptor, const std::size_t member_count)
     {
         constexpr std::size_t FIXED_PARTY_RESPONSE_PAYLOAD_SIZE = 19;
-        const std::size_t frame_size = snf::protocol::FRAME_LENGTH_FIELD_SIZE + snf::protocol::MIN_BODY_SIZE + FIXED_PARTY_RESPONSE_PAYLOAD_SIZE + member_count * 8;
+        const std::size_t frame_size =
+            snf::protocol::FRAME_LENGTH_FIELD_SIZE + snf::protocol::MIN_BODY_SIZE + FIXED_PARTY_RESPONSE_PAYLOAD_SIZE + member_count * 8;
         snf::protocol::FrameDecoder decoder;
         const auto decoded = decoder.append(receive_exact(socket_descriptor, frame_size));
         assert(decoded.ok());
@@ -485,13 +494,15 @@ namespace
         return decoded.frames.front();
     }
 
-    void assert_party_response(const snf::protocol::Frame& response,
-                               const snf::protocol::MessageType type,
-                               const std::uint32_t request_id,
-                               const snf::server::PartyCommandStatus status,
-                               const std::uint64_t party,
-                               const std::uint64_t membership_epoch,
-                               const std::vector<std::uint64_t>& members)
+    void assert_party_response(
+        const snf::protocol::Frame& response,
+        const snf::protocol::MessageType type,
+        const std::uint32_t request_id,
+        const snf::server::PartyCommandStatus status,
+        const std::uint64_t party,
+        const std::uint64_t membership_epoch,
+        const std::vector<std::uint64_t>& members
+    )
     {
         assert(response.type == type);
         assert(response.request_id == request_id);
@@ -505,14 +516,16 @@ namespace
         }
     }
 
-    void assert_purchase_response(const snf::protocol::Frame& response,
-                                  const std::uint32_t request_id,
-                                  const snf::server::PurchaseStatus status,
-                                  const bool replayed,
-                                  const std::uint64_t key,
-                                  const std::uint32_t product,
-                                  const std::uint64_t balance,
-                                  const std::uint64_t item_count)
+    void assert_purchase_response(
+        const snf::protocol::Frame& response,
+        const std::uint32_t request_id,
+        const snf::server::PurchaseStatus status,
+        const bool replayed,
+        const std::uint64_t key,
+        const std::uint32_t product,
+        const std::uint64_t balance,
+        const std::uint64_t item_count
+    )
     {
         assert(response.type == snf::protocol::MessageType::PurchaseResult);
         assert(response.request_id == request_id);
@@ -555,29 +568,53 @@ namespace
     std::size_t actor_count(const snf::runtime::ActorRuntimeStats& stats)
     {
         return std::accumulate(
-            stats.workers.begin(), stats.workers.end(), std::size_t{0}, [](const std::size_t total, const snf::runtime::ActorRuntimeWorkerStats& worker) { return total + worker.actor_count; });
+            stats.workers.begin(),
+            stats.workers.end(),
+            std::size_t{0},
+            [](const std::size_t total, const snf::runtime::ActorRuntimeWorkerStats& worker)
+            {
+                return total + worker.actor_count;
+            }
+        );
     }
 
     std::uint64_t evicted_actor_count(const snf::runtime::ActorRuntimeStats& stats)
     {
         return std::accumulate(
-            stats.workers.begin(), stats.workers.end(), std::uint64_t{0}, [](const std::uint64_t total, const snf::runtime::ActorRuntimeWorkerStats& worker) { return total + worker.evicted_actors; });
+            stats.workers.begin(),
+            stats.workers.end(),
+            std::uint64_t{0},
+            [](const std::uint64_t total, const snf::runtime::ActorRuntimeWorkerStats& worker)
+            {
+                return total + worker.evicted_actors;
+            }
+        );
     }
 
     std::uint64_t queue_wait_sample_count(const snf::runtime::ActorRuntimeStats& stats)
     {
-        return std::accumulate(stats.workers.begin(),
-                               stats.workers.end(),
-                               std::uint64_t{0},
-                               [](const std::uint64_t total, const snf::runtime::ActorRuntimeWorkerStats& worker) { return total + worker.queue_wait_nanoseconds.sample_count; });
+        return std::accumulate(
+            stats.workers.begin(),
+            stats.workers.end(),
+            std::uint64_t{0},
+            [](const std::uint64_t total, const snf::runtime::ActorRuntimeWorkerStats& worker)
+            {
+                return total + worker.queue_wait_nanoseconds.sample_count;
+            }
+        );
     }
 
     std::uint64_t suspended_command_count(const snf::runtime::ActorRuntimeStats& stats)
     {
-        return std::accumulate(stats.workers.begin(),
-                               stats.workers.end(),
-                               std::uint64_t{0},
-                               [](const std::uint64_t total, const snf::runtime::ActorRuntimeWorkerStats& worker) { return total + worker.suspended_commands; });
+        return std::accumulate(
+            stats.workers.begin(),
+            stats.workers.end(),
+            std::uint64_t{0},
+            [](const std::uint64_t total, const snf::runtime::ActorRuntimeWorkerStats& worker)
+            {
+                return total + worker.suspended_commands;
+            }
+        );
     }
 
     void test_saturated_outbound_answers_every_request_and_still_drains()
@@ -832,11 +869,15 @@ namespace
 
         const auto first = purchase_frame(111, 1);
         send_all(client.getDescriptor(), snf::protocol::encode_frame(first));
-        assert_purchase_response(receive_purchase_response(client.getDescriptor()), first.request_id, snf::server::PurchaseStatus::Committed, false, 1, 1, 900, 1);
+        assert_purchase_response(
+            receive_purchase_response(client.getDescriptor()), first.request_id, snf::server::PurchaseStatus::Committed, false, 1, 1, 900, 1
+        );
 
         const auto duplicate = purchase_frame(112, 1);
         send_all(client.getDescriptor(), snf::protocol::encode_frame(duplicate));
-        assert_purchase_response(receive_purchase_response(client.getDescriptor()), duplicate.request_id, snf::server::PurchaseStatus::Committed, true, 1, 1, 900, 1);
+        assert_purchase_response(
+            receive_purchase_response(client.getDescriptor()), duplicate.request_id, snf::server::PurchaseStatus::Committed, true, 1, 1, 900, 1
+        );
 
         // The Actor commits before response emission. Closing immediately after the
         // send models a client that cannot know whether key 2 was applied in memory.
@@ -874,11 +915,22 @@ namespace
 
         const auto retry = purchase_frame(115, 2);
         send_all(reconnected.getDescriptor(), snf::protocol::encode_frame(retry));
-        assert_purchase_response(receive_purchase_response(reconnected.getDescriptor()), retry.request_id, snf::server::PurchaseStatus::Committed, false, 2, 1, 700, 3);
+        assert_purchase_response(
+            receive_purchase_response(reconnected.getDescriptor()), retry.request_id, snf::server::PurchaseStatus::Committed, false, 2, 1, 700, 3
+        );
 
         const auto unknown = purchase_frame(118, 4, 999);
         send_all(reconnected.getDescriptor(), snf::protocol::encode_frame(unknown));
-        assert_purchase_response(receive_purchase_response(reconnected.getDescriptor()), unknown.request_id, snf::server::PurchaseStatus::ProductNotFound, false, 4, 999, 700, 3);
+        assert_purchase_response(
+            receive_purchase_response(reconnected.getDescriptor()),
+            unknown.request_id,
+            snf::server::PurchaseStatus::ProductNotFound,
+            false,
+            4,
+            999,
+            700,
+            3
+        );
 
         reconnected.init();
         server.stop();
@@ -920,17 +972,26 @@ namespace
         const auto first_join = party_join_frame(122, party);
         send_all(first.getDescriptor(), snf::protocol::encode_frame(first_join));
         assert_party_response(
-            receive_party_response(first.getDescriptor(), 1), snf::protocol::MessageType::PartyJoined, first_join.request_id, snf::server::PartyCommandStatus::Applied, party, 1, {first_player});
+            receive_party_response(first.getDescriptor(), 1),
+            snf::protocol::MessageType::PartyJoined,
+            first_join.request_id,
+            snf::server::PartyCommandStatus::Applied,
+            party,
+            1,
+            {first_player}
+        );
 
         const auto second_join = party_join_frame(123, party);
         send_all(second.getDescriptor(), snf::protocol::encode_frame(second_join));
-        assert_party_response(receive_party_response(second.getDescriptor(), 2),
-                              snf::protocol::MessageType::PartyJoined,
-                              second_join.request_id,
-                              snf::server::PartyCommandStatus::Applied,
-                              party,
-                              1,
-                              {second_player, first_player});
+        assert_party_response(
+            receive_party_response(second.getDescriptor(), 2),
+            snf::protocol::MessageType::PartyJoined,
+            second_join.request_id,
+            snf::server::PartyCommandStatus::Applied,
+            party,
+            1,
+            {second_player, first_player}
+        );
 
         constexpr std::uint64_t third_player = 303;
         const auto third_auth = authentication_frame(126, third_player);
@@ -939,13 +1000,15 @@ namespace
         assert_authenticated(receive_exact(third.getDescriptor(), third_auth_bytes.size()), third_auth.request_id, third_player);
         const auto full_join = party_join_frame(127, party);
         send_all(third.getDescriptor(), snf::protocol::encode_frame(full_join));
-        assert_party_response(receive_party_response(third.getDescriptor(), 2),
-                              snf::protocol::MessageType::PartyJoined,
-                              full_join.request_id,
-                              snf::server::PartyCommandStatus::PartyFull,
-                              party,
-                              1,
-                              {second_player, first_player});
+        assert_party_response(
+            receive_party_response(third.getDescriptor(), 2),
+            snf::protocol::MessageType::PartyJoined,
+            full_join.request_id,
+            snf::server::PartyCommandStatus::PartyFull,
+            party,
+            1,
+            {second_player, first_player}
+        );
         const snf::protocol::Frame still_connected{
             .type = snf::protocol::MessageType::Ping,
             .request_id = 128,
@@ -962,7 +1025,14 @@ namespace
         };
         send_all(first.getDescriptor(), snf::protocol::encode_frame(first_leave));
         assert_party_response(
-            receive_party_response(first.getDescriptor(), 1), snf::protocol::MessageType::PartyLeft, first_leave.request_id, snf::server::PartyCommandStatus::Applied, party, 1, {second_player});
+            receive_party_response(first.getDescriptor(), 1),
+            snf::protocol::MessageType::PartyLeft,
+            first_leave.request_id,
+            snf::server::PartyCommandStatus::Applied,
+            party,
+            1,
+            {second_player}
+        );
 
         const snf::protocol::Frame second_leave{
             .type = snf::protocol::MessageType::PartyLeave,
@@ -971,7 +1041,14 @@ namespace
         };
         send_all(second.getDescriptor(), snf::protocol::encode_frame(second_leave));
         assert_party_response(
-            receive_party_response(second.getDescriptor(), 0), snf::protocol::MessageType::PartyLeft, second_leave.request_id, snf::server::PartyCommandStatus::Applied, party, 1, {});
+            receive_party_response(second.getDescriptor(), 0),
+            snf::protocol::MessageType::PartyLeft,
+            second_leave.request_id,
+            snf::server::PartyCommandStatus::Applied,
+            party,
+            1,
+            {}
+        );
 
         const auto party_stats = server.getPartyActorStats();
         assert(party_stats.commands == 5);
@@ -1008,7 +1085,8 @@ namespace
 
         auto first = connect_client(server.getPort());
         auto second = connect_client(server.getPort());
-        for (const auto& [socket, player, request_id] : {std::tuple{std::ref(first), first_player, std::uint32_t{300}}, std::tuple{std::ref(second), second_player, std::uint32_t{301}}})
+        for (const auto& [socket, player, request_id] :
+             {std::tuple{std::ref(first), first_player, std::uint32_t{300}}, std::tuple{std::ref(second), second_player, std::uint32_t{301}}})
         {
             const auto frame = authentication_frame(request_id, player);
             const auto bytes = snf::protocol::encode_frame(frame);
@@ -1023,17 +1101,21 @@ namespace
         // The two sit further apart than the AOI radius on purpose: a Zone reply carries
         // the players it can see, and the fixed-size reader below only holds a reply that
         // sees none.
-        for (const auto& [socket, request_id, y] : {std::tuple{std::ref(first), std::uint32_t{310}, std::uint32_t{20}}, std::tuple{std::ref(second), std::uint32_t{311}, std::uint32_t{5000}}})
+        for (const auto& [socket, request_id, y] :
+             {std::tuple{std::ref(first), std::uint32_t{310}, std::uint32_t{20}},
+              std::tuple{std::ref(second), std::uint32_t{311}, std::uint32_t{5000}}})
         {
             std::vector<std::byte> enter_payload = player_id_payload(zone);
             append_u32(enter_payload, 10);
             append_u32(enter_payload, y);
-            send_all(socket.get().getDescriptor(),
-                     snf::protocol::encode_frame(snf::protocol::Frame{
-                         .type = snf::protocol::MessageType::EnterZone,
-                         .request_id = request_id,
-                         .payload = std::move(enter_payload),
-                     }));
+            send_all(
+                socket.get().getDescriptor(),
+                snf::protocol::encode_frame(snf::protocol::Frame{
+                    .type = snf::protocol::MessageType::EnterZone,
+                    .request_id = request_id,
+                    .payload = std::move(enter_payload),
+                })
+            );
             const auto entered = receive_zone_response(socket.get().getDescriptor());
             assert(entered.type == snf::protocol::MessageType::ZoneEntered);
             assert(entered.request_id == request_id);
@@ -1056,17 +1138,21 @@ namespace
         // In a Room means in no Zone. The Move is answered rather than refused, and it
         // changes nothing: the position the return restores below is the one they entered
         // the Room with.
-        send_all(first.getDescriptor(),
-                 snf::protocol::encode_frame(snf::protocol::Frame{
-                     .type = snf::protocol::MessageType::Move,
-                     .request_id = 312,
-                     .payload = [] {
-                         std::vector<std::byte> payload;
-                         append_u32(payload, 99);
-                         append_u32(payload, 99);
-                         return payload;
-                     }(),
-                 }));
+        send_all(
+            first.getDescriptor(),
+            snf::protocol::encode_frame(snf::protocol::Frame{
+                .type = snf::protocol::MessageType::Move,
+                .request_id = 312,
+                .payload =
+                    []
+                {
+                    std::vector<std::byte> payload;
+                    append_u32(payload, 99);
+                    append_u32(payload, 99);
+                    return payload;
+                }(),
+            })
+        );
         const auto refused_move = receive_zone_response(first.getDescriptor());
         assert(refused_move.type == snf::protocol::MessageType::Moved);
         assert(refused_move.request_id == 312);
@@ -1100,17 +1186,21 @@ namespace
         // The route is real again, on a fresh epoch: entering minted 1, the return minted
         // 2. A Move that lands proves the whole way back, not just the frame announcing
         // it.
-        for (const auto& [socket, request_id, y] : {std::tuple{std::ref(first), std::uint32_t{320}, std::int32_t{21}}, std::tuple{std::ref(second), std::uint32_t{321}, std::int32_t{5001}}})
+        for (const auto& [socket, request_id, y] :
+             {std::tuple{std::ref(first), std::uint32_t{320}, std::int32_t{21}}, std::tuple{std::ref(second), std::uint32_t{321}, std::int32_t{5001}}
+             })
         {
             std::vector<std::byte> move_payload;
             append_u32(move_payload, 11);
             append_u32(move_payload, static_cast<std::uint32_t>(y));
-            send_all(socket.get().getDescriptor(),
-                     snf::protocol::encode_frame(snf::protocol::Frame{
-                         .type = snf::protocol::MessageType::Move,
-                         .request_id = request_id,
-                         .payload = std::move(move_payload),
-                     }));
+            send_all(
+                socket.get().getDescriptor(),
+                snf::protocol::encode_frame(snf::protocol::Frame{
+                    .type = snf::protocol::MessageType::Move,
+                    .request_id = request_id,
+                    .payload = std::move(move_payload),
+                })
+            );
             const auto moved = receive_zone_response(socket.get().getDescriptor());
             assert(moved.type == snf::protocol::MessageType::Moved);
             assert(moved.request_id == request_id);
@@ -1241,12 +1331,14 @@ namespace
         std::vector<std::byte> source_payload = player_id_payload(source_zone);
         append_u32(source_payload, 10);
         append_u32(source_payload, 20);
-        send_all(client.getDescriptor(),
-                 snf::protocol::encode_frame(snf::protocol::Frame{
-                     .type = snf::protocol::MessageType::EnterZone,
-                     .request_id = 401,
-                     .payload = std::move(source_payload),
-                 }));
+        send_all(
+            client.getDescriptor(),
+            snf::protocol::encode_frame(snf::protocol::Frame{
+                .type = snf::protocol::MessageType::EnterZone,
+                .request_id = 401,
+                .payload = std::move(source_payload),
+            })
+        );
         const auto source_entered = receive_zone_response(client.getDescriptor());
         assert(source_entered.type == snf::protocol::MessageType::ZoneEntered);
         assert(read_u64(source_entered.payload, 1) == source_zone);
@@ -1255,12 +1347,14 @@ namespace
         std::vector<std::byte> target_payload = player_id_payload(target_zone);
         append_u32(target_payload, static_cast<std::uint32_t>(-50));
         append_u32(target_payload, 60);
-        send_all(client.getDescriptor(),
-                 snf::protocol::encode_frame(snf::protocol::Frame{
-                     .type = snf::protocol::MessageType::EnterZone,
-                     .request_id = 402,
-                     .payload = std::move(target_payload),
-                 }));
+        send_all(
+            client.getDescriptor(),
+            snf::protocol::encode_frame(snf::protocol::Frame{
+                .type = snf::protocol::MessageType::EnterZone,
+                .request_id = 402,
+                .payload = std::move(target_payload),
+            })
+        );
         const auto target_entered = receive_zone_response(client.getDescriptor());
         assert(target_entered.type == snf::protocol::MessageType::ZoneEntered);
         assert(target_entered.request_id == 402);
@@ -1273,23 +1367,27 @@ namespace
         std::vector<std::byte> move_payload;
         append_u32(move_payload, 70);
         append_u32(move_payload, static_cast<std::uint32_t>(-80));
-        send_all(client.getDescriptor(),
-                 snf::protocol::encode_frame(snf::protocol::Frame{
-                     .type = snf::protocol::MessageType::Move,
-                     .request_id = 403,
-                     .payload = std::move(move_payload),
-                 }));
+        send_all(
+            client.getDescriptor(),
+            snf::protocol::encode_frame(snf::protocol::Frame{
+                .type = snf::protocol::MessageType::Move,
+                .request_id = 403,
+                .payload = std::move(move_payload),
+            })
+        );
         const auto moved = receive_zone_response(client.getDescriptor());
         assert(moved.type == snf::protocol::MessageType::Moved);
         assert(read_u64(moved.payload, 1) == target_zone);
         assert(read_u64(moved.payload, 9) == 2);
 
-        send_all(client.getDescriptor(),
-                 snf::protocol::encode_frame(snf::protocol::Frame{
-                     .type = snf::protocol::MessageType::LeaveZone,
-                     .request_id = 404,
-                     .payload = {},
-                 }));
+        send_all(
+            client.getDescriptor(),
+            snf::protocol::encode_frame(snf::protocol::Frame{
+                .type = snf::protocol::MessageType::LeaveZone,
+                .request_id = 404,
+                .payload = {},
+            })
+        );
         const auto left = receive_zone_response(client.getDescriptor());
         assert(left.type == snf::protocol::MessageType::ZoneLeft);
         assert(read_u64(left.payload, 1) == target_zone);
@@ -1351,23 +1449,27 @@ namespace
             std::vector<std::byte> enter_payload = player_id_payload(zone_id);
             append_u32(enter_payload, 1);
             append_u32(enter_payload, 2);
-            send_all(client.getDescriptor(),
-                     snf::protocol::encode_frame(snf::protocol::Frame{
-                         .type = snf::protocol::MessageType::EnterZone,
-                         .request_id = 301,
-                         .payload = std::move(enter_payload),
-                     }));
+            send_all(
+                client.getDescriptor(),
+                snf::protocol::encode_frame(snf::protocol::Frame{
+                    .type = snf::protocol::MessageType::EnterZone,
+                    .request_id = 301,
+                    .payload = std::move(enter_payload),
+                })
+            );
             static_cast<void>(receive_zone_response(client.getDescriptor()));
 
             std::vector<std::byte> move_payload;
             append_u32(move_payload, static_cast<std::uint32_t>(-30));
             append_u32(move_payload, 45);
-            send_all(client.getDescriptor(),
-                     snf::protocol::encode_frame(snf::protocol::Frame{
-                         .type = snf::protocol::MessageType::Move,
-                         .request_id = 302,
-                         .payload = std::move(move_payload),
-                     }));
+            send_all(
+                client.getDescriptor(),
+                snf::protocol::encode_frame(snf::protocol::Frame{
+                    .type = snf::protocol::MessageType::Move,
+                    .request_id = 302,
+                    .payload = std::move(move_payload),
+                })
+            );
             static_cast<void>(receive_zone_response(client.getDescriptor()));
             client.init();
         }
@@ -1385,10 +1487,13 @@ namespace
             std::this_thread::sleep_for(1ms);
         }
         assert(saved.has_value());
-        assert((saved->last_location == snf::server::PlayerLocation{
-                                            .zone = snf::server::ZoneId{.value = zone_id},
-                                            .position = {.x = -30, .y = 45},
-                                        }));
+        assert(
+            (saved->last_location ==
+             snf::server::PlayerLocation{
+                 .zone = snf::server::ZoneId{.value = zone_id},
+                 .position = {.x = -30, .y = 45},
+             })
+        );
 
         const auto passivation_deadline = std::chrono::steady_clock::now() + 1s;
         while (actor_count(server.getActorRuntimeStats()) != 0 && std::chrono::steady_clock::now() < passivation_deadline)
@@ -1406,12 +1511,14 @@ namespace
         std::vector<std::byte> enter_payload = player_id_payload(zone_id);
         append_u32(enter_payload, 999);
         append_u32(enter_payload, 999);
-        send_all(reconnected.getDescriptor(),
-                 snf::protocol::encode_frame(snf::protocol::Frame{
-                     .type = snf::protocol::MessageType::EnterZone,
-                     .request_id = 304,
-                     .payload = std::move(enter_payload),
-                 }));
+        send_all(
+            reconnected.getDescriptor(),
+            snf::protocol::encode_frame(snf::protocol::Frame{
+                .type = snf::protocol::MessageType::EnterZone,
+                .request_id = 304,
+                .payload = std::move(enter_payload),
+            })
+        );
         const auto restored = receive_zone_response(reconnected.getDescriptor());
         assert(restored.type == snf::protocol::MessageType::ZoneEntered);
         assert(static_cast<std::int32_t>(read_u32(restored.payload, 17)) == -30);
@@ -1727,18 +1834,24 @@ namespace
     {
         RecordingFrameIngress ingress;
         const auto outbound_event = make_eventfd();
-        snf::server::OutboundChannel outbound{snf::server::OutboundChannelConfig{.capacity = 8, .max_slots_per_connection = 8}, outbound_event.getDescriptor()};
-        snf::runtime::RuntimeCompletionCoordinator runtime_completion{snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic), outbound_event.getDescriptor()};
-        snf::server::TcpServer server{snf::server::TcpServerConfig{
-                                          .port = 0,
-                                          .shutdown_grace_period = 5s,
-                                          .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
-                                          .client_send_buffer_size = std::nullopt,
-                                      },
-                                      ingress,
-                                      outbound,
-                                      runtime_completion,
-                                      outbound_event.getDescriptor()};
+        snf::server::OutboundChannel outbound{
+            snf::server::OutboundChannelConfig{.capacity = 8, .max_slots_per_connection = 8}, outbound_event.getDescriptor()
+        };
+        snf::runtime::RuntimeCompletionCoordinator runtime_completion{
+            snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic), outbound_event.getDescriptor()
+        };
+        snf::server::TcpServer server{
+            snf::server::TcpServerConfig{
+                .port = 0,
+                .shutdown_grace_period = 5s,
+                .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
+                .client_send_buffer_size = std::nullopt,
+            },
+            ingress,
+            outbound,
+            runtime_completion,
+            outbound_event.getDescriptor()
+        };
 
         std::promise<void> server_finished;
         const auto finished = server_finished.get_future();
@@ -1774,18 +1887,24 @@ namespace
             snf::server::PostResult::Accepted,
         };
         const auto outbound_event = make_eventfd();
-        snf::server::OutboundChannel outbound{snf::server::OutboundChannelConfig{.capacity = 8, .max_slots_per_connection = 8}, outbound_event.getDescriptor()};
-        snf::runtime::RuntimeCompletionCoordinator runtime_completion{snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic), outbound_event.getDescriptor()};
-        snf::server::TcpServer server{snf::server::TcpServerConfig{
-                                          .port = 0,
-                                          .shutdown_grace_period = 200ms,
-                                          .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
-                                          .client_send_buffer_size = std::nullopt,
-                                      },
-                                      ingress,
-                                      outbound,
-                                      runtime_completion,
-                                      outbound_event.getDescriptor()};
+        snf::server::OutboundChannel outbound{
+            snf::server::OutboundChannelConfig{.capacity = 8, .max_slots_per_connection = 8}, outbound_event.getDescriptor()
+        };
+        snf::runtime::RuntimeCompletionCoordinator runtime_completion{
+            snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic), outbound_event.getDescriptor()
+        };
+        snf::server::TcpServer server{
+            snf::server::TcpServerConfig{
+                .port = 0,
+                .shutdown_grace_period = 200ms,
+                .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
+                .client_send_buffer_size = std::nullopt,
+            },
+            ingress,
+            outbound,
+            runtime_completion,
+            outbound_event.getDescriptor()
+        };
 
         std::exception_ptr server_error;
         std::thread server_thread{[&]
@@ -1829,19 +1948,25 @@ namespace
         RecordingFrameIngress ingress;
         ingress.lifecycle_fallback = snf::server::PostResult::Full;
         const auto outbound_event = make_eventfd();
-        snf::server::OutboundChannel outbound{snf::server::OutboundChannelConfig{.capacity = 8, .max_slots_per_connection = 8}, outbound_event.getDescriptor()};
-        snf::runtime::RuntimeCompletionCoordinator runtime_completion{snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic), outbound_event.getDescriptor()};
-        snf::server::TcpServer server{snf::server::TcpServerConfig{
-                                          .port = 0,
-                                          .shutdown_grace_period = 200ms,
-                                          .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
-                                          .client_send_buffer_size = std::nullopt,
-                                          .connection_lifecycle_capacity = 2,
-                                      },
-                                      ingress,
-                                      outbound,
-                                      runtime_completion,
-                                      outbound_event.getDescriptor()};
+        snf::server::OutboundChannel outbound{
+            snf::server::OutboundChannelConfig{.capacity = 8, .max_slots_per_connection = 8}, outbound_event.getDescriptor()
+        };
+        snf::runtime::RuntimeCompletionCoordinator runtime_completion{
+            snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic), outbound_event.getDescriptor()
+        };
+        snf::server::TcpServer server{
+            snf::server::TcpServerConfig{
+                .port = 0,
+                .shutdown_grace_period = 200ms,
+                .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
+                .client_send_buffer_size = std::nullopt,
+                .connection_lifecycle_capacity = 2,
+            },
+            ingress,
+            outbound,
+            runtime_completion,
+            outbound_event.getDescriptor()
+        };
 
         std::exception_ptr server_error;
         std::thread server_thread{[&]
@@ -1888,24 +2013,34 @@ namespace
     {
         RecordingFrameIngress ingress;
         const auto outbound_event = make_eventfd();
-        snf::server::OutboundChannel outbound{snf::server::OutboundChannelConfig{.capacity = 2, .max_slots_per_connection = 2}, outbound_event.getDescriptor()};
-        snf::runtime::RuntimeCompletionCoordinator runtime_completion{snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic), outbound_event.getDescriptor()};
+        snf::server::OutboundChannel outbound{
+            snf::server::OutboundChannelConfig{.capacity = 2, .max_slots_per_connection = 2}, outbound_event.getDescriptor()
+        };
+        snf::runtime::RuntimeCompletionCoordinator runtime_completion{
+            snf::runtime::runtimeMask(snf::runtime::RuntimeId::Logic), outbound_event.getDescriptor()
+        };
         std::atomic<bool> control_drained{false};
-        snf::server::TcpServer server{snf::server::TcpServerConfig{
-                                          .port = 0,
-                                          .shutdown_grace_period = 500ms,
-                                          .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
-                                          .client_send_buffer_size = std::nullopt,
-                                          .connection_lifecycle_capacity = 2,
-                                          .metrics_report_interval = 0ms,
-                                          .on_metrics_interval = {},
-                                          .on_control_wake = {},
-                                          .is_control_drained = [&control_drained] { return control_drained.load(std::memory_order_acquire); },
-                                      },
-                                      ingress,
-                                      outbound,
-                                      runtime_completion,
-                                      outbound_event.getDescriptor()};
+        snf::server::TcpServer server{
+            snf::server::TcpServerConfig{
+                .port = 0,
+                .shutdown_grace_period = 500ms,
+                .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
+                .client_send_buffer_size = std::nullopt,
+                .connection_lifecycle_capacity = 2,
+                .metrics_report_interval = 0ms,
+                .on_metrics_interval = {},
+                .on_control_wake = {},
+                .is_control_drained =
+                    [&control_drained]
+                {
+                    return control_drained.load(std::memory_order_acquire);
+                },
+            },
+            ingress,
+            outbound,
+            runtime_completion,
+            outbound_event.getDescriptor()
+        };
 
         std::exception_ptr server_error;
         std::promise<void> finished;
@@ -1949,12 +2084,14 @@ int main()
     };
 
     run("test_returns_pong_for_ping", test_returns_pong_for_ping);
-    run("test_authenticates_one_session_and_allows_reconnect_after_passivation", test_authenticates_one_session_and_allows_reconnect_after_passivation);
+    run("test_authenticates_one_session_and_allows_reconnect_after_passivation",
+        test_authenticates_one_session_and_allows_reconnect_after_passivation);
     run("test_live_purchase_is_memory_authoritative_and_flushes", test_live_purchase_is_memory_authoritative_and_flushes);
     run("test_two_players_share_one_party_actor_and_passivate_it_when_empty", test_two_players_share_one_party_actor_and_passivate_it_when_empty);
     run("test_two_players_clear_a_room_and_are_told_without_asking", test_two_players_clear_a_room_and_are_told_without_asking);
     run("test_authenticated_player_enters_moves_and_leaves_a_zone", test_authenticated_player_enters_moves_and_leaves_a_zone);
-    run("test_authenticated_player_handoffs_between_zones_and_publishes_target_route", test_authenticated_player_handoffs_between_zones_and_publishes_target_route);
+    run("test_authenticated_player_handoffs_between_zones_and_publishes_target_route",
+        test_authenticated_player_handoffs_between_zones_and_publishes_target_route);
     run("test_zone_position_survives_disconnect_save_and_reconnect", test_zone_position_survives_disconnect_save_and_reconnect);
     run("test_collects_baseline_saturation_metrics_for_a_round_trip", test_collects_baseline_saturation_metrics_for_a_round_trip);
     run("test_saturated_outbound_answers_every_request_and_still_drains", test_saturated_outbound_answers_every_request_and_still_drains);
@@ -1968,10 +2105,20 @@ int main()
     run("test_request_stop_closes_listener_and_active_sessions", test_request_stop_closes_listener_and_active_sessions);
     run("test_closes_slow_client_when_send_queue_exceeds_limit", test_closes_slow_client_when_send_queue_exceeds_limit);
     run("test_shutdown_forces_slow_client_closed_after_grace_period", test_shutdown_forces_slow_client_closed_after_grace_period);
-    run("test_termination_signal_stops_server(SIGINT)", [] { test_termination_signal_stops_server(SIGINT); });
-    run("test_termination_signal_stops_server(SIGTERM)", [] { test_termination_signal_stops_server(SIGTERM); });
+    run("test_termination_signal_stops_server(SIGINT)",
+        []
+        {
+            test_termination_signal_stops_server(SIGINT);
+        });
+    run("test_termination_signal_stops_server(SIGTERM)",
+        []
+        {
+            test_termination_signal_stops_server(SIGTERM);
+        });
     run("test_actor_runtime_failure_aborts_without_waiting_for_grace_period", test_actor_runtime_failure_aborts_without_waiting_for_grace_period);
-    run("test_retries_a_full_connection_closed_post_without_duplicate_after_acceptance", test_retries_a_full_connection_closed_post_without_duplicate_after_acceptance);
-    run("test_bounds_pending_connection_closes_and_rejects_new_connections_at_capacity", test_bounds_pending_connection_closes_and_rejects_new_connections_at_capacity);
+    run("test_retries_a_full_connection_closed_post_without_duplicate_after_acceptance",
+        test_retries_a_full_connection_closed_post_without_duplicate_after_acceptance);
+    run("test_bounds_pending_connection_closes_and_rejects_new_connections_at_capacity",
+        test_bounds_pending_connection_closes_and_rejects_new_connections_at_capacity);
     run("test_shutdown_waits_for_reactor_control_state_after_logic_drains", test_shutdown_waits_for_reactor_control_state_after_logic_drains);
 }

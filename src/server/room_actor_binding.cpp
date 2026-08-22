@@ -80,7 +80,8 @@ namespace snf::server
             CommandPayload{
                 .command = std::move(command),
                 .release = std::move(release),
-            });
+            }
+        );
     }
 
     snf::runtime::ActorSubmission RoomActorBinding::makePassivate(const RoomId room) const
@@ -97,7 +98,8 @@ namespace snf::server
             },
             snf::runtime::ActorActivation::ExistingOnly,
             snf::runtime::ActorAccounting::Control,
-            PassivatePayload{});
+            PassivatePayload{}
+        );
     }
 
     std::optional<snf::runtime::ActorSubmission> RoomActorBinding::makeTell(const snf::runtime::ActorKey target, snf::runtime::TellPayload payload)
@@ -151,8 +153,12 @@ namespace snf::server
         return std::make_unique<RoomActorState>(RoomId{.value = entity}, _actor_config);
     }
 
-    snf::runtime::ActorDispatchResult
-    RoomActorBinding::dispatch(snf::runtime::ActorState& state, const snf::runtime::ActorSubmission& submission, snf::runtime::ActorContext& context, const std::stop_token stop_token)
+    snf::runtime::ActorDispatchResult RoomActorBinding::dispatch(
+        snf::runtime::ActorState& state,
+        const snf::runtime::ActorSubmission& submission,
+        snf::runtime::ActorContext& context,
+        const std::stop_token stop_token
+    )
     {
         static_cast<void>(stop_token);
         if (submission.accounting() == snf::runtime::ActorAccounting::Control)
@@ -183,13 +189,15 @@ namespace snf::server
             // ExistingOnly: if the Room is gone there is nobody left to reward, so a
             // completion must not resurrect it. A Running Room stays resident, which
             // is what keeps this deliverable.
-            auto timer_submission = makeSubmission(submission.target(),
-                                                   snf::runtime::ActorActivation::ExistingOnly,
-                                                   snf::runtime::ActorAccounting::Command,
-                                                   CommandPayload{
-                                                       .command = std::move(completion_command),
-                                                       .release = {},
-                                                   });
+            auto timer_submission = makeSubmission(
+                submission.target(),
+                snf::runtime::ActorActivation::ExistingOnly,
+                snf::runtime::ActorAccounting::Command,
+                CommandPayload{
+                    .command = std::move(completion_command),
+                    .release = {},
+                }
+            );
             static_cast<void>(context.trySchedule(*result.complete_after, std::move(timer_submission)));
         }
 
@@ -202,7 +210,8 @@ namespace snf::server
                     .kind = snf::runtime::ActorKind::Player,
                     .entity = grant.player.value,
                 },
-                snf::runtime::TellPayload::of(grant)));
+                snf::runtime::TellPayload::of(grant)
+            ));
         }
 
         // A cleared Room has emitted its rewards and has nothing left to do, and a
@@ -215,7 +224,8 @@ namespace snf::server
         return snf::runtime::ActorDispatchResult::KeepActive;
     }
 
-    snf::runtime::ActorDispatchResult RoomActorBinding::resume(snf::runtime::ActorState& state, snf::runtime::ActorContext& context, const std::stop_token stop_token)
+    snf::runtime::ActorDispatchResult
+    RoomActorBinding::resume(snf::runtime::ActorState& state, snf::runtime::ActorContext& context, const std::stop_token stop_token)
     {
         static_cast<void>(state);
         static_cast<void>(context);
