@@ -103,7 +103,7 @@ Waiting → Running → Cleared
    Player·Connection exact-match passivation. Actor 내부에 중복 generation guard를 두지 않는다. (완료)
 4. **보상 인계 책임 전달** — tell 수락과 최초 load 성공 뒤의 책임 이전, 스냅샷 큐 수락까지
    PlayerActor 상주, tell·load·큐 거절 계측. 프로세스 장애를 넘는 보상 복구는 보장하지 않는다. (완료)
-5. **Room 부하 실측** — hot Room 하나와 분산 Room N개 비교, 느린 client의 outbound 포화 격리.
+5. **Room 부하 실측 (완료)** — hot Room 하나와 분산 Room N개 비교, 느린 client의 outbound 포화 격리.
    shutdown은 시나리오 종료 smoke로만 확인하고 별도 부하 축으로 만들지 않는다
 
 각 단계는 wire에서 관찰 가능한 상태로 끝난다. tick과 브로드캐스트를 한 단계로 묶은 이유가
@@ -143,6 +143,34 @@ transaction framework, 범용 saga/outbox, 과거 전체 `Transaction` abstracti
 protocol과 reward 적용 순서 보장을 만들지 않는다. 전달이 at-most-once이고 저장이 record 전체
 덮어쓰기이므로 이 범위에는 멱등 키가 들어갈 자리가 없다.
 
+### Step 5 Room 부하 측정 계약
+
+Room 정원은 4명이므로 참가자를 더 넣어 hot actor를 만드는 축은 없다. Step 5는 서로 다른 병목을
+섞지 않도록 아래 두 축을 따로 측정한다.
+
+- **단일 actor 직렬화 한계:** 1 Room × 4 client에서 client별 전투 요청 빈도를 올린다. Room command
+  지연과 tick turn p50/p99/max, tick budget 초과를 함께 보고 한 Room이 100ms simulation tick을
+  유지하는 범위를 찾는다
+- **worker 확장 한계:** client는 Room마다 최대 4명으로 나누고 `actor_worker_count`를 1로 고정한 채
+  Room 수를 늘려 tick budget 초과가 처음 나타나는 지점을 찾는다. 같은 sweep을 worker 2·4에서
+  반복해 수용 Room 수가 worker 수에 따라 확장되는지 비교한다
+
+측정 workload는 `RoomJoin` 뒤 방별 leader 하나가 `BattleStart`를 보내고, 모든 참가자가
+`UseSkill`과 `SetMoveIntent`를 반복한다. `request_id == 0`인 `BattleDigest`, `BattleCleared`,
+`BattleFailed`, `ReturnedToZone`은 request/response 오류가 아닌 server push다. load client는 push
+frame 수와 bytes, digest 도착 간격을 별도 집계한다. `players_per_room`은 Room id 배분만 결정하며
+hash를 역산해 특정 worker에 Room을 몰아넣지 않는다.
+
+리포트에는 worker별 queue와 mailbox high-water, `rejected_full`, Room tick/command 분포와 초과 수,
+digest fanout, 그리고 `grant_tell_rejections`, `reward_snapshot_admission_rejections`,
+`reward_snapshot_retry_giveups`, `grant_load_failures`를 포함한다. 느린 client 격리는 4인 전투에서
+한 연결만 읽기를 멈춘 뒤 그 연결만 닫히고, 남은 세 client가 연속 digest와 `ParticipantLeft`를
+받아 clear까지 진행하는 통합 테스트로 판정한다.
+
+Step 5에서는 범용 benchmark framework, actor hash co-location knob, shutdown 부하 축과 주기적
+resync snapshot을 만들지 않는다. shutdown은 측정 종료 smoke로만 확인한다. resync는 느린 client
+격리 결과가 살아 있는 참가자의 event 유실을 보일 때만 다시 설계한다.
+
 ### 확정한 계약
 
 - **시간은 deadline이다.** cooldown은 tick마다 감소시키지 않고 `ready_at`으로 둔다.
@@ -163,8 +191,10 @@ protocol과 reward 적용 순서 보장을 만들지 않는다. 전달이 at-mos
   tick 예약 거절은 metric으로 남기고 deadline을 backstop으로 쓰며, deadline 예약 거절은 Logic Runtime
   실패로 승격한다
 - **outbound 포화는 연결을 닫고 Room은 계속 진행한다.** Room을 suspend시키면 느린 client 하나가
-  4인 전투를 멈춘다. 살아 있는 연결이 이벤트 일부를 잃는 경로가 없으므로 resync snapshot은
-  만들지 않는다. 부하 측정에서 이 정책이 실제 문제로 확인되면 그때 설계한다
+  4인 전투를 멈춘다. Step 5 실측에서 느린 연결 하나만 닫힌 뒤 남은 세 client의 digest sequence가
+  연속으로 clear까지 진행했다. 살아 있는 연결의 event gap이 없으므로 resync snapshot은 만들지
+  않는다. 대규모 분산 부하에서 먼저 나타난 shared outbound admission 포화는 snapshot이 아니라
+  capacity/credit 문제다
 - **죽음과 퇴장은 다른 상태다.** 죽은 participant는 audience와 clear 보상 대상에 남아 관전하지만
   이동·cast·target 대상에서는 빠진다. leave와 disconnect는 participant를 제거하고 보상을 포기하며
   `ParticipantLeft`가 남은 client의 유령 상태를 지운다
@@ -186,10 +216,12 @@ protocol과 reward 적용 순서 보장을 만들지 않는다. 전달이 at-mos
   좌석을 해제하고 보상을 포기하며, Room 재적을 영속화하지 않으므로 reconnect는 저장된 Zone으로
   복원된다. mid-battle reconnect는 명시적 비범위다)
 - clear/fail 결과는 한 번만 생성되고 Room은 timer와 mailbox를 정리한 뒤 passivate된다. (충족)
-- 여러 Room 분산 부하와 하나의 hot Room 부하를 비교한다.
+- 여러 Room 분산 부하와 하나의 hot Room 부하를 비교한다. (충족:
+  [Step 5 Room 부하 측정 리포트](room-load-measurement.md))
 - 부하 리포트가 보상 tell 거절, 최초 load 실패와 저장 큐 거절 카운터 값을 포함한다. 카운터를 만드는 것은 구현
-  순서 4이고, 포화 상황에서 그 값을 보고하는 것이 이 축이다.
+  순서 4이고, 포화 상황에서 그 값을 보고하는 것이 이 축이다. (충족: 네 카운터 모두 0)
 - 느린 client가 outbound를 포화시키면 해당 연결만 종료되고 Room과 건강한 참가자는 계속 진행한다.
+  (충족: 1개 연결 종료, 3개 참가자의 연속 digest와 clear 확인)
 - deadline/Tick 예약 포화와 terminal 뒤 stale timer 정리를 포함한다. (충족)
 - Debug, TCP integration, ASan·UBSan과 TSan을 통과한다. (충족)
 
@@ -217,5 +249,5 @@ connection generation  → admission/routing에서 session 수명을 넘긴 stal
 
 1. 요구사항 → 상태 → command/result → 예외 흐름을 담은 콘텐츠 계약
 2. Actor 소유권과 async/backpressure/lifecycle 결정만 담은 아키텍처 문서
-3. 정상·hot Room·분산 Room과 outbound 포화 측정 결과
+3. [정상·hot Room·분산 Room과 outbound 포화 측정 결과](room-load-measurement.md)
 4. 5분 안에 재현 가능한 TCP demo와 실행 명령
