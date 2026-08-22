@@ -158,11 +158,11 @@ namespace snf::server
                   .repository = _player_repository.get(),
                   .on_before_command = {},
                   .on_actor_deactivated =
-                      [this](const PlayerActorId actor)
+                      [this](const PlayerActorId actor, const std::optional<snf::net::ConnectionId> closing_connection) noexcept
                   {
-                      if (const auto player = actor.playerId())
+                      if (const auto player = actor.playerId(); player && closing_connection)
                       {
-                          _player_sessions.completePassivation(*player);
+                          _player_sessions.completePassivation(*player, *closing_connection);
                       }
                   },
                   .on_record_loaded =

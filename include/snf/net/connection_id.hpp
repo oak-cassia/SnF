@@ -10,6 +10,8 @@ namespace snf::net
     // connection lifetime checks and must never be used as a persistent domain ID.
     struct ConnectionId
     {
+        // TCP generations are issued from 1, so default initialization is the
+        // intentional invalid identity without a second sentinel constant.
         int descriptor{-1};
         std::uint64_t generation{0};
 

@@ -164,16 +164,15 @@ namespace snf::server
         }
     }
 
-    void PlayerSessionDirectory::completePassivation(const PlayerId player) noexcept
+    void PlayerSessionDirectory::completePassivation(const PlayerId player, const snf::net::ConnectionId connection) noexcept
     {
         std::lock_guard lock{_mutex};
         const auto player_iterator = _connections_by_player.find(player);
-        if (player_iterator == _connections_by_player.end())
+        if (player_iterator == _connections_by_player.end() || player_iterator->second != connection)
         {
             return;
         }
 
-        const snf::net::ConnectionId connection = player_iterator->second;
         const auto connection_iterator = _sessions_by_connection.find(connection);
         if (connection_iterator == _sessions_by_connection.end() || connection_iterator->second.state != State::Closing)
         {

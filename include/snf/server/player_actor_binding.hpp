@@ -27,7 +27,7 @@ namespace snf::server
         std::function<void(PlayerActorId, const PlayerCommand&)> on_before_command{};
         // Runs after the scheduler has removed and destroyed a persistent Player
         // slot. GameServer uses it to finish the Closing -> detached transition.
-        std::function<void(PlayerActorId)> on_actor_deactivated{};
+        std::function<void(PlayerActorId, std::optional<snf::net::ConnectionId>)> on_actor_deactivated{};
         // Runs on the owning Worker after a persistent record has loaded and before
         // its first response is emitted. Session routing uses the immutable location
         // value to restore a Zone entry without reading Actor state cross-thread.
@@ -99,7 +99,7 @@ namespace snf::server
         snf::runtime::ActorKind _kind;
         PlayerRepository* _repository;
         std::function<void(PlayerActorId, const PlayerCommand&)> _on_before_command;
-        std::function<void(PlayerActorId)> _on_actor_deactivated;
+        std::function<void(PlayerActorId, std::optional<snf::net::ConnectionId>)> _on_actor_deactivated;
         std::function<void(snf::net::ConnectionId, std::optional<PlayerLocation>)> _on_record_loaded;
         std::function<void(const RoomEntryContext&, RoomId)> _on_room_join_undelivered;
         std::unique_ptr<PlayerPersistenceService> _owned_persistence_service;

@@ -99,7 +99,11 @@ namespace snf::server
             Saving,
         };
 
-        PlayerActorState(PlayerActorId actor_id, std::function<void(PlayerActorId)> on_deactivated, const std::size_t max_purchase_idempotency_records)
+        PlayerActorState(
+            PlayerActorId actor_id,
+            std::function<void(PlayerActorId, std::optional<snf::net::ConnectionId>)> on_deactivated,
+            const std::size_t max_purchase_idempotency_records
+        )
             // The Actor gets only the persistent identity: which namespace it is
             // routed in stays here, where routing lives.
             : player(actor_id.playerId(), max_purchase_idempotency_records)
@@ -112,13 +116,13 @@ namespace snf::server
         {
             if (on_deactivated)
             {
-                on_deactivated(identity);
+                on_deactivated(identity, closing_connection);
             }
         }
 
         Player player;
         PlayerActorId identity;
-        std::function<void(PlayerActorId)> on_deactivated;
+        std::function<void(PlayerActorId, std::optional<snf::net::ConnectionId>)> on_deactivated;
         bool loaded{false};
         Stage stage{Stage::Idle};
         std::optional<PlayerCommand> pending_command;
@@ -133,6 +137,10 @@ namespace snf::server
         // state for the same reason.
         snf::runtime::ActorTask<OutboundReservation> reservation_task;
         snf::runtime::ActorTask<PlayerSaveResult> save_task;
+        // Stable passivation identity captured only from ConnectionClosed. The
+        // response connection below is per-command scratch and cannot identify the
+        // session whose final save caused this Actor to leave.
+        std::optional<snf::net::ConnectionId> closing_connection;
         // The handler's decisions, held between its normal return and the application
         // whose capacity is still being awaited.
         PlayerResult pending_result;
@@ -299,6 +307,7 @@ namespace snf::server
                 throw std::logic_error{"Persistent Player close arrived before load completed"};
             }
 
+            player_state.closing_connection = payload.closed.connection;
             if (!player_state.loaded)
             {
                 return snf::runtime::ActorDispatchResult::Evict;

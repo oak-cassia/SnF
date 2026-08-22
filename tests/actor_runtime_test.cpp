@@ -1,4 +1,5 @@
 #include "outbound_reservation_test_support.hpp"
+#include "snf/game/street_experience_grant.hpp"
 #include "snf/runtime/actor_key.hpp"
 #include "snf/runtime/actor_runtime.hpp"
 #include "snf/runtime/bounded_queue.hpp"
@@ -150,6 +151,74 @@ namespace
         std::mutex mutex;
         snf::server::PlayerLoadCompletion pending_load;
         std::optional<snf::server::PlayerId> requested_player;
+        std::optional<snf::server::PlayerRecord> saved;
+    };
+
+    class ControlledSavePlayerRepository final : public snf::server::PlayerRepository
+    {
+    public:
+        ControlledSavePlayerRepository()
+            : save_held_future(save_held.get_future())
+        {
+        }
+
+        void asyncLoad(const snf::server::PlayerId, snf::server::PlayerLoadCompletion completion) override
+        {
+            completion(snf::server::PlayerLoadResult{
+                .status = snf::server::PlayerRepositoryStatus::Success,
+                .record = std::nullopt,
+            });
+        }
+
+        void asyncSave(snf::server::PlayerRecord record, snf::server::PlayerSaveCompletion completion) override
+        {
+            {
+                std::lock_guard lock{mutex};
+                if (hold_next_save)
+                {
+                    hold_next_save = false;
+                    pending_record = std::move(record);
+                    pending_save = std::move(completion);
+                    save_held.set_value();
+                    return;
+                }
+                saved = std::move(record);
+            }
+            completion(snf::server::PlayerSaveResult{
+                .status = snf::server::PlayerRepositoryStatus::Success,
+            });
+        }
+
+        void holdNextSave()
+        {
+            std::lock_guard lock{mutex};
+            assert(!hold_next_save);
+            assert(!pending_save);
+            hold_next_save = true;
+        }
+
+        void completeHeldSave()
+        {
+            snf::server::PlayerSaveCompletion completion;
+            {
+                std::lock_guard lock{mutex};
+                assert(pending_record.has_value());
+                assert(pending_save);
+                saved = std::move(pending_record);
+                pending_record.reset();
+                completion = std::move(pending_save);
+            }
+            completion(snf::server::PlayerSaveResult{
+                .status = snf::server::PlayerRepositoryStatus::Success,
+            });
+        }
+
+        std::promise<void> save_held;
+        std::future<void> save_held_future;
+        std::mutex mutex;
+        bool hold_next_save{false};
+        std::optional<snf::server::PlayerRecord> pending_record;
+        snf::server::PlayerSaveCompletion pending_save;
         std::optional<snf::server::PlayerRecord> saved;
     };
 
@@ -1444,6 +1513,181 @@ namespace
         assert(stats.in_flight_operations == 0);
     }
 
+    void test_player_deactivation_keeps_the_closing_connection_until_final_save_completes()
+    {
+        struct DeactivationObservation
+        {
+            std::atomic<std::uint64_t> count{0};
+            snf::server::PlayerActorId actor;
+            std::optional<snf::net::ConnectionId> connection;
+        };
+
+        RuntimeDependencies dependencies{8};
+        ControlledSavePlayerRepository repository;
+        snf::server::PlayerPersistenceService persistence{
+            repository,
+            snf::server::PlayerPersistenceServiceConfig{
+                .queue_capacity = 8,
+                .flush_interval = 1ms,
+            }
+        };
+        DeactivationObservation observation;
+        snf::server::PlayerActorBinding provisional{dependencies.outbound_sink, dependencies.outbound, dependencies.lifecycle};
+        snf::server::PlayerActorBinding persistent{
+            dependencies.outbound_sink,
+            dependencies.outbound,
+            dependencies.lifecycle,
+            snf::server::PlayerActorBindingConfig{
+                .actor_kind = ActorKind::Player,
+                .repository = &repository,
+                .on_before_command = {},
+                .on_actor_deactivated =
+                    [&observation](const snf::server::PlayerActorId actor, const std::optional<snf::net::ConnectionId> connection) noexcept
+                {
+                    observation.actor = actor;
+                    observation.connection = connection;
+                    observation.count.fetch_add(1, std::memory_order_release);
+                },
+                .on_record_loaded = {},
+                .on_room_join_undelivered = {},
+                .persistence_service = &persistence,
+            }
+        };
+        ActorRuntime runtime{player_runtime_config(1, 8), dependencies.completion};
+        runtime.registerBinding(provisional);
+        runtime.registerBinding(persistent);
+        snf::server::PlayerActorIngress ingress{runtime, provisional, persistent, dependencies.lifecycle};
+        runtime.start();
+
+        const snf::server::PlayerId player{.value = 782};
+        const snf::net::ConnectionId closing_connection{.descriptor = 76, .generation = 706};
+        const snf::net::ConnectionId last_command_connection{.descriptor = 77, .generation = 707};
+        assert(
+            ingress.tryPost(snf::server::PlayerInboundCommand{
+                .actor = player,
+                .connection = closing_connection,
+                .command = snf::server::AuthenticateCommand{.player = player},
+                .request_id = 1,
+            }) == PostResult::Accepted
+        );
+
+        auto await_response = [&dependencies]
+        {
+            std::optional<snf::server::PostedOutboundAction> response;
+            const auto deadline = std::chrono::steady_clock::now() + 1s;
+            while (!response && std::chrono::steady_clock::now() < deadline)
+            {
+                response = dependencies.outbound.tryPop();
+                if (!response)
+                {
+                    std::this_thread::sleep_for(1ms);
+                }
+            }
+            assert(response.has_value());
+        };
+        await_response();
+
+        assert(
+            ingress.tryPost(snf::server::PlayerInboundCommand{
+                .actor = player,
+                .connection = last_command_connection,
+                .command = snf::server::PingCommand{.payload = {}},
+                .request_id = 2,
+            }) == PostResult::Accepted
+        );
+        await_response();
+        persistence.flush();
+
+        repository.holdNextSave();
+        assert(
+            ingress.tryPostConnectionClosed(
+                player,
+                snf::server::ConnectionClosed{
+                    .connection = closing_connection,
+                    .cause = snf::server::ConnectionCloseCause::PeerClosed,
+                    .has_location_snapshot = false,
+                    .last_location = std::nullopt,
+                }
+            ) == PostResult::Accepted
+        );
+        assert(repository.save_held_future.wait_for(1s) == std::future_status::ready);
+        assert(observation.count.load(std::memory_order_acquire) == 0);
+
+        repository.completeHeldSave();
+        const auto deactivation_deadline = std::chrono::steady_clock::now() + 1s;
+        while (observation.count.load(std::memory_order_acquire) == 0 && std::chrono::steady_clock::now() < deactivation_deadline)
+        {
+            std::this_thread::sleep_for(1ms);
+        }
+        assert(observation.count.load(std::memory_order_acquire) == 1);
+        assert(observation.actor == snf::server::PlayerActorId{player});
+        assert(observation.connection == closing_connection);
+        assert(dependencies.lifecycle.terminalCount() == 2);
+
+        runtime.close();
+        runtime.join();
+        persistence.stop();
+        assert(observation.count.load(std::memory_order_acquire) == 1);
+    }
+
+    void test_tell_only_player_deactivation_has_no_closing_connection()
+    {
+        struct DeactivationObservation
+        {
+            std::atomic<std::uint64_t> count{0};
+            std::optional<snf::net::ConnectionId> connection;
+        };
+
+        RuntimeDependencies dependencies{8};
+        snf::server::InMemoryPlayerRepository repository;
+        DeactivationObservation observation;
+        snf::server::PlayerActorBinding binding{
+            dependencies.outbound_sink,
+            dependencies.outbound,
+            dependencies.lifecycle,
+            snf::server::PlayerActorBindingConfig{
+                .actor_kind = ActorKind::Player,
+                .repository = &repository,
+                .on_before_command = {},
+                .on_actor_deactivated =
+                    [&observation](const snf::server::PlayerActorId, const std::optional<snf::net::ConnectionId> connection) noexcept
+                {
+                    observation.connection = connection;
+                    observation.count.fetch_add(1, std::memory_order_release);
+                },
+            }
+        };
+        ActorRuntime runtime{player_runtime_config(1, 8), dependencies.completion};
+        runtime.registerBinding(binding);
+        runtime.start();
+
+        const snf::server::PlayerId player{.value = 783};
+        assert(
+            runtime.tryTell(
+                snf::runtime::ActorKey{
+                    .kind = ActorKind::Player,
+                    .entity = player.value,
+                },
+                snf::runtime::TellPayload::of(snf::server::StreetExperienceGrant{
+                    .player = player,
+                    .experience = 300,
+                })
+            ) == PostResult::Accepted
+        );
+
+        const auto deactivation_deadline = std::chrono::steady_clock::now() + 1s;
+        while (observation.count.load(std::memory_order_acquire) == 0 && std::chrono::steady_clock::now() < deactivation_deadline)
+        {
+            std::this_thread::sleep_for(1ms);
+        }
+        assert(observation.count.load(std::memory_order_acquire) == 1);
+        assert(!observation.connection.has_value());
+
+        runtime.close();
+        runtime.join();
+        assert(observation.count.load(std::memory_order_acquire) == 1);
+    }
+
     void test_live_purchase_does_not_suspend_on_repository()
     {
         RuntimeDependencies dependencies{8};
@@ -2111,6 +2355,8 @@ void run_actor_runtime_tests()
     test_an_unsatisfiable_result_closes_the_connection_instead_of_failing_the_worker();
     test_admitted_commands_and_refused_posts_are_counted_apart();
     test_player_repository_wait_suspends_only_the_loading_actor();
+    test_player_deactivation_keeps_the_closing_connection_until_final_save_completes();
+    test_tell_only_player_deactivation_has_no_closing_connection();
     test_live_purchase_does_not_suspend_on_repository();
     test_scheduled_alarm_fires_and_executes_handler();
     test_cancelled_timer_does_not_fire();

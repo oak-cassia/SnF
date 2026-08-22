@@ -31,6 +31,7 @@
 - Actor 수명 범위 idempotent NPC 구매
 - dirty snapshot 제출, Player별 coalescing과 save 직렬화
 - disconnect final save와 reconnect 복원
+- connection generation 기반 one-live-session과 exact-match passivation
 - in-memory 및 bounded MySQL load/save adapter
 - street 누적 경험치 영속화와, 그로부터 파생되는 레벨·공격/체력
 
@@ -98,7 +99,8 @@ Waiting → Running → Cleared
      ordered `BattleDigest`, hard deadline, tick 예산 측정. (완료)
    - **2b — Minimal Arena와 생사:** 8방향 persistent movement, nearest-live targeting, enemy
      attack/cooldown, participant HP/death와 결정적 ID tie-break. (완료)
-3. **Session 안정성** — connection generation으로 stale 명령 거부
+3. **Session 안정성** — generation 기반 admission/routing 방어, Closing 동안 reconnect 차단과
+   Player·Connection exact-match passivation. Actor 내부에 중복 generation guard를 두지 않는다. (완료)
 4. **결과 영속화** — `BattleResult`, `battle_id` idempotency, reward/progression transaction.
    여기서 persistence 범위를 넓힌다. 상세 계약은 이 단계 직전에 확정한다
 5. **Progression** — skill unlock과 loadout, CombatSnapshot으로 전달
@@ -140,7 +142,8 @@ vertical slice가 아니다.
 
 - 같은 Room 명령이 FIFO로 결정적으로 적용되고 handler 동시 실행이 없다. (충족)
 - 중복 request sequence가 damage나 clear를 두 번 적용하지 않는다. (충족)
-- stale connection generation이 이전 Player를 조작하지 못한다.
+- stale connection generation이 admission/routing 경계에서 이전 Player를 조작하지 못하며, 이전
+  connection의 늦은 deactivation이 새 Closing 세션을 제거하지 않는다. (충족)
 - 같은 `battle_id`의 결과가 두 번 도착해도 보상이 두 번 지급되지 않는다.
 - 같은 입력에서 같은 `BattleDigest` 이벤트 순서가 나온다. (충족)
 - disconnect/reconnect와 timeout 정책이 명시돼 있다. (충족: 입장 handoff 계약 §6. disconnect는
@@ -156,7 +159,7 @@ vertical slice가 아니다.
 
 ```text
 request_sequence       → transport/요청 중복
-connection generation  → session 수명을 넘긴 stale 명령
+connection generation  → admission/routing에서 session 수명을 넘긴 stale 명령
 battle_id              → 영속 연산 중복
 ```
 
