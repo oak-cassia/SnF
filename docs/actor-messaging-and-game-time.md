@@ -1,6 +1,6 @@
 # Actor 간 메시지와 게임 시간 결정
 
-> 상태: ①② 채택·구현, ③ 채택·미구현
+> 상태: ①②③ 채택·구현
 > 범위: Actor가 다른 Actor에게 보내는 메시지, 후속 작업의 목적지 분기, 콘텐츠가 시간을
 > 세는 기준
 
@@ -140,7 +140,7 @@ timer heap은 런타임이 소유한 자원이고, 소켓은 아니다. `ActorRu
 struct RoomResult
 {
     ...
-    std::optional<std::chrono::milliseconds> complete_after;   // 이 전투에 남은 시간
+    std::optional<std::chrono::milliseconds> deadline_after;    // 보스를 잡을 남은 시간
     std::vector<StreetExperienceGrant> grants;                 // 누구에게 얼마
 };
 
@@ -151,7 +151,7 @@ struct ZoneResult
 };
 ```
 
-Binding이 번역한다. `complete_after`/`tick_after` → `trySchedule`, `grants` → `tryTell`.
+Binding이 번역한다. `deadline_after`/`tick_after` → `trySchedule`, `grants` → `tryTell`.
 
 바꾼 이유는 계층 규칙이 아니라 눈에 보이는 비용이었다.
 
@@ -175,8 +175,8 @@ tell을 `requiredSlots`에 넣지 않는다. 네트워크 backpressure와 mailbo
 
 ## 4. 게임 시간
 
-> 런타임 전달은 구현됐다(`ActorContext::observedAt`). 이를 소비하는 콘텐츠는 Room의
-> 실제 전투에서 시작된다.
+> 런타임 전달과 첫 소비자가 모두 구현됐다. `Room`이 skill cooldown을
+> `ActorContext::observedAt`으로 판정한다.
 
 ### 4.1 tick 수로 세지 않는다
 
@@ -209,11 +209,17 @@ tell을 `requiredSlots`에 넣지 않는다. 네트워크 backpressure와 mailbo
 turn마다 알려주고, Binding이 dispatch 시점에 도메인 핸들러로 넘긴다. `steady_clock`은
 표준 타입이므로 게임 계층이 런타임을 참조하게 되지 않는다.
 
-Actor는 시점 산술만 한다.
+Binding이 `handle`의 인자로 넘기고, Actor는 시점 산술만 한다. 값을 명령 안에 두지 않는 이유가
+그대로 시그니처에 남아 있다.
 
 ```cpp
-if (command.observed_at >= _enrage_deadline) { enrage(); }
+RoomResult Room::handle(const RoomCommand&, std::chrono::steady_clock::time_point observed_at);
+
+if (observed_at < cooldown->ready_at) { return refuse(SkillOnCooldown); }   // Room의 UseSkill
 ```
+
+쿨다운을 tick마다 깎지 않고 `ready_at`으로 두는 것도 같은 결정의 결과다. 시간이 흐르게 하려고
+누군가 참가자를 방문할 필요가 없으므로, tick 없이도 cooldown이 성립한다.
 
 ### 4.3 observed_at은 만료 시각이 아니라 처리 시작 시각이다
 

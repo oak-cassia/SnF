@@ -55,6 +55,8 @@ namespace snf::server
         snf::runtime::ActorRuntimeStats actor_runtime;
         PlayerRepositoryStats player_repository;
         ZoneActorBindingStats zone_actors;
+        RoomActorBindingStats room_actors;
+        ProtocolRoomResultSinkStats room_protocol;
         RouteCoordinatorStats zone_handoffs;
         ZoneHandoffStats zone_handoffs_saga;
         ZoneTransitionChannelStats zone_transition_channel;
@@ -95,9 +97,19 @@ namespace snf::server
         std::chrono::milliseconds zone_tick_interval{50};
         std::chrono::nanoseconds zone_tick_budget{std::chrono::milliseconds{5}};
         std::size_t max_zone_handoffs{4096};
-        std::chrono::milliseconds room_battle_duration{5000};
+        std::chrono::milliseconds room_battle_duration{90000};
         std::size_t max_room_participants{4};
         std::uint64_t room_clear_experience{300};
+        std::uint64_t room_boss_health{1000};
+        std::chrono::milliseconds room_tick_interval{100};
+        std::chrono::nanoseconds room_tick_budget{std::chrono::milliseconds{5}};
+        std::chrono::milliseconds room_wave_interval{20000};
+        std::size_t room_wave_count{2};
+        std::size_t room_minions_per_wave{10};
+        std::uint64_t room_minion_health{30};
+        std::chrono::milliseconds room_boss_spawn_after{40000};
+        std::size_t max_room_spawned_enemies{64};
+        std::size_t room_digest_flush_threshold{512};
         std::size_t max_room_entries{4096};
         std::size_t max_room_entry_completions_per_turn{64};
         std::size_t max_zone_handoff_completions_per_turn{64};
@@ -139,6 +151,7 @@ namespace snf::server
         [[nodiscard]] snf::runtime::ActorRuntimeStats getActorRuntimeStats() const;
         [[nodiscard]] std::optional<PlayerRecord> getPlayerRecord(PlayerId player) const;
         [[nodiscard]] ZoneActorBindingStats getZoneActorStats() const noexcept;
+        [[nodiscard]] RoomActorBindingStats getRoomActorStats() const noexcept;
         [[nodiscard]] PartyActorBindingStats getPartyActorStats() const noexcept;
         // Reads reactor state, so it belongs to the reactor thread: call it from
         // metrics_reporter or after run() has returned.

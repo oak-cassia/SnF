@@ -40,6 +40,11 @@ namespace snf::protocol
         RoomLeave = 22,
         RoomLeft = 23,
         ReturnedToZone = 24,
+        UseSkill = 25,
+        SkillApplied = 26,
+        BattleFailed = 27,
+        BattleDigest = 28,
+        SkillAcknowledged = 29,
     };
 
     // A request id of zero marks a frame the server sent on its own rather than in

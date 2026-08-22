@@ -1,289 +1,375 @@
 #include "snf/game/room.hpp"
-
-#include "snf/game/street_experience_grant.hpp"
+#include "snf/game/skill_catalog.hpp"
 
 #include <cassert>
 #include <chrono>
+#include <cstdint>
+#include <limits>
+#include <stdexcept>
+#include <variant>
 #include <vector>
 
 namespace
 {
-    using snf::server::BattleCompleted;
+    using namespace std::chrono_literals;
+    using snf::server::BattleOutcome;
+    using snf::server::EnemyDamaged;
+    using snf::server::EnemyDied;
+    using snf::server::EnemyKind;
+    using snf::server::EnemySpawned;
     using snf::server::JoinRoom;
-    using snf::server::LeaveRoom;
     using snf::server::PlayerId;
     using snf::server::Room;
     using snf::server::RoomCommandStatus;
     using snf::server::RoomConfig;
     using snf::server::RoomId;
     using snf::server::RoomPhase;
+    using snf::server::RoomSimulationTick;
+    using snf::server::SkillWhiffed;
     using snf::server::StartBattle;
-    using snf::server::StreetExperienceGrant;
+    using snf::server::UseSkill;
 
-    [[nodiscard]] RoomConfig small_room()
+    [[nodiscard]] std::chrono::steady_clock::time_point at(const std::int64_t milliseconds)
+    {
+        return std::chrono::steady_clock::time_point{std::chrono::milliseconds{milliseconds}};
+    }
+
+    [[nodiscard]] RoomConfig wave_room()
     {
         return RoomConfig{
-            .battle_duration = std::chrono::milliseconds{5000},
-            .max_participants = 2,
+            .battle_duration = 5000ms,
+            .max_participants = 4,
             .clear_experience = 300,
+            .boss_health = 50,
+            .tick_interval = 100ms,
+            .wave_interval = 1000ms,
+            .wave_count = 2,
+            .minions_per_wave = 2,
+            .minion_health = 10,
+            .boss_spawn_after = 3000ms,
+            .max_spawned_enemies = 8,
+            .digest_flush_threshold = 512,
         };
     }
 
-    void test_a_room_starts_empty_and_waiting()
+    [[nodiscard]] RoomConfig boss_room()
     {
-        const Room actor{RoomId{.value = 1}, small_room()};
-
-        assert(actor.id() == RoomId{.value = 1});
-        assert(actor.phase() == RoomPhase::Waiting);
-        assert(actor.participantCount() == 0);
+        RoomConfig config = wave_room();
+        config.wave_count = 0;
+        config.minions_per_wave = 0;
+        config.boss_spawn_after = 1000ms;
+        return config;
     }
 
-    void test_a_room_refuses_a_duplicate_join()
+    void join(Room& room, const PlayerId player, const std::uint64_t attack = 10)
     {
-        Room actor{RoomId{.value = 1}, small_room()};
-
-        const auto first = actor.handle(JoinRoom{.player = PlayerId{.value = 7}});
-        assert(first.status == RoomCommandStatus::Applied);
-        assert(actor.participantCount() == 1);
-
-        const auto again = actor.handle(JoinRoom{.player = PlayerId{.value = 7}});
-        assert(again.status == RoomCommandStatus::AlreadyJoined);
-        assert(again.player == PlayerId{.value = 7});
-        assert(actor.participantCount() == 1);
+        const auto result = room.handle(JoinRoom{.player = player, .stats = {.attack = attack, .health = 100}}, at(0));
+        assert(result.status == RoomCommandStatus::Applied);
     }
 
-    void test_a_room_refuses_a_join_past_capacity()
+    [[nodiscard]] Room started(const RoomConfig& config, const PlayerId player = PlayerId{.value = 7}, const std::uint64_t attack = 10)
     {
-        Room actor{RoomId{.value = 1}, small_room()};
+        Room room{RoomId{.value = 1}, config};
+        join(room, player, attack);
+        const auto result = room.handle(StartBattle{}, at(0));
+        assert(result.status == RoomCommandStatus::Applied);
+        return room;
+    }
 
-        static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 1}}));
-        static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 2}}));
-        const auto refused = actor.handle(JoinRoom{.player = PlayerId{.value = 3}});
+    template <typename Event> [[nodiscard]] const Event& event_at(const snf::server::BattleDigest& digest, const std::size_t index)
+    {
+        const auto* event = std::get_if<Event>(&digest.events.at(index));
+        assert(event != nullptr);
+        return *event;
+    }
+
+    void test_room_config_rejects_invalid_simulation_bounds()
+    {
+        auto rejects = [](const RoomConfig& config)
+        {
+            bool threw = false;
+            try
+            {
+                static_cast<void>(Room{RoomId{.value = 1}, config});
+            }
+            catch (const std::invalid_argument&)
+            {
+                threw = true;
+            }
+            assert(threw);
+        };
+
+        RoomConfig invalid = wave_room();
+        invalid.tick_interval = 0ms;
+        rejects(invalid);
+        invalid = wave_room();
+        invalid.boss_spawn_after = invalid.battle_duration;
+        rejects(invalid);
+        invalid = wave_room();
+        invalid.digest_flush_threshold = 0;
+        rejects(invalid);
+        invalid = wave_room();
+        invalid.max_spawned_enemies = 4;
+        rejects(invalid);
+        invalid = wave_room();
+        invalid.boss_spawn_after = 500ms;
+        rejects(invalid);
+        invalid = wave_room();
+        invalid.minions_per_wave = 0;
+        rejects(invalid);
+        invalid = wave_room();
+        invalid.wave_count = std::numeric_limits<std::size_t>::max();
+        invalid.minions_per_wave = 2;
+        rejects(invalid);
+    }
+
+    void test_joining_is_bounded_and_keeps_the_combat_snapshot()
+    {
+        RoomConfig config = wave_room();
+        config.max_participants = 1;
+        Room room{RoomId{.value = 1}, config};
+
+        join(room, PlayerId{.value = 10}, 37);
+        const auto refused = room.handle(JoinRoom{.player = PlayerId{.value = 20}}, at(0));
 
         assert(refused.status == RoomCommandStatus::RoomFull);
-        assert(actor.participantCount() == 2);
+        assert(room.statsOf(PlayerId{.value = 10})->attack == 37);
+        assert(room.participantCount() == 1);
     }
 
-    void test_starting_a_battle_arms_exactly_one_timer()
+    void test_start_spawns_the_first_wave_and_arms_both_timers()
     {
-        Room actor{RoomId{.value = 1}, small_room()};
-        static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 7}}));
+        Room room{RoomId{.value = 1}, wave_room()};
+        join(room, PlayerId{.value = 20});
+        join(room, PlayerId{.value = 10});
 
-        const auto started = actor.handle(StartBattle{});
-        assert(started.status == RoomCommandStatus::Applied);
-        assert(actor.phase() == RoomPhase::Running);
-        assert(started.complete_after == std::chrono::milliseconds{5000});
-        assert(started.grants.empty());
+        const auto result = room.handle(StartBattle{}, at(0));
+
+        assert(result.phase == RoomPhase::Running);
+        assert(result.deadline_after == 5000ms);
+        assert(result.tick_after == 100ms);
+        assert(result.digest && result.digest->sequence == 1);
+        assert(result.digest->events.size() == 2);
+        assert(event_at<EnemySpawned>(*result.digest, 0).id.value == 1);
+        assert(event_at<EnemySpawned>(*result.digest, 1).id.value == 2);
+        assert((result.audience == std::vector<PlayerId>{PlayerId{.value = 10}, PlayerId{.value = 20}}));
+        assert(room.enemyCount() == 2);
+        assert(!room.bossSpawned());
+        assert(room.bossHealth() == 0);
     }
 
-    void test_an_empty_room_cannot_start_a_battle()
+    void test_a_late_tick_catches_up_every_due_wave_in_order()
     {
-        Room actor{RoomId{.value = 1}, small_room()};
+        RoomConfig config = wave_room();
+        config.wave_count = 3;
+        config.minions_per_wave = 1;
+        config.max_spawned_enemies = 4;
+        config.boss_spawn_after = 4000ms;
+        Room room = started(config);
 
-        const auto started = actor.handle(StartBattle{});
-        // Otherwise the room arms a timer and then clears with nobody to reward.
-        assert(started.status == RoomCommandStatus::WrongPhase);
-        assert(!started.complete_after);
-        assert(actor.phase() == RoomPhase::Waiting);
+        const auto tick = room.handle(RoomSimulationTick{}, at(2500));
+
+        assert(tick.digest && tick.digest->sequence == 2);
+        assert(tick.digest->events.size() == 2);
+        assert(event_at<EnemySpawned>(*tick.digest, 0).id.value == 2);
+        assert(event_at<EnemySpawned>(*tick.digest, 1).id.value == 3);
+        assert(room.enemyCount() == 3);
+        assert(tick.tick_after == 100ms);
     }
 
-    void test_a_second_start_is_refused()
+    void test_the_next_wave_uses_its_absolute_boundary()
     {
-        Room actor{RoomId{.value = 1}, small_room()};
-        static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 7}}));
-        static_cast<void>(actor.handle(StartBattle{}));
+        Room room = started(wave_room());
 
-        const auto again = actor.handle(StartBattle{});
-        assert(again.status == RoomCommandStatus::WrongPhase);
-        // A second timer would deliver a second completion to the same battle.
-        assert(!again.complete_after);
+        const auto before = room.handle(RoomSimulationTick{}, at(999));
+        const auto at_boundary = room.handle(RoomSimulationTick{}, at(1000));
+
+        assert(!before.digest);
+        assert(at_boundary.digest && at_boundary.digest->events.size() == 2);
+        assert(event_at<EnemySpawned>(*at_boundary.digest, 0).id.value == 3);
+        assert(event_at<EnemySpawned>(*at_boundary.digest, 1).id.value == 4);
     }
 
-    void test_joining_is_refused_once_the_battle_is_running()
+    void test_the_boss_spawns_at_its_absolute_time_after_the_minions()
     {
-        Room actor{RoomId{.value = 1}, small_room()};
-        static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 7}}));
-        static_cast<void>(actor.handle(StartBattle{}));
+        Room room = started(wave_room());
 
-        const auto late = actor.handle(JoinRoom{.player = PlayerId{.value = 8}});
-        assert(late.status == RoomCommandStatus::WrongPhase);
-        assert(actor.participantCount() == 1);
+        const auto before = room.handle(RoomSimulationTick{}, at(2999));
+        const auto spawned = room.handle(RoomSimulationTick{}, at(3000));
+
+        assert(before.digest);
+        assert(spawned.digest);
+        const EnemySpawned& boss = event_at<EnemySpawned>(*spawned.digest, spawned.digest->events.size() - 1);
+        assert(boss.kind == EnemyKind::Boss);
+        assert(boss.id.value == 5);
+        assert(room.bossSpawned());
+        assert(room.bossHealth() == 50);
     }
 
-    void test_a_completion_before_the_battle_starts_is_refused()
+    void test_casts_hit_the_first_living_enemy_even_before_cleanup()
     {
-        Room actor{RoomId{.value = 1}, small_room()};
-        static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 7}}));
+        Room room{RoomId{.value = 1}, wave_room()};
+        join(room, PlayerId{.value = 10}, 10);
+        join(room, PlayerId{.value = 20}, 10);
+        static_cast<void>(room.handle(StartBattle{}, at(0)));
 
-        const auto completed = actor.handle(BattleCompleted{});
-        assert(completed.status == RoomCommandStatus::WrongPhase);
-        assert(completed.grants.empty());
-        assert(actor.phase() == RoomPhase::Waiting);
+        static_cast<void>(room.handle(UseSkill{.player = PlayerId{.value = 10}, .skill = snf::server::SLASH, .request_sequence = 1}, at(0)));
+        static_cast<void>(room.handle(UseSkill{.player = PlayerId{.value = 20}, .skill = snf::server::SLASH, .request_sequence = 1}, at(0)));
+        const auto tick = room.handle(RoomSimulationTick{}, at(100));
+
+        assert(tick.digest && tick.digest->events.size() == 4);
+        assert(event_at<EnemyDamaged>(*tick.digest, 0).target.value == 1);
+        assert(event_at<EnemyDied>(*tick.digest, 1).id.value == 1);
+        assert(event_at<EnemyDamaged>(*tick.digest, 2).target.value == 2);
+        assert(event_at<EnemyDied>(*tick.digest, 3).id.value == 2);
+        assert(room.enemyCount() == 0);
+        assert(room.phase() == RoomPhase::Running);
     }
 
-    void test_a_clear_rewards_every_participant_in_player_id_order()
+    void test_a_whiff_is_applied_and_consumes_sequence_and_cooldown()
     {
-        Room actor{
-            RoomId{.value = 1},
-            RoomConfig{
-                .battle_duration = std::chrono::milliseconds{5000},
-                .max_participants = 3,
-                .clear_experience = 300,
-            }
-        };
-        // Deliberately out of order: the reward order must come from the identity,
-        // not from who happened to join first.
-        static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 30}}));
-        static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 10}}));
-        static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 20}}));
-        static_cast<void>(actor.handle(StartBattle{}));
+        Room room = started(boss_room(), PlayerId{.value = 7}, 10);
 
-        const auto cleared = actor.handle(BattleCompleted{});
-        assert(cleared.status == RoomCommandStatus::Applied);
-        assert(actor.phase() == RoomPhase::Cleared);
-        // The reward order is the only place the participant order is observable,
-        // and it must follow the identity rather than who joined first.
-        assert(
-            (cleared.grants ==
-             std::vector<StreetExperienceGrant>{
-                 {.player = PlayerId{.value = 10}, .experience = 300},
-                 {.player = PlayerId{.value = 20}, .experience = 300},
-                 {.player = PlayerId{.value = 30}, .experience = 300},
-             })
-        );
+        const auto whiff = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill = snf::server::SLASH, .request_sequence = 1}, at(0));
+        const auto tick = room.handle(RoomSimulationTick{}, at(100));
+        const auto early = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill = snf::server::SLASH, .request_sequence = 2}, at(999));
+        const auto duplicate = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill = snf::server::SLASH, .request_sequence = 1}, at(1000));
+
+        assert(whiff.status == RoomCommandStatus::Applied && !whiff.digest);
+        assert(early.status == RoomCommandStatus::SkillOnCooldown);
+        assert(duplicate.status == RoomCommandStatus::DuplicateRequest);
+        assert(tick.digest);
+        const SkillWhiffed& event = event_at<SkillWhiffed>(*tick.digest, 0);
+        assert(event.actor == PlayerId{.value = 7});
+        assert(event.skill == snf::server::SLASH);
     }
 
-    void test_a_clear_pays_out_only_once()
+    void test_digest_threshold_flushes_an_atomic_damage_and_death_pair()
     {
-        Room actor{RoomId{.value = 1}, small_room()};
-        static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 7}}));
-        static_cast<void>(actor.handle(StartBattle{}));
+        RoomConfig config = wave_room();
+        config.wave_count = 1;
+        config.minions_per_wave = 1;
+        config.max_spawned_enemies = 2;
+        config.digest_flush_threshold = 2;
+        Room room = started(config, PlayerId{.value = 7}, 10);
 
-        const auto first = actor.handle(BattleCompleted{});
-        assert(first.grants.size() == 1);
+        const auto cast = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill = snf::server::SLASH, .request_sequence = 1}, at(0));
 
-        // A duplicate completion -- a redelivered timer, or a mailbox that still held
-        // one -- must not grant the reward a second time.
-        const auto second = actor.handle(BattleCompleted{});
-        assert(second.status == RoomCommandStatus::WrongPhase);
-        assert(second.grants.empty());
-        assert(actor.phase() == RoomPhase::Cleared);
+        assert(cast.digest && cast.digest->sequence == 2);
+        assert(cast.digest->events.size() == 2);
+        static_cast<void>(event_at<EnemyDamaged>(*cast.digest, 0));
+        static_cast<void>(event_at<EnemyDied>(*cast.digest, 1));
+        assert(cast.audience == std::vector<PlayerId>{PlayerId{.value = 7}});
     }
 
-    void test_a_room_keeps_the_stats_each_participant_joined_with()
+    void test_quiet_ticks_emit_no_digest_and_do_not_advance_its_sequence()
     {
-        Room actor{RoomId{.value = 1}, small_room()};
-        const PlayerId weak{.value = 10};
-        const PlayerId strong{.value = 20};
+        Room room = started(boss_room());
 
-        static_cast<void>(actor.handle(JoinRoom{.player = weak, .stats = {.attack = 10, .health = 100}}));
-        static_cast<void>(actor.handle(JoinRoom{.player = strong, .stats = {.attack = 39, .health = 390}}));
+        const auto quiet = room.handle(RoomSimulationTick{}, at(100));
+        const auto spawned = room.handle(RoomSimulationTick{}, at(1000));
 
-        // Fixed at join. The Room never asks the Player again, so what it stored is
-        // what the battle runs on.
-        assert((actor.statsOf(weak) == snf::server::CombatStats{.attack = 10, .health = 100}));
-        assert((actor.statsOf(strong) == snf::server::CombatStats{.attack = 39, .health = 390}));
-        assert(!actor.statsOf(PlayerId{.value = 30}));
+        assert(!quiet.digest);
+        assert(spawned.digest && spawned.digest->sequence == 1);
     }
 
-    void test_leaving_before_the_battle_frees_the_seat()
+    void test_only_killing_the_boss_clears_and_flushes_the_terminal_digest()
     {
-        Room actor{RoomId{.value = 1}, small_room()};
-        static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 1}}));
-        static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 2}}));
+        RoomConfig config = boss_room();
+        config.boss_health = 20;
+        Room room = started(config, PlayerId{.value = 7}, 20);
+        const auto spawned = room.handle(RoomSimulationTick{}, at(1000));
+        assert(spawned.digest && event_at<EnemySpawned>(*spawned.digest, 0).kind == EnemyKind::Boss);
 
-        const auto left = actor.handle(LeaveRoom{.player = PlayerId{.value = 1}});
-        assert(left.status == RoomCommandStatus::Applied);
-        assert(left.player == PlayerId{.value = 1});
-        assert(actor.participantCount() == 1);
-        assert(!actor.statsOf(PlayerId{.value = 1}));
+        const auto cleared = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill = snf::server::SLASH, .request_sequence = 1}, at(1000));
 
-        // The seat is genuinely free again, not merely vacated by a flag.
-        const auto joined = actor.handle(JoinRoom{.player = PlayerId{.value = 3}});
-        assert(joined.status == RoomCommandStatus::Applied);
-        assert(actor.participantCount() == 2);
-    }
-
-    void test_leaving_a_room_you_are_not_in_is_refused()
-    {
-        Room actor{RoomId{.value = 1}, small_room()};
-        static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 1}}));
-
-        const auto refused = actor.handle(LeaveRoom{.player = PlayerId{.value = 2}});
-        assert(refused.status == RoomCommandStatus::NotJoined);
-        assert(refused.phase == RoomPhase::Waiting);
-        assert(actor.participantCount() == 1);
-    }
-
-    void test_leaving_mid_battle_forfeits_the_reward()
-    {
-        Room actor{RoomId{.value = 1}, small_room()};
-        static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 1}}));
-        static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 2}}));
-        static_cast<void>(actor.handle(StartBattle{}));
-
-        const auto left = actor.handle(LeaveRoom{.player = PlayerId{.value = 1}});
-        assert(left.status == RoomCommandStatus::Applied);
-        assert(left.phase == RoomPhase::Running);
-
-        // The reward path is never told that anyone left. It pays the participants the
-        // Room still holds, which is what makes the removal the whole policy.
-        const auto cleared = actor.handle(BattleCompleted{});
-        assert(
-            (cleared.grants ==
-             std::vector<StreetExperienceGrant>{
-                 {.player = PlayerId{.value = 2}, .experience = 300},
-             })
-        );
-    }
-
-    void test_the_last_participant_leaving_a_battle_clears_with_no_grants()
-    {
-        Room actor{RoomId{.value = 1}, small_room()};
-        static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 1}}));
-        static_cast<void>(actor.handle(StartBattle{}));
-        static_cast<void>(actor.handle(LeaveRoom{.player = PlayerId{.value = 1}}));
-
-        // The timer was armed before the room emptied, so the completion still
-        // arrives. It has to reach the terminal phase rather than stay Running with
-        // nobody in it.
-        const auto cleared = actor.handle(BattleCompleted{});
-        assert(cleared.status == RoomCommandStatus::Applied);
         assert(cleared.phase == RoomPhase::Cleared);
-        assert(cleared.grants.empty());
+        assert(cleared.outcome == BattleOutcome::Cleared);
+        assert(cleared.digest && cleared.digest->sequence == 2);
+        assert(cleared.boss_spawned && cleared.boss_health == 0);
+        assert((cleared.grants == std::vector<snf::server::StreetExperienceGrant>{{.player = PlayerId{.value = 7}, .experience = 300}}));
+        assert(!cleared.tick_after);
     }
 
-    void test_leaving_a_cleared_room_is_refused()
+    void test_a_cast_at_the_absolute_deadline_expires_the_battle_and_flushes()
     {
-        Room actor{RoomId{.value = 1}, small_room()};
-        static_cast<void>(actor.handle(JoinRoom{.player = PlayerId{.value = 1}}));
-        static_cast<void>(actor.handle(StartBattle{}));
-        static_cast<void>(actor.handle(BattleCompleted{}));
+        RoomConfig config = boss_room();
+        config.battle_duration = 3000ms;
+        config.boss_spawn_after = 2000ms;
+        Room room = started(config, PlayerId{.value = 7}, 10);
+        const auto allowed = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill = snf::server::SLASH, .request_sequence = 1}, at(2999));
 
-        // A leave racing the clear must not report that it took a seat back, or the
-        // return path would be told to undo an entry that already ended.
-        const auto refused = actor.handle(LeaveRoom{.player = PlayerId{.value = 1}});
-        assert(refused.status == RoomCommandStatus::WrongPhase);
-        assert(refused.phase == RoomPhase::Cleared);
+        const auto expired = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill = snf::server::SLASH, .request_sequence = 2}, at(3000));
+
+        assert(allowed.status == RoomCommandStatus::Applied);
+        assert(allowed.phase == RoomPhase::Running);
+        assert(expired.status == RoomCommandStatus::BattleExpired);
+        assert(expired.phase == RoomPhase::Failed);
+        assert(expired.outcome == BattleOutcome::Failed);
+        assert(expired.digest && event_at<SkillWhiffed>(*expired.digest, 0).actor == PlayerId{.value = 7});
+        assert(expired.audience == std::vector<PlayerId>{PlayerId{.value = 7}});
+        assert(expired.grants.empty());
+    }
+
+    void test_a_tick_at_the_deadline_fails_once_and_never_reschedules()
+    {
+        RoomConfig config = boss_room();
+        config.battle_duration = 3000ms;
+        config.boss_spawn_after = 2000ms;
+        Room room = started(config);
+
+        const auto failed = room.handle(RoomSimulationTick{}, at(3000));
+        const auto deadline = room.handle(snf::server::BattleDeadline{}, at(3000));
+
+        assert(failed.outcome == BattleOutcome::Failed);
+        assert(!failed.tick_after);
+        assert(deadline.status == RoomCommandStatus::WrongPhase);
+        assert(!deadline.outcome);
+    }
+
+    void test_a_deadline_before_its_absolute_time_is_refused()
+    {
+        Room room = started(boss_room());
+
+        const auto early = room.handle(snf::server::BattleDeadline{}, at(4999));
+
+        assert(early.status == RoomCommandStatus::WrongPhase);
+        assert(room.phase() == RoomPhase::Running);
+    }
+
+    void test_leaving_removes_the_participant_from_reward_and_audience()
+    {
+        RoomConfig config = boss_room();
+        config.boss_health = 10;
+        Room room{RoomId{.value = 1}, config};
+        join(room, PlayerId{.value = 10}, 10);
+        join(room, PlayerId{.value = 20}, 10);
+        static_cast<void>(room.handle(StartBattle{}, at(0)));
+        static_cast<void>(room.handle(snf::server::LeaveRoom{.player = PlayerId{.value = 20}}, at(0)));
+        static_cast<void>(room.handle(RoomSimulationTick{}, at(1000)));
+
+        const auto cleared = room.handle(UseSkill{.player = PlayerId{.value = 10}, .skill = snf::server::SLASH, .request_sequence = 1}, at(1000));
+
+        assert(cleared.audience == std::vector<PlayerId>{PlayerId{.value = 10}});
+        assert((cleared.grants == std::vector<snf::server::StreetExperienceGrant>{{.player = PlayerId{.value = 10}, .experience = 300}}));
     }
 }
 
 void run_room_tests()
 {
-    test_a_room_keeps_the_stats_each_participant_joined_with();
-    test_a_room_starts_empty_and_waiting();
-    test_a_room_refuses_a_duplicate_join();
-    test_a_room_refuses_a_join_past_capacity();
-    test_starting_a_battle_arms_exactly_one_timer();
-    test_an_empty_room_cannot_start_a_battle();
-    test_a_second_start_is_refused();
-    test_joining_is_refused_once_the_battle_is_running();
-    test_a_completion_before_the_battle_starts_is_refused();
-    test_a_clear_rewards_every_participant_in_player_id_order();
-    test_a_clear_pays_out_only_once();
-    test_leaving_before_the_battle_frees_the_seat();
-    test_leaving_a_room_you_are_not_in_is_refused();
-    test_leaving_mid_battle_forfeits_the_reward();
-    test_the_last_participant_leaving_a_battle_clears_with_no_grants();
-    test_leaving_a_cleared_room_is_refused();
+    test_room_config_rejects_invalid_simulation_bounds();
+    test_joining_is_bounded_and_keeps_the_combat_snapshot();
+    test_start_spawns_the_first_wave_and_arms_both_timers();
+    test_a_late_tick_catches_up_every_due_wave_in_order();
+    test_the_next_wave_uses_its_absolute_boundary();
+    test_the_boss_spawns_at_its_absolute_time_after_the_minions();
+    test_casts_hit_the_first_living_enemy_even_before_cleanup();
+    test_a_whiff_is_applied_and_consumes_sequence_and_cooldown();
+    test_digest_threshold_flushes_an_atomic_damage_and_death_pair();
+    test_quiet_ticks_emit_no_digest_and_do_not_advance_its_sequence();
+    test_only_killing_the_boss_clears_and_flushes_the_terminal_digest();
+    test_a_cast_at_the_absolute_deadline_expires_the_battle_and_flushes();
+    test_a_tick_at_the_deadline_fails_once_and_never_reschedules();
+    test_a_deadline_before_its_absolute_time_is_refused();
+    test_leaving_removes_the_participant_from_reward_and_audience();
 }

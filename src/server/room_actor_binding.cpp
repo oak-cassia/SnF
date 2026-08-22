@@ -5,6 +5,7 @@
 #include <chrono>
 #include <stdexcept>
 #include <utility>
+#include <variant>
 
 namespace snf::server
 {
@@ -30,15 +31,25 @@ namespace snf::server
 
     RoomActorBinding::RoomActorBinding(RoomActorBindingConfig config)
         : _actor_config(config.actor)
+        , _tick_budget(config.tick_budget)
         , _on_result(std::move(config.on_result))
     {
+        if (_tick_budget < std::chrono::nanoseconds::zero())
+        {
+            throw std::invalid_argument{"Room tick budget cannot be negative"};
+        }
     }
 
     RoomActorBinding::RoomActorBinding(RoomActorBindingConfig config, CommandLifecycleSink& lifecycle)
         : _actor_config(config.actor)
+        , _tick_budget(config.tick_budget)
         , _on_result(std::move(config.on_result))
         , _lifecycle(&lifecycle)
     {
+        if (_tick_budget < std::chrono::nanoseconds::zero())
+        {
+            throw std::invalid_argument{"Room tick budget cannot be negative"};
+        }
     }
 
     snf::runtime::ActorKind RoomActorBinding::kind() const noexcept
@@ -50,6 +61,11 @@ namespace snf::server
     {
         return RoomActorBindingStats{
             .command_execution_nanoseconds = _command_execution_nanoseconds.snapshot(),
+            .tick_execution_nanoseconds = _tick_execution_nanoseconds.snapshot(),
+            .tick_publish_nanoseconds = _tick_publish_nanoseconds.snapshot(),
+            .tick_turn_nanoseconds = _tick_turn_nanoseconds.snapshot(),
+            .tick_overruns = _tick_overruns.load(std::memory_order_relaxed),
+            .tick_schedule_rejections = _tick_schedule_rejections.load(std::memory_order_relaxed),
         };
     }
 
@@ -80,7 +96,8 @@ namespace snf::server
             CommandPayload{
                 .command = std::move(command),
                 .release = std::move(release),
-            });
+            }
+        );
     }
 
     snf::runtime::ActorSubmission RoomActorBinding::makePassivate(const RoomId room) const
@@ -97,7 +114,8 @@ namespace snf::server
             },
             snf::runtime::ActorActivation::ExistingOnly,
             snf::runtime::ActorAccounting::Control,
-            PassivatePayload{});
+            PassivatePayload{}
+        );
     }
 
     std::optional<snf::runtime::ActorSubmission> RoomActorBinding::makeTell(const snf::runtime::ActorKey target, snf::runtime::TellPayload payload)
@@ -151,8 +169,12 @@ namespace snf::server
         return std::make_unique<RoomActorState>(RoomId{.value = entity}, _actor_config);
     }
 
-    snf::runtime::ActorDispatchResult
-    RoomActorBinding::dispatch(snf::runtime::ActorState& state, const snf::runtime::ActorSubmission& submission, snf::runtime::ActorContext& context, const std::stop_token stop_token)
+    snf::runtime::ActorDispatchResult RoomActorBinding::dispatch(
+        snf::runtime::ActorState& state,
+        const snf::runtime::ActorSubmission& submission,
+        snf::runtime::ActorContext& context,
+        const std::stop_token stop_token
+    )
     {
         static_cast<void>(stop_token);
         if (submission.accounting() == snf::runtime::ActorAccounting::Control)
@@ -163,34 +185,84 @@ namespace snf::server
 
         auto& room_state = dynamic_cast<RoomActorState&>(state);
         const CommandPayload& payload = payloadAs<CommandPayload>(submission);
+        const bool is_tick = std::holds_alternative<RoomSimulationTick>(payload.command.command);
         const auto started_at = std::chrono::steady_clock::now();
-        RoomResult result = room_state.room.handle(payload.command.command);
-        _command_execution_nanoseconds.record(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started_at));
+        // observedAt, not the reading above: the Room derives cooldowns from when its
+        // turn began, while the reading here exists to measure how long the turn took.
+        RoomResult result = room_state.room.handle(payload.command.command, context.observedAt());
+        const auto handled_at = std::chrono::steady_clock::now();
+        const auto handle_elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(handled_at - started_at);
+        _command_execution_nanoseconds.record(handle_elapsed);
+        if (is_tick)
+        {
+            _tick_execution_nanoseconds.record(handle_elapsed);
+        }
+
+        // The mandatory backstop is reserved before a client can be told that the
+        // battle started. Failure is a Worker failure: a Running Room without its
+        // deadline is not a degraded state this server can safely expose.
+        if (result.deadline_after)
+        {
+            RoomInboundCommand deadline_command{
+                .room = payload.command.room,
+                .command = BattleDeadline{},
+                .reply = std::nullopt,
+            };
+            // ExistingOnly: if the Room is gone there is nobody left to fail the
+            // battle for, so the deadline must not resurrect it. A Running Room stays
+            // resident, which is what keeps this deliverable.
+            auto timer_submission = makeSubmission(
+                submission.target(),
+                snf::runtime::ActorActivation::ExistingOnly,
+                snf::runtime::ActorAccounting::Command,
+                CommandPayload{
+                    .command = std::move(deadline_command),
+                    .release = {},
+                }
+            );
+            if (!context.trySchedule(*result.deadline_after, std::move(timer_submission)))
+            {
+                throw std::runtime_error{"Room deadline timer could not be scheduled"};
+            }
+        }
+
+        if (result.tick_after)
+        {
+            RoomInboundCommand tick_command{
+                .room = payload.command.room,
+                .command = RoomSimulationTick{},
+                .reply = std::nullopt,
+            };
+            auto timer_submission = makeSubmission(
+                submission.target(),
+                snf::runtime::ActorActivation::ExistingOnly,
+                snf::runtime::ActorAccounting::Command,
+                CommandPayload{
+                    .command = std::move(tick_command),
+                    .release = {},
+                }
+            );
+            if (!context.trySchedule(*result.tick_after, std::move(timer_submission)))
+            {
+                _tick_schedule_rejections.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+
+        const auto publish_started_at = std::chrono::steady_clock::now();
         if (_on_result)
         {
             _on_result(payload.command, result);
         }
-
-        // The Room decided in game terms; naming a mailbox and a timer is this
-        // binding's job.
-        if (result.complete_after)
+        const auto published_at = std::chrono::steady_clock::now();
+        if (is_tick)
         {
-            RoomInboundCommand completion_command{
-                .room = payload.command.room,
-                .command = BattleCompleted{},
-                .reply = std::nullopt,
-            };
-            // ExistingOnly: if the Room is gone there is nobody left to reward, so a
-            // completion must not resurrect it. A Running Room stays resident, which
-            // is what keeps this deliverable.
-            auto timer_submission = makeSubmission(submission.target(),
-                                                   snf::runtime::ActorActivation::ExistingOnly,
-                                                   snf::runtime::ActorAccounting::Command,
-                                                   CommandPayload{
-                                                       .command = std::move(completion_command),
-                                                       .release = {},
-                                                   });
-            static_cast<void>(context.trySchedule(*result.complete_after, std::move(timer_submission)));
+            _tick_publish_nanoseconds.record(std::chrono::duration_cast<std::chrono::nanoseconds>(published_at - publish_started_at));
+            const auto turn_elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(published_at - started_at);
+            _tick_turn_nanoseconds.record(turn_elapsed);
+            if (turn_elapsed >= _tick_budget)
+            {
+                _tick_overruns.fetch_add(1, std::memory_order_relaxed);
+            }
         }
 
         for (const StreetExperienceGrant& grant : result.grants)
@@ -202,20 +274,23 @@ namespace snf::server
                     .kind = snf::runtime::ActorKind::Player,
                     .entity = grant.player.value,
                 },
-                snf::runtime::TellPayload::of(grant)));
+                snf::runtime::TellPayload::of(grant)
+            ));
         }
 
-        // A cleared Room has emitted its rewards and has nothing left to do, and a
-        // Room nobody joined was activated by a stray command. A Running Room must
-        // stay resident so its completion timer can land.
-        if (room_state.room.phase() == RoomPhase::Cleared || room_state.room.participantCount() == 0)
+        // A decided Room has emitted whatever it owed and has nothing left to do, and
+        // a Room nobody joined was activated by a stray command. A Running Room must
+        // stay resident so its deadline timer can land.
+        const RoomPhase phase = room_state.room.phase();
+        if (phase == RoomPhase::Cleared || phase == RoomPhase::Failed || room_state.room.participantCount() == 0)
         {
             return snf::runtime::ActorDispatchResult::PassivateIfIdle;
         }
         return snf::runtime::ActorDispatchResult::KeepActive;
     }
 
-    snf::runtime::ActorDispatchResult RoomActorBinding::resume(snf::runtime::ActorState& state, snf::runtime::ActorContext& context, const std::stop_token stop_token)
+    snf::runtime::ActorDispatchResult
+    RoomActorBinding::resume(snf::runtime::ActorState& state, snf::runtime::ActorContext& context, const std::stop_token stop_token)
     {
         static_cast<void>(state);
         static_cast<void>(context);

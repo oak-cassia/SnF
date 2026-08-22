@@ -15,6 +15,9 @@ namespace snf::server
     {
         Joined,
         BattleStarted,
+        // The detailed outcome is broadcast later in a BattleDigest. This reply only
+        // correlates the accepted or refused request.
+        SkillAcknowledged,
     };
 
     struct RoomReplyContext
@@ -28,7 +31,7 @@ namespace snf::server
     {
         RoomId room;
         RoomCommand command;
-        // Absent when nothing asked for this command. BattleCompleted arrives from
+        // Absent when nothing asked for this command. BattleDeadline arrives from
         // the Room's own timer, so there is no request to answer -- the same reason
         // ZoneSimulationTick rides with no reply context.
         std::optional<RoomReplyContext> reply;

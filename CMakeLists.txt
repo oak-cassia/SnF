@@ -64,6 +64,7 @@ add_library(snf_game STATIC
     src/game/room.cpp
     src/game/street_progression.cpp
     src/game/product_catalog.cpp
+    src/game/skill_catalog.cpp
 )
 target_include_directories(snf_game PUBLIC include)
 snf_configure_target(snf_game)
