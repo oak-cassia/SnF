@@ -27,8 +27,9 @@ matchmaking, Party 단위 동시 입장, 프로세스 간 이동, Room 상태 �
 
 ## 2. 소유권과 상태
 
-reactor의 `RouteCoordinator`가 Player의 현재 공간을 소유한다. `RoomActor`는 좌석과 phase를,
-`PlayerActor`는 전투 스냅샷의 출처인 경험치를 소유한다.
+reactor의 `RouteCoordinator`가 Player의 현재 공간을 소유한다. `RoomActor`는 좌석과 phase뿐 아니라
+전투 중에만 존재하는 Arena 좌표·현재 HP·이동 의도를 소유하고, `PlayerActor`는 전투 스냅샷의 출처인
+경험치를 소유한다.
 
 ```text
 Stable(zone, epoch, position)
@@ -44,6 +45,8 @@ Returning(room -> zone, return_epoch)       신규
 - 전투 스냅샷은 `PlayerActor`가 만든다. 경험치를 소유한 곳에서 읽는다는 규칙은 그대로다.
 - `PlayerRecord`의 `last_location`은 **복귀 지점**으로 유지한다. Room 재적은 영속화하지 않는다.
   저장된 위치는 재시작 뒤 복원될 수 있어야 하고, Room은 재시작을 넘기지 못한다.
+- Arena 좌표는 Zone 좌표를 덮지 않는다. Room 종료 시 Arena 상태는 폐기되고 `return position`은
+  입장 때 보존한 Zone 좌표를 그대로 사용한다.
 
 ## 3. 정상 입장
 
@@ -73,7 +76,7 @@ cross-zone handoff에서 가장 비싼 경로다. 이 순서에서는 입장 경
 복귀는 client 요청이 아니다.
 
 ```text
-BattleCleared(boss 사망) | BattleFailed(Room 자기 deadline) | LeaveRoom | Disconnected
+BattleCleared(boss 사망) | BattleFailed(Deadline | PartyDefeated) | LeaveRoom | Disconnected
 → Returning 기록과 return_epoch 발급
 → return Zone EnterZone(return_epoch, return position)
 → Applied 또는 AlreadyPresent 확인
