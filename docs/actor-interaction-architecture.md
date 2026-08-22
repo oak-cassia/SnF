@@ -382,7 +382,24 @@ Room은 clear 시점에 남아 있는 participant를 기준으로 `StreetExperie
 다만 tell admission 자체는 현재 best-effort다. Player Worker의 mailbox capacity가 가득 차면 Room은
 기다리거나 재시도하지 않고 grant를 drop한다. client의 `BattleCleared` 알림과 reward tell도 서로 다른
 경로이므로 알림이 도착했다고 persistence까지 보장되는 것은 아니다. 보상을 반드시 보존해야 한다면
-outbox, durable event 또는 bounded retry를 별도 요구사항으로 추가해야 한다.
+현재 구조만으로는 부족하다. 반면 Room join은 `on_room_join_undelivered`가 거절을 terminal completion으로
+바꾸므로 두 tell 경로의 유실 정책도 현재 서로 다르다.
+
+구현 순서 4는 범용 outbox나 retry timer 대신 durable per-Player grant로 이 차이를 닫는다.
+
+```text
+Room clear terminal turn
+  → snf_battle_grants batch commit + DB-issued battle_id
+  → best-effort grant tell
+      → admitted: PlayerActor가 즉시 자기 grant를 원자 적용
+      → refused: durable pending row 유지
+  → 다음 Player activation의 asyncLoad가 pending grant 적용
+```
+
+batch commit은 grant intent만 저장하고 Player progression은 건드리지 않는다. 각 PlayerActor가
+`snf_players` 갱신과 자기 `(battle_id, player_id)` 행의 `applied = true`를 하나의 Player-local
+transaction으로 처리한다. Room은 Player ack나 재시도를 기다리지 않고 terminal 정리와 passivation을
+유지한다. 이 DB 왕복은 전투 종결 turn에 한 번만 있으며 Room tick과 `tick_turn` 측정 범위가 아니다.
 
 ### 8.3 복귀
 
@@ -461,7 +478,8 @@ return을 명시적으로 정리한다. 단순히 Actor mailbox가 비었다는 
 - Actor 동기 요청을 금지한 대신 correlation context와 별도 saga가 필요하다.
 - Room 적용 후 Zone leave 전까지 짧은 이중 재적 구간을 route fence로 감춘다.
 - route authority가 reactor에 집중되므로 transition 트래픽이 커지면 별도 병목 관측이 필요하다.
-- reward tell은 현재 best-effort라 durable gameplay 보상 요구에는 부족하다.
+- reward tell은 현재 best-effort라 durable gameplay 보상 요구에는 부족하다. 구현 순서 4는 Room을
+  붙잡는 retry driver 없이 durable pending row와 다음 Player activation fallback으로 이를 닫는다.
 - Room이 process 수명을 넘지 않으므로 mid-battle reconnect나 process 간 migration을 지원하지 않는다.
 
 이 비용은 Actor abstraction만으로 숨기지 않는다. interaction마다 latency, admission failure, transition

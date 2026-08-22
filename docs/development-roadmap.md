@@ -56,8 +56,8 @@
 
 ## 현재 정리 기준
 
-- Repository는 Player snapshot의 `load/save`만 담당한다. gameplay 판정은 PlayerActor에서 한다.
-  아래 구현 순서 4의 battle outcome commit이 이 기준을 넓히는 첫 변경이다.
+- Repository는 현재 Player snapshot의 `load/save`만 담당한다. gameplay 판정은 PlayerActor에서 한다.
+  아래 구현 순서 4의 durable grant intent와 Player별 원자 적용이 이 기준을 넓히는 첫 변경이다.
 - Runtime, network와 콘텐츠는 typed command/result로만 연결한다.
 - 구현되지 않은 executor, network backend와 분산 구조는 문서에도 선행 설계하지 않는다.
 - 기능 수보다 하나의 콘텐츠가 정상·포화·disconnect·shutdown까지 종결되는지를 우선한다.
@@ -101,14 +101,48 @@ Waiting → Running → Cleared
      attack/cooldown, participant HP/death와 결정적 ID tie-break. (완료)
 3. **Session 안정성** — generation 기반 admission/routing 방어, Closing 동안 reconnect 차단과
    Player·Connection exact-match passivation. Actor 내부에 중복 generation guard를 두지 않는다. (완료)
-4. **결과 영속화** — `BattleResult`, `battle_id` idempotency, reward/progression transaction.
-   여기서 persistence 범위를 넓힌다. 상세 계약은 이 단계 직전에 확정한다
-5. **Progression** — skill unlock과 loadout, CombatSnapshot으로 전달
-6. **부하** — hot Room 하나 vs 분산 Room N개, outbound 포화, shutdown과 late completion
+4. **Durable per-Player Battle Grant** — DB가 발급한 `battle_id`, durable grant intent와 Player별
+   idempotent progression 적용. 여러 Player progression을 하나의 transaction으로 묶지 않는다
+5. **Room 부하 실측** — hot Room 하나와 분산 Room N개 비교, 느린 client의 outbound 포화 격리.
+   shutdown은 시나리오 종료 smoke로만 확인하고 별도 부하 축으로 만들지 않는다
 
 각 단계는 wire에서 관찰 가능한 상태로 끝난다. tick과 브로드캐스트를 한 단계로 묶은 이유가
 그것이다. 내부에서 몬스터가 spawn하고 공격하는데 client가 알 수 없으면 그 단계는 완결된
 vertical slice가 아니다.
+
+### Step 4 영속화 계약
+
+현재 reward tell은 mailbox admission이 거절되면 반환값을 버리고 Room이 passivate하므로 영구 유실된다.
+Step 4는 범용 saga나 retry driver를 추가하지 않고 다음 단일 테이블로 이 비대칭을 닫는다.
+
+```text
+snf_battle_grants(
+  battle_id  BIGINT UNSIGNED AUTO_INCREMENT,
+  player_id  BIGINT UNSIGNED,
+  experience BIGINT UNSIGNED,
+  applied    BOOLEAN,
+  PRIMARY KEY (battle_id, player_id)
+)
+```
+
+- clear의 terminal turn에서만 grant batch를 한 번 저장한다. 첫 participant 행의 auto-increment 값을
+  `battle_id`로 받고 나머지 행은 같은 값을 명시해 하나의 transaction으로 commit한다. 이 DB 왕복은
+  100ms tick이나 `tick_turn`에 포함되지 않는다
+- 이 batch transaction은 immutable grant intent만 만들며 어떤 Player progression도 수정하지 않는다.
+  durable insert가 실패하면 clear를 성공한 것처럼 publish하거나 passivate하지 않고 Logic Runtime
+  failure로 승격한다
+- commit 뒤 기존 `tryTell`로 즉시 전달한다. admission 성공 시 PlayerActor가 자기
+  `(battle_id, player_id)` 행만 처리한다. `snf_players.street_experience` 갱신과 `applied = true`는
+  단일 Player transaction이며 이미 applied이면 성공 no-op다
+- tell admission 거절에는 즉시 재시도하지 않는다. 다음 Player activation의 `asyncLoad`가 해당
+  Player의 미적용 행을 함께 적용하고 갱신된 snapshot을 반환한다. 보상은 재접속까지 지연될 수 있지만
+  유실되거나 중복 지급되지 않는다
+- Room은 Player별 ack를 기다리지 않고 durable insert와 tell 시도 뒤 기존 terminal 정리와
+  passivation을 유지한다
+
+Step 4에서는 여러 Player progression의 all-or-nothing transaction, 범용 transaction framework,
+범용 saga/outbox, 과거 전체 `Transaction` abstraction 복원, 새 client protocol과 reward 적용 순서
+보장을 만들지 않는다.
 
 ### 확정한 계약
 
@@ -145,13 +179,14 @@ vertical slice가 아니다.
 - stale connection generation이 admission/routing 경계에서 이전 Player를 조작하지 못하며, 이전
   connection의 늦은 deactivation이 새 Closing 세션을 제거하지 않는다. (충족)
 - 같은 `battle_id`의 결과가 두 번 도착해도 보상이 두 번 지급되지 않는다.
+- reward tell이 거절돼도 durable row가 남고 다음 Player activation에서 정확히 한 번 적용된다.
 - 같은 입력에서 같은 `BattleDigest` 이벤트 순서가 나온다. (충족)
 - disconnect/reconnect와 timeout 정책이 명시돼 있다. (충족: 입장 handoff 계약 §6. disconnect는
   좌석을 해제하고 보상을 포기하며, Room 재적을 영속화하지 않으므로 reconnect는 저장된 Zone으로
   복원된다. mid-battle reconnect는 명시적 비범위다)
 - clear/fail 결과는 한 번만 생성되고 Room은 timer와 mailbox를 정리한 뒤 passivate된다. (충족)
 - 여러 Room 분산 부하와 하나의 hot Room 부하를 비교한다.
-- 느린 client가 outbound를 포화시켰을 때 전투가 계속 진행된다.
+- 느린 client가 outbound를 포화시키면 해당 연결만 종료되고 Room과 건강한 참가자는 계속 진행한다.
 - deadline/Tick 예약 포화와 terminal 뒤 stale timer 정리를 포함한다. (충족)
 - Debug, TCP integration, ASan·UBSan과 TSan을 통과한다. (충족)
 
@@ -171,12 +206,13 @@ battle_id              → 영속 연산 중복
 - 대규모 seamless world와 process 간 migration
 - matchmaking service
 - 복잡한 전투 수치와 클라이언트 표현
-- 별도 projection이나 read model. battle outcome commit은 구현 순서 4에서 예외로 들어온다
+- skill unlock, loadout과 추가 skill 콘텐츠. 현재 단일 Slash 카탈로그를 유지한다
+- 별도 projection이나 read model. 단일 `snf_battle_grants` 테이블만 구현 순서 4의 예외로 들어온다
 - Runtime 통합, io_uring 또는 Actor 내부 병렬화
 
 ## 콘텐츠 완료 후 포트폴리오 산출물
 
 1. 요구사항 → 상태 → command/result → 예외 흐름을 담은 콘텐츠 계약
 2. Actor 소유권과 async/backpressure/lifecycle 결정만 담은 아키텍처 문서
-3. 정상·hot Actor·포화·shutdown 부하 결과
+3. 정상·hot Room·분산 Room과 outbound 포화 측정 결과
 4. 5분 안에 재현 가능한 TCP demo와 실행 명령
