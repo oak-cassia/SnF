@@ -2415,7 +2415,7 @@ namespace
             .shutdown_grace_period = 200ms,
             .max_pending_send_bytes = 2048,
             .client_send_buffer_size = 1024,
-            .room_battle_duration = 4s,
+            .room_battle_duration = 10s,
             .room_boss_health = snf::server::BASE_ATTACK,
             .room_tick_interval = 1ms,
             .room_wave_interval = 1s,
@@ -2486,6 +2486,7 @@ namespace
             std::uint64_t last_digest_sequence{0};
             std::uint64_t participant_left_sequence{0};
             bool saw_boss{false};
+            bool participant_in_boss_range{false};
             bool saw_clear{false};
         };
         std::array<HealthyObservation, 3> observations{};
@@ -2509,6 +2510,12 @@ namespace
                     {
                         observation.saw_boss = true;
                     }
+                }
+                if (const auto moved = digest_event_offset(frame, snf::server::BattleEventKind::ParticipantMoved))
+                {
+                    constexpr std::uint32_t SAFE_BOSS_RANGE_Y = 8;
+                    observation.participant_in_boss_range =
+                        observation.participant_in_boss_range || read_u32(frame.payload, *moved + 13) <= SAFE_BOSS_RANGE_Y;
                 }
             }
             else if (frame.type == snf::protocol::MessageType::BattleCleared)
@@ -2568,15 +2575,15 @@ namespace
         }
         assert(all_healthy(saw_participant_left));
 
-        const auto saw_boss = [](const HealthyObservation& observation)
+        const auto ready_to_cast = [](const HealthyObservation& observation)
         {
-            return observation.saw_boss;
+            return observation.saw_boss && observation.participant_in_boss_range;
         };
-        while (!all_healthy(saw_boss) && drain_round++ < MAX_DRAIN_ROUNDS)
+        while (!all_healthy(ready_to_cast) && drain_round++ < MAX_DRAIN_ROUNDS)
         {
-            drain_unsatisfied_round(saw_boss);
+            drain_unsatisfied_round(ready_to_cast);
         }
-        assert(all_healthy(saw_boss));
+        assert(all_healthy(ready_to_cast));
 
         send_all(clients[FIRST_HEALTHY_INDEX].getDescriptor(), snf::protocol::encode_frame(use_skill_frame(450, room, snf::server::SLASH, 1)));
         const auto saw_clear = [](const HealthyObservation& observation)
