@@ -154,7 +154,8 @@ Session은 partial frame과 pending send를 보존한다.
 - frame: `[body_length:u32][type:u16][request_id:u32][payload]`
 - 모든 정수는 big-endian이며 body는 최대 64 KiB다.
 - decoder는 incomplete input과 invalid input을 구분한다.
-- connection generation이 이전 연결의 늦은 outbound를 차단한다.
+- connection generation이 이전 연결의 늦은 outbound를 차단하고, Gateway와 session directory의
+  admission/routing에서 stale inbound가 persistent PlayerActor에 도달하지 못하게 한다.
 - protocol layer가 frame을 typed command로 바꾸므로 Actor는 wire format을 모른다.
 - `request_id`는 요청과 응답을 짝짓는다. 한 command가 응답을 여러 개 만들면 **전부 같은
   `request_id`를 갖는다** — 요청이 하나이기 때문이며, 구분은 payload로 한다.

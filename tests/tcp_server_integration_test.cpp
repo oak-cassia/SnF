@@ -12,6 +12,7 @@
 #include <cassert>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
@@ -30,6 +31,7 @@
 #include <thread>
 #include <tuple>
 #include <unistd.h>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -103,6 +105,181 @@ namespace
         assert(descriptor != -1);
         return snf::net::UniqueFileDescriptor{descriptor};
     }
+
+    class ControlledSaveRepository final : public snf::server::PlayerRepository, public snf::server::PlayerRepositoryDiagnostics
+    {
+    public:
+        ControlledSaveRepository()
+            : _watchdog(
+                  [this](const std::stop_token stop_token) noexcept
+                  {
+                      runWatchdog(stop_token);
+                  }
+              )
+        {
+        }
+
+        ~ControlledSaveRepository() override
+        {
+            _watchdog.request_stop();
+            _changed.notify_all();
+        }
+
+        void asyncLoad(const snf::server::PlayerId player, snf::server::PlayerLoadCompletion completion) override
+        {
+            snf::server::PlayerLoadResult result;
+            {
+                std::lock_guard lock{_mutex};
+                ++_accepted;
+                if (const auto record = _records.find(player); record != _records.end())
+                {
+                    result.record = record->second;
+                }
+            }
+            completion(std::move(result));
+        }
+
+        void asyncSave(snf::server::PlayerRecord record, snf::server::PlayerSaveCompletion completion) override
+        {
+            {
+                std::lock_guard lock{_mutex};
+                ++_accepted;
+                if (_hold_first_save)
+                {
+                    _hold_first_save = false;
+                    _pending_record = std::move(record);
+                    _pending_save = std::move(completion);
+                    _changed.notify_all();
+                    return;
+                }
+                _records.insert_or_assign(record.player, std::move(record));
+            }
+            completion(successfulSave());
+        }
+
+        [[nodiscard]] std::optional<snf::server::PlayerRecord> find(const snf::server::PlayerId player) const override
+        {
+            std::lock_guard lock{_mutex};
+            const auto record = _records.find(player);
+            return record == _records.end() ? std::nullopt : std::optional{record->second};
+        }
+
+        [[nodiscard]] snf::server::PlayerRepositoryStats stats() const override
+        {
+            std::lock_guard lock{_mutex};
+            return snf::server::PlayerRepositoryStats{
+                .accepted = _accepted,
+                .rejected = 0,
+                .queue_depth = _pending_save ? 1U : 0U,
+                .queue_high_water_mark = _hold_first_save ? 0U : 1U,
+                .operation_failures = 0,
+                .operation_latency_nanoseconds = {},
+            };
+        }
+
+        [[nodiscard]] bool waitForPendingSave(const std::chrono::milliseconds timeout)
+        {
+            std::unique_lock lock{_mutex};
+            return _changed.wait_for(
+                lock,
+                timeout,
+                [this]
+                {
+                    return static_cast<bool>(_pending_save);
+                }
+            );
+        }
+
+        [[nodiscard]] bool releasePendingSave()
+        {
+            snf::server::PlayerSaveCompletion completion;
+            {
+                std::lock_guard lock{_mutex};
+                if (!_pending_record || !_pending_save)
+                {
+                    return false;
+                }
+                _records.insert_or_assign(_pending_record->player, std::move(*_pending_record));
+                _pending_record.reset();
+                completion = std::move(_pending_save);
+                _changed.notify_all();
+            }
+            completion(successfulSave());
+            return true;
+        }
+
+        [[nodiscard]] std::uint64_t watchdogReleaseCount() const noexcept
+        {
+            return _watchdog_releases.load(std::memory_order_acquire);
+        }
+
+    private:
+        [[nodiscard]] static snf::server::PlayerSaveResult successfulSave() noexcept
+        {
+            return snf::server::PlayerSaveResult{
+                .status = snf::server::PlayerRepositoryStatus::Success,
+            };
+        }
+
+        void runWatchdog(const std::stop_token stop_token) noexcept
+        {
+            snf::server::PlayerSaveCompletion completion;
+            {
+                std::unique_lock lock{_mutex};
+                if (!_changed.wait(
+                        lock,
+                        stop_token,
+                        [this]
+                        {
+                            return static_cast<bool>(_pending_save);
+                        }
+                    ))
+                {
+                    return;
+                }
+                if (_changed.wait_for(
+                        lock,
+                        stop_token,
+                        5s,
+                        [this]
+                        {
+                            return !_pending_save;
+                        }
+                    ))
+                {
+                    return;
+                }
+                if (!_pending_record || !_pending_save)
+                {
+                    return;
+                }
+                _records.insert_or_assign(_pending_record->player, std::move(*_pending_record));
+                _pending_record.reset();
+                completion = std::move(_pending_save);
+                _watchdog_releases.fetch_add(1, std::memory_order_release);
+            }
+
+            try
+            {
+                completion(successfulSave());
+            }
+            catch (...)
+            {
+                // This is a test-only anti-hang path. The normal path releases the
+                // completion explicitly and asserts that this fallback was unused.
+            }
+        }
+
+        mutable std::mutex _mutex;
+        std::condition_variable_any _changed;
+        std::unordered_map<snf::server::PlayerId, snf::server::PlayerRecord, snf::server::PlayerIdHash> _records;
+        std::uint64_t _accepted{0};
+        bool _hold_first_save{true};
+        std::optional<snf::server::PlayerRecord> _pending_record;
+        snf::server::PlayerSaveCompletion _pending_save;
+        std::atomic<std::uint64_t> _watchdog_releases{0};
+        std::jthread _watchdog;
+    };
 
     class RunningServer
     {
@@ -993,6 +1170,89 @@ namespace
         const auto second_saved = server.getPlayerRecord(snf::server::PlayerId{.value = player_id});
         assert(second_saved.has_value());
         assert(second_saved->handled_command_count == 4);
+
+        server.stop();
+    }
+
+    void test_reconnect_waits_while_the_previous_session_is_closing()
+    {
+        ControlledSaveRepository* repository = nullptr;
+        RunningServer server{snf::server::GameServerConfig{
+            .port = 0,
+            .shutdown_grace_period = 200ms,
+            .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
+            .client_send_buffer_size = std::nullopt,
+            .player_repository_factory =
+                [&repository]
+            {
+                auto controlled = std::make_unique<ControlledSaveRepository>();
+                repository = controlled.get();
+                return controlled;
+            },
+        }};
+        assert(repository != nullptr);
+        constexpr std::uint64_t player_id = 78;
+        const snf::server::PlayerId player{.value = player_id};
+
+        auto first = connect_client(server.getPort());
+        const auto first_auth = authentication_frame(105, player_id);
+        const auto first_auth_bytes = snf::protocol::encode_frame(first_auth);
+        send_all(first.getDescriptor(), first_auth_bytes);
+        assert_authenticated(receive_exact(first.getDescriptor(), first_auth_bytes.size()), first_auth.request_id, player_id);
+
+        const auto first_ping = snf::protocol::Frame{
+            .type = snf::protocol::MessageType::Ping,
+            .request_id = 106,
+            .payload = {std::byte{0xAC}},
+        };
+        const auto first_ping_bytes = snf::protocol::encode_frame(first_ping);
+        send_all(first.getDescriptor(), first_ping_bytes);
+        assert_pong(receive_exact(first.getDescriptor(), first_ping_bytes.size()), first_ping);
+
+        first.init();
+        assert(repository->waitForPendingSave(1s));
+        assert(actor_count(server.getActorRuntimeStats()) == 1);
+
+        const auto blocked = connect_client(server.getPort());
+        const auto blocked_auth = authentication_frame(107, player_id);
+        send_all(blocked.getDescriptor(), snf::protocol::encode_frame(blocked_auth));
+        receive_until_closed(blocked.getDescriptor());
+        assert(actor_count(server.getActorRuntimeStats()) == 1);
+
+        assert(repository->releasePendingSave());
+        const auto first_passivation_deadline = std::chrono::steady_clock::now() + 1s;
+        while (actor_count(server.getActorRuntimeStats()) != 0 && std::chrono::steady_clock::now() < first_passivation_deadline)
+        {
+            std::this_thread::sleep_for(1ms);
+        }
+        assert(actor_count(server.getActorRuntimeStats()) == 0);
+
+        auto reconnected = connect_client(server.getPort());
+        const auto reconnect_auth = authentication_frame(108, player_id);
+        const auto reconnect_auth_bytes = snf::protocol::encode_frame(reconnect_auth);
+        send_all(reconnected.getDescriptor(), reconnect_auth_bytes);
+        assert_authenticated(receive_exact(reconnected.getDescriptor(), reconnect_auth_bytes.size()), reconnect_auth.request_id, player_id);
+
+        const auto restored_ping = snf::protocol::Frame{
+            .type = snf::protocol::MessageType::Ping,
+            .request_id = 109,
+            .payload = {std::byte{0xAD}},
+        };
+        const auto restored_ping_bytes = snf::protocol::encode_frame(restored_ping);
+        send_all(reconnected.getDescriptor(), restored_ping_bytes);
+        assert_pong(receive_exact(reconnected.getDescriptor(), restored_ping_bytes.size()), restored_ping);
+
+        reconnected.init();
+        const auto second_passivation_deadline = std::chrono::steady_clock::now() + 1s;
+        while (actor_count(server.getActorRuntimeStats()) != 0 && std::chrono::steady_clock::now() < second_passivation_deadline)
+        {
+            std::this_thread::sleep_for(1ms);
+        }
+        assert(actor_count(server.getActorRuntimeStats()) == 0);
+        const auto saved = server.getPlayerRecord(player);
+        assert(saved.has_value());
+        assert(saved->handled_command_count == 4);
+        assert(repository->watchdogReleaseCount() == 0);
 
         server.stop();
     }
@@ -2434,6 +2694,7 @@ int main()
     run("test_returns_pong_for_ping", test_returns_pong_for_ping);
     run("test_authenticates_one_session_and_allows_reconnect_after_passivation",
         test_authenticates_one_session_and_allows_reconnect_after_passivation);
+    run("test_reconnect_waits_while_the_previous_session_is_closing", test_reconnect_waits_while_the_previous_session_is_closing);
     run("test_live_purchase_is_memory_authoritative_and_flushes", test_live_purchase_is_memory_authoritative_and_flushes);
     run("test_two_players_share_one_party_actor_and_passivate_it_when_empty", test_two_players_share_one_party_actor_and_passivate_it_when_empty);
     run("test_two_players_kill_a_boss_and_are_told_without_asking", test_two_players_kill_a_boss_and_are_told_without_asking);

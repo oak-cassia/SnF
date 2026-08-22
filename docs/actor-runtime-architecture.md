@@ -199,6 +199,7 @@ PlayerActorState
 ├── load/reservation/save task   coroutine frame 소유자
 ├── pending command/result
 ├── connection/request/room-entry context
+├── closing_connection           ConnectionClosed 전용 passivation identity
 └── on_deactivated               passivation lifecycle callback
 ```
 
@@ -208,8 +209,11 @@ request ID, repository와 outbound capacity는 게임 규칙이 아니므로 `Pl
 
 `ActorState`의 virtual destructor도 단순한 C++ type erasure 이상의 계약 지점이다. Runtime은
 파생 타입을 모르지만 activation 제거 시 반드시 파생 destructor까지 실행해야 한다. Player에서는
-`PlayerActorState` 파괴가 `on_deactivated`를 호출하고, session directory가 passivation 완료를
-확정하는 흐름으로 이어진다.
+`PlayerActorState` 파괴가 `on_deactivated`를 호출하고, session directory가 Player와
+`closing_connection`이 현재 Closing index와 모두 일치할 때만 passivation 완료를 확정한다.
+`Stage::Saving`이 Actor 슬롯을 유지하므로 final save가 terminal repository 결과에 도달하기 전에는
+소멸 callback도 실행되지 않는다. command별 응답 connection은 dispatch마다 바뀔 수 있어 이 identity로
+재사용하지 않는다.
 
 ### 4.6 `ActorBinding`: Runtime과 도메인의 adapter
 
