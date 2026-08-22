@@ -17,6 +17,7 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <thread>
 #include <variant>
 #include <vector>
 
@@ -610,6 +611,128 @@ namespace
         assert(evicted >= 1);
         assert(completion.failed.load() == 0);
     }
+
+    void test_a_rejected_reward_tell_is_counted()
+    {
+        RecordingPlayerBinding player_binding;
+        BossSpawnWatch boss_spawn;
+        auto boss_reached = boss_spawn.reached();
+        snf::runtime::ActorRuntime* runtime_pointer = nullptr;
+        snf::server::RoomActorBinding* binding_pointer = nullptr;
+        std::atomic<bool> fill_armed{true};
+
+        snf::server::CountingCommandLifecycleSink lifecycle;
+        snf::server::RoomActorBinding binding{
+            snf::server::RoomActorBindingConfig{
+                .actor =
+                    snf::server::RoomConfig{
+                        .battle_duration = 5s,
+                        .clear_experience = 300,
+                        .boss_health = 50,
+                        .tick_interval = 5ms,
+                        .wave_interval = 1s,
+                        .wave_count = 0,
+                        .minions_per_wave = 0,
+                        .boss_spawn_after = 10ms,
+                        .max_spawned_enemies = 1,
+                        .arena_width = 20,
+                        .arena_height = 20,
+                        .participant_spawn_spacing = 2,
+                        .minion_spawn_radius = 5,
+                    },
+                .on_result =
+                    [&boss_spawn, &runtime_pointer, &binding_pointer, &fill_armed](
+                        const snf::server::RoomInboundCommand&, const snf::server::RoomResult& result
+                    )
+                {
+                    boss_spawn.observe(result);
+                    if (result.grants.empty() || !fill_armed.exchange(false) || runtime_pointer == nullptr || binding_pointer == nullptr)
+                    {
+                        return;
+                    }
+
+                    // on_result runs immediately before the Room publishes grants.
+                    // Fill this one Worker's outstanding budget here so the following
+                    // tell is deterministically refused without giving the Worker a
+                    // chance to drain the filler commands first.
+                    for (std::uint64_t attempt = 0; attempt < 64; ++attempt)
+                    {
+                        const auto posted = runtime_pointer->tryPost(binding_pointer->makeCommand(snf::server::RoomInboundCommand{
+                            .room = snf::server::RoomId{.value = 1000 + attempt},
+                            .command = snf::server::StartBattle{},
+                            .reply = std::nullopt,
+                        }));
+                        if (posted != snf::runtime::PostResult::Accepted)
+                        {
+                            break;
+                        }
+                    }
+                },
+            },
+            lifecycle
+        };
+        binding_pointer = &binding;
+        RecordingCompletion completion;
+        auto config = runtime_config();
+        config.worker_count = 1;
+        config.queue_capacity_per_worker = 8;
+        snf::runtime::ActorRuntime runtime{config, completion};
+        runtime_pointer = &runtime;
+        runtime.registerBinding(binding);
+        runtime.registerBinding(player_binding);
+        snf::server::RoomActorIngress ingress{runtime, binding, lifecycle};
+        runtime.start();
+
+        const snf::server::RoomId room{.value = 14};
+        assert(
+            ingress.tryPost(snf::server::RoomInboundCommand{
+                .room = room,
+                .command =
+                    snf::server::JoinRoom{
+                        .player = snf::server::PlayerId{.value = 10},
+                        .stats = {.attack = 50, .health = 100},
+                    },
+                .reply = std::nullopt,
+            }) == snf::runtime::PostResult::Accepted
+        );
+        assert(
+            ingress.tryPost(snf::server::RoomInboundCommand{
+                .room = room,
+                .command = snf::server::StartBattle{},
+                .reply = std::nullopt,
+            }) == snf::runtime::PostResult::Accepted
+        );
+        assert(boss_reached.wait_for(5s) == std::future_status::ready);
+        assert(
+            ingress.tryPost(snf::server::RoomInboundCommand{
+                .room = room,
+                .command =
+                    snf::server::UseSkill{
+                        .player = snf::server::PlayerId{.value = 10},
+                        .skill = snf::server::SLASH,
+                        .request_sequence = 1,
+                    },
+                .reply = std::nullopt,
+            }) == snf::runtime::PostResult::Accepted
+        );
+
+        bool counted = false;
+        for (int attempt = 0; attempt < 500 && !counted; ++attempt)
+        {
+            counted = binding.stats().grant_tell_rejections == 1;
+            if (!counted)
+            {
+                std::this_thread::sleep_for(10ms);
+            }
+        }
+        assert(counted);
+        runtime.close();
+        runtime.join();
+
+        std::lock_guard lock{player_binding.mutex};
+        assert(player_binding.grants.empty());
+        assert(completion.failed.load() == 0);
+    }
 }
 
 void test_a_join_naming_another_room_is_refused()
@@ -667,4 +790,5 @@ void run_room_actor_binding_tests()
     test_deadline_schedule_rejection_fails_the_runtime();
     test_tick_schedule_rejection_keeps_deadline_backstop();
     test_a_room_that_never_started_passivates();
+    test_a_rejected_reward_tell_is_counted();
 }

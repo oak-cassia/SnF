@@ -370,6 +370,11 @@ namespace
             return _server.getZoneActorStats();
         }
 
+        [[nodiscard]] snf::server::PlayerActorBindingStats getPlayerActorStats() const noexcept
+        {
+            return _server.getPlayerActorStats();
+        }
+
         [[nodiscard]] snf::server::RoomActorBindingStats getRoomActorStats() const noexcept
         {
             return _server.getRoomActorStats();
@@ -1730,6 +1735,11 @@ namespace
         assert(room_metrics.tick_publish_nanoseconds.sample_count == room_metrics.tick_execution_nanoseconds.sample_count);
         assert(room_metrics.tick_turn_nanoseconds.sample_count == room_metrics.tick_execution_nanoseconds.sample_count);
         assert(room_metrics.tick_schedule_rejections == 0);
+        assert(room_metrics.grant_tell_rejections == 0);
+        const auto player_metrics = server.getPlayerActorStats();
+        assert(player_metrics.reward_snapshot_admission_rejections == 0);
+        assert(player_metrics.reward_snapshot_retry_giveups == 0);
+        assert(player_metrics.grant_load_failures == 0);
     }
 
     void test_a_party_defeat_reports_its_reason_and_returns_the_player_to_the_zone()
