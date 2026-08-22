@@ -89,20 +89,22 @@ Network Runtime
 ### Battle Room과 street 성장
 
 - `Waiting → Running → Cleared | Failed` 상태 기계, 100ms one-shot tick 사슬과 별도 전투 deadline timer
-- client는 skill id와 request sequence만 보낸다. damage, cooldown, boss HP는 서버가 소유한다
+- Room은 비영속 100×100 정수 Arena의 참가자·적 좌표와 HP를 소유한다. client는 이동 의도 또는
+  skill id와 request sequence만 보내며 damage, targeting, cooldown과 생사는 서버가 판정한다
 - 같은 request sequence는 damage를 두 번 적용하지 않고, cooldown은 turn 시작 시각과 비교하는
   deadline이다 (`ActorContext::observedAt`)
-- 첫 wave와 minion, 정해진 절대 시각에 마지막으로 생성되는 boss를 Room이 소유한다. 현재 targeting은
-  spawn 순서상 첫 생존 적이다
-- `UseSkill`은 즉시 판정하고 요청자에게 `SkillAcknowledged`를 보낸다. damage/death/spawn은 순서를
-  보존한 `BattleDigest(request_id = 0)`로 caster를 포함한 참가자 전원에게 fanout한다
+- `SetMoveIntent`는 persistent 8방향 의도만 바꾸고 다음 tick이 좌표를 이동한다. 플레이어와 적은
+  사거리 안/추격 대상 중 가장 가까운 생존 개체를 고르며 동률은 작은 ID다
+- `UseSkill`은 현재 좌표에서 즉시 판정하고 요청자에게 `SkillAcknowledged`를 보낸다. 좌표·damage·
+  death·spawn은 인과 순서를 보존한 `BattleDigest(request_id = 0)`로 전 참가자에게 fanout한다
 - clear 시 참가자마다 `tryTell`로 street 경험치 전달, 미상주 Player는 레코드를 먼저 로드
 - 누적 경험치만 저장하고 레벨과 공격/체력은 파생 (레벨당 +10% 선형, 상한 30)
-- `RoomJoin`/`BattleStart`/`UseSkill` 요청과, 요청 없이 나가는 `BattleDigest`·`BattleCleared`·
-  `BattleFailed` 알림. 기존 `SkillApplied` wire 번호는 예약 상태로 남아 있다
+- `RoomJoin`/`BattleStart`/`SetMoveIntent`/`UseSkill` 요청과, 요청 없이 나가는 `BattleDigest`·
+  `BattleCleared`·`BattleFailed` 알림. `BattleFailed`는 `Deadline`과 `PartyDefeated`를 구분한다
+- Arena 좌표는 Room 종료와 함께 사라지며 `ReturnedToZone`은 입장 전에 저장한 Zone 좌표를 복원한다
 
-적 공격과 참가자 HP/사망, threat targeting은 아직 없다. 따라서 실패는 deadline까지 boss가 살아남는
-경우뿐이다. matchmaking도 없으며 클라이언트가 room id를 지정한다.
+충돌, 장애물, pathfinding, projectile, Room AOI와 진행 중 resync snapshot은 없다. matchmaking도
+없으며 클라이언트가 room id를 지정한다. 기존 `SkillApplied` wire 번호는 예약 상태로 남아 있다.
 
 ## Actor 모델로 검증하는 것
 

@@ -31,6 +31,19 @@ namespace snf::server
         // A flush threshold rather than a drop boundary. The command that crosses
         // it stays atomic and may take the final count slightly above this value.
         std::size_t digest_flush_threshold{512};
+        std::uint32_t arena_width{100};
+        std::uint32_t arena_height{100};
+        std::uint32_t player_move_speed{4};
+        std::uint32_t participant_spawn_spacing{4};
+        std::uint32_t minion_spawn_radius{25};
+        std::uint32_t minion_move_speed{2};
+        std::uint32_t boss_move_speed{1};
+        std::uint64_t minion_attack_damage{3};
+        std::uint64_t boss_attack_damage{10};
+        std::uint32_t minion_attack_range{3};
+        std::uint32_t boss_attack_range{5};
+        std::chrono::milliseconds minion_attack_cooldown{1000};
+        std::chrono::milliseconds boss_attack_cooldown{2000};
     };
 
     // A clock-free state machine. Its binding supplies observed_at and translates
@@ -47,6 +60,8 @@ namespace snf::server
         [[nodiscard]] bool bossSpawned() const noexcept;
         [[nodiscard]] std::uint64_t bossHealth() const noexcept;
         [[nodiscard]] std::optional<CombatStats> statsOf(PlayerId player) const;
+        [[nodiscard]] std::optional<std::uint64_t> healthOf(PlayerId player) const;
+        [[nodiscard]] std::optional<ArenaPosition> positionOf(PlayerId player) const;
 
         [[nodiscard]] RoomResult handle(const RoomCommand& command, std::chrono::steady_clock::time_point observed_at);
 
@@ -61,7 +76,11 @@ namespace snf::server
         {
             PlayerId player;
             CombatStats stats;
-            std::uint64_t applied_sequence{0};
+            std::uint64_t current_health{0};
+            ArenaPosition position{};
+            MoveDirection move_intent{MoveDirection::Stop};
+            std::uint64_t applied_skill_sequence{0};
+            std::uint64_t applied_movement_sequence{0};
             std::vector<SkillCooldown> cooldowns;
         };
 
@@ -71,16 +90,26 @@ namespace snf::server
         [[nodiscard]] RoomResult handleCommand(const UseSkill& command, std::chrono::steady_clock::time_point observed_at);
         [[nodiscard]] RoomResult handleCommand(const BattleDeadline& command, std::chrono::steady_clock::time_point observed_at);
         [[nodiscard]] RoomResult handleCommand(const RoomSimulationTick& command, std::chrono::steady_clock::time_point observed_at);
+        [[nodiscard]] RoomResult handleCommand(const SetMoveIntent& command, std::chrono::steady_clock::time_point observed_at);
 
         [[nodiscard]] Participant* findParticipant(PlayerId player);
-        [[nodiscard]] Enemy* firstLivingEnemy();
+        [[nodiscard]] Enemy* nearestLivingEnemy(ArenaPosition origin, std::uint32_t range);
+        [[nodiscard]] Participant* nearestLivingParticipant(ArenaPosition origin);
         [[nodiscard]] const Enemy* boss() const noexcept;
+        [[nodiscard]] bool allParticipantsDead() const noexcept;
+        [[nodiscard]] std::uint32_t enemyMoveSpeed(EnemyKind kind) const noexcept;
+        [[nodiscard]] std::uint32_t enemyAttackRange(EnemyKind kind) const noexcept;
+        [[nodiscard]] std::uint64_t enemyAttackDamage(EnemyKind kind) const noexcept;
+        [[nodiscard]] std::chrono::milliseconds enemyAttackCooldown(EnemyKind kind) const noexcept;
         [[nodiscard]] std::vector<PlayerId> audience() const;
         [[nodiscard]] RoomResult baseResult(RoomCommandStatus status, std::optional<PlayerId> player) const;
-        [[nodiscard]] RoomResult failBattle(RoomCommandStatus status, std::optional<PlayerId> player);
+        [[nodiscard]] RoomResult failBattle(RoomCommandStatus status, std::optional<PlayerId> player, BattleFailureReason reason);
         [[nodiscard]] std::optional<BattleDigest> takeDigest();
-        void spawnWave();
-        void spawnBoss();
+        void initializeArena();
+        void moveParticipants();
+        [[nodiscard]] bool actEnemies(std::chrono::steady_clock::time_point observed_at);
+        void spawnWave(std::chrono::steady_clock::time_point observed_at);
+        void spawnBoss(std::chrono::steady_clock::time_point observed_at);
         void rewardClear(RoomResult& result) const;
 
         RoomId _room;

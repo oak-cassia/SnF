@@ -1,5 +1,8 @@
 #pragma once
 
+#include "snf/game/arena.hpp"
+
+#include <chrono>
 #include <cstdint>
 
 namespace snf::server
@@ -23,6 +26,8 @@ namespace snf::server
         EnemyId id{};
         EnemyKind kind{EnemyKind::Minion};
         std::uint64_t health{0};
+        ArenaPosition position{};
+        std::chrono::steady_clock::time_point attack_ready_at{};
 
         [[nodiscard]] bool operator==(const Enemy&) const noexcept = default;
     };

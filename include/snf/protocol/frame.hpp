@@ -45,6 +45,8 @@ namespace snf::protocol
         BattleFailed = 27,
         BattleDigest = 28,
         SkillAcknowledged = 29,
+        SetMoveIntent = 30,
+        MoveAcknowledged = 31,
     };
 
     // A request id of zero marks a frame the server sent on its own rather than in

@@ -9,7 +9,9 @@ using namespace snf::protocol;
 
 void test_encode_frame()
 {
-    const snf::protocol::Frame frame{.type = snf::protocol::MessageType::Ping, .request_id = 0x01020304, .payload = {std::byte{0xAA}, std::byte{0xBB}}};
+    const snf::protocol::Frame frame{
+        .type = snf::protocol::MessageType::Ping, .request_id = 0x01020304, .payload = {std::byte{0xAA}, std::byte{0xBB}}
+    };
 
     const auto result = snf::protocol::encode_frame(frame);
 
@@ -369,11 +371,15 @@ void test_decodes_room_handoff_frames()
     const Frame leave{.type = MessageType::RoomLeave, .request_id = 10, .payload = {}};
     const Frame left{.type = MessageType::RoomLeft, .request_id = 11, .payload = {std::byte{0x00}}};
     const Frame returned{.type = MessageType::ReturnedToZone, .request_id = 0, .payload = {std::byte{0x01}, std::byte{0x02}}};
+    const Frame move{.type = MessageType::SetMoveIntent, .request_id = 12, .payload = {std::byte{0x00}}};
+    const Frame acknowledged{.type = MessageType::MoveAcknowledged, .request_id = 12, .payload = {std::byte{0x00}, std::byte{0x01}}};
 
     FrameDecoder decoder{};
     decoder.push(encode_frame(leave));
     decoder.push(encode_frame(left));
     decoder.push(encode_frame(returned));
+    decoder.push(encode_frame(move));
+    decoder.push(encode_frame(acknowledged));
 
     const auto first = decoder.tryDecodeNext();
     assert(first.hasFrame() && first.frame->type == MessageType::RoomLeave);
@@ -381,6 +387,10 @@ void test_decodes_room_handoff_frames()
     assert(second.hasFrame() && second.frame->type == MessageType::RoomLeft);
     const auto third = decoder.tryDecodeNext();
     assert(third.hasFrame() && third.frame->type == MessageType::ReturnedToZone);
+    const auto fourth = decoder.tryDecodeNext();
+    assert(fourth.hasFrame() && fourth.frame->type == MessageType::SetMoveIntent);
+    const auto fifth = decoder.tryDecodeNext();
+    assert(fifth.hasFrame() && fifth.frame->type == MessageType::MoveAcknowledged);
     assert(decoder.tryDecodeNext().needsMoreData());
 }
 

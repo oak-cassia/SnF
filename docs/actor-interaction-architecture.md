@@ -181,6 +181,7 @@ struct RoomResult
     bool boss_spawned;
     std::optional<BattleDigest> digest;
     std::optional<BattleOutcome> outcome;
+    std::optional<BattleFailureReason> failure_reason;
     std::vector<PlayerId> audience;
     std::vector<StreetExperienceGrant> grants;
 };
@@ -312,7 +313,7 @@ sequenceDiagram
     participant C as Client
 
     C->>R: UseSkill(skill, sequence)
-    R->>R: 중복·cooldown 판정 → 첫 생존 적 damage → boss 0 → Cleared
+    R->>R: 중복·cooldown·거리 판정 → nearest enemy damage → boss 0 → Cleared
     par reward
         R->>P: StreetExperienceGrant via tryTell
     and notification
@@ -335,9 +336,10 @@ sequenceDiagram
     S-->>C: ReturnedToZone(request_id=0)
 ```
 
-보스가 deadline까지 살아남으면 같은 그림에서 첫 두 줄만 바뀐다. Room의 자기 timer가 `BattleDeadline`을
-넣거나 deadline에 도달한 tick/늦은 `UseSkill`이 동일 failure helper를 호출한다. Room은 한 번만
-`Failed`가 되며 pending `BattleDigest`, 보상 없는 `BattleFailed`와 복귀 요청이 순서대로 나간다.
+보스가 deadline까지 살아남거나 마지막 참가자가 죽으면 같은 그림에서 첫 두 줄만 바뀐다. Room의 자기
+timer, deadline에 도달한 tick/늦은 command는 `Deadline` helper를 호출하고 전원 사망은
+`PartyDefeated` helper를 호출한다. Room은 한 번만 `Failed`가 되며 pending `BattleDigest`, reason을 담은
+보상 없는 `BattleFailed`와 복귀 요청이 순서대로 나간다.
 
 ### 8.1 Room tick과 관찰 경계
 
@@ -347,10 +349,16 @@ sequenceDiagram
 없는 오류라 Logic Runtime 실패로 승격하고, tick 예약 실패는 metric만 올린 뒤 이미 예약된 deadline을
 종결 backstop으로 사용한다.
 
-`UseSkill`은 tick까지 기다리지 않고 즉시 상태를 바꾼다. 발생한 `EnemyDamaged`, `EnemyDied`,
-`SkillWhiffed`는 Room의 ordered buffer에 쌓이고 다음 tick이 `BattleDigest`로 비운다. threshold를 넘으면
-해당 command가 만든 이벤트 그룹을 전부 추가한 다음 조기 flush하므로 Damage+Died가 갈라지지 않는다.
-wave와 boss spawn도 같은 이벤트 스트림에 들어간다.
+Room은 Zone과 별개인 비영속 Arena 좌표와 현재 HP를 소유한다. `SetMoveIntent`는 의도와 독립 movement
+sequence만 즉시 바꾸고, tick이 참가자를 PlayerId 순서로 이동시킨다. 이어 tick 시작 때 존재한 적을
+EnemyId 순서로 처리하며 각 적마다 가장 가까운 생존 참가자 선택 → 직선 추격 → 선택적 공격 → 선택적
+사망을 끝낸다. 동률은 작은 ID이고, 뒤의 적은 앞의 적에게 죽은 참가자를 제외하고 다시 선택한다.
+
+`UseSkill`은 tick까지 기다리지 않고 현재 좌표에서 가장 가까운 사거리 내 적에게 즉시 적용한다. 발생한
+`EnemyDamaged`, `EnemyDied`, `SkillWhiffed`는 Room의 ordered buffer에 쌓이고 다음 tick이
+`BattleDigest`로 비운다. threshold를 넘으면 command의 인과 그룹을 전부 추가한 다음 조기 flush하므로
+Damage+Died와 EnemySpawned+EnemyPositioned가 갈라지지 않는다. 참가자 이동, 적 이동·공격, wave와 boss
+spawn도 같은 이벤트 스트림에 들어간다.
 
 Room tick metric의 범위는 다음과 같다.
 
@@ -358,6 +366,12 @@ Room tick metric의 범위는 다음과 같다.
 - `tick_publish`: protocol payload 생성과 `OutboundChannel` enqueue. reactor의 frame encoding과 실제 TCP
   송신은 포함하지 않는다
 - `tick_turn`: Room handle 시작부터 timer 예약과 ResultSink publish 완료까지이며 budget overrun 기준이다
+
+Protocol sink는 성공적으로 enqueue한 `battle_digest_frames`와 frame header를 포함한
+`battle_digest_fanout_bytes`를 별도로 센다. 참가자 4명이 모두 움직이고 적 64마리가 모두 위치를 바꾸는
+movement-only 상한은 921 bytes/client/tick이며 100ms tick이면 9.21KB/s/client다. 4인 fanout은 tick당
+3,684 bytes다. 기본 1MiB pending-byte 상한보다 connection당 64 outbound slot이 지속 정체 약 6.4초에서
+먼저 작동할 수 있다. 이 수치는 reactor encoding/TCP 송신 비용이 아니라 Worker-side fanout 크기다.
 
 ### 8.2 보상
 
@@ -463,13 +477,14 @@ return을 명시적으로 정리한다. 단순히 Actor mailbox가 비었다는 
 | completion reservation, 재사용과 동시 publish | [`room_transition_channel_test.cpp`](../tests/room_transition_channel_test.cpp) |
 | entry, InRoom, return과 epoch 상태 전이 | [`route_coordinator_test.cpp`](../tests/route_coordinator_test.cpp) |
 | 정상 입장, 실패 보상과 InRoom command fence | [`protocol_gateway_test.cpp`](../tests/protocol_gateway_test.cpp) |
-| 실제 TCP wave→minion kill→boss→clear→Zone 왕복 | [`tcp_server_integration_test.cpp`](../tests/tcp_server_integration_test.cpp) |
-| unsolicited clear와 outbound 포화 | [`protocol_room_result_sink_test.cpp`](../tests/protocol_room_result_sink_test.cpp) |
+| 실제 TCP 이동→추격/피해→boss clear 또는 PartyDefeated→Zone 왕복 | [`tcp_server_integration_test.cpp`](../tests/tcp_server_integration_test.cpp) |
+| unsolicited fanout, 최대 digest wire bytes와 outbound 포화 | [`protocol_room_result_sink_test.cpp`](../tests/protocol_room_result_sink_test.cpp) |
 
-통합 테스트는 두 Player가 Zone에 들어가 Room에 합류하고, 첫 wave 등장, minion 처치, tick에서 boss
-등장, clear까지의 unsolicited `BattleDigest`를 양쪽 실제 socket에서 확인한다. 이어 두 Player가
-`BattleCleared`와 `ReturnedToZone`을 받고 새 epoch의 Move까지 적용되는지 검증해 frame만 전송되고
-route가 복원되지 않은 false positive를 막는다.
+통합 테스트는 두 Player가 Zone에 들어가 Room에 합류하고, 이동, 첫 wave 등장, minion 처치, tick에서
+boss 등장과 clear까지의 unsolicited `BattleDigest`를 양쪽 실제 socket에서 확인한다. 이어 두 Player가
+`BattleCleared`와 `ReturnedToZone`을 받고 새 epoch의 Move까지 적용되는지 검증한다. 별도 실제 socket
+시나리오는 적 공격으로 `ParticipantDied → BattleFailed(PartyDefeated) → ReturnedToZone`이 이어지는지
+검증해 deadline 실패와 전멸을 구분한다.
 
 ## 13. 구현이 발전한 순서
 

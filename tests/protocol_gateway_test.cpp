@@ -919,6 +919,25 @@ namespace
         };
     }
 
+    snf::server::FrameEnvelope make_set_move_intent_frame(
+        const snf::net::ConnectionId connection, const std::uint64_t room, const std::uint8_t direction, const std::uint64_t sequence
+    )
+    {
+        std::vector<std::byte> payload;
+        append_u64(payload, room);
+        payload.push_back(static_cast<std::byte>(direction));
+        append_u64(payload, sequence);
+        return snf::server::FrameEnvelope{
+            .connection = connection,
+            .frame =
+                snf::protocol::Frame{
+                    .type = snf::protocol::MessageType::SetMoveIntent,
+                    .request_id = 44,
+                    .payload = std::move(payload),
+                },
+        };
+    }
+
     snf::server::FrameEnvelope make_room_leave_frame(const snf::net::ConnectionId connection)
     {
         return snf::server::FrameEnvelope{
@@ -1061,6 +1080,24 @@ namespace
         assert(cast->player == player);
         assert(cast->skill == snf::server::SLASH);
         assert(cast->request_sequence == 7);
+
+        // 6c. Movement has its own sequence. Direction zero is the valid Stop
+        // action, while values past NorthWest are malformed at the wire edge.
+        assert(fixture.gateway.tryPost(make_set_move_intent_frame(connection, 999, 0, 1)) == snf::server::FramePostResult::InvalidPayload);
+        assert(fixture.gateway.tryPost(make_set_move_intent_frame(connection, room.value, 9, 1)) == snf::server::FramePostResult::InvalidPayload);
+        assert(fixture.gateway.tryPost(make_set_move_intent_frame(connection, room.value, 0, 0)) == snf::server::FramePostResult::InvalidPayload);
+        {
+            auto truncated = make_set_move_intent_frame(connection, room.value, 0, 1);
+            truncated.frame.payload.pop_back();
+            assert(fixture.gateway.tryPost(truncated) == snf::server::FramePostResult::InvalidPayload);
+        }
+        assert(fixture.gateway.tryPost(make_set_move_intent_frame(connection, room.value, 0, 8)) == snf::server::FramePostResult::Accepted);
+        const auto* move_route = std::get_if<snf::server::RoomCommandRoute>(&fixture.commands.posted->route);
+        assert(move_route != nullptr && move_route->reply_kind == snf::server::RoomReplyKind::MoveAcknowledged);
+        const auto* move_intent = std::get_if<snf::server::SetMoveIntent>(&move_route->command);
+        assert(move_intent != nullptr && move_intent->player == player);
+        assert(move_intent->direction == snf::server::MoveDirection::Stop);
+        assert(move_intent->request_sequence == 8);
 
         // 7. RoomLeave -> Leaves room and begins return to zone
         assert(fixture.gateway.tryPost(make_room_leave_frame(connection)) == snf::server::FramePostResult::Accepted);

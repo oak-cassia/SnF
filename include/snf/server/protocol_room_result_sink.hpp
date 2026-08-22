@@ -16,6 +16,8 @@ namespace snf::server
     struct ProtocolRoomResultSinkStats
     {
         std::uint64_t oversized_battle_digests{0};
+        std::uint64_t battle_digest_frames{0};
+        std::uint64_t battle_digest_fanout_bytes{0};
     };
 
     // Translates game results into request replies and unsolicited party facts. It
@@ -40,5 +42,7 @@ namespace snf::server
         OutboundSink& _outbound;
         const PlayerSessionDirectory& _sessions;
         std::atomic<std::uint64_t> _oversized_battle_digests{0};
+        std::atomic<std::uint64_t> _battle_digest_frames{0};
+        std::atomic<std::uint64_t> _battle_digest_fanout_bytes{0};
     };
 }

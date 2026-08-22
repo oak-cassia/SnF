@@ -39,8 +39,8 @@
 - Zone enter/move/leave, periodic tick, AOI와 빈 Actor passivation
 - route epoch과 failure-safe cross-zone handoff
 - Party membership, capacity, stale leave 차단과 passivation
-- Room `Waiting → Running → Cleared | Failed`. 100ms tick이 wave/minion/boss spawn과 ordered
-  `BattleDigest`를 진행하고, client의 skill id를 첫 생존 적에게 즉시 적용한다. damage, cooldown과
+- Room `Waiting → Running → Cleared | Failed`. 100ms tick이 정수 좌표 이동, wave/minion/boss spawn,
+  가장 가까운 생존 대상 추격·공격과 ordered `BattleDigest`를 진행한다. damage, HP, cooldown과
   중복 판정은 서버가 소유하며 clear 시 참가자 보상 tell, 종결 뒤 passivation한다
 - Zone과 Room 사이의 보상 있는 입장·복귀 handoff. 전투 중 Player는 Zone에 없고, clear·leave·
   disconnect가 원래 Zone의 원래 좌표로 되돌린다
@@ -64,13 +64,15 @@
 ## 다음 콘텐츠: 4인 협동 Wave Battle
 
 Party가 입장하는 작은 협동 인스턴스다. MMORPG 월드 기능을 넓히지 않고, Actor 상태 소유권이
-공유 콘텐츠에서 주는 장점과 비용을 보여주는 것이 목적이다. 전투는 위치 없는 wave 전투다.
-위치·이동·충돌을 빼면 "client는 skill ID만 보내고 서버가 damage를 판정한다"는 성질이 1/3
-비용으로 남는다.
+공유 콘텐츠에서 주는 장점과 비용을 보여주는 것이 목적이다. 처음에는 위치 없는 wave 전투로
+계획했지만 2a가 tick, ordered digest, fanout, payload 상한과 비용 metric을 먼저 완성한 뒤 범위를
+바꿨다. 정수 좌표는 threat table 없이 가장 가까운 생존 대상이라는 관찰 가능한 targeting 근거를
+주고, 빠르게 변하는 좌표와 HP를 Room Actor 하나가 직렬화하는 비용도 드러낸다. 대신 직선 이동만
+허용하며 충돌·장애물·pathfinding·projectile·Room AOI·resync snapshot은 계속 만들지 않는다.
 
-> **진행 중 — 구현 순서 2a 완료.** 클라이언트가 실제 TCP로 Zone에서 입장해 첫 wave와 minion 처치,
-> tick에서 boss 등장, clear와 원래 Zone 복귀까지 `BattleDigest`로 관찰한다. 입장·복귀 saga와 그 보상은
-> `docs/room-entry-handoff-contract.md`에 기록돼 있다. 적 공격, 참가자 HP/사망과 threat는 2b 범위다.
+> **구현 순서 2b 완료.** 실제 TCP에서 이동, 적 추격·피해, boss clear와 `PartyDefeated` 실패가
+> `BattleDigest`로 관찰되고 두 종결 모두 원래 Zone 좌표로 복귀한다. 입장·복귀 saga와 그 보상은
+> `docs/room-entry-handoff-contract.md`에 기록돼 있다.
 
 ### 상태와 명령
 
@@ -81,9 +83,9 @@ Waiting → Running → Cleared
         Closing → Passivated
 ```
 
-- `JoinRoom`, `LeaveRoom`, `StartBattle`, `UseSkill`, `RoomSimulationTick`, `BattleDeadline`
-- Room이 participant combat snapshot, enemy HP와 spawn 순서, boss phase, skill cooldown과 request
-  sequence를 소유한다. participant 생사와 enemy attack/threat는 2b에서 추가한다
+- `JoinRoom`, `LeaveRoom`, `StartBattle`, `UseSkill`, `SetMoveIntent`, `RoomSimulationTick`, `BattleDeadline`
+- Room이 participant combat snapshot·현재 HP·좌표·이동 의도, enemy HP·좌표·spawn 순서·공격
+  cooldown, boss phase와 skill/movement request sequence를 소유한다
 - PlayerActor는 영속 progression과 session을 계속 소유
 - client는 damage 값을 보내지 않고 skill ID만 보낸다
 
@@ -94,7 +96,8 @@ Waiting → Running → Cleared
 2. **Wave simulation**
    - **2a — Wave와 관찰 경계:** 100ms tick, minion/boss spawn, 첫 생존 적 targeting, 즉시 cast와
      ordered `BattleDigest`, hard deadline, tick 예산 측정. (완료)
-   - **2b — 적 행동과 생사:** enemy attack/cooldown/threat, participant HP/death와 결정적 tie-break
+   - **2b — Minimal Arena와 생사:** 8방향 persistent movement, nearest-live targeting, enemy
+     attack/cooldown, participant HP/death와 결정적 ID tie-break. (완료)
 3. **Session 안정성** — connection generation으로 stale 명령 거부
 4. **결과 영속화** — `BattleResult`, `battle_id` idempotency, reward/progression transaction.
    여기서 persistence 범위를 넓힌다. 상세 계약은 이 단계 직전에 확정한다
@@ -115,14 +118,21 @@ vertical slice가 아니다.
   threshold/terminal 경계에서 `BattleDigest`로 전 참가자에게 fanout된다
 - **한 command의 인과 그룹은 갈라지지 않는다.** Damage 뒤 선택적인 Died를 전부 buffer에 추가한
   다음 threshold를 검사한다. event를 drop하지 않으며 digest sequence는 실제 방출 때만 증가한다
+- **좌표는 Room 안에서만 유효하다.** `SetMoveIntent`는 의도만 저장하고 다음 tick이 생존 참가자를
+  움직인다. skill은 현재 좌표에서 사거리 안의 가장 가까운 생존 적을, 적은 가장 가까운 생존
+  참가자를 고르며 동률은 작은 ID다. Room 종료 뒤에는 입장 전 Zone 좌표로 복귀한다
+- **적 행동은 적별로 인터리브한다.** EnemyId 순서로 대상 선택 → 이동 → 선택적 피해 → 선택적
+  사망을 끝낸 다음 다음 적이 살아 있는 대상을 다시 고른다. 마지막 생존 참가자가 죽으면
+  `PartyDefeated`로 즉시 종결하며 deadline 실패와 wire reason을 구분한다
 - **tick은 one-shot 사슬이다.** binding이 deadline을 먼저 예약한 다음 `ExistingOnly` tick을 예약한다.
   tick 예약 거절은 metric으로 남기고 deadline을 backstop으로 쓰며, deadline 예약 거절은 Logic Runtime
   실패로 승격한다
 - **outbound 포화는 연결을 닫고 Room은 계속 진행한다.** Room을 suspend시키면 느린 client 하나가
   4인 전투를 멈춘다. 살아 있는 연결이 이벤트 일부를 잃는 경로가 없으므로 resync snapshot은
   만들지 않는다. 부하 측정에서 이 정책이 실제 문제로 확인되면 그때 설계한다
-- **죽음과 퇴장은 다른 상태다.** 이 계약은 2b에서 생사 모델과 함께 구현한다. 현재 leave와
-  disconnect만 participant에서 제거되고 보상을 포기하며, clear는 남아 있는 participant에게 지급한다
+- **죽음과 퇴장은 다른 상태다.** 죽은 participant는 audience와 clear 보상 대상에 남아 관전하지만
+  이동·cast·target 대상에서는 빠진다. leave와 disconnect는 participant를 제거하고 보상을 포기하며
+  `ParticipantLeft`가 남은 client의 유령 상태를 지운다
 - **시작은 명시적 `StartBattle`이다.** Room은 현재 참가자 수와 상한만 알고 원래 파티가 몇 명인지
   모른다. 자동 시작은 Party roster를 Room까지 넘기는 별개 작업이므로 이 콘텐츠에 넣지 않는다
 
@@ -152,7 +162,7 @@ battle_id              → 영속 연산 중복
 
 ### 비범위
 
-- 위치, 이동, projectile, 충돌, pathfinding
+- 충돌, 장애물, pathfinding, projectile, Room AOI와 진행 중 resync snapshot
 - `Ready`와 countdown, 그리고 자동 시작을 위한 Party roster 전달
 - 진행 중인 전투로의 reconnect와 주기적 resync snapshot
 - 대규모 seamless world와 process 간 migration

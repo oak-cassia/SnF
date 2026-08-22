@@ -13,13 +13,21 @@
 
 namespace
 {
+    using snf::server::ArenaStarted;
     using snf::server::BattleDigest;
+    using snf::server::BattleFailureReason;
     using snf::server::BattleOutcome;
     using snf::server::EnemyDamaged;
     using snf::server::EnemyDied;
     using snf::server::EnemyId;
     using snf::server::EnemyKind;
+    using snf::server::EnemyPositioned;
     using snf::server::EnemySpawned;
+    using snf::server::ParticipantDamaged;
+    using snf::server::ParticipantDied;
+    using snf::server::ParticipantLeft;
+    using snf::server::ParticipantMoved;
+    using snf::server::ParticipantSpawned;
     using snf::server::PlayerId;
     using snf::server::RoomCommandStatus;
     using snf::server::RoomId;
@@ -30,9 +38,15 @@ namespace
 
     struct SinkFixture
     {
-        explicit SinkFixture(const std::size_t capacity)
+        explicit SinkFixture(const std::size_t capacity, const std::size_t max_slots_per_connection = 0)
             : wake(snf::test::make_wake_descriptor())
-            , outbound(snf::server::OutboundChannelConfig{.capacity = capacity, .max_slots_per_connection = capacity}, wake.getDescriptor())
+            , outbound(
+                  snf::server::OutboundChannelConfig{
+                      .capacity = capacity,
+                      .max_slots_per_connection = max_slots_per_connection == 0 ? capacity : max_slots_per_connection,
+                  },
+                  wake.getDescriptor()
+              )
             , sink(outbound, sessions)
         {
         }
@@ -81,6 +95,25 @@ namespace
         };
     }
 
+    [[nodiscard]] RoomInboundCommand move_command(const snf::net::ConnectionId connection, const PlayerId player, const std::uint32_t request_id)
+    {
+        return RoomInboundCommand{
+            .room = RoomId{.value = 7},
+            .command =
+                snf::server::SetMoveIntent{
+                    .player = player,
+                    .direction = snf::server::MoveDirection::Stop,
+                    .request_sequence = 1,
+                },
+            .reply =
+                snf::server::RoomReplyContext{
+                    .connection = connection,
+                    .request_id = request_id,
+                    .kind = snf::server::RoomReplyKind::MoveAcknowledged,
+                },
+        };
+    }
+
     [[nodiscard]] std::uint16_t payload_u16(const snf::protocol::Frame& frame, const std::size_t offset)
     {
         return (std::to_integer<std::uint16_t>(frame.payload[offset]) << 8U) | std::to_integer<std::uint16_t>(frame.payload[offset + 1]);
@@ -117,6 +150,13 @@ namespace
                     },
                     EnemyDied{.id = EnemyId{.value = 1}},
                     SkillWhiffed{.actor = PlayerId{.value = 20}, .skill = snf::server::SLASH},
+                    ArenaStarted{.width = 100, .height = 100},
+                    ParticipantSpawned{.player = PlayerId{.value = 10}, .position = {.x = 50, .y = 50}, .health = 100},
+                    ParticipantMoved{.player = PlayerId{.value = 10}, .position = {.x = 54, .y = 46}},
+                    EnemyPositioned{.enemy = EnemyId{.value = 1}, .position = {.x = 50, .y = 25}},
+                    ParticipantDamaged{.target = PlayerId{.value = 10}, .attacker = EnemyId{.value = 1}, .amount = 3, .health = 97},
+                    ParticipantDied{.player = PlayerId{.value = 20}},
+                    ParticipantLeft{.player = PlayerId{.value = 30}},
                 },
         };
     }
@@ -149,6 +189,22 @@ namespace
         assert(!fixture.pop());
     }
 
+    void test_a_move_acknowledgement_uses_its_own_two_byte_reply_type()
+    {
+        SinkFixture fixture{2};
+        const PlayerId player{.value = 10};
+        const auto connection = fixture.attach(4, player);
+
+        fixture.sink.accept(
+            move_command(connection, player, 78), RoomResult{.status = RoomCommandStatus::Applied, .phase = RoomPhase::Running, .player = player}
+        );
+
+        const auto frame = fixture.pop();
+        assert(frame && frame->type == snf::protocol::MessageType::MoveAcknowledged && frame->request_id == 78);
+        assert(frame->payload == (std::vector<std::byte>{std::byte{0}, std::byte{1}}));
+        assert(!fixture.pop());
+    }
+
     void test_a_digest_encodes_every_tag_and_body_in_event_order()
     {
         SinkFixture fixture{4};
@@ -170,7 +226,7 @@ namespace
         assert(frame->request_id == snf::protocol::UNSOLICITED_REQUEST_ID);
         assert(payload_u64(*frame, 0) == 9);
         assert(frame->payload[8] == std::byte{static_cast<std::uint8_t>(RoomPhase::Running)});
-        assert(payload_u16(*frame, 9) == 4);
+        assert(payload_u16(*frame, 9) == 11);
 
         assert(frame->payload[11] == std::byte{static_cast<std::uint8_t>(snf::server::BattleEventKind::EnemySpawned)});
         assert(payload_u32(*frame, 12) == 1);
@@ -189,7 +245,40 @@ namespace
         assert(frame->payload[63] == std::byte{static_cast<std::uint8_t>(snf::server::BattleEventKind::SkillWhiffed)});
         assert(payload_u64(*frame, 64) == 20);
         assert(payload_u32(*frame, 72) == snf::server::SLASH.value);
-        assert(frame->payload.size() == 76);
+        assert(frame->payload[76] == std::byte{static_cast<std::uint8_t>(snf::server::BattleEventKind::ArenaStarted)});
+        assert(payload_u32(*frame, 77) == 100);
+        assert(payload_u32(*frame, 81) == 100);
+
+        assert(frame->payload[85] == std::byte{static_cast<std::uint8_t>(snf::server::BattleEventKind::ParticipantSpawned)});
+        assert(payload_u64(*frame, 86) == 10);
+        assert(payload_u32(*frame, 94) == 50);
+        assert(payload_u32(*frame, 98) == 50);
+        assert(payload_u64(*frame, 102) == 100);
+
+        assert(frame->payload[110] == std::byte{static_cast<std::uint8_t>(snf::server::BattleEventKind::ParticipantMoved)});
+        assert(payload_u64(*frame, 111) == 10);
+        assert(payload_u32(*frame, 119) == 54);
+        assert(payload_u32(*frame, 123) == 46);
+
+        assert(frame->payload[127] == std::byte{static_cast<std::uint8_t>(snf::server::BattleEventKind::EnemyPositioned)});
+        assert(payload_u32(*frame, 128) == 1);
+        assert(payload_u32(*frame, 132) == 50);
+        assert(payload_u32(*frame, 136) == 25);
+
+        assert(frame->payload[140] == std::byte{static_cast<std::uint8_t>(snf::server::BattleEventKind::ParticipantDamaged)});
+        assert(payload_u64(*frame, 141) == 10);
+        assert(payload_u32(*frame, 149) == 1);
+        assert(payload_u64(*frame, 153) == 3);
+        assert(payload_u64(*frame, 161) == 97);
+
+        assert(frame->payload[169] == std::byte{static_cast<std::uint8_t>(snf::server::BattleEventKind::ParticipantDied)});
+        assert(payload_u64(*frame, 170) == 20);
+        assert(frame->payload[178] == std::byte{static_cast<std::uint8_t>(snf::server::BattleEventKind::ParticipantLeft)});
+        assert(payload_u64(*frame, 179) == 30);
+        assert(frame->payload.size() == 187);
+        const auto stats = fixture.sink.stats();
+        assert(stats.battle_digest_frames == 1);
+        assert(stats.battle_digest_fanout_bytes == 197);
     }
 
     void test_ack_precedes_the_same_digest_for_caster_and_observer()
@@ -238,6 +327,7 @@ namespace
                 .boss_spawned = true,
                 .digest = BattleDigest{.sequence = 2, .events = {SkillWhiffed{.actor = first, .skill = snf::server::SLASH}}},
                 .outcome = BattleOutcome::Failed,
+                .failure_reason = BattleFailureReason::Deadline,
                 .audience = {first, second},
             }
         );
@@ -252,6 +342,7 @@ namespace
             assert(failed && failed->type == snf::protocol::MessageType::BattleFailed);
             assert(payload_u64(*failed, 0) == 40);
             assert(failed->payload[8] == std::byte{1});
+            assert(failed->payload[9] == std::byte{static_cast<std::uint8_t>(BattleFailureReason::Deadline)});
         }
         assert(!fixture.pop());
     }
@@ -300,16 +391,119 @@ namespace
                 .boss_health = 0,
                 .boss_spawned = false,
                 .outcome = BattleOutcome::Failed,
+                .failure_reason = BattleFailureReason::PartyDefeated,
                 .audience = {player},
             }
         );
 
         const auto failed = fixture.pop();
         assert(failed && failed->type == snf::protocol::MessageType::BattleFailed);
-        assert(failed->payload.size() == 9);
+        assert(failed->payload.size() == 10);
         assert(payload_u64(*failed, 0) == 0);
         assert(failed->payload[8] == std::byte{0});
+        assert(failed->payload[9] == std::byte{static_cast<std::uint8_t>(BattleFailureReason::PartyDefeated)});
         assert(!fixture.pop());
+    }
+
+    void test_maximum_movement_fanout_reports_wire_bytes_for_every_client()
+    {
+        SinkFixture fixture{4};
+        const std::vector<PlayerId> audience{
+            PlayerId{.value = 10},
+            PlayerId{.value = 20},
+            PlayerId{.value = 30},
+            PlayerId{.value = 40},
+        };
+        for (std::size_t index = 0; index < audience.size(); ++index)
+        {
+            static_cast<void>(fixture.attach(static_cast<int>(4 + index), audience[index]));
+        }
+
+        std::vector<snf::server::BattleEvent> events;
+        events.reserve(4 + 64);
+        for (const PlayerId player : audience)
+        {
+            events.emplace_back(ParticipantMoved{.player = player, .position = {.x = 50, .y = 50}});
+        }
+        for (std::uint32_t enemy = 1; enemy <= 64; ++enemy)
+        {
+            events.emplace_back(EnemyPositioned{.enemy = EnemyId{.value = enemy}, .position = {.x = enemy, .y = enemy}});
+        }
+
+        fixture.sink.accept(
+            RoomInboundCommand{.room = RoomId{.value = 7}, .command = snf::server::RoomSimulationTick{}, .reply = std::nullopt},
+            RoomResult{
+                .status = RoomCommandStatus::Applied,
+                .phase = RoomPhase::Running,
+                .digest = BattleDigest{.sequence = 1, .events = std::move(events)},
+                .audience = audience,
+            }
+        );
+
+        constexpr std::size_t DIGEST_PAYLOAD_BYTES = 11 + 4 * 17 + 64 * 13;
+        constexpr std::size_t ENCODED_FRAME_BYTES = 10 + DIGEST_PAYLOAD_BYTES;
+        static_assert(DIGEST_PAYLOAD_BYTES == 911);
+        static_assert(ENCODED_FRAME_BYTES == 921);
+        for (std::size_t index = 0; index < audience.size(); ++index)
+        {
+            const auto frame = fixture.pop();
+            assert(frame && frame->type == snf::protocol::MessageType::BattleDigest);
+            assert(frame->payload.size() == DIGEST_PAYLOAD_BYTES);
+        }
+        assert(!fixture.pop());
+        assert(fixture.sink.stats().battle_digest_frames == audience.size());
+        assert(fixture.sink.stats().battle_digest_fanout_bytes == audience.size() * ENCODED_FRAME_BYTES);
+    }
+
+    void test_a_saturated_client_does_not_block_a_healthy_client_or_terminal_result()
+    {
+        SinkFixture fixture{3, 1};
+        const PlayerId slow{.value = 10};
+        const PlayerId healthy{.value = 20};
+        const auto slow_connection = fixture.attach(4, slow);
+        static_cast<void>(fixture.attach(5, healthy));
+        auto held = fixture.outbound.tryReserve(slow_connection, 1);
+        assert(held);
+
+        for (std::uint64_t sequence = 1; sequence <= 2; ++sequence)
+        {
+            fixture.sink.accept(
+                RoomInboundCommand{.room = RoomId{.value = 7}, .command = snf::server::RoomSimulationTick{}, .reply = std::nullopt},
+                RoomResult{
+                    .status = RoomCommandStatus::Applied,
+                    .phase = RoomPhase::Running,
+                    .digest =
+                        BattleDigest{
+                            .sequence = sequence,
+                            .events = {ParticipantMoved{.player = healthy, .position = {.x = 50, .y = 50}}},
+                        },
+                    .audience = {slow, healthy},
+                }
+            );
+            const auto digest = fixture.pop();
+            assert(digest && digest->type == snf::protocol::MessageType::BattleDigest);
+            assert(payload_u64(*digest, 0) == sequence);
+            assert(!fixture.pop());
+        }
+
+        fixture.sink.accept(
+            RoomInboundCommand{.room = RoomId{.value = 7}, .command = snf::server::BattleDeadline{}, .reply = std::nullopt},
+            RoomResult{
+                .status = RoomCommandStatus::Applied,
+                .phase = RoomPhase::Failed,
+                .outcome = BattleOutcome::Failed,
+                .failure_reason = BattleFailureReason::Deadline,
+                .audience = {slow, healthy},
+            }
+        );
+        const auto failed = fixture.pop();
+        assert(failed && failed->type == snf::protocol::MessageType::BattleFailed);
+        assert(!fixture.pop());
+
+        std::vector<snf::net::ConnectionId> failures;
+        assert(!fixture.outbound.takePendingAdmissionFailures(failures));
+        assert(failures == std::vector<snf::net::ConnectionId>{slow_connection});
+        assert(fixture.sink.stats().battle_digest_frames == 2);
     }
 
     void test_an_oversized_digest_closes_its_audience_instead_of_encoding()
@@ -353,10 +547,13 @@ namespace
 void run_protocol_room_result_sink_tests()
 {
     test_a_skill_acknowledgement_is_the_two_byte_request_reply();
+    test_a_move_acknowledgement_uses_its_own_two_byte_reply_type();
     test_a_digest_encodes_every_tag_and_body_in_event_order();
     test_ack_precedes_the_same_digest_for_caster_and_observer();
     test_terminal_frames_follow_the_terminal_digest();
     test_a_clear_follows_the_digest_and_pays_each_grant();
     test_failure_before_boss_spawn_carries_zero_health_and_false_gate();
+    test_maximum_movement_fanout_reports_wire_bytes_for_every_client();
+    test_a_saturated_client_does_not_block_a_healthy_client_or_terminal_result();
     test_an_oversized_digest_closes_its_audience_instead_of_encoding();
 }

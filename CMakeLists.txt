@@ -58,6 +58,7 @@ endfunction()
 # threads. Anything it needed from those would fail to link snf_game_tests below,
 # which is the wall the compiler keeps for us.
 add_library(snf_game STATIC
+    src/game/arena.cpp
     src/game/player.cpp
     src/game/zone.cpp
     src/game/party.cpp
@@ -206,6 +207,7 @@ if(BUILD_TESTING)
     # runtime, a socket or MySQL, this is what stops the build.
     add_executable(snf_game_tests
         tests/game_test_main.cpp
+        tests/arena_test.cpp
         tests/street_progression_test.cpp
         tests/room_test.cpp
         tests/player_test.cpp

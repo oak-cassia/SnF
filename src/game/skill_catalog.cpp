@@ -10,6 +10,7 @@ namespace snf::server
                 .skill = SLASH,
                 .attack_percent = SLASH_ATTACK_PERCENT,
                 .cooldown = SLASH_COOLDOWN,
+                .range = SLASH_RANGE,
             };
         }
         return std::nullopt;
