@@ -55,6 +55,7 @@ namespace snf::server
         snf::runtime::ActorRuntimeStats actor_runtime;
         PlayerRepositoryStats player_repository;
         ZoneActorBindingStats zone_actors;
+        PlayerActorBindingStats player_actors;
         RoomActorBindingStats room_actors;
         ProtocolRoomResultSinkStats room_protocol;
         RouteCoordinatorStats zone_handoffs;
@@ -164,6 +165,7 @@ namespace snf::server
         [[nodiscard]] snf::runtime::ActorRuntimeStats getActorRuntimeStats() const;
         [[nodiscard]] std::optional<PlayerRecord> getPlayerRecord(PlayerId player) const;
         [[nodiscard]] ZoneActorBindingStats getZoneActorStats() const noexcept;
+        [[nodiscard]] PlayerActorBindingStats getPlayerActorStats() const noexcept;
         [[nodiscard]] RoomActorBindingStats getRoomActorStats() const noexcept;
         [[nodiscard]] PartyActorBindingStats getPartyActorStats() const noexcept;
         // Reads reactor state, so it belongs to the reactor thread: call it from

@@ -121,6 +121,11 @@ namespace
                   << "Room battle digest fanout bytes (frame header + payload, before TCP/IP): " << metrics.room_protocol.battle_digest_fanout_bytes
                   << '\n';
 
+        const auto& players = metrics.player_actors;
+        std::cout << "Reward handoff: " << rooms.grant_tell_rejections << " grant tell rejections, " << players.reward_snapshot_admission_rejections
+                  << " snapshot admission rejections, " << players.reward_snapshot_retry_giveups << " snapshot retry give-ups, "
+                  << players.grant_load_failures << " grant load failures\n";
+
         const auto& parties = metrics.party_actors;
         std::cout << "Party actors: " << parties.commands << " commands, " << parties.rejected << " rejected, " << parties.passivation_requests
                   << " passivation requests\n";

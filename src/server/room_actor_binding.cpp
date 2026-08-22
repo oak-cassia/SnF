@@ -66,6 +66,7 @@ namespace snf::server
             .tick_turn_nanoseconds = _tick_turn_nanoseconds.snapshot(),
             .tick_overruns = _tick_overruns.load(std::memory_order_relaxed),
             .tick_schedule_rejections = _tick_schedule_rejections.load(std::memory_order_relaxed),
+            .grant_tell_rejections = _grant_tell_rejections.load(std::memory_order_relaxed),
         };
     }
 
@@ -269,13 +270,17 @@ namespace snf::server
         {
             // Best effort by design. A full target mailbox drops the reward rather
             // than blocking the Room, and there is no reply channel to report it on.
-            static_cast<void>(context.tryTell(
+            const snf::runtime::PostResult posted = context.tryTell(
                 snf::runtime::ActorKey{
                     .kind = snf::runtime::ActorKind::Player,
                     .entity = grant.player.value,
                 },
                 snf::runtime::TellPayload::of(grant)
-            ));
+            );
+            if (posted != snf::runtime::PostResult::Accepted)
+            {
+                _grant_tell_rejections.fetch_add(1, std::memory_order_relaxed);
+            }
         }
 
         // A decided Room has emitted whatever it owed and has nothing left to do, and

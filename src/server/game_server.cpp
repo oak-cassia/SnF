@@ -483,6 +483,11 @@ namespace snf::server
         return _zone_actor_binding.stats();
     }
 
+    PlayerActorBindingStats GameServer::getPlayerActorStats() const noexcept
+    {
+        return _persistent_player_actor_binding.stats();
+    }
+
     RoomActorBindingStats GameServer::getRoomActorStats() const noexcept
     {
         return _room_actor_binding.stats();
@@ -501,6 +506,7 @@ namespace snf::server
             .actor_runtime = _logic_runtime.getStats(),
             .player_repository = repository_diagnostics(*_player_repository).stats(),
             .zone_actors = _zone_actor_binding.stats(),
+            .player_actors = _persistent_player_actor_binding.stats(),
             .room_actors = _room_actor_binding.stats(),
             .room_protocol = _room_result_sink.stats(),
             .zone_handoffs = _route_coordinator.stats(),
