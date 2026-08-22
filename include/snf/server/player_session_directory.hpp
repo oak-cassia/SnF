@@ -53,7 +53,7 @@ namespace snf::server
         // queued behind the old close and discarded by that close's eviction.
         [[nodiscard]] bool beginClose(snf::net::ConnectionId connection) noexcept;
         void rollbackClose(snf::net::ConnectionId connection) noexcept;
-        void completePassivation(PlayerId player) noexcept;
+        void completePassivation(PlayerId player, snf::net::ConnectionId connection) noexcept;
         void abandon(snf::net::ConnectionId connection) noexcept;
 
     private:
