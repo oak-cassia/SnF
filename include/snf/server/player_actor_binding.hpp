@@ -12,6 +12,9 @@
 #include "snf/server/player_repository.hpp"
 #include "snf/server/player_response_sink.hpp"
 
+#include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -44,6 +47,15 @@ namespace snf::server
         // service so the repository is never called directly by the Actor binding.
         PlayerPersistenceService* persistence_service{nullptr};
         std::size_t max_purchase_idempotency_records_per_player{DEFAULT_PURCHASE_IDEMPOTENCY_CAPACITY};
+        std::chrono::milliseconds snapshot_retry_delay{1000};
+        int snapshot_retry_limit{5};
+    };
+
+    struct PlayerActorBindingStats
+    {
+        std::uint64_t reward_snapshot_admission_rejections{0};
+        std::uint64_t reward_snapshot_retry_giveups{0};
+        std::uint64_t grant_load_failures{0};
     };
 
     // Owns Player-specific type erasure at the edge of the generic scheduler.
@@ -61,6 +73,7 @@ namespace snf::server
         [[nodiscard]] snf::runtime::ActorKind kind() const noexcept override;
         [[nodiscard]] snf::runtime::ActorSubmission makeCommand(PlayerInboundCommand command) const;
         [[nodiscard]] snf::runtime::ActorSubmission makeConnectionClosed(PlayerActorId actor, ConnectionClosed closed) const;
+        [[nodiscard]] PlayerActorBindingStats stats() const noexcept;
 
     protected:
         [[nodiscard]] std::unique_ptr<snf::runtime::ActorState> activate(snf::runtime::EntityId entity) override;
@@ -76,6 +89,14 @@ namespace snf::server
         struct CommandPayload;
         struct ConnectionClosedPayload;
         struct StreetExperienceGrantPayload;
+        struct SnapshotRetryPayload;
+
+        enum class SnapshotPublishOutcome
+        {
+            CleanOrAccepted,
+            RetryScheduled,
+            GaveUp,
+        };
 
         // Shared tail of dispatch and resume: drive whichever stage the command is in,
         // and apply its follow-ups once the capacity is in hand.
@@ -85,7 +106,11 @@ namespace snf::server
         // The handler cannot suspend, so its decisions are complete before any of
         // them is applied -- a throw emits nothing.
         void runHandler(PlayerActorState& state, const PlayerCommand& command, snf::runtime::ActorContext& context);
-        void publishDirtySnapshot(PlayerActorState& state) noexcept;
+        [[nodiscard]] SnapshotPublishOutcome
+        publishDirtySnapshot(PlayerActorState& state, snf::runtime::ActorContext& context, bool retry_attempt) noexcept;
+        [[nodiscard]] bool tryPublishDirtySnapshot(PlayerActorState& state) noexcept;
+        [[nodiscard]] bool tryScheduleSnapshotRetry(PlayerActorState& state, snf::runtime::ActorContext& context) noexcept;
+        [[nodiscard]] static snf::runtime::ActorDispatchResult snapshotTerminalResult(const PlayerActorState& state) noexcept;
         // Ends a command that could not acquire capacity at all, either because none
         // could be awaited or because the result asks for more than one connection may
         // ever hold. The connection is closed by the backend, so the command itself ends
@@ -105,5 +130,10 @@ namespace snf::server
         std::unique_ptr<PlayerPersistenceService> _owned_persistence_service;
         PlayerPersistenceService* _persistence_service;
         std::size_t _max_purchase_idempotency_records_per_player;
+        std::chrono::milliseconds _snapshot_retry_delay;
+        int _snapshot_retry_limit;
+        std::atomic<std::uint64_t> _reward_snapshot_admission_rejections{0};
+        std::atomic<std::uint64_t> _reward_snapshot_retry_giveups{0};
+        std::atomic<std::uint64_t> _grant_load_failures{0};
     };
 }

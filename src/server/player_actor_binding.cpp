@@ -129,9 +129,13 @@ namespace snf::server
         // Held while the record loads when a tell arrived before it. A grant is not a
         // client request, so it cannot ride in pending_command.
         std::optional<StreetExperienceGrant> pending_grant;
-        // True when a tell, not a connection, brought this state to life. Such a state
-        // has no session keeping it resident, so it passivates once the grant is saved.
-        bool activated_by_tell{false};
+        // True while no session command has claimed an actor that a tell brought to
+        // life. A command may arrive while a snapshot retry timer is outstanding, so
+        // this describes current residency rather than immutable activation history.
+        bool sessionless{false};
+        bool reward_snapshot_pending{false};
+        bool snapshot_retry_scheduled{false};
+        int snapshot_retries_remaining{0};
         snf::runtime::ActorTask<PlayerLoadResult> load_task;
         // Started only when capacity was not immediately available, and owned by the
         // state for the same reason.
@@ -173,7 +177,13 @@ namespace snf::server
         StreetExperienceGrant grant;
     };
 
-    PlayerActorBinding::PlayerActorBinding(PlayerResponseSink& response_sink, OutboundSink& outbound, CommandLifecycleSink& lifecycle, PlayerActorBindingConfig config)
+    struct PlayerActorBinding::SnapshotRetryPayload
+    {
+    };
+
+    PlayerActorBinding::PlayerActorBinding(
+        PlayerResponseSink& response_sink, OutboundSink& outbound, CommandLifecycleSink& lifecycle, PlayerActorBindingConfig config
+    )
         : _response_sink(response_sink)
         , _outbound(outbound)
         , _lifecycle(lifecycle)
@@ -185,6 +195,8 @@ namespace snf::server
         , _on_room_join_undelivered(std::move(config.on_room_join_undelivered))
         , _persistence_service(config.persistence_service)
         , _max_purchase_idempotency_records_per_player(config.max_purchase_idempotency_records_per_player)
+        , _snapshot_retry_delay(config.snapshot_retry_delay)
+        , _snapshot_retry_limit(config.snapshot_retry_limit)
     {
         if (_kind != snf::runtime::ActorKind::ProvisionalPlayer && _kind != snf::runtime::ActorKind::Player)
         {
@@ -199,6 +211,14 @@ namespace snf::server
         {
             throw std::invalid_argument{"Purchase idempotency capacity must be positive"};
         }
+        if (_snapshot_retry_delay <= std::chrono::milliseconds::zero())
+        {
+            throw std::invalid_argument{"Player snapshot retry delay must be positive"};
+        }
+        if (_snapshot_retry_limit < 0)
+        {
+            throw std::invalid_argument{"Player snapshot retry limit cannot be negative"};
+        }
         if (_kind == snf::runtime::ActorKind::Player && _persistence_service == nullptr)
         {
             _owned_persistence_service = std::make_unique<PlayerPersistenceService>(*_repository);
@@ -209,6 +229,15 @@ namespace snf::server
     snf::runtime::ActorKind PlayerActorBinding::kind() const noexcept
     {
         return _kind;
+    }
+
+    PlayerActorBindingStats PlayerActorBinding::stats() const noexcept
+    {
+        return PlayerActorBindingStats{
+            .reward_snapshot_admission_rejections = _reward_snapshot_admission_rejections.load(std::memory_order_relaxed),
+            .reward_snapshot_retry_giveups = _reward_snapshot_retry_giveups.load(std::memory_order_relaxed),
+            .grant_load_failures = _grant_load_failures.load(std::memory_order_relaxed),
+        };
     }
 
     snf::runtime::ActorSubmission PlayerActorBinding::makeCommand(PlayerInboundCommand command) const
@@ -328,6 +357,13 @@ namespace snf::server
             throw std::logic_error{"PlayerActorBinding dispatched a command while one was in flight"};
         }
 
+        if (tryPayloadAs<SnapshotRetryPayload>(submission) != nullptr)
+        {
+            const SnapshotPublishOutcome outcome = publishDirtySnapshot(player_state, context, true);
+            return outcome == SnapshotPublishOutcome::RetryScheduled ? snf::runtime::ActorDispatchResult::KeepActive
+                                                                     : snapshotTerminalResult(player_state);
+        }
+
         if (const auto* grant = tryPayloadAs<StreetExperienceGrantPayload>(submission))
         {
             if (!player_state.loaded)
@@ -336,7 +372,7 @@ namespace snf::server
                 // stored currency, so the record loads first exactly as a command makes
                 // it. Evicting instead -- what a close does -- would lose the reward.
                 player_state.pending_grant = grant->grant;
-                player_state.activated_by_tell = true;
+                player_state.sessionless = true;
                 player_state.stage = PlayerActorState::Stage::Loading;
                 player_state.load_task = awaitPlayerLoad(*_repository, context, *player_state.identity.playerId());
                 return advance(player_state, context, stop_token);
@@ -345,11 +381,14 @@ namespace snf::server
             // A tell carries no connection, so nothing here emits a response or takes
             // outbound capacity.
             player_state.player.grantStreetExperience(grant->grant.experience);
-            publishDirtySnapshot(player_state);
-            return snf::runtime::ActorDispatchResult::KeepActive;
+            player_state.reward_snapshot_pending = true;
+            const SnapshotPublishOutcome outcome = publishDirtySnapshot(player_state, context, false);
+            return outcome == SnapshotPublishOutcome::RetryScheduled ? snf::runtime::ActorDispatchResult::KeepActive
+                                                                     : snapshotTerminalResult(player_state);
         }
 
         const CommandPayload& payload = payloadAs<CommandPayload>(submission);
+        player_state.sessionless = false;
         if (_on_before_command)
         {
             _on_before_command(payload.command.actor, payload.command.command);
@@ -403,9 +442,15 @@ namespace snf::server
             state.load_task = {};
             if (loaded.status != PlayerRepositoryStatus::Success)
             {
+                const bool discarded_grant = state.pending_grant.has_value();
                 state.pending_command.reset();
                 state.pending_grant.reset();
                 state.stage = PlayerActorState::Stage::Idle;
+                if (discarded_grant)
+                {
+                    _grant_load_failures.fetch_add(1, std::memory_order_relaxed);
+                    return snapshotTerminalResult(state);
+                }
                 _outbound.reportAdmissionFailure(state.connection);
                 return snf::runtime::ActorDispatchResult::KeepActive;
             }
@@ -423,12 +468,12 @@ namespace snf::server
             if (state.pending_grant)
             {
                 state.player.grantStreetExperience(state.pending_grant->experience);
+                state.reward_snapshot_pending = true;
                 state.pending_grant.reset();
-                publishDirtySnapshot(state);
                 state.stage = PlayerActorState::Stage::Idle;
-                // Nothing else is keeping this state alive, and the snapshot is already
-                // queued, so it may go once the mailbox is empty.
-                return state.activated_by_tell ? snf::runtime::ActorDispatchResult::PassivateIfIdle : snf::runtime::ActorDispatchResult::KeepActive;
+                const SnapshotPublishOutcome outcome = publishDirtySnapshot(state, context, false);
+                return outcome == SnapshotPublishOutcome::RetryScheduled ? snf::runtime::ActorDispatchResult::KeepActive
+                                                                         : snapshotTerminalResult(state);
             }
 
             if (!state.pending_command)
@@ -578,16 +623,62 @@ namespace snf::server
             state.pending_result.room_join.reset();
             state.room_entry.reset();
         }
-        publishDirtySnapshot(state);
+        if (state.reward_snapshot_pending)
+        {
+            static_cast<void>(publishDirtySnapshot(state, context, false));
+        }
+        else
+        {
+            static_cast<void>(tryPublishDirtySnapshot(state));
+        }
         state.pending_command.reset();
         state.stage = PlayerActorState::Stage::Reserving;
     }
 
-    void PlayerActorBinding::publishDirtySnapshot(PlayerActorState& state) noexcept
+    PlayerActorBinding::SnapshotPublishOutcome
+    PlayerActorBinding::publishDirtySnapshot(PlayerActorState& state, snf::runtime::ActorContext& context, const bool retry_attempt) noexcept
+    {
+        if (retry_attempt)
+        {
+            state.snapshot_retry_scheduled = false;
+            if (state.snapshot_retries_remaining > 0)
+            {
+                --state.snapshot_retries_remaining;
+            }
+        }
+
+        if (tryPublishDirtySnapshot(state))
+        {
+            state.reward_snapshot_pending = false;
+            state.snapshot_retries_remaining = 0;
+            return SnapshotPublishOutcome::CleanOrAccepted;
+        }
+
+        _reward_snapshot_admission_rejections.fetch_add(1, std::memory_order_relaxed);
+        if (!retry_attempt && state.snapshot_retries_remaining == 0)
+        {
+            state.snapshot_retries_remaining = _snapshot_retry_limit;
+        }
+
+        if (state.snapshot_retry_scheduled)
+        {
+            return SnapshotPublishOutcome::RetryScheduled;
+        }
+        if (state.snapshot_retries_remaining == 0 || !tryScheduleSnapshotRetry(state, context))
+        {
+            state.reward_snapshot_pending = false;
+            state.snapshot_retries_remaining = 0;
+            _reward_snapshot_retry_giveups.fetch_add(1, std::memory_order_relaxed);
+            return SnapshotPublishOutcome::GaveUp;
+        }
+        return SnapshotPublishOutcome::RetryScheduled;
+    }
+
+    bool PlayerActorBinding::tryPublishDirtySnapshot(PlayerActorState& state) noexcept
     {
         if (_persistence_service == nullptr || !state.player.hasFlushableDirtyState())
         {
-            return;
+            return true;
         }
 
         PlayerStateComponentMask cleared_components = state.player.dirtyComponents();
@@ -596,17 +687,51 @@ namespace snf::server
             auto snapshot = state.player.takeDirtySnapshot(&cleared_components);
             if (!snapshot)
             {
-                return;
+                return true;
             }
             if (!_persistence_service->tryEnqueue(std::move(*snapshot)))
             {
                 state.player.restoreDirtyComponents(cleared_components);
+                return false;
             }
+            return true;
         }
         catch (...)
         {
             state.player.restoreDirtyComponents(cleared_components);
+            return false;
         }
+    }
+
+    bool PlayerActorBinding::tryScheduleSnapshotRetry(PlayerActorState& state, snf::runtime::ActorContext& context) noexcept
+    {
+        try
+        {
+            auto submission = makeSubmission(
+                snf::runtime::ActorKey{
+                    .kind = kind(),
+                    .entity = state.identity.value,
+                },
+                snf::runtime::ActorActivation::ExistingOnly,
+                snf::runtime::ActorAccounting::Command,
+                SnapshotRetryPayload{}
+            );
+            if (!context.trySchedule(_snapshot_retry_delay, std::move(submission)))
+            {
+                return false;
+            }
+            state.snapshot_retry_scheduled = true;
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    snf::runtime::ActorDispatchResult PlayerActorBinding::snapshotTerminalResult(const PlayerActorState& state) noexcept
+    {
+        return state.sessionless ? snf::runtime::ActorDispatchResult::PassivateIfIdle : snf::runtime::ActorDispatchResult::KeepActive;
     }
 
     snf::runtime::ActorDispatchResult PlayerActorBinding::abandonResponses(PlayerActorState& state) noexcept
