@@ -6,12 +6,13 @@
 
 ## 1. 프로젝트 개요
 
-SnF는 Linux에서 실행되는 C++20 기반 MORPG 서버입니다. 논블로킹 TCP와 epoll로 연결을 처리하고, 게임 상태 변경은 Actor별 FIFO 명령 대기열을 통해 순차적으로 처리합니다. DB 응답이나 `OutboundChannel` 슬롯을 기다리는 동안에는 해당 Actor의 코루틴만 중단되고, Worker 스레드는 다른 Actor를 계속 처리합니다.
+SnF는 Linux에서 실행되는 C++20 기반 MORPG 서버입니다.
 
-클라이언트는 인증 후 Zone에 입장하고, 최대 4명이 Battle Room에서 전투한 뒤 Zone으로 복귀합니다.
-Room 입장 시 PlayerActor가 자신이 소유한 성장 상태에서 전투용 스냅샷을 만들고, RoomActor는 그
-복사본만으로 전투를 처리합니다. 전투가 끝나면 RoomActor가 결과를 PlayerActor에 전달하고,
-PlayerActor가 보상을 반영해 MySQL에 저장할 스냅샷을 생성합니다.
+- 논블로킹 TCP와 `epoll` 기반 연결 처리
+- Actor별 FIFO 대기열을 통한 Player·Zone·Room 상태의 순차 처리
+- DB 응답을 기다릴 때 PlayerActor만 중단하고 Worker는 다른 Actor를 계속 처리
+- 최대 4인 Battle Room 입장 시 Player 상태를 전투용 스냅샷으로 전달
+- 전투 종료 결과를 PlayerActor에 반영해 MySQL에 저장하고 참가자를 Zone으로 복귀
 
 ---
 
