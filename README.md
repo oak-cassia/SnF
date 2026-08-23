@@ -6,9 +6,12 @@
 
 ## 1. 프로젝트 개요
 
-SnF는 Linux에서 실행되는 C++20 기반 MORPG 서버입니다. 논블로킹 TCP와 epoll로 연결을 처리하고, 게임 상태 변경은 Actor별 FIFO 명령 대기열을 통해 순차적으로 처리합니다. DB 읽기·저장과 송신 공간 확보를 기다릴 때는 코루틴으로 해당 Actor만 중단하며, Worker 스레드는 대기하지 않고 다른 Actor를 계속 처리합니다.
+SnF는 Linux에서 실행되는 C++20 기반 MORPG 서버입니다. 논블로킹 TCP와 epoll로 연결을 처리하고, 게임 상태 변경은 Actor별 FIFO 명령 대기열을 통해 순차적으로 처리합니다. DB 응답이나 `OutboundChannel` 슬롯을 기다리는 동안에는 해당 Actor의 코루틴만 중단되고, Worker 스레드는 다른 Actor를 계속 처리합니다.
 
-클라이언트는 인증 후 Zone에 입장해 이동하고, 최대 4명이 Battle Room에 입장해 전투한 뒤 보상을 획득하고 Zone으로 복귀합니다. Room은 전투 중 100ms 단발성 타이머를 반복 예약해 이동·추격·공격 등을 처리하고, 전투 제한시간과 승패를 관리합니다.
+클라이언트는 인증 후 Zone에 입장하고, 최대 4명이 Battle Room에서 전투한 뒤 Zone으로 복귀합니다.
+Room 입장 시 PlayerActor가 자신이 소유한 성장 상태에서 전투용 스냅샷을 만들고, RoomActor는 그
+복사본만으로 전투를 처리합니다. 전투가 끝나면 RoomActor가 결과를 PlayerActor에 전달하고,
+PlayerActor가 보상을 반영해 MySQL에 저장할 스냅샷을 생성합니다.
 
 ---
 
@@ -81,24 +84,7 @@ Reactor는 네트워크 I/O 전용 스레드 하나를 사용합니다. 부하�
 대기하므로 CPU 사용량은 적지만, 해당 스레드를 Actor 작업에 활용할 수는 없습니다. 반대로 모든
 소켓 I/O가 한 스레드에 모이므로 네트워크 부하가 커지면 Reactor가 처리량의 상한이 될 수 있습니다.
 
-### 3.2 부분 입출력과 연결 세대
-
-```text
-[body_length:u32][type:u16][request_id:u32][payload]
-```
-
-TCP 수신 단위와 요청 프레임의 경계가 일치하지 않으므로 본문 길이를 헤더에 기록하고 최대 64 KiB로
-제한했습니다. `FrameDecoder`는 누적된 입력에서 완성된 프레임만 순서대로 꺼냅니다. `send()`가
-일부만 전송하면 Session이 전송 위치를 저장하고 다음 `EPOLLOUT`에서 남은 데이터만 보냅니다.
-
-연결 종료 후 같은 파일 디스크립터가 재사용되는 경우에는 `ConnectionId{descriptor, generation}`으로
-이전 연결과 새 연결을 구분합니다. 송신·Session 조회·명령 전달과 `epoll` 이벤트 모두 두 값이
-일치할 때만 현재 연결에 적용합니다.
-
-> 코드: [`src/net/session.cpp`](src/net/session.cpp),
-> [`src/protocol/frame_codec.cpp`](src/protocol/frame_codec.cpp)
-
-### 3.3 송신 용량 제한과 느린 클라이언트 격리
+### 3.2 송신 용량 제한과 느린 클라이언트 격리
 
 Room은 전투 변경사항을 참가자에게 주기적으로 전송합니다. 특정 클라이언트가 데이터를 읽지 않으면
 해당 연결의 미전송 데이터가 계속 쌓입니다. 송신 대기열에 상한이 없으면 메모리 사용량이 계속
@@ -110,10 +96,6 @@ Room은 전투 변경사항을 참가자에게 주기적으로 전송합니다. 
 연결은 최대 64개까지만 점유할 수 있습니다. Reactor가 송신 작업을 가져간 뒤에는 Session이 연결별
 미전송 데이터를 관리하며, 기본 상한은 1 MiB입니다.
 
-Actor가 결과를 송신 작업으로 등록하기 전에 필요한 개수를 예약합니다. 대기가 가능한 요청·응답
-경로에서는 용량이 날 때까지 해당 Actor만 중단하고 Worker는 다른 Actor를 처리합니다. 송신 작업을
-등록할 수 없거나 Session의 바이트 상한을 넘으면 응답을 조용히 버리지 않고 해당 연결을 종료합니다.
-
 #### 구현 구조
 
 ```text
@@ -124,9 +106,84 @@ Actor 결과
 → `send()`
 ```
 
+Actor가 결과를 송신 작업으로 등록하기 전에 필요한 슬롯을 예약합니다. 전체 사용량과 해당 연결의
+사용량에는 대기열에 들어간 작업뿐 아니라 아직 등록하지 않은 예약도 포함합니다. 따라서 여러 Actor가
+동시에 공간을 확인한 뒤 상한을 초과해 등록하는 일을 막습니다.
+
+```cpp
+bool OutboundChannel::fits(
+    const ConnectionUsage& usage,
+    const std::size_t slots) const
+{
+    return _items.size() + _reserved_slots + slots <= _capacity &&
+           usage.queued + usage.reserved + slots <= _max_slots_per_connection;
+}
+```
+
+> 코드: [`src/server/outbound_channel.cpp`](src/server/outbound_channel.cpp)
+
+용량이 있으면 예약과 응답 등록을 동기 경로에서 끝냅니다. 포화된 경우에만 예약 대기 코루틴을 만들고
+해당 Actor를 중단합니다. Worker 스레드는 기다리지 않고 다른 Actor를 계속 처리하며, Reactor가 송신
+작업을 소비해 공간이 생기면 예약 결과를 담당 Worker로 돌려보냅니다.
+
+```cpp
+if (auto reservation = _outbound.tryReserve(state.connection, required_slots))
+{
+    return applyResponses(state, *reservation, stop_token);
+}
+
+state.reservation_task =
+    awaitOutboundReservation(_outbound, context, state.connection, required_slots);
+
+// 이후 같은 Actor의 실행 차례에서 진행
+if (state.reservation_task.resume() == snf::runtime::ActorTaskStatus::Suspended)
+{
+    return snf::runtime::ActorDispatchResult::Suspended;
+}
+```
+
+> 코드: [`src/server/player_actor_binding.cpp`](src/server/player_actor_binding.cpp)
+
+Reactor가 송신 작업을 가져간 뒤에는 인코딩된 프레임의 실제 바이트 수를 Session 상한에 반영합니다.
+상한을 넘으면 프레임을 조용히 버리지 않고 해당 연결만 종료합니다.
+
+```cpp
+// Session::enqueueFrame
+auto encoded_frame = protocol::encode_frame(frame);
+if (_pending_send_byte_count > _max_pending_send_bytes ||
+    encoded_frame.size() > _max_pending_send_bytes - _pending_send_byte_count)
+{
+    return false;
+}
+
+// TcpServer::handleOutboundAction
+auto* session = findCurrentSession(network_action.connection);
+if (session == nullptr)
+{
+    return;
+}
+
+if (!session->enqueueFrame(network_action.frame))
+{
+    removeSession(
+        network_action.connection.descriptor,
+        ConnectionCloseCause::Overflow);
+}
+```
+
+> 코드: [`src/net/session.cpp`](src/net/session.cpp),
+> [`src/server/tcp_server.cpp`](src/server/tcp_server.cpp)
+
+`findCurrentSession`은 파일 디스크립터뿐 아니라 연결마다 증가하는 generation까지 확인합니다. 따라서
+이전 연결에서 늦게 도착한 송신이나 종료 결과가 같은 디스크립터를 재사용한 새 연결에 적용되지 않습니다.
+
+#### 검증
+
 4인 Room에서 한 클라이언트만 수신을 중단한 통합 테스트에서는 해당 연결 하나만 종료됐습니다.
 나머지 3명은 `BattleDigest`의 순서 번호를 건너뛰지 않았고, `ParticipantLeft` 이후에도 전투를
 클리어했습니다.
+
+> 테스트: [`tests/tcp_server_integration_test.cpp`](tests/tcp_server_integration_test.cpp)
 
 #### 한계
 
@@ -135,132 +192,148 @@ Actor 결과
 
 ---
 
-## 4. Actor와 비동기 실행
+## 4. Actor 단위 비동기 실행과 코루틴 수명 보장
 
-ActorRuntime은 `ActorKey`로 담당 Worker를 정하고, 각 Worker는 자신에게 배치된 Actor의 대기열,
-실행 상태와 코루틴 수명을 독점해서 관리합니다.
+> 외부 작업을 기다릴 때 Worker가 아니라 해당 Actor만 중단합니다. 외부 스레드는 코루틴을 직접
+> 재개하지 않고 완료 결과만 게시하며, 코루틴 프레임과 Actor 상태의 생성·재개·파괴는 담당 Worker가
+> 수행합니다.
 
-```text
-ActorRuntime
-└── Worker 0..N
-    ├── 용량 제한 ingress
-    ├── 완료 결과 대기열
-    ├── 실행 준비 Actor 대기열
-    ├── 단발 타이머
-    ├── 작업 예약과 실행 지표
-    └── ActorEntry table
-        └── ActorEntry
-            ├── ActorBinding
-            ├── FIFO mailbox
-            ├── execution
-            │   └── Idle / Ready / Running / Suspended
-            ├── incarnation
-            ├── ActorContext
-            ├── 현재 명령과 외부 작업
-            └── ActorState
-                ├── PlayerActorState
-                │   ├── Player
-                │   ├── 연결·요청·생명주기 정보
-                │   └── 읽기·송신 예약·저장 코루틴 상태
-                ├── ZoneActorState
-                │   └── Zone
-                └── RoomActorState
-                    └── Room
-```
+Actor가 중단된 동안에는 같은 Actor의 다음 명령을 실행하지 않습니다. 뒤에 도착한 명령은 mailbox에서
+기다리고, Worker는 실행 가능한 다른 Actor를 처리합니다.
 
-| 구성 요소 | 역할 |
+| 실행 계약 | 보장 |
 | --- | --- |
-| `ActorRuntime` | Binding을 등록하고 `ActorKey`에 따라 명령을 담당 Worker로 보냅니다. |
-| Worker | 입력·완료·타이머·실행 준비 대기열과 자신에게 배치된 모든 `ActorEntry`를 소유합니다. |
-| `ActorEntry` | Actor 활성화 하나의 mailbox, 실행 상태, 세대와 진행 중인 작업을 관리합니다. |
-| `ActorBinding` | Runtime 명령을 게임 객체 호출로 변환하고 결과를 송신·저장·타이머로 연결합니다. |
-| `ActorState` | Binding이 사용하는 타입별 상태이며 게임 객체와 필요한 비동기 진행 정보를 가집니다. |
-| `ActorContext` | Actor 메시지 전달, 외부 작업 시작과 타이머 예약처럼 담당 Worker의 기능만 제공합니다. |
+| Actor 상태·mailbox·코루틴은 담당 Worker만 접근 | 상태 변경에 Actor별 mutex가 필요하지 않음 |
+| 같은 Actor는 한 명령만 실행 | 중단 중에도 뒤의 명령이 현재 명령을 앞지르지 않음 |
+| 외부 스레드는 완료 결과만 게시 | 다른 스레드에서 코루틴을 재개하거나 파괴하지 않음 |
+| Actor incarnation과 작업 ID가 일치할 때만 재개 | 비활성화·재활성화 뒤 도착한 이전 결과를 폐기 |
 
-`PlayerActorState`는 게임의 `Player` 자체가 아니라 연결·요청과 코루틴 진행 상태까지 포함한 Runtime
-상태입니다. `ActorState`의 가상 소멸자를 통해 Runtime이 타입별 상태를 제거하며,
-`PlayerActorState`가 파괴될 때 비활성화 완료 콜백도 실행합니다.
-
-### 4.1 mutex 대신 Actor를 선택한 이유
-
-#### 문제
-
-여러 Worker가 같은 Player·Zone·Room 상태를 동시에 변경하면 명령 순서와 동기화 범위를 정해야
-합니다. 모든 상태를 mutex로 보호하면 상태마다 락 범위와 획득 순서를 관리해야 하고, DB나 송신
-공간을 기다리는 작업이 락 구간에 섞일 수 있습니다.
-
-#### 결정과 이유
-
-> Actor는 자신에게 도착한 명령을 FIFO 순서로 하나씩 처리하는 실행 단위입니다.
-
-Player·Zone·Room을 Actor로 실행합니다. 같은 Actor의 명령은 동시에 실행되지 않으며, 서로 다른
-Actor는 독립적으로 진행합니다. 도메인 객체가 Actor 기반 클래스를 상속하지는 않습니다.
-`ActorBinding`이 일반 C++ 객체를 Runtime과 연결하므로 게임 로직은 스레드·소켓·DB를 모르는 동기
-함수로 유지합니다.
-
-#### 한계
-
-여러 Actor의 상태를 하나의 트랜잭션으로 변경하지는 못합니다. Player·Zone·Room을 함께 변경하는
-입장과 복귀는 별도의 진행 상태와 보상 절차로 처리합니다.
-
-### 4.2 Actor별 순서와 Worker 배치
+### 4.1 상태 소유권과 순차 실행
 
 ```text
 worker = hash(ActorKey{kind, entity}) % worker_count
 ```
 
-Actor는 `ActorKey`의 해시로 정해진 Worker에 배치됩니다. 활성화된 동안 상태, 명령 대기열과
-코루틴은 항상 같은 Worker가 소유하며, 명령·타이머·외부 작업의 완료 결과도 해당 Worker로
-돌아옵니다. 따라서 Actor 상태를 다른 Worker가 직접 변경하지 않습니다.
+Player·Zone·Room Actor는 `ActorKey`의 해시로 정해진 Worker에 배치됩니다. 활성화된 동안 상태,
+FIFO mailbox, 실행 상태와 코루틴은 항상 같은 Worker가 소유합니다. `ActorBinding`이 Runtime 명령을
+일반 C++ 게임 객체의 함수 호출로 변환하므로, 게임 로직은 스레드·소켓·DB를 모르는 동기 함수로
+유지합니다.
 
 ```text
 명령 게시
 → 담당 Worker 입력 대기열
-→ Actor FIFO 명령 대기열
+→ Actor FIFO mailbox
 → 실행 준비 대기열
 → 한 차례에 최대 16개 처리
-→ 남은 명령이 있으면 다시 실행 준비 대기열에 등록
+→ 남은 명령이 있으면 실행 준비 대기열 끝으로 이동
 ```
 
-실행 준비 대기열에는 Actor마다 토큰을 하나만 둡니다. 한 Actor가 한 차례에 처리할 명령 수도
-16개로 제한해, 명령이 몰린 Actor가 같은 Worker의 다른 Actor를 계속 밀어내지 않게 합니다.
+같은 Actor를 실행 준비 대기열에 중복 등록하지 않습니다. 또한 한 Actor가 한 차례에 처리할 명령을
+최대 16개로 제한해, 명령이 몰린 Actor가 같은 Worker의 다른 Actor를 계속 밀어내지 않게 합니다.
 
 #### 한계
 
-실행 중인 Actor를 다른 Worker로 이동하거나 Worker 사이의 Actor 수를 재조정하지 않습니다. 또한
-하나의 Actor는 한 Worker에서 순차 실행되므로 단일 Actor의 처리량은 해당 Worker의 실행 속도를
-넘을 수 없습니다.
+실행 중인 Actor를 다른 Worker로 이동하거나 Worker 사이의 Actor 수를 재조정하지 않습니다. 하나의
+Actor는 순차 실행되므로 단일 Actor의 처리량은 담당 Worker의 실행 속도를 넘을 수 없습니다. 또한
+여러 Actor의 상태를 하나의 트랜잭션으로 변경하지 않으며, 입장과 복귀는 별도의 진행 상태와 보상
+절차로 처리합니다.
 
-### 4.3 외부 작업을 기다리는 동안 해당 Actor만 중단
+### 4.2 외부 작업을 기다리는 Actor만 중단
 
-#### 문제
+Actor Worker가 MySQL 호출과 `OutboundChannel` 슬롯 대기를 동기식으로 처리하면 Worker 전체가
+멈춥니다. 두 작업은 `PlayerActorBinding`에서 비동기로 처리하므로 요청한 PlayerActor만 중단됩니다.
 
-Actor Worker에서 MySQL 응답이나 송신 공간을 동기적으로 기다리면 같은 Worker가 담당하는 다른
-Actor도 함께 멈춥니다.
+Player를 읽을 때 Repository에는 결과 콜백을 전달합니다. 조회가 끝나면 Repository가 콜백을 호출하고,
+콜백은 결과를 담당 Worker 대기열에 등록할 뿐 코루틴을 직접 재개하지 않습니다.
 
-#### 결정과 이유
-
-Player·Zone·Room의 핸들러는 동기 함수로 유지하고, 외부 작업을 아는 `ActorBinding`에 코루틴을
-둡니다. 외부 작업을 기다리는 Actor는 실행 준비 대기열에서 빠지지만, Worker는 다른 Actor를 계속
-처리합니다. 완료 결과가 도착해도 외부 스레드가 코루틴을 직접 재개하지 않고 담당 Worker에
-결과를 게시합니다.
-
-```text
-Actor Worker
-→ 외부 작업 시작
-→ Actor 중단
-→ 다른 Actor 처리
-
-Repository / OutboundChannel
-→ 완료 결과 게시
-
-담당 Actor Worker
-→ Actor와 작업 식별자 확인
-→ 코루틴 재개
+```cpp
+auto result = co_await snf::runtime::awaitAsyncOperation<
+    snf::server::PlayerLoadResult>(
+    context,
+    [&repository, player](
+        snf::runtime::AsyncOperationProducer<snf::server::PlayerLoadResult> producer)
+    {
+        repository.asyncLoad(
+            player,
+            [producer = std::move(producer)](
+                snf::server::PlayerLoadResult result) mutable noexcept
+            {
+                producer.complete(std::move(result));
+            });
+    });
 ```
 
-외부 작업을 시작하기 전에 완료 결과를 받을 공간도 함께 예약합니다. 완료와 취소가 경쟁하면 둘 중
-하나만 최종 결과가 되며, Actor가 비활성화된 뒤 늦게 도착한 결과는 식별자가 맞지 않아 폐기됩니다.
+> 코드: [`src/server/player_actor_binding.cpp`](src/server/player_actor_binding.cpp)
+
+```text
+PlayerActor / 담당 Worker
+→ Repository 작업 시작
+→ PlayerActor만 Suspended
+→ Worker는 다른 Actor 처리
+
+MySQL Repository Worker
+→ 결과 콜백 호출
+→ 담당 Worker의 완료 결과 대기열에 등록
+
+담당 Worker
+→ 완료 결과 소비
+→ PlayerActor의 코루틴 재개
+```
+
+Repository가 `asyncLoad()` 반환 전에 완료 콜백을 호출하더라도, 콜백은 결과를 담당 Worker의
+대기열에 등록할 뿐입니다. 코루틴은 Worker가 결과를 꺼낼 때 재개되므로 콜백의 실행 시점이나
+스레드와 관계없이 같은 경로로 처리됩니다.
+
+### 4.3 중단된 Actor를 한 번만 재개
+
+PlayerActor가 DB 조회 결과를 기다리는 동안 완료와 취소가 동시에 발생할 수 있습니다. Actor가 제거된
+뒤 같은 `ActorKey`로 다시 생성될 수도 있습니다. 이때 이전 DB 조회 결과가 현재 Actor를 재개하거나,
+완료와 취소가 같은 코루틴을 두 번 재개해서는 안 됩니다.
+
+```text
+PlayerActor가 DB 결과를 기다리며 Suspended
+├── DB 완료가 먼저 도착
+│   → 현재 Actor가 기다리던 DB 조회의 결과인지 확인
+│   → 담당 Worker에서 코루틴 재개
+│
+├── 취소가 먼저 발생
+│   → 취소 결과로 재개
+│   → 나중에 도착한 DB 완료는 폐기
+│
+└── Actor가 제거된 뒤 같은 ActorKey로 다시 생성
+    → incarnation이 다르므로 이전 완료를 폐기
+```
+
+Runtime은 Actor가 `Suspended` 상태이고, `incarnation`과 작업 ID가 모두 일치할 때만 완료 결과를
+적용합니다. `incarnation`은 같은 `ActorKey`로 다시 생성된 Actor를 구분하고, 작업 ID는 PlayerActor가
+현재 기다리는 DB 조회를 이전 조회와 구분합니다.
+
+```cpp
+if (entry.execution == ActorExecutionState::Suspended &&
+    entry.incarnation == continuation.incarnation &&
+    entry.expected_task == continuation.task)
+{
+    entry.active_operation.reset();
+    entry.expected_task.reset();
+    entry.pending_resume = true;
+    entry.execution = ActorExecutionState::Ready;
+    worker.ready_actors.push_back(actor_iterator->first);
+}
+```
+
+> 코드: [`src/runtime/actor_runtime.cpp`](src/runtime/actor_runtime.cpp),
+> [`include/snf/runtime/async_operation.hpp`](include/snf/runtime/async_operation.hpp)
+
+완료와 취소 중 먼저 확정된 결과만 사용하므로 코루틴은 한 번만 재개됩니다. 같은 DB 조회의 완료
+콜백이 두 번 호출되면 두 번째 결과는 폐기하고 지표에 기록합니다.
+
+#### 검증
+
+- 즉시 완료, 완료·취소 경합, 중복 완료와 재활성화 뒤 도착한 이전 완료를 재현합니다.
+- 코루틴 재개와 파괴가 완료 콜백 스레드가 아닌 담당 Worker에서 수행되는지 확인합니다.
+
+> 테스트: [`tests/actor_coroutine_test.cpp`](tests/actor_coroutine_test.cpp),
+> [`tests/actor_runtime_test.cpp`](tests/actor_runtime_test.cpp)
 
 #### 한계
 
@@ -269,136 +342,304 @@ I/O 단계가 많은 `ActorBinding`은 읽기·저장·송신 대기 상태를 �
 
 ---
 
-## 5. Battle Room
+## 5. 전투 시작: Player 상태 스냅샷과 Room 입장
 
-Room은 참가자와 적의 좌표·HP·이동 의도·공격 상태를 하나의 Actor에서 관리합니다. 클라이언트는
-이동과 스킬 사용을 요청하고, 위치·쿨다운·공격 범위·피해량·승패는 서버가 판정합니다.
+> 전투에 사용할 Player 상태는 `BattleStart` 프레임이 아니라 각 Player가 Room에 입장할 때 정합니다.
+> PlayerActor가 자신이 소유한 상태를 읽어 전투용 값으로 만들고, RoomActor는 전달받은
+> 복사본만으로 전투를 처리합니다.
 
-### 5.1 서버 권위 전투 처리
+### 5.1 스냅샷은 상태 소유자인 PlayerActor에서 생성
 
-```text
-UseSkill 프레임
-→ RoomActor FIFO 명령 대기열
-→ 현재 좌표·쿨다운·공격 범위 판정
-→ 피해·사망·전투 종료 상태 반영
-→ 전투 변경사항을 BattleDigest로 참가자에게 전송
+클라이언트의 Room 입장 요청에는 Room ID만 있습니다. 공격력과 체력은 클라이언트가 보내지 않으며,
+PlayerActor가 자신이 소유한 누적 경험치를 읽어 `CombatStats`를 계산합니다.
+
+```cpp
+// Player::handleCommand(const JoinRoomRequest&)
+return PlayerResult{
+    .room_join =
+        RoomJoinRequest{
+            .room = command.room,
+            .stats = combatStats(
+                streetLevel(_state._progression.street_experience)),
+        },
+};
+
+// Room::handleCommand(const JoinRoom&)
+_participants.insert(
+    position,
+    Participant{
+        .player = command.player,
+        .stats = command.stats,
+        .current_health = command.stats.health,
+        .cooldowns = {},
+    });
 ```
 
-Room 명령과 타이머는 같은 FIFO 명령 대기열을 통과합니다. 따라서 스킬 사용, 참가자 이동, 적 행동과
-전투 종료가 하나의 실행 순서에서 처리됩니다. 같은 Room 상태에서 하나의 명령이 만드는 대상 선택과
-피해·사망 이벤트 순서는 ID를 기준으로 결정합니다.
+`RoomJoinRequest`는 Player 객체나 `PlayerRecord` 전체가 아니라 전투에 필요한 값만 담습니다. 따라서
+RoomActor가 PlayerActor의 메모리를 참조하거나 락을 걸 필요가 없고, 입장 뒤 Player의 성장 상태가
+변하더라도 진행 중인 전투 능력치는 자동으로 바뀌지 않습니다.
 
-### 5.2 Tick과 전투 상태
+| 상태 | 소유자와 수명 |
+| --- | --- |
+| 누적 경험치 | PlayerActor가 소유하고 DB에 저장 |
+| `CombatStats` | 입장 순간 계산해 값으로 전달 |
+| 현재 HP·쿨다운·좌표 | RoomActor가 전투가 끝날 때까지 소유 |
 
-Room은 기본 100ms 간격의 단발성 타이머를 실행한 뒤 다음 tick을 다시 예약합니다. 전투 제한시간은
-tick과 별도의 타이머로 예약하지만, 두 타이머 모두 RoomActor의 명령 대기열에서 처리됩니다.
+> 코드: [`src/game/player.cpp`](src/game/player.cpp),
+> [`src/server/player_actor_binding.cpp`](src/server/player_actor_binding.cpp),
+> [`src/game/room.cpp`](src/game/room.cpp)
 
-```text
-Waiting
-  → Running
-      ├── Cleared : 보스 HP 0
-      └── Failed  : 제한시간 초과 또는 참가자 전원 사망
-```
+### 5.2 Room 입장은 단계적으로 확정
 
-전투 제한시간 타이머를 예약할 수 없으면 종료 결과를 보장할 수 없으므로 `BattleStart`를
-`RuntimeOverloaded`로 거절합니다. 시작된 전투는 종료 상태를 한 번만 만들고, 남은 타이머와 명령이
-정리된 뒤 RoomActor를 비활성화합니다.
-
-#### 한계
-
-tick은 이전 처리가 끝난 뒤 100ms를 더하는 방식이므로 Worker가 바쁘면 실행 시점이 늦어질 수
-있습니다. 정확한 고정 주기를 보장하지 않으며 타이머 지연과 tick 실행 시간을 지표로 기록합니다.
-
-### 5.3 클리어 보상과 Zone 복귀
-
-```text
-보스 HP 0
-→ Room을 Cleared로 전환
-→ BattleDigest와 BattleCleared 전송
-→ PlayerActor에 경험치 지급 메시지 전달
-→ Player 상태 반영과 스냅샷 저장 요청
-→ 참가자를 Zone으로 복귀
-```
-
-RoomActor는 PlayerActor에 보상 메시지를 보내지만 응답을 기다리지는 않습니다. Actor끼리 서로의
-응답을 기다리면 순환 대기가 생길 수 있기 때문입니다. 메시지 전달이 거절되면 Room을 멈추지 않고
-카운터로 기록합니다. PlayerActor가 메시지를 수락하면 경험치를 반영하고 저장 대기열 수락까지
-책임집니다.
-
-Room 입장과 복귀는 Player·Zone·Room 상태를 한 번에 변경하지 않습니다.
+Player·Zone·Room은 서로 다른 Actor이므로 하나의 메모리 트랜잭션으로 동시에 변경할 수 없습니다.
+Reactor가 소유하는 `RoomEntryService`는 진행 단계를 기록하고 각 Actor의 처리 결과를 확인하며
+다음 순서로 입장을 완성합니다.
 
 ```text
 Stable(zone)
-→ Entering 기록과 완료 공간 예약
-→ PlayerActor에서 전투 스냅샷 생성
-→ Room 좌석 적용
-→ 원래 Zone에서 제거
-→ InRoom 공개
-→ 전투
-→ Returning 기록과 복귀 epoch 발급
-→ 원래 Zone에 재등록
-→ Stable(zone) 공개
+→ Entering(entry_id) 기록
+→ PlayerActor: CombatStats 스냅샷 생성
+→ RoomActor: 스냅샷을 참가자 상태로 복사
+→ ZoneActor: 원래 Zone에서 Player 제거
+→ InRoom 공개와 RoomJoined 응답
 ```
 
-Room의 정원과 전투 단계는 Room만 판정할 수 있으므로, Room 좌석이 적용된 뒤 원래 Zone에서
-제거합니다. 입장·복귀 식별자, 진행 단계와 epoch가 현재 전환에 맞지 않는 늦은 완료는 폐기합니다.
-Zone 제거가 실패하면 Room 좌석을 되돌리고, 복귀에 실패하면 연결을 종료해 잘못된 경로를 공개하지
-않습니다.
+먼저 RoomActor가 정원과 전투 단계를 확인하고 Player를 참가자 목록에 추가합니다. Room이 입장을
+거절하면 Player는 원래 Zone에 남아 있습니다. 참가자 추가 뒤 Zone 제거가 실패하면 `LeaveRoom`을
+보내 참가자 등록을 되돌립니다. 두 단계가 모두 끝난 뒤에만 `InRoom`을 안정 상태로 공개합니다.
+
+입장 상태 전환에 관련된 분기만 발췌하면 다음과 같습니다.
+
+```cpp
+// Room 참가자 등록 성공 후에만 원래 Zone 제거 단계로 진행
+if (completion.room_status != RoomCommandStatus::Applied)
+{
+    static_cast<void>(_routes.rollbackRoomEntryBeforeLeave(
+        active.connection, active.entry_id));
+    return;
+}
+static_cast<void>(_routes.noteRoomJoined(
+    active.connection, active.entry_id));
+
+// Zone 제거 성공 후에만 InRoom으로 전환
+if (completion.zone_status != ZoneCommandStatus::Applied ||
+    !completion.position)
+{
+    compensateFailedSourceLeave(active);
+    return;
+}
+
+const auto in_room = _routes.completeRoomEntry(
+    active.connection, active.entry_id, *completion.position);
+if (!in_room)
+{
+    compensateFailedSourceLeave(active);
+    return;
+}
+```
+
+`completeRoomEntry()`는 진행 중인 입장 정보를 제거하고 연결을 `_in_rooms`에 등록합니다.
+
+```cpp
+_room_entries.erase(iterator);
+_in_rooms.insert_or_assign(connection, in_room);
+```
+
+| 실패 위치 | 처리 |
+| --- | --- |
+| Player·Room 메시지 전달 실패 | 원래 Zone을 떠나기 전에 입장 진행 상태를 되돌림 |
+| Room 정원 초과·잘못된 전투 단계 | Room의 거절 결과로 입장 종료, Zone 상태 유지 |
+| Room 수락 후 Zone 제거 실패 | Room에 `LeaveRoom`을 보내 참가자 등록을 되돌림 |
+| 이전 전환의 늦은 완료 | `entry_id`와 진행 단계가 다르면 폐기 |
+
+각 Actor의 소유권을 유지하면서 작업을 단계별로 진행하고, 중간에 실패하면 이미 적용한 작업을
+되돌립니다.
+
+> 코드: [`src/server/room_entry_service.cpp`](src/server/room_entry_service.cpp),
+> [`src/server/route_coordinator.cpp`](src/server/route_coordinator.cpp)
+
+### 5.3 RoomActor가 전달받은 상태로 전투를 처리
+
+입장이 끝나면 위치·HP·쿨다운·적 상태와 승패는 RoomActor 안에서만 변경됩니다. 이동·스킬·tick·제한시간
+타이머도 같은 FIFO mailbox를 통과하므로 하나의 Room 상태를 동시에 수정하지 않습니다. 전투 중에는
+PlayerActor를 다시 읽지 않으므로, 입장 뒤 성장 상태가 바뀌어도 진행 중인 전투에는 반영되지 않습니다.
+
+`BattleStart` 처리 전에 제한시간 타이머 슬롯을 확보하지 못하면 `Running`으로 전환하지 않고
+`RuntimeOverloaded`로 거절합니다. 종료 시점을 예약할 수 있는 전투만 시작합니다.
+
+> 테스트: [`tests/player_test.cpp`](tests/player_test.cpp),
+> [`tests/route_coordinator_test.cpp`](tests/route_coordinator_test.cpp),
+> [`tests/protocol_gateway_test.cpp`](tests/protocol_gateway_test.cpp),
+> [`tests/room_actor_binding_test.cpp`](tests/room_actor_binding_test.cpp)
 
 ---
 
-## 6. MySQL과 Player 저장
+## 6. 전투 종료: 결과 전달과 Player 저장
 
-### 6.1 동기식 MySQL을 Actor Worker 밖에서 실행
+> RoomActor는 전투가 끝나도 Player 상태나 DB를 직접 수정하지 않습니다. 결과를 값 메시지로
+> PlayerActor에 전달하고, PlayerActor가 자신의 현재 상태에 반영한 뒤 저장 스냅샷을 만듭니다.
 
-MySQL C API는 호출한 스레드를 대기시킵니다. Actor Worker에서 직접 읽고 저장하면 해당 Worker가
-담당하는 다른 Actor까지 DB 응답 동안 멈춥니다.
+### 6.1 종료 결과를 보상과 복귀 흐름으로 분리
+
+Room이 종료 상태가 되면 `RoomResult`를 바탕으로 보상 처리와 Zone 복귀를 각각 진행합니다. 클리어 결과에만
+`StreetExperienceGrant`가 들어가며, `audience`는 성공·실패와 관계없이 참가자를 Zone으로 돌려보내는
+데 사용합니다.
+
+```text
+RoomActor: Cleared / Failed
+├── grants (Cleared만 존재)
+│   → StreetExperienceGrant
+│   → PlayerActor
+│   → 성장 상태 반영과 PlayerRecord 스냅샷 생성
+│   → PlayerPersistenceService → MySQL
+│
+└── audience (Cleared와 Failed 모두 존재)
+    → RoomReturnRequest
+    → Reactor의 RoomEntryService
+    → ZoneActor 재등록 → Stable(zone)
+```
+
+```cpp
+void Room::rewardClear(RoomResult& result) const
+{
+    for (const Participant& participant : _participants)
+    {
+        result.grants.push_back(StreetExperienceGrant{
+            .player = participant.player,
+            .experience = _config.clear_experience,
+        });
+    }
+}
+
+// RoomActorBinding
+for (const StreetExperienceGrant& grant : result.grants)
+{
+    const auto posted = context.tryTell(
+        snf::runtime::ActorKey{
+            .kind = snf::runtime::ActorKind::Player,
+            .entity = grant.player.value,
+        },
+        snf::runtime::TellPayload::of(grant));
+
+    if (posted != snf::runtime::PostResult::Accepted)
+    {
+        _grant_tell_rejections.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+```
+
+RoomActor는 PlayerActor의 처리 결과나 DB 저장 완료를 기다리지 않습니다. Zone 복귀는 `audience`를
+기준으로 별도 진행하므로 실패한 전투의 참가자도 모두 복귀하며, 보상 저장과 독립적으로 진행됩니다.
+
+> 코드: [`src/game/room.cpp`](src/game/room.cpp),
+> [`src/server/room_actor_binding.cpp`](src/server/room_actor_binding.cpp),
+> [`src/server/game_server.cpp`](src/server/game_server.cpp)
+
+### 6.2 비활성 Player도 현재 상태를 읽은 뒤 보상 적용
+
+전투 도중 로그아웃해 PlayerActor가 비활성화됐을 수 있으므로 보상 메시지는 `ActivateIfMissing`으로
+전달합니다. 새로 활성화된 Actor는 DB의 `PlayerRecord`를 아직 읽지 않았으므로, 보상을 기본값에
+적용해 기존 재화와 경험치를 덮어쓰지 않도록 먼저 레코드를 비동기로 읽습니다.
+
+```cpp
+// PlayerActorBinding::makeTell
+return makeSubmission(
+    target,
+    ActorActivation::ActivateIfMissing,
+    ActorAccounting::Command,
+    StreetExperienceGrantPayload{.grant = *grant});
+
+// PlayerActorBinding::dispatch
+if (!player_state.loaded)
+{
+    player_state.pending_grant = grant->grant;
+    player_state.sessionless = true;
+    player_state.stage = PlayerActorState::Stage::Loading;
+    player_state.load_task = awaitPlayerLoad(
+        *_repository, context, *player_state.identity.playerId());
+    return advance(player_state, context, stop_token);
+}
+
+player_state.player.grantStreetExperience(grant->grant.experience);
+player_state.reward_snapshot_pending = true;
+```
+
+보상 적용 뒤에는 Player가 변경된 구성요소를 포함한 `PlayerRecord`를 생성합니다. 저장 대기열 등록이
+거절되거나 예외가 발생하면 스냅샷 생성 과정에서 해제한 `dirty` 표시를 복원해 변경사항이 유실되지
+않도록 합니다.
+
+```cpp
+auto snapshot = state.player.takeDirtySnapshot(&cleared_components);
+if (!_persistence_service->tryEnqueue(std::move(*snapshot)))
+{
+    state.player.restoreDirtyComponents(cleared_components);
+    return false;
+}
+```
+
+즉 RoomActor가 오래된 Player 전체 상태를 저장하는 것이 아니라, **결과만 소유자에게 보내고
+PlayerActor가 자신의 최신 상태와 결합해 저장 스냅샷을 만드는 구조**입니다.
+
+> 코드: [`src/server/player_actor_binding.cpp`](src/server/player_actor_binding.cpp),
+> [`src/game/player.cpp`](src/game/player.cpp)
+
+### 6.3 Player별 저장 순서와 MySQL Worker 분리
+
+현재 사용하는 MySQL 클라이언트 함수는 DB 작업이 끝난 뒤에 반환됩니다. 따라서 SQL은 Actor Worker가
+아니라 MySQL 전용 Worker에서 실행합니다. `PlayerPersistenceService`가 Player별 저장 순서를 정하고,
+Actor 쪽에서는 `asyncLoad`와 `asyncSave`만 사용합니다.
 
 ```text
 PlayerActor
+→ 용량 제한 스냅샷 대기열
 → PlayerPersistenceService
-→ PlayerRepository 작업 대기열
-→ MySQL 전용 Worker
+   ├── pending[player]   : 아직 시작하지 않은 최신 스냅샷
+   └── in_flight[player] : 현재 실행 중인 저장 0개 또는 1개
+→ MySqlPlayerRepository 작업 대기열
+→ MySQL Worker
 → MySQL
 ```
 
-MySQL 작업은 용량이 제한된 작업 대기열과 전용 Worker 스레드에서 실행합니다. Actor 쪽에서는
-`asyncLoad`와 `asyncSave`만 사용하며 MySQL 연결이나 SQL을 직접 다루지 않습니다. 대기열이
-가득 차면 작업을 시작하지 않고 `Unavailable` 결과를 돌려줍니다. 테스트에서는 같은
-`PlayerRepository` 인터페이스를 구현한 메모리 저장소를 사용합니다.
+`PlayerPersistenceService`는 같은 Player의 대기 중인 값을 `insert_or_assign`으로 최신 스냅샷으로
+교체하고, 저장 중인 Player는 다음 저장 대상으로 선택하지 않습니다. 따라서 같은 Player의 저장은
+직렬화되지만 서로 다른 Player는 Repository Worker에서 병렬로 저장할 수 있습니다.
 
-### 6.2 Player 스냅샷 병합과 저장 순서
+- 실행 중 스냅샷 저장이 실패하면 해당 스냅샷을 다시 대기 상태로 돌립니다.
+- 새 스냅샷이 들어오면 실패한 이전 값보다 최신 값으로 교체할 수 있습니다.
+- 연결·서버 종료 시의 최종 스냅샷은 진행 중인 저장을 추월하지 않고, 이전 대기 값은 대체합니다.
+- Repository 작업 대기열이 가득 차면 블로킹하지 않고 완료 콜백에 `Unavailable`을 전달합니다.
 
-실행 중인 Player 상태는 PlayerActor가 소유하고, DB에는 로그인과 재접속에 사용할 전체 스냅샷을
-저장합니다. 위치·재화·경험치가 변경되면 dirty 상태를 표시하고 `PlayerRecord`를
-`PlayerPersistenceService`에 제출합니다.
+테스트에서는 같은 `PlayerRepository` 인터페이스를 구현한 메모리 저장소로 완료 순서와 실패를
+제어하고, 별도 테스트 DB가 설정된 경우 MySQL 구현을 통합 검증합니다.
 
-Service는 다음 순서를 보장합니다.
+> 코드: [`src/server/player_persistence_service.cpp`](src/server/player_persistence_service.cpp),
+> [`src/server/mysql_player_repository.cpp`](src/server/mysql_player_repository.cpp)
 
-- 같은 Player의 대기 중인 스냅샷은 가장 최근 값으로 교체합니다.
-- 같은 Player의 저장을 동시에 두 개 실행하지 않습니다.
-- 서로 다른 Player의 저장은 Repository Worker에서 병렬로 실행할 수 있습니다.
-- 실패한 저장은 스냅샷을 유지한 채 다시 시도합니다.
-- 연결 종료와 서버 종료 시 마지막 스냅샷이 이전 저장을 추월하지 않도록 순서대로 처리합니다.
+### 6.4 현재 보장 범위
 
-### 6.3 저장 보장 범위
+| 경계 | 현재 동작 |
+| --- | --- |
+| RoomActor → PlayerActor | 재시도 없이 한 번 전달하며, `mailbox` 거절은 카운터로 기록 |
+| 비활성 Player 읽기 | DB 읽기 성공 후 보상을 적용하며, 읽기 실패는 기록하고 보상을 폐기 |
+| PlayerActor → PersistenceService | 거절 시 `dirty` 상태를 복원하고 1초 간격으로 최대 5회 재시도 |
+| PersistenceService → MySQL | Player별 저장 순서 유지, 실행 중 저장 실패 시 스냅샷 재등록 |
+| Zone 복귀 | 전투 결과 발생 뒤 시작하며 보상 적용·DB 저장 완료를 기다리지 않음 |
 
-NPC 구매와 전투 보상은 MySQL 저장 완료 전에 성공 결과를 보냅니다. 따라서 저장 대기 중에
-프로세스가 비정상 종료되면 최근 변경이 유실될 수 있습니다.
-
-**서버 실행 중 보장하는 것**
-
-- PlayerActor가 실행 중인 Player 상태를 소유합니다.
-- 같은 Player의 저장 순서를 보장하고, 대기 중인 스냅샷은 최신 값으로 병합합니다.
-- 저장 실패 시 스냅샷을 유지하고 다시 시도합니다.
-- 전투 보상 스냅샷이 대기열에서 거절되면 dirty 상태를 복원하고 1초 간격으로 최대 5회 다시 시도합니다.
-
-**보장하지 않는 것**
+따라서 서버가 실행 중인 동안에는 상태 소유권과 Player별 저장 순서를 보장하지만, 다음은 보장하지
+않습니다.
 
 - 프로세스 비정상 종료 직전 변경의 영속성
-- 보상이 정확히 한 번만 적용되는 것
+- 보상 메시지가 한 번 이상 전달되는 것
+- 중복 보상 메시지의 멱등 처리 또는 정확히 한 번만 적용되는 것
 
-보상 메시지 전달 거절, 최초 Player 읽기 실패와 재시도 소진은 카운터로 기록합니다.
+내구성을 더 높이려면 Room 결과와 보상 ID를 DB에 먼저 기록하고, PlayerActor가 이미 처리한 ID를
+무시하도록 해야 합니다. 보상 반영과 처리 완료 상태도 하나의 DB 트랜잭션으로 저장해야 합니다. 현재
+구현에는 이 복잡도를 추가하지 않았으며, 각 실패를 카운터와 테스트로 확인할 수 있게 했습니다.
+
+> 테스트: [`tests/room_actor_binding_test.cpp`](tests/room_actor_binding_test.cpp),
+> [`tests/player_tell_test.cpp`](tests/player_tell_test.cpp),
+> [`tests/player_persistence_service_test.cpp`](tests/player_persistence_service_test.cpp),
+> [`tests/mysql_player_repository_integration_test.cpp`](tests/mysql_player_repository_integration_test.cpp)
 
 ---
 
@@ -411,54 +652,21 @@ NPC 구매와 전투 보상은 MySQL 저장 완료 전에 성공 결과를 보�
 | Actor FIFO·단일 실행 | 같은 Actor 순차 실행, 다른 Worker의 병렬 실행 |
 | 용량 제한 | 입력·외부 작업·타이머·송신 대기열 포화 |
 | 코루틴 수명 | 즉시 완료, 완료·취소 경합, 늦은 완료, 담당 Worker에서 폐기 |
+| 전투 시작 경계 | Player 상태에서 능력치 계산, Room의 값 복사, 단계별 입장과 거절 시 롤백 |
+| 전투 종료 경계 | 참가자별 보상 전달, 비활성 Player 선행 읽기, 보상과 Zone 복귀 분리 |
 | Player 저장 | dirty 복원, 최신 값 병합, Player별 저장 직렬화, 재시도 |
 | MySQL | Repository 재생성과 GameServer 재시작 후 Player 복원 |
 | 느린 클라이언트 | 해당 연결만 종료, 나머지 3명의 digest 연속성과 `ParticipantLeft` 이후 클리어 |
-| 서버 종료 | Actor·코루틴·스냅샷·송신·Session 정리 순서 |
 
 게임 계층은 Runtime과 분리해 단위 테스트를 실행합니다. Runtime 경합과 대기열 포화는 작은 용량과
 테스트용 제어 지점으로 재현하고, TCP 재접속과 느린 송신은 실제 소켓을 사용하는 통합 테스트로
-검증합니다. Debug·ASan·UBSan·TSan 구성에서 실행했으며, MySQL 통합 테스트는 별도 테스트 DB를
-사용했습니다.
+검증합니다. MySQL 통합 테스트는 별도 테스트 DB가 설정된 경우 실행됩니다.
 
 ---
 
-## 8. 서버 종료 순서
+## 8. 실행
 
-```text
-새 연결과 명령 수락 중단
-→ Session 종료 사실을 Actor에 전달
-→ Actor·타이머·코루틴 정리
-→ Player 스냅샷 저장 완료
-→ 송신 대기열과 Session 미전송 데이터 처리
-→ Reactor 종료
-```
-
-Actor는 송신 공간을 기다리며 중단될 수 있습니다. Reactor를 먼저 종료하면 송신 공간을 돌려줄
-주체가 사라져 Actor Worker가 끝나지 않을 수 있으므로, Reactor는 Actor와 송신 대기열이 정리된 뒤
-마지막에 종료합니다.
-
-유예 시간이 끝나거나 Runtime이 실패하면 취소 경로로 전환합니다. 외부 스레드는 취소만 요청하고,
-코루틴 재개·폐기와 명령 대기열 정리는 상태를 소유한 Worker가 수행합니다.
-
----
-
-## 9. 핵심 코드 위치
-
-| 관심사 | 코드 |
-| --- | --- |
-| epoll Reactor와 Session 수명 | [`src/server/tcp_server.cpp`](src/server/tcp_server.cpp) |
-| Actor 실행·코루틴·타이머 | [`src/runtime/actor_runtime.cpp`](src/runtime/actor_runtime.cpp) |
-| Player 비동기 연결 계층 | [`src/server/player_actor_binding.cpp`](src/server/player_actor_binding.cpp) |
-| Room 전투 상태 기계 | [`src/game/room.cpp`](src/game/room.cpp) |
-| 스냅샷 병합과 저장 순서 | [`src/server/player_persistence_service.cpp`](src/server/player_persistence_service.cpp) |
-| MySQL 작업 대기열과 SQL | [`src/server/mysql_player_repository.cpp`](src/server/mysql_player_repository.cpp) |
-
----
-
-## 10. 실행
-
-### 10.1 최초 환경 준비 및 빌드
+### 8.1 최초 환경 준비 및 빌드
 
 최초 한 번만 Docker 개발 이미지를 만들고 서버와 Python 클라이언트를 준비합니다.
 
@@ -477,7 +685,7 @@ python3 -m venv .venv-play
 cd ..
 ```
 
-### 10.2 평소 실행
+### 8.2 평소 실행
 
 준비가 끝난 뒤에는 서버와 클라이언트를 각각 실행합니다.
 
