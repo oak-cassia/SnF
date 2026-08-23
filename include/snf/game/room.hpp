@@ -57,6 +57,7 @@ namespace snf::server
         [[nodiscard]] RoomPhase phase() const noexcept;
         [[nodiscard]] std::size_t participantCount() const noexcept;
         [[nodiscard]] std::size_t enemyCount() const noexcept;
+        [[nodiscard]] bool canStartBattle() const noexcept;
         [[nodiscard]] bool bossSpawned() const noexcept;
         [[nodiscard]] std::uint64_t bossHealth() const noexcept;
         [[nodiscard]] std::optional<CombatStats> statsOf(PlayerId player) const;

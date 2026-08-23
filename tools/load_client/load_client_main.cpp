@@ -248,7 +248,8 @@ int main(const int argument_count, char* arguments[])
     std::cout << "Requests: " << result.sent_requests << " sent, " << result.received_responses << " received, " << result.request_timeouts
               << " timeout, " << result.invalid_responses << " invalid, " << result.socket_errors << " socket error\n";
     std::cout << "Workload: " << result.sent_bootstrap_requests << '/' << result.received_bootstrap_responses << " bootstrap sent/received, "
-              << result.sent_gameplay_requests << '/' << result.received_gameplay_responses << " gameplay sent/received\n";
+              << result.battle_start_rejections << " battle-start overload rejections, " << result.sent_gameplay_requests << '/'
+              << result.received_gameplay_responses << " gameplay sent/received\n";
     std::cout << "Push: " << result.unsolicited_frames << " frames, " << result.unsolicited_bytes << " bytes; " << result.battle_digest_frames
               << " battle digests, " << result.battle_digest_bytes << " digest bytes; terminal clear/fail/return " << result.battle_cleared_frames
               << '/' << result.battle_failed_frames << '/' << result.returned_to_zone_frames << '\n';

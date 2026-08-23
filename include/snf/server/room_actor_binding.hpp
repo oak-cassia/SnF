@@ -35,6 +35,7 @@ namespace snf::server
         snf::runtime::DistributionSnapshot tick_turn_nanoseconds;
         std::uint64_t tick_overruns{0};
         std::uint64_t tick_schedule_rejections{0};
+        std::uint64_t deadline_schedule_rejections{0};
         std::uint64_t grant_tell_rejections{0};
     };
 
@@ -79,6 +80,7 @@ namespace snf::server
         snf::runtime::Distribution _tick_turn_nanoseconds;
         std::atomic<std::uint64_t> _tick_overruns{0};
         std::atomic<std::uint64_t> _tick_schedule_rejections{0};
+        std::atomic<std::uint64_t> _deadline_schedule_rejections{0};
         std::atomic<std::uint64_t> _grant_tell_rejections{0};
     };
 }

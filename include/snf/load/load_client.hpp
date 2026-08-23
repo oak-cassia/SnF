@@ -36,6 +36,7 @@ namespace snf::load
         std::size_t received_responses{0};
         std::size_t sent_bootstrap_requests{0};
         std::size_t received_bootstrap_responses{0};
+        std::size_t battle_start_rejections{0};
         std::size_t sent_gameplay_requests{0};
         std::size_t received_gameplay_responses{0};
         std::size_t request_timeouts{0};

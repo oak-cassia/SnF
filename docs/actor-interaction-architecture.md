@@ -343,11 +343,13 @@ timer, deadline에 도달한 tick/늦은 command는 `Deadline` helper를 호출�
 
 ### 8.1 Room tick과 관찰 경계
 
-`StartBattle`은 deadline timer를 먼저 예약하고 100ms `ExistingOnly` one-shot tick을 예약한다. 각 tick
-결과의 `tick_after`가 다음 timer 하나를 만든다. terminal result는 `PassivateIfIdle`을 반환하므로 Runtime이
-남은 tick/deadline timer를 activation과 함께 제거한다. deadline 예약 실패는 Running Room을 노출할 수
-없는 오류라 Logic Runtime 실패로 승격하고, tick 예약 실패는 metric만 올린 뒤 이미 예약된 deadline을
-종결 backstop으로 사용한다.
+`StartBattle`은 Room의 시작 가능 여부를 확인한 뒤 deadline timer를 먼저 예약하고, 예약에 성공해야
+Room 상태를 `Running`으로 바꾼다. 예약이 거절되면 `deadline_schedule_rejections`를 올리고
+`RuntimeOverloaded`/`Waiting`으로 응답한다. Room과 Logic Runtime은 그대로 살아 있어 client가 시작을
+재시도할 수 있다. 시작 뒤에는 100ms `ExistingOnly` one-shot tick을 예약하고, 각 tick 결과의
+`tick_after`가 다음 timer 하나를 만든다. terminal result는 `PassivateIfIdle`을 반환하므로 Runtime이
+남은 tick/deadline timer를 activation과 함께 제거한다. tick 예약 실패는 metric만 올린 뒤 이미
+예약된 deadline을 종결 backstop으로 사용한다.
 
 Room은 Zone과 별개인 비영속 Arena 좌표와 현재 HP를 소유한다. `SetMoveIntent`는 의도와 독립 movement
 sequence만 즉시 바꾸고, tick이 참가자를 PlayerId 순서로 이동시킨다. 이어 tick 시작 때 존재한 적을

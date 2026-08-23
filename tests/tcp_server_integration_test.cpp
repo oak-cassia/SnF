@@ -1,3 +1,4 @@
+#include "snf/game/arena.hpp"
 #include "snf/game/skill_catalog.hpp"
 #include "snf/net/socket_options.hpp"
 #include "snf/net/termination_signal.hpp"
@@ -1748,6 +1749,7 @@ namespace
         assert(room_metrics.tick_publish_nanoseconds.sample_count == room_metrics.tick_execution_nanoseconds.sample_count);
         assert(room_metrics.tick_turn_nanoseconds.sample_count == room_metrics.tick_execution_nanoseconds.sample_count);
         assert(room_metrics.tick_schedule_rejections == 0);
+        assert(room_metrics.deadline_schedule_rejections == 0);
         assert(room_metrics.grant_tell_rejections == 0);
         const auto player_metrics = server.getPlayerActorStats();
         assert(player_metrics.reward_snapshot_admission_rejections == 0);
@@ -2413,20 +2415,20 @@ namespace
         RunningServer server{snf::server::GameServerConfig{
             .port = 0,
             .shutdown_grace_period = 200ms,
-            .max_pending_send_bytes = 2048,
-            .client_send_buffer_size = 1024,
+            .max_pending_send_bytes = 32 * 1024,
+            .client_send_buffer_size = 8 * 1024,
             .room_battle_duration = 10s,
             .room_boss_health = snf::server::BASE_ATTACK,
-            .room_tick_interval = 1ms,
+            .room_tick_interval = 5ms,
             .room_wave_interval = 1s,
             .room_wave_count = 0,
             .room_minions_per_wave = 0,
             .room_minion_health = snf::server::BASE_ATTACK,
-            .room_boss_spawn_after = 1s,
+            .room_boss_spawn_after = 500ms,
             .max_room_spawned_enemies = 1,
             .room_arena_width = 20,
-            .room_arena_height = 2000,
-            .room_player_move_speed = 4,
+            .room_arena_height = 4000,
+            .room_player_move_speed = 1,
             .room_participant_spawn_spacing = 2,
             .room_minion_spawn_radius = 5,
         }};
@@ -2442,6 +2444,18 @@ namespace
             connect_client(server.getPort()),
             connect_client(server.getPort()),
         };
+        const timeval healthy_receive_timeout{
+            .tv_sec = 5,
+            .tv_usec = 0,
+        };
+        for (std::size_t index = FIRST_HEALTHY_INDEX; index < clients.size(); ++index)
+        {
+            assert(
+                ::setsockopt(
+                    clients[index].getDescriptor(), SOL_SOCKET, SO_RCVTIMEO, &healthy_receive_timeout, sizeof(healthy_receive_timeout)
+                ) == 0
+            );
+        }
 
         for (std::size_t index = 0; index < clients.size(); ++index)
         {
@@ -2486,7 +2500,13 @@ namespace
             std::uint64_t last_digest_sequence{0};
             std::uint64_t participant_left_sequence{0};
             bool saw_boss{false};
+            std::optional<std::uint32_t> boss_id;
+            std::optional<snf::server::ArenaPosition> boss_position;
+            std::optional<snf::server::ArenaPosition> caster_position;
             bool participant_in_boss_range{false};
+            bool skill_acknowledged{false};
+            bool saw_enemy_damaged{false};
+            bool saw_enemy_died{false};
             bool saw_clear{false};
         };
         std::array<HealthyObservation, 3> observations{};
@@ -2499,24 +2519,58 @@ namespace
                 assert(sequence == observation.last_digest_sequence + 1);
                 observation.last_digest_sequence = sequence;
 
-                if (const auto left = digest_event_offset(frame, snf::server::BattleEventKind::ParticipantLeft))
+                for (const auto& [kind, offset] : digest_events(frame))
                 {
-                    assert(read_u64(frame.payload, *left + 1) == players[SLOW_INDEX]);
-                    observation.participant_left_sequence = sequence;
-                }
-                if (const auto spawned = digest_event_offset(frame, snf::server::BattleEventKind::EnemySpawned))
-                {
-                    if (frame.payload[*spawned + 5] == static_cast<std::byte>(snf::server::EnemyKind::Boss))
+                    if (kind == snf::server::BattleEventKind::ParticipantLeft)
+                    {
+                        assert(read_u64(frame.payload, offset + 1) == players[SLOW_INDEX]);
+                        observation.participant_left_sequence = sequence;
+                    }
+                    else if (kind == snf::server::BattleEventKind::EnemySpawned &&
+                             frame.payload[offset + 5] == static_cast<std::byte>(snf::server::EnemyKind::Boss))
                     {
                         observation.saw_boss = true;
+                        observation.boss_id = read_u32(frame.payload, offset + 1);
+                    }
+                    else if (kind == snf::server::BattleEventKind::EnemyPositioned && observation.boss_id &&
+                             read_u32(frame.payload, offset + 1) == *observation.boss_id)
+                    {
+                        observation.boss_position = snf::server::ArenaPosition{
+                            .x = read_u32(frame.payload, offset + 5),
+                            .y = read_u32(frame.payload, offset + 9),
+                        };
+                    }
+                    else if (kind == snf::server::BattleEventKind::ParticipantMoved &&
+                             read_u64(frame.payload, offset + 1) == players[FIRST_HEALTHY_INDEX])
+                    {
+                        observation.caster_position = snf::server::ArenaPosition{
+                            .x = read_u32(frame.payload, offset + 9),
+                            .y = read_u32(frame.payload, offset + 13),
+                        };
+                    }
+                    else if (kind == snf::server::BattleEventKind::EnemyDamaged)
+                    {
+                        observation.saw_enemy_damaged = true;
+                    }
+                    else if (kind == snf::server::BattleEventKind::EnemyDied)
+                    {
+                        observation.saw_enemy_died = true;
                     }
                 }
-                if (const auto moved = digest_event_offset(frame, snf::server::BattleEventKind::ParticipantMoved))
+                if (observation.boss_position && observation.caster_position)
                 {
-                    constexpr std::uint32_t SAFE_BOSS_RANGE_Y = 8;
                     observation.participant_in_boss_range =
-                        observation.participant_in_boss_range || read_u32(frame.payload, *moved + 13) <= SAFE_BOSS_RANGE_Y;
+                        observation.participant_in_boss_range ||
+                        snf::server::squaredDistance(*observation.boss_position, *observation.caster_position) <=
+                            static_cast<std::uint64_t>(snf::server::SLASH_RANGE) * snf::server::SLASH_RANGE;
                 }
+            }
+            else if (frame.type == snf::protocol::MessageType::SkillAcknowledged)
+            {
+                assert(frame.payload.size() == 2);
+                assert(frame.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::Applied));
+                assert(frame.payload[1] == static_cast<std::byte>(snf::server::RoomPhase::Cleared));
+                observation.skill_acknowledged = true;
             }
             else if (frame.type == snf::protocol::MessageType::BattleCleared)
             {
@@ -2536,71 +2590,68 @@ namespace
             }
         }
 
-        // The slow participant stops reading after the initial state. All four move
-        // north so every Tick produces a digest until the boss appears at the edge.
-        for (std::size_t index = 0; index < clients.size(); ++index)
-        {
-            send_all(
-                clients[index].getDescriptor(),
-                snf::protocol::encode_frame(set_move_intent_frame(440 + static_cast<std::uint32_t>(index), room, snf::server::MoveDirection::North, 1)
-                )
-            );
-        }
-
-        const auto all_healthy = [&observations](const auto predicate)
-        {
-            return std::ranges::all_of(observations, predicate);
-        };
-        const auto drain_unsatisfied_round = [&clients, &observations, &observe](const auto predicate)
-        {
-            for (std::size_t index = FIRST_HEALTHY_INDEX; index < clients.size(); ++index)
-            {
-                HealthyObservation& observation = observations[index - FIRST_HEALTHY_INDEX];
-                if (!predicate(observation))
-                {
-                    observe(receive_frame(clients[index].getDescriptor()), observation);
-                }
-            }
-        };
-
-        constexpr std::size_t MAX_DRAIN_ROUNDS = 5000;
-        std::size_t drain_round = 0;
-        const auto saw_participant_left = [](const HealthyObservation& observation)
-        {
-            return observation.participant_left_sequence != 0;
-        };
-        while (!all_healthy(saw_participant_left) && drain_round++ < MAX_DRAIN_ROUNDS)
-        {
-            drain_unsatisfied_round(saw_participant_left);
-        }
-        assert(all_healthy(saw_participant_left));
+        // The slow participant stops reading after the initial state. Moving the
+        // eventual caster alone still fans more than a thousand digests to every connection,
+        // enough to exceed the constrained socket without making range readiness
+        // depend on four independently admitted movement commands.
+        send_all(
+            clients[FIRST_HEALTHY_INDEX].getDescriptor(),
+            snf::protocol::encode_frame(set_move_intent_frame(440, room, snf::server::MoveDirection::North, 1))
+        );
 
         const auto ready_to_cast = [](const HealthyObservation& observation)
         {
-            return observation.saw_boss && observation.participant_in_boss_range;
+            return observation.participant_left_sequence != 0 && observation.saw_boss && observation.participant_in_boss_range;
         };
-        while (!all_healthy(ready_to_cast) && drain_round++ < MAX_DRAIN_ROUNDS)
+
+        std::array<std::promise<void>, 3> ready_promises;
+        std::array<std::future<void>, 3> ready_futures;
+        std::array<std::future<HealthyObservation>, 3> readers;
+        for (std::size_t healthy_index = 0; healthy_index < observations.size(); ++healthy_index)
         {
-            drain_unsatisfied_round(ready_to_cast);
+            ready_futures[healthy_index] = ready_promises[healthy_index].get_future();
+            readers[healthy_index] = std::async(
+                std::launch::async,
+                [&, healthy_index]
+                {
+                    HealthyObservation& observation = observations[healthy_index];
+                    bool reported_ready = false;
+                    while (!observation.saw_clear)
+                    {
+                        observe(receive_frame(clients[healthy_index + FIRST_HEALTHY_INDEX].getDescriptor()), observation);
+                        if (!reported_ready && ready_to_cast(observation))
+                        {
+                            ready_promises[healthy_index].set_value();
+                            reported_ready = true;
+                        }
+                    }
+                    return observation;
+                }
+            );
         }
-        assert(all_healthy(ready_to_cast));
+
+        for (auto& ready : ready_futures)
+        {
+            ready.get();
+        }
 
         send_all(clients[FIRST_HEALTHY_INDEX].getDescriptor(), snf::protocol::encode_frame(use_skill_frame(450, room, snf::server::SLASH, 1)));
-        const auto saw_clear = [](const HealthyObservation& observation)
+
+        std::array<HealthyObservation, 3> completed_observations;
+        for (std::size_t healthy_index = 0; healthy_index < readers.size(); ++healthy_index)
         {
-            return observation.saw_clear;
-        };
-        while (!all_healthy(saw_clear) && drain_round++ < MAX_DRAIN_ROUNDS)
-        {
-            drain_unsatisfied_round(saw_clear);
+            completed_observations[healthy_index] = readers[healthy_index].get();
         }
-        assert(all_healthy(saw_clear));
-        for (const HealthyObservation& observation : observations)
+        assert(completed_observations.front().skill_acknowledged);
+        for (const HealthyObservation& observation : completed_observations)
         {
+            assert(observation.saw_enemy_damaged);
+            assert(observation.saw_enemy_died);
+            assert(observation.saw_clear);
             assert(observation.last_digest_sequence > observation.participant_left_sequence);
         }
 
-        receive_until_closed(clients[SLOW_INDEX].getDescriptor());
+        assert(server.getStats().closed_connections == 1);
         server.stop();
         assert(server.getStats().accepted_connections == 4);
         assert(server.getStats().closed_connections == 4);

@@ -118,6 +118,7 @@ retry window와 authority를 별도 vertical slice로 정의한다.
 - background retry와 final save ordering
 - disconnect/save/reconnect 복원
 - Closing 중 reconnect 거부와 connection exact-match passivation
-- 중복 battle grant no-op와 tell 거절 뒤 다음 activation 적용
+- 서로 다른 battle grant의 누적과 대상 Player가 다른 grant 거부
+- grant tell 거절·최초 load 실패 계측과 snapshot admission retry·give-up
 - shutdown final flush
 - Debug, TCP integration과 TSan

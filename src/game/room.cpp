@@ -165,6 +165,11 @@ namespace snf::server
         return _enemies.size();
     }
 
+    bool Room::canStartBattle() const noexcept
+    {
+        return _phase == RoomPhase::Waiting && !_participants.empty();
+    }
+
     bool Room::bossSpawned() const noexcept
     {
         return _boss_spawned;
@@ -571,7 +576,7 @@ namespace snf::server
 
     RoomResult Room::handleCommand(const StartBattle&, const std::chrono::steady_clock::time_point observed_at)
     {
-        if (_phase != RoomPhase::Waiting || _participants.empty())
+        if (!canStartBattle())
         {
             return baseResult(RoomCommandStatus::WrongPhase, std::nullopt);
         }

@@ -131,7 +131,8 @@ namespace
                   << "Room tick publish ns (payload + outbound enqueue; excludes reactor encode/TCP): "
                   << format_distribution(rooms.tick_publish_nanoseconds) << '\n'
                   << "Room tick turn ns: " << format_distribution(rooms.tick_turn_nanoseconds) << ", " << rooms.tick_overruns << " budget overruns, "
-                  << rooms.tick_schedule_rejections << " schedule rejections\n"
+                  << rooms.tick_schedule_rejections << " tick schedule rejections, " << rooms.deadline_schedule_rejections
+                  << " deadline schedule rejections\n"
                   << "Room oversized battle digests: " << metrics.room_protocol.oversized_battle_digests << '\n'
                   << "Room battle digest frames: " << metrics.room_protocol.battle_digest_frames << '\n'
                   << "Room battle digest fanout bytes (frame header + payload, before TCP/IP): " << metrics.room_protocol.battle_digest_fanout_bytes

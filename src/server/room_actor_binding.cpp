@@ -66,6 +66,7 @@ namespace snf::server
             .tick_turn_nanoseconds = _tick_turn_nanoseconds.snapshot(),
             .tick_overruns = _tick_overruns.load(std::memory_order_relaxed),
             .tick_schedule_rejections = _tick_schedule_rejections.load(std::memory_order_relaxed),
+            .deadline_schedule_rejections = _deadline_schedule_rejections.load(std::memory_order_relaxed),
             .grant_tell_rejections = _grant_tell_rejections.load(std::memory_order_relaxed),
         };
     }
@@ -188,6 +189,47 @@ namespace snf::server
         const CommandPayload& payload = payloadAs<CommandPayload>(submission);
         const bool is_tick = std::holds_alternative<RoomSimulationTick>(payload.command.command);
         const auto started_at = std::chrono::steady_clock::now();
+
+        // StartBattle is a two-resource commit: the Room may enter Running only
+        // after its mandatory terminal backstop owns capacity. The Actor is the
+        // single writer, so canStartBattle cannot become stale before handle().
+        std::optional<snf::runtime::TimerHandle> deadline_timer;
+        if (std::holds_alternative<StartBattle>(payload.command.command) && room_state.room.canStartBattle())
+        {
+            RoomInboundCommand deadline_command{
+                .room = payload.command.room,
+                .command = BattleDeadline{},
+                .reply = std::nullopt,
+            };
+            auto timer_submission = makeSubmission(
+                submission.target(),
+                snf::runtime::ActorActivation::ExistingOnly,
+                snf::runtime::ActorAccounting::Command,
+                CommandPayload{
+                    .command = std::move(deadline_command),
+                    .release = {},
+                }
+            );
+            deadline_timer = context.trySchedule(_actor_config.battle_duration, std::move(timer_submission));
+            if (!deadline_timer)
+            {
+                _deadline_schedule_rejections.fetch_add(1, std::memory_order_relaxed);
+                const RoomResult rejected{
+                    .status = RoomCommandStatus::RuntimeOverloaded,
+                    .phase = room_state.room.phase(),
+                    .boss_health = room_state.room.bossHealth(),
+                    .boss_spawned = room_state.room.bossSpawned(),
+                };
+                const auto handled_at = std::chrono::steady_clock::now();
+                _command_execution_nanoseconds.record(std::chrono::duration_cast<std::chrono::nanoseconds>(handled_at - started_at));
+                if (_on_result)
+                {
+                    _on_result(payload.command, rejected);
+                }
+                return snf::runtime::ActorDispatchResult::KeepActive;
+            }
+        }
+
         // observedAt, not the reading above: the Room derives cooldowns from when its
         // turn began, while the reading here exists to measure how long the turn took.
         RoomResult result = room_state.room.handle(payload.command.command, context.observedAt());
@@ -199,32 +241,16 @@ namespace snf::server
             _tick_execution_nanoseconds.record(handle_elapsed);
         }
 
-        // The mandatory backstop is reserved before a client can be told that the
-        // battle started. Failure is a Worker failure: a Running Room without its
-        // deadline is not a degraded state this server can safely expose.
-        if (result.deadline_after)
+        // If the preflight and state-machine predicate ever diverge, release a timer
+        // that has no Running Room. A result that requests a deadline without the
+        // pre-reservation is an internal contract violation, not overload.
+        if (deadline_timer && !result.deadline_after)
         {
-            RoomInboundCommand deadline_command{
-                .room = payload.command.room,
-                .command = BattleDeadline{},
-                .reply = std::nullopt,
-            };
-            // ExistingOnly: if the Room is gone there is nobody left to fail the
-            // battle for, so the deadline must not resurrect it. A Running Room stays
-            // resident, which is what keeps this deliverable.
-            auto timer_submission = makeSubmission(
-                submission.target(),
-                snf::runtime::ActorActivation::ExistingOnly,
-                snf::runtime::ActorAccounting::Command,
-                CommandPayload{
-                    .command = std::move(deadline_command),
-                    .release = {},
-                }
-            );
-            if (!context.trySchedule(*result.deadline_after, std::move(timer_submission)))
-            {
-                throw std::runtime_error{"Room deadline timer could not be scheduled"};
-            }
+            context.cancelTimer(*deadline_timer);
+        }
+        if (result.deadline_after && !deadline_timer)
+        {
+            throw std::logic_error{"Running Room did not pre-reserve its deadline timer"};
         }
 
         if (result.tick_after)

@@ -419,19 +419,28 @@ namespace
         assert(stats.tick_schedule_rejections == 0);
     }
 
-    void test_deadline_schedule_rejection_fails_the_runtime()
+    void test_deadline_schedule_rejection_refuses_start_and_keeps_the_runtime_alive()
     {
         RecordingPlayerBinding player_binding;
-        std::promise<void> joined;
-        auto joined_future = joined.get_future();
-        bool join_signalled = false;
+        std::promise<void> blocker_joined;
+        auto blocker_joined_future = blocker_joined.get_future();
+        std::promise<void> blocker_started;
+        auto blocker_started_future = blocker_started.get_future();
+        std::promise<void> blocker_failed;
+        auto blocker_failed_future = blocker_failed.get_future();
+        std::promise<void> target_joined;
+        auto target_joined_future = target_joined.get_future();
+        std::promise<snf::server::RoomResult> rejected;
+        auto rejected_future = rejected.get_future();
+        std::promise<snf::server::RoomResult> retried;
+        auto retried_future = retried.get_future();
 
         snf::server::CountingCommandLifecycleSink lifecycle;
         snf::server::RoomActorBinding binding{
             snf::server::RoomActorBindingConfig{
                 .actor =
                     snf::server::RoomConfig{
-                        .battle_duration = 30ms,
+                        .battle_duration = 200ms,
                         .tick_interval = 5ms,
                         .wave_interval = 1s,
                         .wave_count = 0,
@@ -440,31 +449,69 @@ namespace
                         .max_spawned_enemies = 1,
                     },
                 .on_result =
-                    [&joined, &join_signalled](const snf::server::RoomInboundCommand&, const snf::server::RoomResult& result)
+                    [&blocker_joined, &blocker_started, &blocker_failed, &target_joined, &rejected, &retried](
+                        const snf::server::RoomInboundCommand& command, const snf::server::RoomResult& result
+                    )
                 {
-                    if (!join_signalled && result.phase == snf::server::RoomPhase::Waiting && result.player)
+                    if (command.room.value == 11 && std::holds_alternative<snf::server::JoinRoom>(command.command))
                     {
-                        join_signalled = true;
-                        joined.set_value();
+                        blocker_joined.set_value();
+                    }
+                    else if (command.room.value == 11 && std::holds_alternative<snf::server::StartBattle>(command.command))
+                    {
+                        blocker_started.set_value();
+                    }
+                    else if (command.room.value == 11 && std::holds_alternative<snf::server::BattleDeadline>(command.command))
+                    {
+                        blocker_failed.set_value();
+                    }
+                    else if (command.room.value == 12 && std::holds_alternative<snf::server::JoinRoom>(command.command))
+                    {
+                        target_joined.set_value();
+                    }
+                    else if (command.room.value == 12 && std::holds_alternative<snf::server::StartBattle>(command.command))
+                    {
+                        if (result.status == snf::server::RoomCommandStatus::RuntimeOverloaded)
+                        {
+                            rejected.set_value(result);
+                        }
+                        else
+                        {
+                            retried.set_value(result);
+                        }
                     }
                 },
             },
             lifecycle
         };
         RecordingCompletion completion;
-        auto failed = completion.failureReported();
         auto config = runtime_config();
-        config.queue_capacity_per_worker = 1;
+        config.worker_count = 1;
+        config.queue_capacity_per_worker = 2;
         snf::runtime::ActorRuntime runtime{config, completion};
         runtime.registerBinding(binding);
         runtime.registerBinding(player_binding);
         snf::server::RoomActorIngress ingress{runtime, binding, lifecycle};
         runtime.start();
 
-        const snf::server::RoomId room{.value = 12};
+        const auto post_until_accepted = [&ingress](auto make_command)
+        {
+            for (int attempt = 0; attempt < 500; ++attempt)
+            {
+                if (ingress.tryPost(make_command()) == snf::runtime::PostResult::Accepted)
+                {
+                    return true;
+                }
+                std::this_thread::sleep_for(1ms);
+            }
+            return false;
+        };
+
+        const snf::server::RoomId blocker{.value = 11};
+        const snf::server::RoomId target{.value = 12};
         assert(
             ingress.tryPost(snf::server::RoomInboundCommand{
-                .room = room,
+                .room = blocker,
                 .command =
                     snf::server::JoinRoom{
                         .player = snf::server::PlayerId{.value = 10},
@@ -473,30 +520,67 @@ namespace
                 .reply = std::nullopt,
             }) == snf::runtime::PostResult::Accepted
         );
-        assert(joined_future.wait_for(5s) == std::future_status::ready);
-        assert(
-            ingress.tryPost(snf::server::RoomInboundCommand{
-                .room = room,
-                .command = snf::server::StartBattle{},
-                .reply = std::nullopt,
-            }) == snf::runtime::PostResult::Accepted
-        );
+        assert(blocker_joined_future.wait_for(5s) == std::future_status::ready);
+        assert(post_until_accepted([blocker]
+                                   {
+                                       return snf::server::RoomInboundCommand{
+                                           .room = blocker,
+                                           .command = snf::server::StartBattle{},
+                                           .reply = std::nullopt,
+                                       };
+                                   }));
+        assert(blocker_started_future.wait_for(5s) == std::future_status::ready);
 
-        // The active command owns the only capacity slot, so the mandatory
-        // deadline cannot be registered and the Worker fails loudly.
-        assert(failed.wait_for(5s) == std::future_status::ready);
+        assert(post_until_accepted([target]
+                                   {
+                                       return snf::server::RoomInboundCommand{
+                                           .room = target,
+                                           .command =
+                                               snf::server::JoinRoom{
+                                                   .player = snf::server::PlayerId{.value = 20},
+                                                   .stats = {.attack = 50, .health = 100},
+                                               },
+                                           .reply = std::nullopt,
+                                       };
+                                   }));
+        assert(target_joined_future.wait_for(5s) == std::future_status::ready);
+        assert(post_until_accepted([target]
+                                   {
+                                       return snf::server::RoomInboundCommand{
+                                           .room = target,
+                                           .command = snf::server::StartBattle{},
+                                           .reply = std::nullopt,
+                                       };
+                                   }));
+
+        // The blocker deadline owns one slot and the target StartBattle owns the
+        // other, so the target cannot reserve its own mandatory backstop.
+        assert(rejected_future.wait_for(5s) == std::future_status::ready);
+        const auto result = rejected_future.get();
+        assert(result.status == snf::server::RoomCommandStatus::RuntimeOverloaded);
+        assert(result.phase == snf::server::RoomPhase::Waiting);
+        assert(!result.deadline_after && !result.tick_after && !result.outcome && !result.digest);
+
+        assert(blocker_failed_future.wait_for(5s) == std::future_status::ready);
+        assert(post_until_accepted([target]
+                                   {
+                                       return snf::server::RoomInboundCommand{
+                                           .room = target,
+                                           .command = snf::server::StartBattle{},
+                                           .reply = std::nullopt,
+                                       };
+                                   }));
+        assert(retried_future.wait_for(5s) == std::future_status::ready);
+        const auto started = retried_future.get();
+        assert(started.status == snf::server::RoomCommandStatus::Applied);
+        assert(started.phase == snf::server::RoomPhase::Running);
+        assert(started.deadline_after == 200ms);
+
         runtime.close();
-        bool join_failed = false;
-        try
-        {
-            runtime.join();
-        }
-        catch (const std::runtime_error&)
-        {
-            join_failed = true;
-        }
-        assert(join_failed);
-        assert(completion.failed.load() == 1);
+        runtime.join();
+        assert(completion.failed.load() == 0);
+        assert(binding.stats().deadline_schedule_rejections == 1);
+        assert(runtime.getStats().workers.front().timers_rejected_full >= 1);
     }
 
     void test_tick_schedule_rejection_keeps_deadline_backstop()
@@ -787,7 +871,7 @@ void run_room_actor_binding_tests()
     test_a_join_naming_another_room_is_refused();
     test_killing_the_boss_rewards_every_participant();
     test_a_room_fails_from_its_own_timer_when_the_boss_survives();
-    test_deadline_schedule_rejection_fails_the_runtime();
+    test_deadline_schedule_rejection_refuses_start_and_keeps_the_runtime_alive();
     test_tick_schedule_rejection_keeps_deadline_backstop();
     test_a_room_that_never_started_passivates();
     test_a_rejected_reward_tell_is_counted();

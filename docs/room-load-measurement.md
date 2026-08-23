@@ -14,6 +14,11 @@ compiler는 GCC 13.3.0이다. 각 값은 6초 단일 실행의 용량 탐색 결
 사용했다. server는 5초 시계열과 종료 summary를, load client는 요청 RTT와 push frame 수·bytes,
 digest 도착 간격을 기록했다.
 
+`UseSkill`의 Slash cooldown은 1초다. 따라서 높은 목표 RPS에서는 번갈아 보내는 command의 절반인
+`SetMoveIntent`는 적용되지만, 초당 1회를 넘는 `UseSkill` 대부분은 `SkillOnCooldown`으로 일찍
+종결된다. 아래 response/s는 이 status 응답까지 포함한 Actor admission·dispatch·reply 처리량이며,
+매 command가 targeting·damage·event 생성을 수행하는 전투 연산 처리량은 아니다.
+
 대표 실행은 다음과 같다.
 
 ```bash
@@ -31,6 +36,9 @@ SNF_ACTOR_WORKER_COUNT=1 ./build/release/snf_server
 
 `tick_overruns`는 한 tick turn이 binding의 5ms 실행 budget을 넘은 횟수다. 100ms 주기 유지 여부는
 이 값만으로 알 수 없으므로 actor timer lateness와 client의 digest interval도 함께 판정했다.
+모든 sweep은 6초라 시작 즉시 생성되는 첫 minion wave 10마리만 포함한다. default 두 번째 wave는
+20초, boss는 40초에 생성되므로 tick 분포는 opening state의 용량 탐색 결과이지 전투 전체 구간의
+peak tick 비용이 아니다.
 
 ## 축 A — 단일 Room 직렬화
 
@@ -82,7 +90,9 @@ outbound capacity/credit을 먼저 용량 계약으로 다뤄야 한다.
 
 ## 보상·fanout·느린 client
 
-모든 성공·포화 실행에서 아래 Step 4 카운터는 전부 0이었다.
+모든 성공·포화 실행에서 아래 Step 4 카운터는 전부 0이었다. 다만 6초 sweep은 default boss 생성
+시각 40초보다 먼저 끝나 clear와 grant를 만들지 않았다. 따라서 이 값은 포화 중 보상 경로의 성공을
+뜻하지 않고, 해당 실행에서 보상 인계 경로가 호출되지 않은 구조적 0이다.
 
 | counter | 관측값 |
 | --- | ---: |
@@ -96,11 +106,12 @@ fanout은 4 workers × 800 Room 실행에서 184,674 frames, 39,625,488 bytes였
 admission 포화의 연결 격리 정책이 작동한 결과다.
 
 느린 client 통합 시나리오는 1 Room × 4명에서 한 socket만 읽기를 중단했다. 포화를 결정적으로
-유도하기 위해 테스트의 `max_pending_send_bytes`를 `GameServerConfig` 기본값 1MiB에서 2KiB로
-낮췄다. 이 테스트 설정의 per-session send 한계에 닿은 연결 1개만 닫혔고, 남은 세 client는 digest
-sequence를 한 번도 건너뛰지 않은 채 `ParticipantLeft`를 관찰하고 boss clear까지 진행했다. 닫힌
-연결 수 대 계속 진행한 Room 수는 1 대 1이다. 살아 있는 client의 event gap이 없으므로 주기적
-resync snapshot은 만들지 않는다.
+유도하기 위해 테스트의 `max_pending_send_bytes`를 `GameServerConfig` 기본값 1MiB에서 32KiB로
+낮추고 accepted socket send buffer는 8KiB, 느린 client receive buffer는 1KiB로 제한했다. 남은 세
+client는 별도 reader로 계속 수신한다. 이 테스트 설정의 per-session send 한계에 닿은 연결 1개만
+닫혔고, 남은 세 client는 digest sequence를 한 번도 건너뛰지 않은 채 `ParticipantLeft`를 관찰하고
+boss clear까지 진행했다. 닫힌 연결 수 대 계속 진행한 Room 수는 1 대 1이다. 살아 있는 client의
+event gap이 없으므로 주기적 resync snapshot은 만들지 않는다.
 
 ## 검증
 

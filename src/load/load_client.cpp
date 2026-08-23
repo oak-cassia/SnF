@@ -211,6 +211,7 @@ namespace snf::load
             .received_responses = 0,
             .sent_bootstrap_requests = 0,
             .received_bootstrap_responses = 0,
+            .battle_start_rejections = 0,
             .sent_gameplay_requests = 0,
             .received_gameplay_responses = 0,
             .request_timeouts = 0,
@@ -510,6 +511,7 @@ namespace snf::load
                         auto read_result = connection.handleReadable();
                         result.received_responses += read_result.round_trip_times.size();
                         result.received_bootstrap_responses += read_result.bootstrap_responses;
+                        result.battle_start_rejections += read_result.battle_start_rejections;
                         result.received_gameplay_responses += read_result.gameplay_responses;
                         result.unsolicited_frames += read_result.unsolicited_frames;
                         result.unsolicited_bytes += read_result.unsolicited_bytes;

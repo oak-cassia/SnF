@@ -205,6 +205,38 @@ namespace
         assert(!fixture.pop());
     }
 
+    void test_runtime_overload_is_a_battle_start_reply_that_leaves_the_room_waiting()
+    {
+        SinkFixture fixture{1};
+        const PlayerId player{.value = 10};
+        const auto connection = fixture.attach(4, player);
+
+        fixture.sink.accept(
+            RoomInboundCommand{
+                .room = RoomId{.value = 7},
+                .command = snf::server::StartBattle{},
+                .reply =
+                    snf::server::RoomReplyContext{
+                        .connection = connection,
+                        .request_id = 79,
+                        .kind = snf::server::RoomReplyKind::BattleStarted,
+                    },
+            },
+            RoomResult{
+                .status = RoomCommandStatus::RuntimeOverloaded,
+                .phase = RoomPhase::Waiting,
+            }
+        );
+
+        const auto frame = fixture.pop();
+        assert(frame && frame->type == snf::protocol::MessageType::BattleStarted && frame->request_id == 79);
+        assert(frame->payload.size() == 10);
+        assert(frame->payload[0] == static_cast<std::byte>(RoomCommandStatus::RuntimeOverloaded));
+        assert(frame->payload[1] == static_cast<std::byte>(RoomPhase::Waiting));
+        assert(payload_u64(*frame, 2) == 7);
+        assert(!fixture.pop());
+    }
+
     void test_a_digest_encodes_every_tag_and_body_in_event_order()
     {
         SinkFixture fixture{4};
@@ -548,6 +580,7 @@ void run_protocol_room_result_sink_tests()
 {
     test_a_skill_acknowledgement_is_the_two_byte_request_reply();
     test_a_move_acknowledgement_uses_its_own_two_byte_reply_type();
+    test_runtime_overload_is_a_battle_start_reply_that_leaves_the_room_waiting();
     test_a_digest_encodes_every_tag_and_body_in_event_order();
     test_ack_precedes_the_same_digest_for_caster_and_observer();
     test_terminal_frames_follow_the_terminal_digest();

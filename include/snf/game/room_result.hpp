@@ -36,6 +36,9 @@ namespace snf::server
         // Appended because command statuses cross the wire as one byte.
         BattleExpired,
         ParticipantDead,
+        // The binding could not reserve mandatory runtime capacity, so the
+        // command was rejected before it changed the Room.
+        RuntimeOverloaded,
     };
 
     enum class BattleOutcome : std::uint8_t

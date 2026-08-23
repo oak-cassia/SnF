@@ -129,9 +129,10 @@ vertical slice가 아니다.
   거절되면 그 보상은 아래 허용 유실로 떨어지고 같은 카운터에 남는다
 - tell 거절, 최초 load 실패와 저장 큐 거절은 각각 계측한다. `_tick_schedule_rejections`와 같은
   방식이며, 유실을 허용한다는 정책과 유실을 관측하지 못하는 상태를 구분하는 장치다
-- tell 거절, 최초 load 실패와 프로세스 장애로 인한 보상 유실은 허용한다. mailbox는 actor별이 아니라 worker당
-  `queue_capacity_per_worker`(현재 4096)이고 clear 하나가 만드는 tell은 최대 참가자 수다. 거절되려면
-  그 worker 큐가 이미 포화여야 하며, 그 상태에서 무너지는 것은 보상 하나가 아니다
+- tell 거절, 최초 load 실패와 프로세스 장애로 인한 보상 유실은 허용한다. mailbox는 Actor별이고,
+  그 mailbox로 들어갈 submission은 worker별 공유 outstanding/admission 예산인
+  `queue_capacity_per_worker`(현재 4096)를 먼저 차지한다. clear 하나가 만드는 tell은 최대 참가자
+  수다. 거절되려면 그 worker 예산이 이미 포화여야 하며, 그 상태에서 무너지는 것은 보상 하나가 아니다
 - Room은 terminal 정리와 passivation을 유지하고 재전달 timer를 갖지 않는다. 프로세스가 살아 있어도
   Room에 재시도를 얹을 자리가 없다. 같은 turn 안의 반복은 대상 mailbox를 비워줄 주체를 돌리지
   못하고, timer는 이미 충족된 terminal passivation 조건을 무른다
@@ -193,8 +194,9 @@ resync snapshot을 만들지 않는다. shutdown은 측정 종료 smoke로만 �
   사망을 끝낸 다음 다음 적이 살아 있는 대상을 다시 고른다. 마지막 생존 참가자가 죽으면
   `PartyDefeated`로 즉시 종결하며 deadline 실패와 wire reason을 구분한다
 - **tick은 one-shot 사슬이다.** binding이 deadline을 먼저 예약한 다음 `ExistingOnly` tick을 예약한다.
-  tick 예약 거절은 metric으로 남기고 deadline을 backstop으로 쓰며, deadline 예약 거절은 Logic Runtime
-  실패로 승격한다
+  deadline 예약이 거절되면 Room을 `Waiting`에 둔 채 `RuntimeOverloaded`로 시작을 거절하고
+  `deadline_schedule_rejections`를 올린다. tick 예약 거절은 metric으로 남기고 이미 확보한 deadline을
+  backstop으로 쓴다
 - **outbound 포화는 연결을 닫고 Room은 계속 진행한다.** Room을 suspend시키면 느린 client 하나가
   4인 전투를 멈춘다. Step 5 실측에서 느린 연결 하나만 닫힌 뒤 남은 세 client의 digest sequence가
   연속으로 clear까지 진행했다. 살아 있는 연결의 event gap이 없으므로 resync snapshot은 만들지
@@ -227,7 +229,9 @@ resync snapshot을 만들지 않는다. shutdown은 측정 종료 smoke로만 �
   순서 4이고, 포화 상황에서 그 값을 보고하는 것이 이 축이다. (충족: 네 카운터 모두 0)
 - 느린 client가 outbound를 포화시키면 해당 연결만 종료되고 Room과 건강한 참가자는 계속 진행한다.
   (충족: 1개 연결 종료, 3개 참가자의 연속 digest와 clear 확인)
-- deadline/Tick 예약 포화와 terminal 뒤 stale timer 정리를 포함한다. (충족)
+- deadline/Tick 예약 포화와 terminal 뒤 stale timer 정리를 포함한다. (충족: deadline 포화는
+  `RuntimeOverloaded`로 해당 시작만 거절하고 Logic Runtime은 계속되며, tick 포화는 deadline을
+  backstop으로 사용한다)
 - Debug, TCP integration, ASan·UBSan과 TSan을 통과한다. (충족)
 
 두 계층의 중복 방어와 명시된 유실 경계를 하나의 콘텐츠에서 보여주는 것이 이 목록의 핵심이다.

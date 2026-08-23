@@ -41,6 +41,7 @@ namespace snf::load
         std::vector<std::chrono::steady_clock::duration> gameplay_round_trip_times;
         std::vector<std::chrono::steady_clock::duration> battle_digest_intervals;
         std::size_t bootstrap_responses{0};
+        std::size_t battle_start_rejections{0};
         std::size_t gameplay_responses{0};
         std::size_t unsolicited_frames{0};
         std::size_t unsolicited_bytes{0};
@@ -101,7 +102,7 @@ namespace snf::load
         [[nodiscard]] std::optional<ClientError> validateResponse(const snf::protocol::Frame& response) const;
         [[nodiscard]] std::optional<ClientError>
         recordUnsolicitedFrame(const snf::protocol::Frame& response, std::chrono::steady_clock::time_point received_at, ReadResult& result);
-        void completeRequest(snf::protocol::MessageType request_type) noexcept;
+        void completeRequest(snf::protocol::MessageType request_type, bool battle_start_rejected) noexcept;
 
         enum class WorkloadStage
         {
