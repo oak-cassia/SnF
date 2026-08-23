@@ -101,13 +101,13 @@ namespace snf::server
         std::chrono::milliseconds room_battle_duration{90000};
         std::size_t max_room_participants{4};
         std::uint64_t room_clear_experience{300};
-        std::uint64_t room_boss_health{1000};
+        std::uint64_t room_boss_health{500};
         std::chrono::milliseconds room_tick_interval{100};
         std::chrono::nanoseconds room_tick_budget{std::chrono::milliseconds{5}};
         std::chrono::milliseconds room_wave_interval{20000};
         std::size_t room_wave_count{2};
         std::size_t room_minions_per_wave{10};
-        std::uint64_t room_minion_health{30};
+        std::uint64_t room_minion_health{60};
         std::chrono::milliseconds room_boss_spawn_after{40000};
         std::size_t max_room_spawned_enemies{64};
         std::size_t room_digest_flush_threshold{512};
@@ -116,7 +116,7 @@ namespace snf::server
         std::uint32_t room_player_move_speed{4};
         std::uint32_t room_participant_spawn_spacing{4};
         std::uint32_t room_minion_spawn_radius{25};
-        std::uint32_t room_minion_move_speed{2};
+        std::uint32_t room_minion_move_speed{1};
         std::uint32_t room_boss_move_speed{1};
         std::uint64_t room_minion_attack_damage{3};
         std::uint64_t room_boss_attack_damage{10};

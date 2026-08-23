@@ -15,6 +15,11 @@ EnemyId 순서로 타격한다. default 100ms Room tick과 이 전투 규칙을 
 시계열과 종료 summary를, load client는 요청 RTT와 push frame 수·bytes,
 digest 도착 간격을 기록했다.
 
+이 실측의 전투 설정은 minion HP 30·이동속도 2, boss HP 1,000이다. 이후 기본 밸런스를
+minion HP 60·이동속도 1, boss HP 500으로 바꾸었으므로 아래 용량 경계는 해당 측정
+설정의 결과다. 아키텍처 경계의 위치를 재현할 때는 이 값을 사용하고, 현재 기본 밸런스의
+정확한 수치가 필요하면 다시 측정한다.
+
 `UseSkill`의 Slash cooldown은 1초다. 따라서 높은 목표 RPS에서는 번갈아 보내는 command의 절반인
 `SetMoveIntent`는 적용되지만, 초당 1회를 넘는 `UseSkill` 대부분은 `SkillOnCooldown`으로 일찍
 종결된다. 아래 response/s는 이 status 응답까지 포함한 Actor admission·dispatch·reply 처리량이며,

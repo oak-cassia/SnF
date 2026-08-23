@@ -250,11 +250,12 @@ connection generation  → admission/routing에서 session 수명을 넘긴 stal
   찼다. active 전투 부하는 처리하더라도 종료 drain은 별도 admission 부하가 되므로, 더 큰 동시 접속
   목표를 잡을 때 close burst의 backpressure와 capacity 계약을 먼저 정한다
 - **shared outbound:** 모든 worker가 공유하는 queue capacity 4,096은 전체 대상 Slash fanout을
-  포함한 현재 코드의 4 workers × 750 Room에서 포화됐고, 4 workers × 700 Room은 high-water
-  3,232로 정상 종료했다. worker 수만 늘려서는 비례 확장되지 않으므로 더 큰 Room 수를
-  목표로 할 때 capacity·credit 또는 sharding 계약을 먼저 정한다
+  포함한 Step 5 측정 설정에서 4 workers × 750 Room에서 포화됐고, 4 workers × 700
+  Room은 high-water 3,232로 정상 종료했다. worker 수만 늘려서는 비례 확장되지 않으므로
+  더 큰 Room 수를 목표로 할 때 capacity·credit 또는 sharding 계약을 먼저 정한다. 현재
+  기본 밸런스의 정확한 경계가 필요하면 리포트에 명시한 설정과 구분해 재측정한다
 
-두 항목은 Step 5의 미완료 조건이 아니라 현재 구성에서 측정된 확장 경계다. 목표 규모가 이 경계에
+두 항목은 Step 5의 미완료 조건이 아니라 리포트의 측정 구성에서 확인한 확장 경계다. 목표 규모가 이 경계에
 도달하기 전에는 TimerService, Room hash co-location이나 resync snapshot 작업을 열지 않는다.
 
 ### 비범위

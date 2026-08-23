@@ -19,12 +19,12 @@ namespace snf::server
         std::chrono::milliseconds battle_duration{90000};
         std::size_t max_participants{4};
         std::uint64_t clear_experience{300};
-        std::uint64_t boss_health{1000};
+        std::uint64_t boss_health{500};
         std::chrono::milliseconds tick_interval{100};
         std::chrono::milliseconds wave_interval{20000};
         std::size_t wave_count{2};
         std::size_t minions_per_wave{10};
-        std::uint64_t minion_health{30};
+        std::uint64_t minion_health{60};
         std::chrono::milliseconds boss_spawn_after{40000};
         // A lifetime spawn bound, not merely the number alive at once.
         std::size_t max_spawned_enemies{64};
@@ -36,7 +36,7 @@ namespace snf::server
         std::uint32_t player_move_speed{4};
         std::uint32_t participant_spawn_spacing{4};
         std::uint32_t minion_spawn_radius{25};
-        std::uint32_t minion_move_speed{2};
+        std::uint32_t minion_move_speed{1};
         std::uint32_t boss_move_speed{1};
         std::uint64_t minion_attack_damage{3};
         std::uint64_t boss_attack_damage{10};
