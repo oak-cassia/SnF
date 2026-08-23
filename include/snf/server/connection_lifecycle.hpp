@@ -20,9 +20,6 @@ namespace snf::server
     {
         snf::net::ConnectionId connection;
         ConnectionCloseCause cause;
-        // false means the session closed before its persistent location was loaded;
-        // the Player retains whatever its load restored. true + nullopt is an
-        // authoritative "not in a Zone" snapshot after explicit leave.
         bool has_location_snapshot{false};
         std::optional<PlayerLocation> last_location;
     };

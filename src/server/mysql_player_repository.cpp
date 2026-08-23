@@ -311,9 +311,6 @@ namespace
 
             if (schema_version < 7)
             {
-                // The CREATE TABLE above already carries the column on a fresh database,
-                // where the recorded version is still 1, so this has to check before it
-                // adds rather than assume the column is missing.
                 auto street_experience = _connection.query("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() "
                                                            "AND table_name=\"snf_players\" AND column_name=\"street_experience\"");
                 if (parse_integer<std::uint64_t>(::mysql_fetch_row(street_experience.get())[0], "street experience column count") == 0)

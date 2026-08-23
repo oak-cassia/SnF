@@ -12,8 +12,6 @@ using namespace std::chrono_literals;
 
 namespace
 {
-    // The Zone asks for its next tick as a duration; the binding is what turns it
-    // into a timer.
     std::optional<std::chrono::milliseconds> scheduled_delay(const snf::server::ZoneResult& result)
     {
         return result.tick_after;
@@ -130,12 +128,10 @@ namespace
         assert(tick2.tick == 2);
         assert(zone.lastTick() == 2);
 
-        // Remove all players
         static_cast<void>(zone.handle(snf::server::LeaveZoneCommand{.player = low, .route_epoch = 1}));
         static_cast<void>(zone.handle(snf::server::LeaveZoneCommand{.player = high, .route_epoch = 1}));
         assert(zone.playerCount() == 0);
 
-        // Tick when zone is empty should not request another timer
         const auto tick3 = zone.handle(snf::server::ZoneSimulationTick{});
         assert(tick3.status == snf::server::ZoneCommandStatus::Applied);
         assert(tick3.tick == 3);

@@ -30,7 +30,7 @@ namespace
         assert(::getsockname(listener_fd, reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
         assert(address.sin_port != 0);
     }
-} // namespace
+}
 
 void run_tcp_listener_tests()
 {

@@ -242,8 +242,6 @@ namespace snf::server
                 _reactor_turn_nanoseconds.record(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - turn_started_at));
             }
 
-            // Reported after the turn is measured so that the report itself does
-            // not inflate the reactor turn distribution.
             reportMetricsIfDue();
         }
 
@@ -315,8 +313,6 @@ namespace snf::server
             if (!hasAvailableConnectionLifecycleSlot())
             {
                 ++_stats.connection_lifecycle_rejections;
-                // Leave any remaining listener backlog for a later reactor turn
-                // so a connection flood cannot monopolize this turn.
                 return;
             }
 
@@ -358,8 +354,6 @@ namespace snf::server
                 snf::net::throw_system_error("epoll_ctl(EPOLL_CTL_ADD client)");
             }
 
-            // Creates this connection's outbound accounting once, so its commands do
-            // not each allocate one inside the channel lock.
             _outbound.trackConnection(connection);
 
             ++_stats.accepted_connections;
@@ -547,9 +541,6 @@ namespace snf::server
 
         closeConnectionsWithFailedOutboundAdmission();
 
-        // Granting after the drain, so capacity freed in this turn reaches a waiting
-        // actor without costing it another reactor turn. The reactor is the only
-        // granter, which is what bounds this work per turn.
         static_cast<void>(_outbound.grantPending());
 
         handleRuntimeCompletion();
@@ -583,10 +574,6 @@ namespace snf::server
             return;
         }
 
-        // The channel could not retain one exact connection ID without violating its
-        // fixed memory bound. Closing every current session is deliberately conservative:
-        // it guarantees the affected live connection is not left with a silently missing
-        // response, while the Worker that detected the condition remains healthy.
         ++_stats.outbound_admission_failure_fallbacks;
         while (!_sessions.empty())
         {
@@ -775,9 +762,6 @@ namespace snf::server
     void TcpServer::cancelQueues()
     {
         _frame_ingress.cancel();
-        // Cancelling releases every actor waiting for capacity. Without it a Logic
-        // Worker would wait for a grant this reactor can no longer make, and the
-        // Logic Runtime would never reach its drained state.
         static_cast<void>(_outbound.cancel());
     }
 
@@ -854,9 +838,6 @@ namespace snf::server
         _client_descriptors_by_event_token.erase(connection.generation);
         _sessions.erase(session_iterator);
         ++_stats.closed_connections;
-        // Releases this connection's outbound accounting once whatever it still holds
-        // has drained. Until this point the channel keeps the entry alive so a live
-        // connection's commands do not allocate one each.
         _outbound.forgetConnection(connection);
         std::cout << "Closed client FD: " << client_descriptor << '\n';
 
@@ -927,8 +908,6 @@ namespace snf::server
             return;
         }
 
-        // ConnectionClosed drives Player snapshot persistence and actor eviction.
-        // Close Logic ingress only after every retained lifecycle fact was admitted.
         _frame_ingress_closed = true;
         _frame_ingress.close();
     }

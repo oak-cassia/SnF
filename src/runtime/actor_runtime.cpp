@@ -16,18 +16,9 @@
 namespace
 {
     constexpr std::size_t INGRESS_BATCH_SIZE = 64;
-    // Continuations are drained in bounded batches. Emptying the whole queue
-    // would starve ingress, and the priority the coroutine contract asks for is
-    // within a single actor, not across actors.
     constexpr std::size_t CONTINUATION_BATCH_SIZE = 64;
     constexpr std::size_t ACTOR_TURN_BUDGET = 16;
 
-    // A Worker's single blocking point. It replaces the blocking ingress pop
-    // because a Worker now has two input sources and a bounded queue can only be
-    // waited on one at a time.
-    //
-    // The flag is sticky and every wake re-checks all sources, so a notification
-    // that lands between two checks is never lost.
     class WorkerWakeup final
     {
     public:
@@ -79,9 +70,6 @@ namespace
         bool _signalled{false};
     };
 
-    // The terminal claim-to-publish window cannot allocate: a cancelling Worker
-    // that loses the claim has no other path to finish. Storage is therefore
-    // allocated once with the Worker's in-flight capacity and reused as a ring.
     class ReservedContinuationQueue final
     {
         static_assert(std::is_nothrow_copy_constructible_v<snf::runtime::ActorContinuation>);
@@ -145,11 +133,6 @@ namespace snf::runtime
         std::chrono::steady_clock::time_point enqueued_at;
     };
 
-    // The submission an actor is currently executing, plus its accounting. It
-    // outlives a single dispatch for two reasons: a suspended command keeps its
-    // capacity and its turn open until a terminal outcome arrives, and a handler
-    // that suspends still holds a reference into this submission, so the runtime
-    // must own it for as long as the coroutine frame lives.
     struct ActorRuntime::ActiveCommand
     {
         QueuedSubmission submission;
@@ -158,9 +141,6 @@ namespace snf::runtime
         std::chrono::steady_clock::time_point suspended_at{};
     };
 
-    // The ActorContext an actor activation hands to its binding. It is stored in
-    // the slot rather than on the dispatch stack because an awaiter that suspends
-    // still holds it after dispatch has returned.
     class ActorRuntime::SlotContext final : public ActorContext
     {
     public:
@@ -220,8 +200,6 @@ namespace snf::runtime
         std::optional<ActiveCommand> active_command{};
         std::optional<TaskId> expected_task{};
         std::shared_ptr<AsyncOperationControl> active_operation{};
-        // Set when a cancel lost the terminal claim to a completion. The publish
-        // is guaranteed to arrive, so the Worker waits for it instead of resuming.
         bool awaiting_guaranteed_publish{false};
         bool pending_resume{false};
         std::uint64_t next_task_id{0};
@@ -272,9 +250,6 @@ namespace snf::runtime
         }
 
         BoundedQueue<QueuedSubmission> ingress;
-        // Its capacity equals the in-flight bound, so a reserved operation always
-        // has a free slot here. It is never closed or cancelled: a Worker that
-        // lost a cancel race must still be able to receive the claimed completion.
         ReservedContinuationQueue continuations;
         const std::size_t capacity;
         const std::size_t max_in_flight_operations;
@@ -292,8 +267,6 @@ namespace snf::runtime
         std::jthread thread;
     };
 
-    // Producers hold this, not the runtime, so a completion that outlives the
-    // runtime finds a deactivated endpoint instead of a dangling pointer.
     class ActorRuntime::WorkerContinuationEndpoint final : public ContinuationEndpoint
     {
     public:
@@ -324,9 +297,6 @@ namespace snf::runtime
             _runtime->reportRejectedCompletion(continuation, rejection);
         }
 
-        // Only safe once every Worker has joined, which is also when no operation
-        // can still be in flight. Deactivating any earlier would strand a Worker
-        // waiting for an already-claimed completion.
         void deactivate() noexcept
         {
             const std::unique_lock lock{_mutex};
@@ -350,8 +320,6 @@ namespace snf::runtime
             throw std::invalid_argument{"An actor operation requires an operation state"};
         }
 
-        // The entry fields are also read by requestActorOperationCancel from other
-        // threads, so every write to them is guarded even on the owning Worker.
         std::lock_guard lock{_worker->scheduling_mutex};
         if (_entry->active_operation)
         {
@@ -498,8 +466,6 @@ namespace snf::runtime
     {
         cancel();
         joinWorkers();
-        // Ordered after the join on purpose. Every operation is terminal by now,
-        // so a late completion can be discarded without stranding a Worker.
         _continuation_endpoint->deactivate();
     }
 
@@ -618,8 +584,6 @@ namespace snf::runtime
             if (!pushed)
             {
                 releaseOutstanding(worker);
-                // The state mutex makes a close race impossible here. A failed
-                // push is consequently the conservative capacity fallback.
                 if (accounting == ActorAccounting::Command)
                 {
                     worker.counters.rejected_full.fetch_add(1, std::memory_order_relaxed);
@@ -634,17 +598,12 @@ namespace snf::runtime
             target_worker = &worker;
         }
 
-        // The Worker waits on its own wake-up rather than on the ingress queue, so
-        // a push has to announce itself.
         target_worker->wakeup.notify();
         return PostResult::Accepted;
     }
 
     PostResult ActorRuntime::tryTell(const ActorKey target, TellPayload payload)
     {
-        // registerBinding refuses to run once the runtime has started, so the
-        // registry is immutable here and needs no lock. tryPost still takes the
-        // state mutex and re-validates, which is what decides Accepted/Full/Closed.
         const auto binding_iterator = _bindings.find(target.kind);
         if (binding_iterator == _bindings.end())
         {
@@ -698,14 +657,10 @@ namespace snf::runtime
 
         for (const auto& worker : _workers)
         {
-            // Producers are stopped from here, but mailboxes, operation states and
-            // coroutine frames belong to the owning Worker and are left to it.
             cancelWorkerIngress(*worker);
             worker->wakeup.notify();
         }
 
-        // A binding may be waiting on an external backpressure point. Its token
-        // is runtime-local, so cancelling it never cancels a shared outbound queue.
         _dispatch_stop_source.request_stop();
     }
 
@@ -720,8 +675,6 @@ namespace snf::runtime
                 return;
             }
 
-            // Only a flag. The owning Worker performs the Pending -> Cancelled
-            // transition and the resume, so no coroutine is touched from here.
             actor_iterator->second.active_operation->requestCancel();
         }
 
@@ -832,8 +785,6 @@ namespace snf::runtime
                 }
             }
 
-            // A cancelled Worker cleans up after itself: the thread that requested
-            // the cancel only asked. On the drained path these are all no-ops.
             discardWorkerSubmissions(worker);
             discardWorkerTimers(worker);
             cancelSuspendedTasks(worker);
@@ -843,8 +794,6 @@ namespace snf::runtime
         catch (...)
         {
             recordWorkerFailure(std::current_exception());
-            // A failed Worker never returns to the pump, so it must transition its
-            // own operations and destroy its own frames right here.
             discardWorkerTimers(worker);
             cancelSuspendedTasks(worker);
             destroyWorkerActors(worker);
@@ -938,8 +887,6 @@ namespace snf::runtime
 
             if (entry.active_operation->claimCancelled())
             {
-                // Winning the claim means no producer will ever write a result, so
-                // the awaiter can be resumed with a cancellation.
                 entry.active_operation.reset();
                 entry.expected_task.reset();
                 entry.pending_resume = true;
@@ -950,9 +897,6 @@ namespace snf::runtime
             }
             else
             {
-                // A completion already claimed the terminal transition, and its
-                // publish is guaranteed to arrive. Resuming now would race the
-                // producer's result write, so the Worker waits for the publish.
                 entry.awaiting_guaranteed_publish = true;
             }
         }
@@ -990,15 +934,10 @@ namespace snf::runtime
                 }
             }
 
-            // The reservation is released whether or not the completion applied:
-            // it was taken for exactly this continuation.
             releaseOperation(worker);
 
             if (!matched)
             {
-                // The activation or the task is gone, so the result belongs to
-                // nobody. Only the operation state is cleaned up, by its own
-                // shared ownership.
                 worker.counters.discarded_late_completions.fetch_add(1, std::memory_order_relaxed);
             }
             ++handled;
@@ -1031,7 +970,6 @@ namespace snf::runtime
                 const auto actor_it = worker.actors.find(timer.target);
                 if (actor_it == worker.actors.end() || actor_it->second.incarnation != timer.incarnation)
                 {
-                    // Stale timer
                     releaseOutstanding(worker);
                     worker.counters.timers_discarded_stale.fetch_add(1, std::memory_order_relaxed);
                     continue;
@@ -1105,9 +1043,6 @@ namespace snf::runtime
             return !discarded;
         }
 
-        // Binding activation is external domain code. It must not run while the
-        // scheduler mutex is held: an activation hook may post more work or
-        // request cancellation through the runtime.
         std::unique_ptr<ActorState> activated_state;
         std::unique_ptr<SlotContext> activated_context;
         try
@@ -1120,8 +1055,6 @@ namespace snf::runtime
                     throw std::logic_error{"ActorBinding::activate returned no state"};
                 }
 
-                // Allocated before the lock so that nothing under it can throw
-                // after the entry has been inserted.
                 activated_context = std::make_unique<SlotContext>();
             }
 
@@ -1239,8 +1172,6 @@ namespace snf::runtime
 
                 if (entry->pending_resume)
                 {
-                    // A resume takes priority over this actor's queued commands.
-                    // That is the only priority the coroutine contract requires.
                     entry->pending_resume = false;
                     resuming = true;
                     if (entry->active_command)
@@ -1261,18 +1192,12 @@ namespace snf::runtime
                     entry->mailbox.pop_front();
                     worker.counters.mailbox_depth.fetch_sub(1, std::memory_order_relaxed);
 
-                    // One reading per turn, shared by the queue wait metric and by
-                    // ActorContext::observedAt. Taken here rather than at expiry, so a
-                    // command that waited in the mailbox is handled with the time it is
-                    // actually being handled at.
                     const auto observed_at = std::chrono::steady_clock::now();
                     entry->context->noteTurnStart(observed_at);
 
                     const bool is_command = queued.submission.accounting() == ActorAccounting::Command;
                     if (is_command)
                     {
-                        // Sampled once per command. A resume is not a new
-                        // acceptance, so it never lands in this distribution.
                         worker.counters.queue_wait.record(std::chrono::duration_cast<std::chrono::nanoseconds>(observed_at - queued.enqueued_at));
                     }
 
@@ -1298,14 +1223,9 @@ namespace snf::runtime
             }
             catch (...)
             {
-                // The coroutine frame may still hold references into the active
-                // submission. Failure cleanup destroys the owning ActorState first
-                // and only then releases this command and its accounting.
                 throw;
             }
 
-            // Post-dispatch bookkeeping touches slot fields that other threads
-            // read, so all of it happens under the scheduling mutex.
             if (result == ActorDispatchResult::Suspended)
             {
                 std::lock_guard lock{worker.scheduling_mutex};
@@ -1325,9 +1245,6 @@ namespace snf::runtime
                     }
                 }
 
-                // The command keeps its outstanding capacity and its turn stays
-                // closed until a terminal outcome arrives. The actor is left out
-                // of the ready queue, so its queued commands wait.
                 return true;
             }
 
@@ -1444,8 +1361,6 @@ namespace snf::runtime
 
     bool ActorRuntime::isWorkerDrained(const Worker& worker) const
     {
-        // The coroutine contract's ActorRuntimeDrained, checked term by term. The
-        // running-task term is implied: this only runs between actor turns.
         if (!worker.ingress.isClosed() || worker.ingress.size() != 0)
         {
             return false;
@@ -1522,11 +1437,6 @@ namespace snf::runtime
 
     void ActorRuntime::cancelSuspendedTasks(Worker& worker) noexcept
     {
-        // Owning Worker only, on the cancel and failure paths. The frame is not
-        // resumed: destroying it with the state still runs the handler's scoped
-        // destructors, and a cancelled runtime has no use for the result. A
-        // per-operation cancel does resume, so the handler observes the
-        // cancellation there.
         while (true)
         {
             bool awaiting_guaranteed_publish = false;
@@ -1546,9 +1456,6 @@ namespace snf::runtime
                         }
                         else
                         {
-                            // The completion owns the terminal transition. Even on
-                            // hard cancel or Worker failure its reserved publish must
-                            // be consumed before the frame and endpoint can go away.
                             entry.awaiting_guaranteed_publish = true;
                             awaiting_guaranteed_publish = true;
                             continue;
@@ -1562,9 +1469,6 @@ namespace snf::runtime
                         entry.execution = ActorExecutionState::Idle;
                     }
 
-                    // active_command deliberately stays alive. A lazy coroutine
-                    // frame may still reference its payload, so destroyWorkerActors
-                    // destroys the ActorState before closing command accounting.
                 }
             }
 
@@ -1573,9 +1477,6 @@ namespace snf::runtime
                 return;
             }
 
-            // A publish may already be queued or may still be inside the contract's
-            // narrow claim-to-publish window. Drain first, then wait on the sticky
-            // Worker wake-up if the claimer has not published yet.
             if (drainContinuations(worker) == 0)
             {
                 worker.wakeup.wait();
@@ -1597,9 +1498,6 @@ namespace snf::runtime
             for (auto& [key, entry] : actors_to_destroy)
             {
                 static_cast<void>(key);
-                // A handler's frame may hold references into active_command. The
-                // explicit reset fixes the order instead of relying on
-                // ActorEntry's reverse member-destruction order.
                 entry.state.reset();
                 finishActiveCommand(worker, entry, false);
             }
@@ -1607,7 +1505,6 @@ namespace snf::runtime
         }
         catch (...)
         {
-            // Actor destructors must not make a worker failure unreportable.
         }
     }
 
@@ -1636,9 +1533,6 @@ namespace snf::runtime
 
     bool ActorRuntime::reserveOperation(Worker& worker) noexcept
     {
-        // One reservation covers both the in-flight slot and the terminal
-        // continuation slot, because the continuation queue's capacity is this
-        // same bound. A publish therefore cannot be refused for capacity.
         std::size_t current = worker.in_flight_operations.load(std::memory_order_relaxed);
         while (current < worker.max_in_flight_operations)
         {
@@ -1657,8 +1551,6 @@ namespace snf::runtime
         worker.in_flight_operations.fetch_sub(1, std::memory_order_acq_rel);
     }
 
-    // The caller holds the Worker's scheduling mutex, unless the entry has already
-    // been detached from worker.actors during final Worker cleanup.
     void ActorRuntime::finishActiveCommand(Worker& worker, ActorEntry& entry, const bool succeeded) noexcept
     {
         if (!entry.active_command)
@@ -1680,9 +1572,6 @@ namespace snf::runtime
         Worker& worker = *_workers[workerIndexFor(continuation.target)];
         if (!worker.continuations.push(continuation))
         {
-            // An in-flight reservation owns one slot in this fixed queue until
-            // this exact continuation is consumed. Full therefore means a broken
-            // scheduler invariant, and returning would strand the owning Worker.
             std::terminate();
         }
 
@@ -1692,8 +1581,6 @@ namespace snf::runtime
 
     void ActorRuntime::reportRejectedCompletion(const ActorContinuation& continuation, const ContinuationRejection rejection) noexcept
     {
-        // A rejected completion never releases a reservation: whoever won the
-        // terminal claim already did, or will when its continuation is consumed.
         Worker& worker = *_workers[workerIndexFor(continuation.target)];
         if (rejection == ContinuationRejection::DuplicateCompletion)
         {
@@ -1745,7 +1632,6 @@ namespace snf::runtime
             }
             catch (...)
             {
-                // Failure notification must never hide the worker exception.
             }
         }
     }

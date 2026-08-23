@@ -13,8 +13,6 @@ namespace
     void test_experience_below_the_first_threshold_stays_at_level_one()
     {
         assert(streetLevel(0) == 1);
-        // The point just short of a threshold and the threshold itself are kept
-        // adjacent so an off-by-one in the comparison cannot pass.
         assert(streetLevel(999) == 1);
         assert(streetLevel(1000) == 2);
     }
@@ -30,8 +28,6 @@ namespace
     {
         assert(streetLevel(29000) == 30);
         assert(streetLevel(29001) == 30);
-        // Experience keeps accumulating past the cap rather than being clamped at
-        // the source, so an arbitrarily large record still reads as the cap.
         assert(streetLevel(std::numeric_limits<std::uint64_t>::max()) == 30);
     }
 
@@ -43,7 +39,6 @@ namespace
     void test_each_level_adds_ten_percent_of_the_base()
     {
         assert(combatStats(2) == (CombatStats{.attack = 11, .health = 110}));
-        // Ten levels of growth double the base exactly.
         assert(combatStats(11) == (CombatStats{.attack = 20, .health = 200}));
     }
 
@@ -54,8 +49,6 @@ namespace
 
     void test_a_level_outside_the_valid_range_reads_as_the_nearest_one()
     {
-        // Level 0 would wrap the growth subtraction; a level above the cap would
-        // grow past what the cap is supposed to bound.
         assert(combatStats(0) == combatStats(1));
         assert(combatStats(1000) == combatStats(30));
     }

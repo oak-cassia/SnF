@@ -6,8 +6,6 @@
 
 namespace snf::server
 {
-    // Protocol adapter for the player follow-up boundary. ActorRuntime deliberately
-    // does not include this header or know that frames exist.
     class ProtocolPlayerResponseSink final : public PlayerResponseSink
     {
     public:

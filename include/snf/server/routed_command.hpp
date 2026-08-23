@@ -16,16 +16,11 @@
 
 namespace snf::server
 {
-    // Target and command live in the same variant alternative, preventing an
-    // invalid pairing such as a PlayerCommand addressed to a future Zone target.
     struct PlayerCommandRoute
     {
         PlayerActorId actor;
         PlayerCommand command;
         std::uint32_t request_id{0};
-        // Present only for a JoinRoomRequest that a room entry started. It rides here
-        // rather than on the command because it is reactor identity -- ticket, step,
-        // connection -- and the game layer must not name any of it.
         std::optional<RoomEntryContext> room_entry{};
     };
 
@@ -45,9 +40,6 @@ namespace snf::server
         std::uint32_t request_id{0};
     };
 
-    // Internal cross-Zone stages already contain their immutable reactor reply
-    // identity. Keeping them in a distinct route alternative prevents a caller
-    // from accidentally attaching a normal client reply/credit to the command.
     struct ZoneHandoffCommandRoute
     {
         ZoneInboundCommand command;

@@ -24,8 +24,6 @@ namespace snf::server
         std::chrono::seconds write_timeout{5};
     };
 
-    // Durable blocking adapter. Its bounded queue is non-blocking at the Actor
-    // boundary and each repository Worker owns one MySQL connection at a time.
     class MySqlPlayerRepository final : public PlayerRepository, public PlayerRepositoryDiagnostics
     {
     public:

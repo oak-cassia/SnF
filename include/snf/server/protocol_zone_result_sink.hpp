@@ -14,9 +14,6 @@ namespace snf::server
         explicit ProtocolZoneResultSink(OutboundSink& outbound) noexcept;
 
         void accept(const ZoneInboundCommand& command, const ZoneResult& result);
-        // Answers a Zone request that never reached a ZoneActor, which is what a
-        // rejected entry or a failed handoff produces. Both the frame path and the
-        // handoff saga need it, so it lives with the mapping rather than in either.
         void replyStatus(
             snf::net::ConnectionId connection, PlayerId player, ZoneId zone, std::uint64_t route_epoch, ZonePosition position, std::uint32_t request_id, ZoneReplyKind kind, ZoneCommandStatus status);
         void reportAdmissionFailure(snf::net::ConnectionId connection) noexcept;

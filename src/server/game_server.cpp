@@ -95,19 +95,9 @@ namespace snf::server
 
                   return OutboundChannelConfig{
                       .capacity = config.outbound_queue_capacity,
-                      // A per-connection cap above the shared capacity is unreachable
-                      // anyway, so it is capped rather than rejected: shrinking the
-                      // channel must not make the server refuse to start.
                       .max_slots_per_connection = std::min(config.max_outbound_slots_per_connection, config.outbound_queue_capacity),
                       .max_grants_per_turn = config.outbound_grants_per_turn,
-                      // A Worker reserves an in-flight slot before it registers as a
-                      // waiter, so the registry is sized above the sum of those
-                      // budgets and can never be the tighter of the two bounds.
                       .max_waiters = total_in_flight_budget,
-                      // A pending record can belong either to a current session or to a
-                      // command that was already admitted when its session disappeared.
-                      // Cover both populations; the channel still has a no-throw
-                      // close-all fail-safe if this accounting invariant is ever broken.
                       .max_pending_admission_failures = checked_sum(
                           config.connection_lifecycle_capacity, total_actor_outstanding_budget, "Outbound admission failure budget exceeds size_t"
                       ),
@@ -155,10 +145,6 @@ namespace snf::server
                   {
                       _player_sessions.noteLocation(connection, std::move(location));
                   },
-                  // The Room never got the join, so the step it would have answered has
-                  // to answer itself. RoomEntryService already ends a refused join by
-                  // rolling the route back, releasing the ticket and replying, so the
-                  // refusal only needs to reach it as the completion it is waiting for.
                   .on_room_join_undelivered =
                       [this](const RoomEntryContext& context, const RoomId room)
                   {
@@ -278,13 +264,6 @@ namespace snf::server
 
                       if (result.outcome)
                       {
-                          // The audience rather than the grants: a failed battle pays nobody and
-                          // still has to send everybody home.
-                          //
-                          // This runs on the Worker, so it publishes the fact and stops there.
-                          // RoomEntryService owns route state without a lock because only the
-                          // reactor touches it; calling startReturn from here would race its
-                          // drain. Same reason the completion above goes through the channel.
                           for (const PlayerId player : result.audience)
                           {
                               if (!_room_transition_channel.tryPublishReturnRequest(RoomReturnRequest{
@@ -375,8 +354,6 @@ namespace snf::server
         _logic_runtime.registerBinding(_player_actor_binding);
         _logic_runtime.registerBinding(_persistent_player_actor_binding);
         _logic_runtime.registerBinding(_zone_actor_binding);
-        // Registered before start so a cleared Room's reward tell resolves to the
-        // persistent Player binding. Nothing routes client frames here yet.
         _logic_runtime.registerBinding(_room_actor_binding);
     }
 
@@ -404,7 +381,6 @@ namespace snf::server
         }
         catch (...)
         {
-            // A destructor cannot propagate a worker failure. run() reports it instead.
         }
     }
 
@@ -482,7 +458,6 @@ namespace snf::server
             }
             catch (...)
             {
-                // Preserve the reactor failure that entered this path.
             }
             throw;
         }
@@ -545,8 +520,6 @@ namespace snf::server
         _protocol_gateway.cancel();
         _zone_transition_channel.cancel();
         _room_transition_channel.cancel();
-        // Also the path a reactor failure takes, and the reason a Worker suspended on
-        // outbound capacity still reaches a terminal outcome when the reactor is gone.
         static_cast<void>(_outbound_channel.cancel());
     }
 

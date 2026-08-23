@@ -7,8 +7,6 @@
 
 namespace snf::server
 {
-    // Routes Player, Zone and Room typed commands into their registered
-    // binding while keeping target and command paired in the route variant.
     class CommandRouter final : public RoutedCommandIngress
     {
     public:

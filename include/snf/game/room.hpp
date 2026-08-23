@@ -26,10 +26,7 @@ namespace snf::server
         std::size_t minions_per_wave{10};
         std::uint64_t minion_health{60};
         std::chrono::milliseconds boss_spawn_after{40000};
-        // A lifetime spawn bound, not merely the number alive at once.
         std::size_t max_spawned_enemies{64};
-        // A flush threshold rather than a drop boundary. The command that crosses
-        // it stays atomic and may take the final count slightly above this value.
         std::size_t digest_flush_threshold{512};
         std::uint32_t arena_width{100};
         std::uint32_t arena_height{100};
@@ -46,8 +43,6 @@ namespace snf::server
         std::chrono::milliseconds boss_attack_cooldown{2000};
     };
 
-    // A clock-free state machine. Its binding supplies observed_at and translates
-    // deadline_after/tick_after into Worker-local timers.
     class Room
     {
     public:

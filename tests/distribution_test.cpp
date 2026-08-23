@@ -12,8 +12,6 @@ namespace
 {
     using namespace std::chrono_literals;
 
-    // The nearest-rank definition the load client uses for its client-side
-    // round-trip percentiles.
     std::uint64_t reference_percentile(std::vector<std::uint64_t> values, const double ratio)
     {
         std::ranges::sort(values);
@@ -74,8 +72,6 @@ namespace
         {
             snf::runtime::Distribution distribution;
             distribution.record(value);
-            // A second, larger sample keeps max from clamping the estimate, so
-            // the reported p50 is the bucket bound the estimator produced.
             distribution.record(UNCLAMPED_UPPER_SAMPLE);
 
             const auto snapshot = distribution.snapshot();
@@ -123,8 +119,6 @@ namespace
 
         const auto snapshot = distribution.snapshot();
         assert(snapshot.sample_count == 2);
-        // Only max reports an unrepresentable sample faithfully. Percentiles stop
-        // at the bound, so an overrun shows up as a max far above p99.
         assert(snapshot.max == OVERFLOWING_SAMPLE + 1);
         assert(snapshot.p50 == snf::runtime::Distribution::REPRESENTABLE_UPPER_BOUND);
         assert(snapshot.p99 == snf::runtime::Distribution::REPRESENTABLE_UPPER_BOUND);

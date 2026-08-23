@@ -17,11 +17,6 @@ namespace
 {
     using namespace std::chrono_literals;
 
-    // How long a correct implementation could possibly need, not how long it does need: a
-    // passing run never reaches this, so the only cost of a generous bound is how late a
-    // genuine hang is reported. One second was not generous enough -- a save round trip
-    // through the repository worker takes orders of magnitude longer under a sanitizer
-    // than in a plain Debug build, and this suite failed intermittently there.
     constexpr auto SETTLE_DEADLINE = 30s;
 
     class RecordingRepository final : public snf::server::PlayerRepository

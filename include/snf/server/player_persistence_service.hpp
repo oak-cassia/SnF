@@ -38,9 +38,6 @@ namespace snf::server
         std::size_t in_flight_players{0};
     };
 
-    // Owns the only production path that writes Player snapshots. Actor Workers
-    // only submit immutable flat records; this service coalesces them and serializes
-    // saves per Player while allowing different Players to share the repository.
     class PlayerPersistenceService final
     {
     public:
@@ -50,19 +47,10 @@ namespace snf::server
         PlayerPersistenceService(const PlayerPersistenceService&) = delete;
         PlayerPersistenceService& operator=(const PlayerPersistenceService&) = delete;
 
-        // Non-blocking dirty snapshot admission. A false result preserves the
-        // Actor's dirty mask so its next command can retry naturally.
         [[nodiscard]] bool tryEnqueue(PlayerRecord record) noexcept;
 
-        // Final/logout save. It is serialized behind any save already in flight for
-        // the same Player. The completion is delivered with repository status and is
-        // intentionally awaited by the owning Actor binding.
         void asyncSave(PlayerRecord record, PlayerSaveCompletion completion);
 
-        // Requests an immediate drain and waits until accepted snapshots have been
-        // attempted and final requests have reached a terminal repository result.
-        // A failed background snapshot remains retryable for the next timer tick;
-        // a final save failure is reported to its caller.
         void flush();
         void stop() noexcept;
 

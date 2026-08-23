@@ -31,9 +31,6 @@ namespace snf::test
 #endif
     }
 
-    // Stands in for the runtime's continuation queue. A channel only ever reaches an
-    // endpoint through a producer, so recording publishes and rejections is enough to
-    // tell a granted waiter from a discarded award.
     class RecordingContinuationEndpoint final : public snf::runtime::ContinuationEndpoint
     {
     public:
@@ -54,8 +51,6 @@ namespace snf::test
         std::optional<snf::runtime::ContinuationRejection> last_rejection;
     };
 
-    // One suspended actor's half of a reservation await: the state its owning Worker
-    // would read, plus the producer the channel keeps.
     struct ReservationWaiter
     {
         using State = snf::runtime::AsyncOperationState<snf::server::OutboundReservation>;

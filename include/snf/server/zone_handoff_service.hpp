@@ -31,13 +31,6 @@ namespace snf::server
         std::size_t pending{0};
     };
 
-    // The cross-zone move, as a state machine of its own. It used to live inside
-    // ProtocolGateway, which meant one class owned both frame decoding and a
-    // multi-step saga with compensation; the gateway now starts a handoff and asks
-    // about one, and nothing more.
-    //
-    // Reactor-owned, like the coordinators it drives: every method here runs on the
-    // reactor thread, which is why none of this state is synchronised.
     class ZoneHandoffService
     {
     public:
@@ -52,13 +45,8 @@ namespace snf::server
         [[nodiscard]] FramePostResult
         tryStart(snf::net::ConnectionId connection, std::uint32_t request_id, PlayerId player, ZoneId target_zone, ZonePosition requested_position, const SessionRoute& source);
 
-        // Answers a Zone request that arrived while a handoff for the same connection
-        // is still in flight, and reports whether it did. The reply describes the
-        // handoff's target, since that is where the player is going.
         [[nodiscard]] bool tryReplyTransitionInProgress(snf::net::ConnectionId connection, std::uint32_t request_id, ZoneReplyKind kind);
 
-        // True when a handoff is still in flight for this connection, in which case
-        // the close cannot be applied yet and the caller retries after cleanup.
         [[nodiscard]] bool noteDisconnect(snf::net::ConnectionId connection) noexcept;
 
         void drain();

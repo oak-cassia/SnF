@@ -41,7 +41,7 @@ class Session:
         sock.settimeout(timeout)
         sock.connect((self.host, self.port))
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        sock.settimeout(None)  # Set to blocking for reader thread
+        sock.settimeout(None)
 
         self._sock = sock
         self._connected = True
@@ -64,7 +64,7 @@ class Session:
                 break
 
         self._connected = False
-        self._queue.put(None)  # Sentinel indicating connection loss
+        self._queue.put(None)
 
     def _alloc_request_id(self) -> int:
         req_id = self._next_request_id
@@ -110,7 +110,6 @@ class Session:
                     )
                 return frame
 
-            # Push or response for another request
             self._pending_pushes.append(frame)
 
     def drain_pushes(self) -> list[Frame]:
@@ -129,7 +128,6 @@ class Session:
 
             results.append(frame)
 
-        # Apply gate rules on unsolicited terminal events
         for frame in results:
             if frame.type in (MessageType.BattleCleared, MessageType.BattleFailed):
                 self.in_room = False
@@ -149,7 +147,6 @@ class Session:
         self.player_id = player_id
         self.zone_id = zone_id
 
-        # 1. Authenticate
         auth_resp = self.request(
             MessageType.Authenticate,
             snf_wire.authenticate(player_id),
@@ -159,7 +156,6 @@ class Session:
         if auth_pid != player_id:
             raise RuntimeError(f"Authenticated player_id mismatch: expected {player_id}, got {auth_pid}")
 
-        # 2. EnterZone
         zone_resp = self.request(
             MessageType.EnterZone,
             snf_wire.enter_zone(zone_id, x, y),

@@ -134,8 +134,6 @@ namespace snf::server
                 return FramePostResult::InvalidPayload;
             }
 
-            // The route decides which battle this connection is in. Taking the room
-            // from the payload alone would let a client cast into someone else's.
             const auto in_room = _routes.inRoomFor(envelope.connection);
             if (!in_room || in_room->player != *player)
             {
@@ -146,8 +144,6 @@ namespace snf::server
             const RoomId room{.value = read_u64(payload, 0)};
             const SkillId skill{.value = read_u32(payload, 8)};
             const std::uint64_t request_sequence = read_u64(payload, 12);
-            // A zero skill or sequence is a malformed frame rather than a cast the
-            // Room should judge: both are the value a field left unset carries.
             if (room.value == 0 || in_room->room != room || skill.value == 0 || request_sequence == 0)
             {
                 return FramePostResult::InvalidPayload;
@@ -185,8 +181,6 @@ namespace snf::server
             const RoomId room{.value = read_u64(payload, 0)};
             const std::uint8_t raw_direction = std::to_integer<std::uint8_t>(payload[8]);
             const std::uint64_t request_sequence = read_u64(payload, 9);
-            // Unlike unset ids and sequences, zero is deliberately the valid Stop
-            // direction. The enum's upper bound is still checked at the wire edge.
             if (room.value == 0 || in_room->room != room || !isValidMoveDirection(raw_direction) || request_sequence == 0)
             {
                 return FramePostResult::InvalidPayload;
@@ -412,8 +406,6 @@ namespace snf::server
         }
         else if (std::holds_alternative<PurchaseCommand>(*dispatch_result.command))
         {
-            // A purchase is persistent Player state. It must never execute on the
-            // connection-scoped provisional actor used by unauthenticated PING.
             return FramePostResult::InvalidPayload;
         }
 
@@ -466,8 +458,6 @@ namespace snf::server
 
     PostResult ProtocolGateway::tryPostConnectionClosed(ConnectionClosed closed)
     {
-        // TcpServer retains this exact lifecycle value in its bounded retry deque, so
-        // the close resumes through the normal Player path once cleanup has run.
         if (_handoffs.noteDisconnect(closed.connection) || _room_entries.noteDisconnect(closed.connection))
         {
             return PostResult::Full;

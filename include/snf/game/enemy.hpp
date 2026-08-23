@@ -14,7 +14,6 @@ namespace snf::server
         [[nodiscard]] bool operator==(const EnemyId&) const noexcept = default;
     };
 
-    // Crosses the wire as one byte. Add new kinds only at the end.
     enum class EnemyKind : std::uint8_t
     {
         Minion = 0,

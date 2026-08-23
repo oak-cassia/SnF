@@ -6,9 +6,6 @@
 
 namespace snf::server
 {
-    // Temporary pre-authentication routing identity. It may be derived from a
-    // connection generation, but it is never a PlayerId, persistence key, or
-    // reconnect key.
     struct ProvisionalActorId
     {
         std::uint64_t value{0};

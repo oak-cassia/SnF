@@ -43,15 +43,8 @@ namespace snf::runtime
     {
         KeepActive,
         Evict,
-        // Passivation request rather than a lifecycle fence. The scheduler evicts
-        // only if this actor's mailbox is empty at the decision point; otherwise it
-        // keeps the activation and processes the already accepted work. Unlike Evict,
-        // this never discards a mailbox tail.
         PassivateIfIdle,
         Stopped,
-        // The handler awaited an operation. The scheduler keeps the command's
-        // capacity and turn accounting open until a terminal continuation or a
-        // cancellation arrives, and leaves the actor out of the ready queue.
         Suspended,
     };
 
@@ -74,9 +67,6 @@ namespace snf::runtime
         [[nodiscard]] bool operator==(const TimerHandle&) const noexcept = default;
     };
 
-    // Handed to a binding's dispatch/resume. Its address is stable for the
-    // lifetime of one actor activation: an awaiter that suspends still uses it
-    // after dispatch has returned, so a per-dispatch stack object would dangle.
     class ActorContext
     {
     public:
@@ -88,31 +78,12 @@ namespace snf::runtime
         [[nodiscard]] virtual ActorKey key() const noexcept = 0;
         [[nodiscard]] virtual ActorIncarnation incarnation() const noexcept = 0;
 
-        // When this turn began, not when a timer expired. An actor whose mailbox
-        // held the command for 500 ms would otherwise reason about a moment 500 ms
-        // gone, which is the drift that measuring in real time was meant to remove.
-        // Content derives durations, cooldowns and rate-based amounts from the
-        // difference between successive values rather than from a tick count.
         [[nodiscard]] virtual std::chrono::steady_clock::time_point observedAt() const noexcept = 0;
 
-        // Reserves an in-flight slot -- which is also the terminal continuation
-        // slot -- allocates a TaskId, and registers the operation on the actor
-        // slot so the owning Worker can cancel it later. std::nullopt means the
-        // reservation failed and the operation must not be started at all.
         [[nodiscard]] virtual std::optional<ActorCompletionHandle> tryBeginOperation(std::shared_ptr<AsyncOperationControl> operation) = 0;
 
-        // Undoes tryBeginOperation when submitting the operation threw. The
-        // operation never started, so no completion can arrive for it.
         virtual void abortOperation() noexcept = 0;
 
-        // Posts a domain payload to another actor's mailbox. It is deliberately
-        // not awaitable: an actor that waited for another actor's reply could
-        // form a cycle, and this runtime has no way to detect or break one, so
-        // suspended tasks would outlive every drain predicate.
-        //
-        // The payload is assembled into a submission by the *target* binding, so
-        // the sender never learns the target's command type. ActivateIfMissing is
-        // used: a tell whose target is passivated must still arrive.
         [[nodiscard]] virtual PostResult tryTell(ActorKey target, TellPayload payload) = 0;
 
         // 소유 Worker의 dispatch/resume 안에서만 호출 가능하다.
@@ -125,12 +96,6 @@ namespace snf::runtime
         ActorContext() = default;
     };
 
-    // Suspends the actor until an external service completes the operation.
-    //
-    // The producer never resumes the coroutine; it only publishes. That is what
-    // makes an immediate completion safe: the publish lands in the owning Worker's
-    // continuation queue, and the suspension has already finished by the time that
-    // Worker looks at the queue.
     template <typename T, typename Submit> class AsyncOperationAwaiter final
     {
     public:
@@ -198,17 +163,12 @@ namespace snf::runtime
         bool _rejected{false};
     };
 
-    // co_await awaitAsyncOperation<Result>(context, [&](auto producer) {
-    //     service.submit(request, std::move(producer));
-    // });
     template <typename T, typename Submit>
     [[nodiscard]] AsyncOperationAwaiter<T, std::decay_t<Submit>> awaitAsyncOperation(ActorContext& context, Submit&& submit)
     {
         return AsyncOperationAwaiter<T, std::decay_t<Submit>>{context, std::forward<Submit>(submit)};
     }
 
-    // A move-only, type-erased binding submission. Its constructor is private:
-    // only an ActorBinding factory can associate a typed payload with a target.
     class ActorSubmission final
     {
     public:
@@ -260,8 +220,6 @@ namespace snf::runtime
         friend class ActorRuntime;
     };
 
-    // The scheduler only stores this wrapper type. Domain actors themselves do
-    // not implement a common runtime base class.
     class ActorState
     {
     public:
@@ -294,10 +252,6 @@ namespace snf::runtime
             return ActorSubmission{this, target, activation, accounting, std::forward<Payload>(payload)};
         }
 
-        // Null when the submission carries a different payload type. A binding that
-        // has more than one payload for the same accounting class uses this to pick
-        // a branch; payloadAs is still the right call once the type is settled,
-        // because a mismatch there is a wiring bug rather than a case to handle.
         template <typename Payload> [[nodiscard]] static const Payload* tryPayloadAs(const ActorSubmission& submission) noexcept
         {
             const auto* payload = dynamic_cast<const ActorSubmission::TypedPayload<Payload>*>(submission._payload.get());
@@ -315,25 +269,11 @@ namespace snf::runtime
             return *payload;
         }
 
-        // Implementations create and use a local wrapper that owns their domain
-        // actor. No Player/Zone/etc. runtime inheritance is required.
         [[nodiscard]] virtual std::unique_ptr<ActorState> activate(EntityId entity) = 0;
 
-        // Returning Suspended means the handler's task is parked on an operation
-        // begun through the context. The binding keeps the task in its own state
-        // until resume() finishes it.
         [[nodiscard]] virtual ActorDispatchResult
         dispatch(ActorState& state, const ActorSubmission& submission, ActorContext& context, std::stop_token stop_token) = 0;
 
-        // Builds this binding's submission for a tell addressed to one of its
-        // actors. Only the binding that owns the payload type can restore it, which
-        // is what lets the runtime route a tell without knowing any domain type.
-        // std::nullopt means this kind does not accept the payload; the default
-        // accepts none, so a kind that is never told needs no override.
-        //
-        // Unlike the other factories this one runs on any Worker, concurrently, so
-        // it must stay a read-only conversion. Do not add a cache, a sequence
-        // counter or any other mutable state to an implementation.
         [[nodiscard]] virtual std::optional<ActorSubmission> makeTell(ActorKey target, TellPayload payload)
         {
             static_cast<void>(target);
@@ -341,9 +281,6 @@ namespace snf::runtime
             return std::nullopt;
         }
 
-        // Called only after a previous dispatch/resume returned Suspended, and
-        // only on the owning Worker. Returning Suspended again is allowed: a
-        // handler may await more than once in sequence.
         [[nodiscard]] virtual ActorDispatchResult resume(ActorState& state, ActorContext& context, std::stop_token stop_token) = 0;
 
         friend class ActorRuntime;
@@ -355,8 +292,6 @@ namespace snf::runtime
         std::uint64_t processed{0};
         std::uint64_t rejected_full{0};
         std::uint64_t evicted_actors{0};
-        // All accepted submissions that have not completed or been discarded:
-        // ingress, mailboxes, and a currently executing dispatch.
         std::size_t queue_depth{0};
         std::size_t queue_high_water_mark{0};
         std::size_t actor_count{0};
@@ -364,27 +299,15 @@ namespace snf::runtime
         std::size_t mailbox_depth{0};
         std::size_t mailbox_high_water_mark{0};
         std::uint64_t budget_yield_turns{0};
-        // Commands that suspended at least once, counted at their first
-        // suspension rather than per suspension.
         std::uint64_t suspended_commands{0};
-        // Operations refused before starting because the in-flight reservation
-        // was exhausted.
         std::uint64_t reservation_rejections{0};
-        // A completion that lost the claim to an already completed operation.
         std::uint64_t double_completions{0};
-        // A completion that lost the claim to a cancellation, or whose
-        // incarnation/task identity no longer matched the owning slot.
         std::uint64_t discarded_late_completions{0};
-        // Operations the owning Worker cancelled before their producer claimed a
-        // terminal outcome.
         std::uint64_t cancelled_operations{0};
         std::size_t suspended_task_count{0};
         std::size_t in_flight_operations{0};
         std::size_t in_flight_high_water_mark{0};
         std::size_t continuation_queue_depth{0};
-        // Actors satisfying the scheduler-visible half of the passivation
-        // condition. The runtime cannot see a binding's retained lifecycle
-        // resources, so this is an observation and not a decision to passivate.
         std::size_t scheduler_passivatable_actor_count{0};
         std::uint64_t timers_scheduled{0};
         std::uint64_t timers_rejected_full{0};
@@ -392,13 +315,8 @@ namespace snf::runtime
         std::uint64_t timers_cancelled{0};
         std::uint64_t timers_discarded_stale{0};
         std::size_t active_timers{0};
-        // Nanoseconds from a command's acceptance to the start of its dispatch.
-        // Control submissions are excluded, as they are in the counters above.
-        // A resume is not a new acceptance, so it is not sampled again.
         DistributionSnapshot queue_wait_nanoseconds;
-        // Nanoseconds from a task suspending to the owning Worker resuming it.
         DistributionSnapshot suspend_duration_nanoseconds;
-        // Nanoseconds from a timer's deadline to its dispatch.
         DistributionSnapshot timer_lateness_nanoseconds;
     };
 
@@ -411,19 +329,12 @@ namespace snf::runtime
     {
         std::size_t worker_count{2};
         std::size_t queue_capacity_per_worker{4096};
-        // Bounds suspended operations per Worker. It is also the continuation
-        // queue capacity, so holding a reservation guarantees a free slot for the
-        // terminal continuation and a publish can never be refused for capacity.
         std::size_t max_in_flight_operations_per_worker{1024};
-        // Diagnostic hooks run on the owning Worker. Production leaves them
-        // empty; tests can use them for deterministic scheduling/failures.
         std::function<void(std::size_t)> on_worker_start;
         std::function<void(std::size_t, const ActorKey&, const ActorSubmission&)> on_before_dispatch;
         std::function<void()> on_worker_failure;
     };
 
-    // Fixed-shard, actor-bound scheduler. Bindings must be registered before
-    // start(), after which the registry is immutable for the runtime lifetime.
     class ActorRuntime final
     {
     public:
@@ -439,25 +350,12 @@ namespace snf::runtime
 
         [[nodiscard]] PostResult tryPost(ActorSubmission submission);
 
-        // Routes a tell to the target kind's registered binding, which assembles
-        // the submission, and then reuses tryPost. A tell therefore lands in the
-        // same bounded ingress and mailbox as a reactor-issued command, so ordering
-        // and backpressure do not depend on who sent it.
-        //
-        // Throws std::logic_error when the target binding refuses the payload:
-        // like a payloadAs mismatch that is a wiring bug, not a runtime condition.
         [[nodiscard]] PostResult tryTell(ActorKey target, TellPayload payload);
 
         void close() noexcept;
 
-        // Requests cancellation. It never touches a coroutine frame or a mailbox
-        // itself: each owning Worker discards its own submissions, cancels its own
-        // operations and destroys its own frames after being woken.
         void cancel() noexcept;
 
-        // Requests cancellation of the operation an actor is currently suspended
-        // on. Callable from any thread; the owning Worker performs the terminal
-        // transition. This is the entry point a deadline primitive will use.
         void requestActorOperationCancel(const ActorKey& key) noexcept;
 
         [[nodiscard]] std::size_t workerIndexFor(const ActorKey& key) const noexcept;
@@ -491,9 +389,6 @@ namespace snf::runtime
         };
 
         void runWorker(std::size_t worker_index);
-        // Replaces the old blocking ingress pop. A Worker now waits on its own
-        // wake-up because it has two input sources -- ingress and continuations --
-        // and a bounded queue can only be waited on one at a time.
         [[nodiscard]] bool pumpWorker(Worker& worker);
         void applyCancelRequests(Worker& worker);
         [[nodiscard]] std::size_t drainContinuations(Worker& worker);
@@ -511,8 +406,6 @@ namespace snf::runtime
         void releaseOutstanding(Worker& worker, std::size_t count = 1) noexcept;
         [[nodiscard]] bool reserveOperation(Worker& worker) noexcept;
         void releaseOperation(Worker& worker) noexcept;
-        // Applies the terminal half of a command's accounting exactly once,
-        // whichever of success, failure or cancellation ended it.
         void finishActiveCommand(Worker& worker, ActorEntry& entry, bool succeeded) noexcept;
         [[nodiscard]] bool publishContinuation(const ActorContinuation& continuation) noexcept;
         void reportRejectedCompletion(const ActorContinuation& continuation, ContinuationRejection rejection) noexcept;
@@ -524,8 +417,6 @@ namespace snf::runtime
         const std::size_t _worker_count;
         const std::size_t _max_in_flight_operations;
         std::vector<std::unique_ptr<Worker>> _workers;
-        // Kept alive by producers, so a completion that outlives the runtime finds
-        // a deactivated endpoint instead of a dangling pointer.
         std::shared_ptr<WorkerContinuationEndpoint> _continuation_endpoint;
         RuntimeCompletionSink& _runtime_completion;
         std::function<void(std::size_t)> _on_worker_start;

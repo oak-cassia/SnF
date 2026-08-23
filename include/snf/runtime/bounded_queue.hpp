@@ -11,8 +11,6 @@
 
 namespace snf::runtime
 {
-    // A bounded FIFO queue with two distinct shutdown modes. close() preserves
-    // accepted items for consumers, while cancel() abandons them and wakes every waiter.
     template <typename T> class BoundedQueue
     {
     public:
@@ -45,8 +43,6 @@ namespace snf::runtime
             return true;
         }
 
-        // Waits only on a full queue. The producer is released when capacity becomes
-        // available or when close()/cancel() rejects the item.
         template <typename U> [[nodiscard]] bool push(U&& item)
         {
             {
@@ -66,9 +62,6 @@ namespace snf::runtime
             return true;
         }
 
-        // Preserves blocking backpressure while allowing the producer's own
-        // lifecycle to interrupt a wait on a full queue. Stopping one producer
-        // does not close or cancel the shared queue for other producers.
         template <typename U> [[nodiscard]] bool push(U&& item, const std::stop_token stop_token)
         {
             {
@@ -119,7 +112,6 @@ namespace snf::runtime
             return item;
         }
 
-        // New producers are rejected, but consumers continue draining accepted items.
         void close()
         {
             {
@@ -131,8 +123,6 @@ namespace snf::runtime
             _not_full.notify_all();
         }
 
-        // Used only when graceful shutdown has expired. It abandons queued work and
-        // releases every blocked producer and consumer.
         std::size_t cancel()
         {
             std::size_t discarded_count = 0;

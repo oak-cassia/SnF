@@ -215,7 +215,7 @@ namespace
         assert(result.error.empty());
         assert(result.successful_connections == 4);
         assert(result.failed_connections == 0);
-        assert(result.sent_bootstrap_requests == 13); // auth + Zone + Room for all, BattleStart for one leader
+        assert(result.sent_bootstrap_requests == 13);
         assert(result.received_bootstrap_responses == result.sent_bootstrap_requests);
         assert(result.battle_start_rejections == 0);
         assert(result.sent_gameplay_requests > 0);

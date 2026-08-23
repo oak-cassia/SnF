@@ -19,9 +19,6 @@ namespace snf::server
     {
         RoomConfig actor;
         std::chrono::nanoseconds tick_budget{std::chrono::milliseconds{5}};
-        // Result delivery is intentionally a binding concern. Production routing
-        // can replace this callback with a typed sink without putting connection
-        // or protocol state inside Room.
         std::function<void(const RoomInboundCommand&, const RoomResult&)> on_result;
     };
 
@@ -29,8 +26,6 @@ namespace snf::server
     {
         snf::runtime::DistributionSnapshot command_execution_nanoseconds;
         snf::runtime::DistributionSnapshot tick_execution_nanoseconds;
-        // ResultSink payload construction and OutboundChannel enqueue only. Reactor
-        // frame encoding and TCP transmission happen later on another thread.
         snf::runtime::DistributionSnapshot tick_publish_nanoseconds;
         snf::runtime::DistributionSnapshot tick_turn_nanoseconds;
         std::uint64_t tick_overruns{0};
@@ -60,8 +55,6 @@ namespace snf::server
         ) override;
         [[nodiscard]] snf::runtime::ActorDispatchResult
         resume(snf::runtime::ActorState& state, snf::runtime::ActorContext& context, std::stop_token stop_token) override;
-        // Called on the sending Player's Worker, so this stays a read-only
-        // transform: no cache, no counter, nothing another Worker could race with.
         [[nodiscard]] std::optional<snf::runtime::ActorSubmission>
         makeTell(snf::runtime::ActorKey target, snf::runtime::TellPayload payload) override;
 

@@ -11,8 +11,6 @@ namespace snf::server
 
     std::size_t ProtocolPlayerResponseSink::requiredSlots(const PlayerResult& result) const noexcept
     {
-        // One outbound action per response. Only the sink knows this mapping, which
-        // is why the binding asks rather than counting the vector itself.
         return result.responses.size();
     }
 

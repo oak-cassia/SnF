@@ -24,8 +24,6 @@ namespace snf::server
         Closed,
     };
 
-    // Shared protocol boundary for every network backend. Implementations must
-    // keep tryPost bounded and non-blocking on the network thread.
     class FrameIngress
     {
     public:

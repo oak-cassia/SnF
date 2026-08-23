@@ -6,8 +6,6 @@
 
 namespace snf::server
 {
-    // Persistent player identity. It is deliberately unrelated to a socket
-    // descriptor, connection generation, or pre-authentication actor id.
     struct PlayerId
     {
         std::uint64_t value{0};

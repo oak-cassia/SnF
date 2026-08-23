@@ -31,9 +31,6 @@ namespace snf::server
 
         if (result != snf::runtime::PostResult::Accepted)
         {
-            // The refused submission has already released the credit it took, inside
-            // tryPost. Recording the refusal here is what keeps that release out of the
-            // count of commands that reached a result.
             _lifecycle.onCommandAdmissionRejected(connection);
         }
 

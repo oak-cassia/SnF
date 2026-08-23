@@ -67,9 +67,6 @@ namespace
         std::atomic<bool> release_result_store{false};
     };
 
-    // Test-only result that widens the otherwise non-blocking claim-to-publish
-    // window. Its second move is AsyncOperationState's result store, after the
-    // Pending -> Completed CAS but before continuation publication.
     struct ClaimWindowResult
     {
         ClaimWindowResult(int result_value, std::shared_ptr<ClaimWindowGate> result_gate) noexcept
@@ -102,8 +99,6 @@ namespace
         std::shared_ptr<ClaimWindowGate> gate;
     };
 
-    // Holds producers until the test thread decides to complete them, so a
-    // completion always arrives from a thread other than the owning Worker.
     class TestAsyncService final
     {
     public:
@@ -147,8 +142,6 @@ namespace
             }
         }
 
-        // Publishes the same operation twice. The second publish must lose the
-        // terminal claim rather than resume the actor again.
         void completeAllTwice()
         {
             for (auto& pending : take())
@@ -228,8 +221,6 @@ namespace
         int value{0};
     };
 
-    // Records the thread that touched each stage of a task's life. Worker affinity
-    // is only meaningful if these all match and differ from the completing thread.
     struct AffinityRecord
     {
         std::atomic<std::thread::id> dispatched{};
@@ -238,9 +229,6 @@ namespace
         std::atomic<int> payload_value_at_frame_destruction{-1};
     };
 
-    // Its destructor runs when the coroutine frame is destroyed, which is how a
-    // test observes where destruction happened even when the frame is dropped
-    // without being resumed.
     class FrameProbe final
     {
     public:
@@ -350,8 +338,6 @@ namespace
 
                                                 if (payload.behavior == Behavior::CompleteInline)
                                                 {
-                                                    // Completes before await_suspend returns. The publish has
-                                                    // to wait for the owning Worker rather than resume here.
                                                     producer.complete(payload.value * 10);
                                                     return;
                                                 }
@@ -482,8 +468,6 @@ namespace
 
     template <typename Predicate> bool wait_until(Predicate predicate)
     {
-        // Deliberately generous: a slow sanitizer build must not turn a correct
-        // interleaving into a failure.
         const auto deadline = std::chrono::steady_clock::now() + 5s;
         while (std::chrono::steady_clock::now() < deadline)
         {
@@ -522,8 +506,6 @@ namespace
         assert(harness.runtime.tryPost(harness.binding.post(1, 5, Behavior::AwaitOnce)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.service.pendingCount() == 1; }));
 
-        // Actor 1 is suspended. A second command for the same actor must wait in
-        // its mailbox while a different actor makes progress on the same Worker.
         assert(harness.runtime.tryPost(harness.binding.post(1, 6, Behavior::NoAwait)) == PostResult::Accepted);
         assert(harness.runtime.tryPost(harness.binding.post(2, 7, Behavior::NoAwait)) == PostResult::Accepted);
 
@@ -543,7 +525,6 @@ namespace
         const auto outcomes = harness.binding.outcomes();
         assert(outcomes[1].kind == OutcomeKind::Completed);
         assert(outcomes[1].value == 50);
-        // The queued command runs only after the suspended one reached terminal.
         assert(outcomes[2].value == 6);
 
         harness.runtime.close();
@@ -588,8 +569,6 @@ namespace
         assert(outcomes.front().kind == OutcomeKind::Completed);
         assert(outcomes.front().value == 40);
 
-        // The producer ran on the Worker itself, yet the resume still went through
-        // the continuation queue rather than happening inline.
         const auto dispatched = harness.state->affinity.dispatched.load();
         assert(harness.state->affinity.resumed.load() == dispatched);
 
@@ -616,7 +595,6 @@ namespace
         harness.runtime.join();
 
         const auto stats = harness.workerStats(zone_key(1));
-        // One acceptance, one terminal: two suspensions must not double-count.
         assert(stats.accepted == 1);
         assert(stats.processed == 1);
         assert(stats.queue_wait_nanoseconds.sample_count == 1);
@@ -633,14 +611,11 @@ namespace
         assert(harness.runtime.tryPost(harness.binding.post(1, 1, Behavior::AwaitOnce)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.service.pendingCount() == 1; }));
 
-        // The single in-flight slot is taken, so the next actor cannot start an
-        // operation at all.
         assert(harness.runtime.tryPost(harness.binding.post(2, 2, Behavior::AwaitOnce)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.binding.outcomes().size() == 1; }));
 
         assert(harness.binding.outcomes().front().kind == OutcomeKind::Rejected);
         assert(harness.workerStats(zone_key(2)).reservation_rejections == 1);
-        // Nothing was submitted for the rejected operation beyond the attempt.
         assert(harness.service.pendingCount() == 1);
 
         harness.service.completeAll();
@@ -679,8 +654,6 @@ namespace
 
         harness.service.failAll();
 
-        // The handler does not catch a producer failure, so it reaches the Worker
-        // as a failure exactly like a synchronous handler throw would.
         bool threw = false;
         try
         {
@@ -708,8 +681,6 @@ namespace
         assert(harness.binding.outcomes().front().kind == OutcomeKind::Cancelled);
         assert(harness.workerStats(zone_key(1)).cancelled_operations == 1);
 
-        // A completion that arrives after the cancellation won the claim is a late
-        // completion, not a second terminal outcome.
         harness.service.completeAll();
         assert(wait_until([&harness] { return harness.workerStats(zone_key(1)).discarded_late_completions == 1; }));
         assert(harness.binding.outcomes().size() == 1);
@@ -726,9 +697,6 @@ namespace
         assert(harness.runtime.tryPost(harness.binding.post(1, 12, Behavior::AwaitOnce)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.service.pendingCount() == 1; }));
 
-        // The completion claims the terminal transition first, so the cancel must
-        // lose and the Worker must consume the already-published continuation
-        // instead of resuming with a cancellation.
         harness.service.completeAll();
         harness.runtime.requestActorOperationCancel(zone_key(1));
 
@@ -751,9 +719,6 @@ namespace
         std::jthread completer{[&harness] { harness.service.completeClaimWindow(230); }};
         assert(wait_until([&harness] { return harness.state->claim_window_gate->result_store_entered.load(std::memory_order_acquire); }));
 
-        // Completed owns the terminal transition, but its result store and publish
-        // are deliberately paused. Cancellation must leave the task suspended and
-        // keep the reservation until that guaranteed publish arrives.
         harness.runtime.requestActorOperationCancel(zone_key(1));
         assert(harness.runtime.tryPost(harness.binding.post(2, 24, Behavior::NoAwait)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.binding.outcomes().size() == 1; }));
@@ -819,8 +784,6 @@ namespace
             assert(harness.runtime.tryPost(harness.binding.post(1, 14, Behavior::AwaitOnce)) == PostResult::Accepted);
             assert(wait_until([&harness] { return harness.service.pendingCount() == 1; }));
 
-            // A graceful close only shuts the external ingress. An operation that
-            // was already admitted still has to reach its terminal outcome.
             std::jthread closer{[&harness] { harness.runtime.close(); }};
             harness.service.completeAll();
             closer.join();
@@ -892,7 +855,6 @@ namespace
         }
 
         assert(threw);
-        // The operation never started, so its reservation must not stay held.
         const auto stats = harness.workerStats(zone_key(1));
         assert(stats.in_flight_operations == 0);
         assert(stats.reservation_rejections == 0);
@@ -906,9 +868,6 @@ namespace
         assert(harness.runtime.tryPost(harness.binding.post(1, 15, Behavior::AwaitOnce)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.service.pendingCount() == 1; }));
 
-        // Actor 2 fails the Worker while actor 1 is still suspended. The failing
-        // Worker never returns to its pump, so it has to transition and destroy
-        // actor 1's task itself.
         assert(harness.runtime.tryPost(harness.binding.post(2, 1, Behavior::ThrowBeforeAwait)) == PostResult::Accepted);
 
         bool threw = false;
@@ -925,7 +884,6 @@ namespace
         assert(harness.completion.failed_count.load() == 1);
         assert(harness.state->affinity.frame_destroyed.load() == harness.state->affinity.dispatched.load());
 
-        // A completion arriving after the failure has nothing left to resume.
         harness.service.completeAll();
     }
 
@@ -938,9 +896,6 @@ namespace
         assert(harness.runtime.tryPost(harness.binding.post(suspended_entity, 21, Behavior::AwaitOnce)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.service.pendingCount() == 1; }));
 
-        // Worker 1 fails while Worker 0 is asleep with a suspended task. The
-        // failure path may only request global cancellation; Worker 0 must wake,
-        // claim cancellation, and destroy its own frame itself.
         assert(harness.runtime.tryPost(harness.binding.post(failing_entity, 22, Behavior::ThrowBeforeAwait)) == PostResult::Accepted);
 
         bool threw = false;
@@ -960,8 +915,6 @@ namespace
         assert(suspended_worker_stats.queue_depth == 0);
         assert(suspended_worker_stats.cancelled_operations == 1);
 
-        // The external operation may outlive both Workers, but its late completion
-        // cannot resume the destroyed frame.
         harness.service.completeAll();
     }
 
@@ -980,7 +933,6 @@ namespace
         assert(stats.queue_depth == 0);
         assert(stats.cancelled_operations == 1);
         assert(harness.state->affinity.payload_value_at_frame_destruction.load() == 16);
-        // The task was abandoned rather than resumed, so no outcome was recorded.
         assert(harness.binding.outcomes().empty());
         assert(harness.completion.drained_count.load() == 0);
 
@@ -994,9 +946,6 @@ namespace
         assert(harness.runtime.tryPost(harness.binding.post(1, 19, Behavior::AwaitOnce)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.service.pendingCount() == 1; }));
 
-        // Keep the owning Worker inside another Actor while actor 1's completion
-        // claims terminal and publishes. Hard cancel must consume that reserved
-        // continuation instead of destroying the frame and leaking the queue item.
         assert(harness.runtime.tryPost(harness.binding.post(2, 20, Behavior::BlockWorker)) == PostResult::Accepted);
         assert(wait_until([&harness] { return harness.state->block_started.load(std::memory_order_acquire); }));
 
@@ -1034,9 +983,6 @@ namespace
             runtime.join();
         }
 
-        // The producer outlived the runtime, which is exactly what the coroutine
-        // contract allows for a blocking operation. Its endpoint is deactivated,
-        // so completing now must be a safe no-op rather than a dangling write.
         service.completeAll();
         assert(state->outcomes.empty());
     }

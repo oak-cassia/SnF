@@ -113,9 +113,6 @@ namespace
                   << "Outbound reservations: " << network.reserved_outbound_slots << " slots reserved, " << network.pending_outbound_reservations
                   << " actors waiting, " << network.tracked_outbound_connections
                   << " connections tracked\n"
-                  // Commit to consumption only. The wait for capacity is the actor's
-                  // suspension, reported per Worker below, so the two together are what
-                  // compares against the 3.9 baseline's single blocking figure.
                   << "Outbound hand-off wait ns: " << format_distribution(network.outbound_queue_wait_nanoseconds) << '\n'
                   << "Commands: " << metrics.command_terminals << " reached a result, " << metrics.command_admission_rejections
                   << " refused admission\n";
@@ -181,17 +178,12 @@ int main()
         config.actor_worker_count = actor_worker_count_from_environment();
         if (auto mysql = mysql_from_environment())
         {
-            // Choosing the backend, and linking it, stays here rather than in the
-            // server: GameServer only asks for a repository.
             config.player_repository_factory = [settings = *std::move(mysql)]
             {
                 return std::make_unique<snf::server::MySqlPlayerRepository>(settings);
             };
         }
         config.metrics_report_interval = METRICS_REPORT_INTERVAL;
-        // Runs on the reactor thread. Writing to a terminal is acceptable for
-        // a development binary; a deployment that ships metrics elsewhere must
-        // post to a bounded logger queue instead of doing the I/O here.
         config.metrics_reporter = [](const snf::server::ServerMetricsSnapshot& metrics)
         {
             std::cout << "--- metrics ---\n";

@@ -9,9 +9,6 @@
 
 namespace snf::server
 {
-    // A typed route target for either the pre-authentication actor namespace or
-    // the persistent Player namespace. Construction from the two strong ids is
-    // intentionally implicit so aggregate route initialization stays concise.
     class PlayerActorId
     {
     public:

@@ -51,9 +51,6 @@ namespace snf::server
     {
         static_cast<void>(connection);
         _releases.fetch_add(1, std::memory_order_relaxed);
-        // A refused post is rolled back by onCommandAdmissionRejected on this same
-        // atomic. Keeping both halves in one modification order prevents the snapshot
-        // underflow possible when subtracting two independently observed atomics.
         _terminals.fetch_add(1, std::memory_order_relaxed);
     }
 
@@ -61,8 +58,6 @@ namespace snf::server
     {
         static_cast<void>(connection);
         _admission_rejections.fetch_add(1, std::memory_order_relaxed);
-        // ActorRuntime destroys the refused submission before returning Full/Closed,
-        // so this command's release increment is sequenced before its rollback.
         _terminals.fetch_sub(1, std::memory_order_relaxed);
     }
 

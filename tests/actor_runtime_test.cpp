@@ -65,9 +65,6 @@ namespace
         std::atomic<int> failed_count{0};
     };
 
-    // The real channel, because the reservation path is part of what these tests
-    // exercise. Without a reactor the test itself has to drain and grant, which is
-    // exactly what a saturated outbound needs from the reactor in production.
     struct RuntimeDependencies
     {
         explicit RuntimeDependencies(const std::size_t outbound_capacity)
@@ -313,8 +310,6 @@ namespace
         }
 
     protected:
-        // Restores the int a sender handed to tryTell and wraps it in this
-        // binding's own payload, which is what the runtime cannot do itself.
         [[nodiscard]] std::optional<ActorSubmission> makeTell(const ActorKey target, TellPayload payload) override
         {
             auto value = payload.take<int>();
@@ -373,7 +368,6 @@ namespace
             return ActorDispatchResult::KeepActive;
         }
 
-        // This binding never suspends, so the scheduler never resumes it.
         [[nodiscard]] ActorDispatchResult resume(ActorState&, ActorContext&, std::stop_token) override
         {
             throw std::logic_error{"SyntheticBinding does not suspend"};
@@ -532,15 +526,11 @@ namespace
         state->release.count_down();
         player.runtime.close();
         player.runtime.join();
-        // The same key's second command cannot overlap its first, so the global
-        // maximum is exactly the two independently sharded actors.
         assert(state->maximum_active.load() == 2);
     }
 
     void test_synthetic_bindings_share_capacity_fairness_and_cross_kind_slots()
     {
-        // Player and Zone submissions share the single Worker's outstanding
-        // budget; one kind cannot reserve a private queue.
         RecordingRuntimeCompletion capacity_completion;
         auto capacity_config = player_runtime_config(1, 2);
         std::promise<void> capacity_worker_start_signal;
@@ -631,8 +621,6 @@ namespace
         assert(zone_dispatch < final_player_dispatch);
         assert(runtime.getStats().workers.front().budget_yield_turns == 1);
 
-        // Same numeric id remains independent by kind: evicting the Player slot
-        // must never evict a Zone slot.
         RecordingRuntimeCompletion completion_two;
         ActorRuntime cross_kind{player_runtime_config(1, 8), completion_two};
         const auto cross_players = std::make_shared<SyntheticBinding::State>();
@@ -1120,8 +1108,6 @@ namespace
         }
         assert(dependencies.outbound.size() == 1);
 
-        // The channel is full, so applying this command's follow-ups suspends its actor rather
-        // than parking the Worker. A registered waiter is the observable proof.
         assert(player.ingress.tryPost(make_command(1, 2)) == PostResult::Accepted);
         deadline = std::chrono::steady_clock::now() + 1s;
         while (dependencies.outbound.pendingWaiterCount() != 1 && std::chrono::steady_clock::now() < deadline)
@@ -1145,19 +1131,13 @@ namespace
         }
         joined.get();
         assert(completed);
-        // Cancelling one runtime never cancels the shared channel: the action already
-        // committed is still waiting for the reactor.
         assert(dependencies.outbound.size() == 1);
         assert(!dependencies.outbound.isCancelled());
-        // Destroying a suspended frame runs the awaiting scope's destructors, so the
-        // waiter withdraws itself rather than lingering in the registry.
         assert(dependencies.outbound.pendingWaiterCount() == 0);
     }
 
     void test_admitted_commands_and_refused_posts_are_counted_apart()
     {
-        // Success, cancellation and mailbox discard in one run: three commands and a
-        // close for the same actor, with the Worker parked until everything is queued.
         {
             RuntimeDependencies dependencies{8};
             auto config = player_runtime_config(1, 8);
@@ -1183,15 +1163,11 @@ namespace
             release_worker.set_value();
             player.runtime.join();
 
-            // Cancelled and discarded commands reach a result exactly like the ones that
-            // answered, and none of them was refused.
             assert(dependencies.lifecycle.releaseCount() == 3);
             assert(dependencies.lifecycle.admissionRejectionCount() == 0);
             assert(dependencies.lifecycle.terminalCount() == 3);
         }
 
-        // A refused post still releases the credit it took at this boundary, but it is
-        // not a command that ran, so it is counted apart.
         {
             RuntimeDependencies dependencies{8};
             auto config = player_runtime_config(1, 1);
@@ -1217,17 +1193,12 @@ namespace
 
             assert(player.ingress.tryPost(make_command(9, 3)) == PostResult::Closed);
 
-            // Three submissions released their credit, two of them because the runtime
-            // refused the post. Only the admitted one reached a result.
             assert(dependencies.lifecycle.releaseCount() == 3);
             assert(dependencies.lifecycle.admissionRejectionCount() == 2);
             assert(dependencies.lifecycle.terminalCount() == 1);
         }
     }
 
-    // Prices every result above what one connection may ever hold. This is the shape a
-    // future multi-follow-up result takes when the per-connection limit is smaller than
-    // the follow-up count.
     class OversizedResponseSink final : public snf::server::PlayerResponseSink
     {
     public:
@@ -1275,8 +1246,6 @@ namespace
             std::this_thread::yield();
         }
 
-        // Reported for closing, not thrown: one oversized result must not take down every
-        // actor the Worker owns.
         assert(failures.size() == 1);
         assert(!response_sink.applied);
 
@@ -1295,8 +1264,6 @@ namespace
         PlayerRuntime player{dependencies, config};
         player.runtime.start();
 
-        // The first command fills the only outbound slot, the second suspends on the
-        // only in-flight slot, and the third has nowhere left to wait.
         for (std::uint64_t actor_id = 1; actor_id <= 3; ++actor_id)
         {
             assert(player.ingress.tryPost(make_command(actor_id, 1)) == PostResult::Accepted);
@@ -1311,8 +1278,6 @@ namespace
             std::this_thread::yield();
         }
 
-        // The response is not dropped in silence: the connection is reported so the
-        // reactor closes it under the overflow policy.
         assert(failures.size() == 1);
         assert(dependencies.outbound.pendingWaiterCount() == 1);
 
@@ -1334,8 +1299,6 @@ namespace
         }
 
         std::vector<std::uint32_t> emitted;
-        // Stands in for the reactor: drain, then grant whatever the drain freed. With a
-        // capacity of one, every command after the first has to wait for a grant.
         const auto pump = [&dependencies, &emitted]
         {
             while (auto posted = dependencies.outbound.tryPop())
@@ -1372,8 +1335,6 @@ namespace
         assert((emitted == std::vector<std::uint32_t>{1, 2, 3}));
         const auto stats = player.runtime.getStats().workers.front();
         assert(stats.processed == 3);
-        // At least one command could not emit immediately, which is the only way this
-        // order could have been produced without a Worker ever blocking.
         assert(stats.suspended_commands >= 1);
         assert(stats.in_flight_operations == 0);
         assert(dependencies.completion.drained_count.load() == 1);
@@ -1445,8 +1406,6 @@ namespace
         assert(pong.has_value());
         assert(std::get<snf::server::SendFrame>(pong->action).frame.request_id == 2);
 
-        // The close snapshot is deliberately unknown because the disconnect raced
-        // the repository load. The binding must retain the location the load restores.
         assert(
             ingress.tryPostConnectionClosed(
                 player,
@@ -2098,9 +2057,6 @@ namespace
         return false;
     }
 
-    // Sends one tell from inside a dispatch and reports whether it arrived. The
-    // guard on the sentinel value is what keeps the target's own dispatch from
-    // telling again.
     bool tell_arrives(const std::size_t worker_count, const bool same_worker, RecordingRuntimeCompletion& completion)
     {
         auto state = std::make_shared<SyntheticBinding::State>();
@@ -2147,8 +2103,6 @@ namespace
         RecordingRuntimeCompletion completion;
         auto state = std::make_shared<SyntheticBinding::State>();
         SyntheticBinding binding{ActorKind::Zone, state};
-        // One worker, one outstanding slot: the command being dispatched still holds
-        // it, so a tell to that same worker cannot reserve one.
         ActorRuntime runtime{player_runtime_config(1, 1), completion};
         runtime.registerBinding(binding);
 
@@ -2200,8 +2154,6 @@ namespace
         assert(runtime.tryPost(binding.post(sender.entity, 1)) == PostResult::Accepted);
         assert(wait_for_dispatch(*state, target, 30));
 
-        // FIFO holds for one sender's turn, which is the only ordering a mailbox
-        // can promise. Two senders on different Workers interleave by design.
         std::vector<int> seen;
         {
             std::lock_guard lock{state->mutex};
@@ -2250,7 +2202,6 @@ namespace
         assert(runtime.tryPost(binding.post(sender.entity, 1)) == PostResult::Accepted);
         assert(wait_for_dispatch(*state, target, 2));
 
-        // ActivateIfMissing: a reward for a passivated actor must still arrive.
         {
             std::lock_guard lock{activated_mutex};
             assert(std::find(activated.begin(), activated.end(), target.entity) != activated.end());
@@ -2271,8 +2222,6 @@ namespace
         runtime.start();
         runtime.close();
 
-        // The target binding still assembles the submission; tryPost is what refuses
-        // it, so a tell and a reactor command report the same shutdown state.
         assert(runtime.tryTell(ActorKey{.kind = ActorKind::Zone, .entity = 1}, TellPayload::of(7)) == PostResult::Closed);
 
         runtime.join();
@@ -2293,9 +2242,6 @@ void test_observed_at_is_when_the_turn_ran_not_when_the_command_arrived()
         }
         if (value == 1)
         {
-            // Holds the Worker, so the second command waits in the mailbox. That
-            // wait is the whole point: it must show up in the time the second turn
-            // reports, not be hidden by the moment the command was accepted.
             std::this_thread::sleep_for(60ms);
         }
     };
@@ -2327,8 +2273,6 @@ void test_observed_at_is_when_the_turn_ran_not_when_the_command_arrived()
 
     const std::lock_guard lock{observed_mutex};
     assert(observed.size() >= 2);
-    // Both were accepted at once, so an arrival-time reading would put the second
-    // at posted_at. It ran after the first held the Worker for 60ms instead.
     assert(observed[1] >= posted_at + 60ms);
     assert(observed[0] < observed[1]);
     assert(completion.failed_count.load() == 0);

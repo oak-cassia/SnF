@@ -12,8 +12,6 @@
 
 namespace snf::server
 {
-    // The request id is stamped on at the protocol boundary, from the envelope the
-    // command arrived in, so a handler never carries one through.
     struct PongResponse
     {
         std::vector<std::byte> payload;
@@ -36,14 +34,9 @@ namespace snf::server
         PlayerResponse response;
     };
 
-    // The outbound leg only. Anything a handler wants the runtime to do afterwards
-    // is a named field on the per-kind result, and the binding translates it.
     struct PlayerResult
     {
         std::vector<SendResponse> responses{};
-        // Set when the Player wants to enter a Room. The binding turns it into a
-        // message; nothing here names a mailbox. It is not priced into outbound
-        // capacity, because a mailbox and a socket are different resources.
         std::optional<RoomJoinRequest> room_join{};
     };
 }

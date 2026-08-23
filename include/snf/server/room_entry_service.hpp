@@ -32,7 +32,6 @@ namespace snf::server
         std::size_t pending{0};
     };
 
-    // Reactor-owned manager for Room Entry and Return handoffs.
     class RoomEntryService
     {
     public:
@@ -48,22 +47,12 @@ namespace snf::server
         [[nodiscard]] FramePostResult
         tryStart(snf::net::ConnectionId connection, std::uint32_t request_id, PlayerId player, RoomId room);
 
-        // Answers a Room request that cannot start an entry -- one is already in flight,
-        // the player is already in a Room, or a return has not finished -- and reports
-        // whether it did.
         [[nodiscard]] bool tryReplyRoomBusy(snf::net::ConnectionId connection, std::uint32_t request_id, RoomReplyKind kind);
 
-        // Answers a Zone request that cannot be applied because a Room holds the player,
-        // and reports whether it did. Refusing it as a malformed frame would close the
-        // connection, and a Move already in flight when an entry completed is an ordinary
-        // client race rather than a protocol error.
         [[nodiscard]] bool tryReplyZoneBlockedByRoom(snf::net::ConnectionId connection, std::uint32_t request_id, ZoneReplyKind kind);
 
         [[nodiscard]] bool noteDisconnect(snf::net::ConnectionId connection) noexcept;
 
-        // Reactor only. A Worker with a cleared Room publishes a RoomReturnRequest on the
-        // channel instead: this reads and writes route state and the maps below, none of
-        // which are synchronised.
         void startReturn(snf::net::ConnectionId connection, RoomId room);
 
         void drain();

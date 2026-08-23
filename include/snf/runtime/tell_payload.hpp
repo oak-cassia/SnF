@@ -6,13 +6,6 @@
 
 namespace snf::runtime
 {
-    // A domain payload carried from one actor's Binding to the target actor's
-    // Binding. The runtime never inspects it: only the Binding that owns the type
-    // restores it, which is what keeps actor routing free of domain types while
-    // still refusing a submission the target binding did not build.
-    //
-    // Move-only, like ActorSubmission. A tell is delivered at most once, so a
-    // carrier that has been taken from is empty rather than copyable.
     class TellPayload final
     {
     public:
@@ -35,10 +28,6 @@ namespace snf::runtime
             return _storage == nullptr;
         }
 
-        // Moves the value out when the carrier holds exactly this type, leaving the
-        // carrier empty. std::nullopt means the carrier is empty or holds another
-        // type: the target Binding refuses the tell instead of guessing, so a
-        // mismatched payload cannot reach an actor as the wrong command.
         template <typename Payload> [[nodiscard]] std::optional<Payload> take()
         {
             auto* typed = dynamic_cast<TypedStorage<Payload>*>(_storage.get());

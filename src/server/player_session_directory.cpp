@@ -99,8 +99,6 @@ namespace snf::server
             return std::nullopt;
         }
 
-        // A Closing session still holds its indexes so a reconnect is not lost, but a
-        // notification posted to it would go to a connection on its way out.
         const auto session = _sessions_by_connection.find(entry->second);
         if (session == _sessions_by_connection.end() || session->second.state != State::Active)
         {

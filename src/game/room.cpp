@@ -636,8 +636,6 @@ namespace snf::server
         const std::uint64_t skill_damage = skillDamage(*skill, participant->stats.attack);
         bool hit_enemy = false;
         bool killed_boss = false;
-        // Spawn assigns monotonically increasing IDs and erase_if is stable, so
-        // iterating the vector fixes a multi-target cast's wire event order by ID.
         for (Enemy& target : _enemies)
         {
             if (target.health == 0 || !isWithinRange(participant->position, target.position, skill->range))

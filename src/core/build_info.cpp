@@ -11,4 +11,4 @@ namespace snf
     {
         return "0.1.0";
     }
-} // namespace snf
+}
