@@ -1,6 +1,6 @@
 # Step 5 Room 부하 측정 리포트
 
-측정일은 2026-08-22이다. `snf-server-dev:latest`의 Release build를 Docker Linux
+측정일은 2026-08-23이다. `snf-server-dev:latest`의 Release build를 Docker Linux
 6.12.5-linuxkit/aarch64에서 실행했다. container에 보인 자원은 10 CPU, 약 7.65 GiB memory이고
 compiler는 GCC 13.3.0이다. 각 값은 6초 단일 실행의 용량 탐색 결과이므로 장기 benchmark의 신뢰
 구간이 아니라 설계 경계와 다음 병목을 찾는 자료다.
@@ -10,8 +10,9 @@ compiler는 GCC 13.3.0이다. 각 값은 6초 단일 실행의 용량 탐색 결
 공통 workload는 `LoadScenario::Battle`, Room당 4명이다. 축 B는 client당 10 RPS로 고정하고 축 A만
 목표 RPS를 바꿨다. 모든 client가
 `Authenticate` → `EnterZone` → `RoomJoin`을 마친 뒤 방별 leader 하나가 `BattleStart`를 보내고,
-참가자는 `UseSkill`과 `SetMoveIntent`를 번갈아 보낸다. default 100ms Room tick과 전투 규칙을
-사용했다. server는 5초 시계열과 종료 summary를, load client는 요청 RTT와 push frame 수·bytes,
+참가자는 `UseSkill`과 `SetMoveIntent`를 번갈아 보낸다. Slash는 사거리 내 모든 생존 적을
+EnemyId 순서로 타격한다. default 100ms Room tick과 이 전투 규칙을 사용했다. server는 5초
+시계열과 종료 summary를, load client는 요청 RTT와 push frame 수·bytes,
 digest 도착 간격을 기록했다.
 
 `UseSkill`의 Slash cooldown은 1초다. 따라서 높은 목표 RPS에서는 번갈아 보내는 command의 절반인
@@ -47,31 +48,32 @@ peak tick 비용이 아니다.
 
 | 목표 RPS/client | 실효 response/s | gameplay RTT p50/p99 | tick turn p50/p99/max | digest interval p50/p99/max | tick overrun |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 10 | 39.5 | 0.326/0.778ms | 41.0/66.6/66.6µs | 102.248/106.271/106.273ms | 0 |
-| 100 | 398.8 | 0.259/0.577ms | 28.7/71.2/71.2µs | 101.119/103.100/103.111ms | 0 |
-| 1,000 | 3,982.8 | 0.187/0.242ms | 16.4/64.2/64.2µs | 100.137/101.013/101.019ms | 0 |
-| 10,000 | 2,028.2 | 0.197/0.327ms | 16.4/61.8/61.8µs | 100.689/109.889/109.909ms | 0 |
+| 10 | 39.5 | 0.406/0.642ms | 45.1/81.9/87.0µs | 102.273/106.060/106.067ms | 0 |
+| 100 | 399.5 | 0.234/0.420ms | 28.7/45.1/53.8µs | 101.288/102.774/102.814ms | 0 |
+| 1,000 | 3,929.3 | 0.189/0.294ms | 12.3/30.7/50.4µs | 100.161/101.067/101.077ms | 0 |
+| 10,000 | 3,930.2 | 0.167/0.270ms | 14.3/36.9/51.0µs | 100.132/105.305/105.305ms | 0 |
 
-1,000 RPS/client까지 Room queue와 tick은 안정적이었다. 10,000 목표에서 실효 처리량이 낮아진 것은
-server 한계나 처리량 plateau가 아니라 load generator 퇴행이다. server worker queue high-water는
-8, mailbox high-water는 5, `rejected_full`은 0이고 tick turn도 변하지 않았다. 하나의 outstanding
-request만 만드는 load client의 100µs timer/epoll 생성 한계가 Room보다 먼저 나타난 것이다. 따라서
-이 실행이 보장하는 단일 Room 하한은 약 3,983 response/s이고, Room 자체의 붕괴점은 이 generator로
-관측되지 않았다.
+1,000과 10,000 RPS/client 목표의 실효 처리량은 약 3,930 response/s에서 같게 멈춰 load
+generator 상한을 보였다. 해당 구간에서 outbound high-water는 8, server admission 거절과 tick
+overrun은 0이고 tick turn도 안정적이었다. 하나의 outstanding request만 만드는 load client의
+timer/epoll 생성 한계가 Room보다 먼저 나타난 것이다. 따라서 이 실행이 보장하는 단일 Room
+하한은 약 3,930 response/s이고, Room 자체의 붕괴점은 이 generator로 관측되지 않았다.
 
 ## 축 B — worker와 Room 수
 
-정상 종료까지 성공한 가장 큰 점과 다음 실패점을 중심으로 sweep했다. queue와 mailbox는 worker별
-high-water 배열이고, outbound는 모든 worker가 공유하는 queue high-water다.
+정상 종료까지 성공한 가장 큰 점과 다음 실패점을 중심으로 sweep했다. outbound는 모든
+worker가 공유하는 queue high-water다.
 
-| workers × Rooms | clients | 결과 | response/s | gameplay RTT p99 | digest p99 | tick turn p99/max | timer lateness p99 | worker queue HWM | mailbox HWM | outbound HWM |
-| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- | --- | ---: |
-| 1 × 64 | 256 | 성공 | 2,528 | 6.878ms | 107.136ms | 65.5/649.3µs | 6.29ms | 260 | 112 | 448 |
-| 1 × 256 | 1,024 | 성공 | 10,112 | 27.440ms | 116.627ms | 57.3/2,576.8µs | 5.77ms | 1,013 | 496 | 1,323 |
-| 1 × 512 | 2,048 | active 성공, 동시 close 실패 | 20,224 | 31.897ms | 113.831ms | 49.2/1,120.6µs | 5.77ms | 2,675 | 1,607 | 2,259 |
-| 2 × 500 | 2,000 | 성공 | 19,750 | 34.747ms | 113.984ms | 57.3/2,036.8µs | 6.00ms | 1,018 / 994 | 185 / 173 | 2,173 |
-| 4 × 800 | 3,200 | 성공 | 31,600 | 31.192ms | 110.687ms | 81.9/2,153.7µs | 5.77ms | 807 / 814 / 791 / 800 | 160 / 115 / 121 / 158 | 3,806 |
-| 4 × 1,000 | 4,000 | outbound 포화, 865 close | 32,196 | 37.309ms | 113.439ms | 65.5/2,056.5µs | 5.98ms | 775 / 664 / 745 / 863 | 147 / 115 / 195 / 173 | 4,096 |
+| workers × Rooms | clients | 결과 | response/s | gameplay RTT p99 | digest p99 | tick turn p99/max | outbound HWM |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 × 64 | 256 | 성공 | 2,528 | 7.140ms | 107.475ms | 73.7/1,362.1µs | 320 |
+| 1 × 256 | 1,024 | 성공 | 10,112 | 26.563ms | 110.981ms | 57.3/1,380.3µs | 1,503 |
+| 1 × 512 | 2,048 | active 성공, 동시 close 실패 | 19,882.7 | 33.540ms | 113.092ms | 41.0/3,788.8µs | 2,441 |
+| 2 × 500 | 2,000 | 성공 | 19,750 | 29.429ms | 112.825ms | 65.5/1,368.4µs | 2,422 |
+| 4 × 700 | 2,800 | 성공 | 27,650 | 30.720ms | 111.375ms | 73.7/2,024.0µs | 3,232 |
+| 4 × 750 | 3,000 | outbound 포화, 116 close | 28,989.7 | 33.065ms | 116.332ms | 98.3/1,995.3µs | 4,096 |
+| 4 × 800 | 3,200 | outbound 포화, 361 close | 28,411.2 | 44.377ms | 111.126ms | 81.9/3,761.8µs | 4,096 |
+| 4 × 1,000 | 4,000 | outbound 포화, 1,475 close | 26,962.5 | 39.761ms | 112.557ms | 61.4/1,454.6µs | 4,096 |
 
 모든 점에서 `tick_overruns`, tick schedule rejection, worker `rejected_full`은 0이었다. 100ms tick
 주기 초과도 시작되지 않았다. 먼저 드러난 경계는 두 가지다.
@@ -80,9 +82,10 @@ high-water 배열이고, outbound는 모든 worker가 공유하는 queue high-wa
   1,024개가 먼저 찼다. 1 worker × 512 Room과 2 workers × 512 Room은 active 부하를 처리했지만
   종료 drain에서 `Actor async operation was rejected before it started`로 끝났다. 2 workers × 500
   Room은 worker별 in-flight high-water 1,006/994로 정상 종료해 이 경계를 바로 아래에서 확인했다
-- 4 workers × 1,000 Room은 shared outbound queue high-water가 capacity 4,096에 닿고 865
-  `outbound_admission_failures`가 발생했다. 같은 설정의 800 Room은 high-water 3,806에서 모든
-  3,200 연결이 정상 진행·종료했다. worker를 늘려도 이 공유 queue는 비례 확장되지 않는다
+- 전체 대상 Slash fanout을 포함한 현재 코드에서 4 workers × 750 Room은 shared outbound
+  queue high-water가 capacity 4,096에 닿고 116 `outbound_admission_failures`가 발생했다. 바로 아래
+  700 Room은 high-water 3,232에서 모든 2,800 연결이 정상 진행·종료했다. worker를 늘려도
+  이 공유 queue는 비례 확장되지 않는다
 
 따라서 이 구성에서 별도 TimerService나 Room hash co-location은 다음 작업이 아니다. timer는
 관측 범위에서 100ms 주기를 지켰고, 더 큰 Room 수를 지원하려면 player close reservation과 shared
@@ -101,9 +104,9 @@ outbound capacity/credit을 먼저 용량 계약으로 다뤄야 한다.
 | `reward_snapshot_retry_giveups` | 0 |
 | `grant_load_failures` | 0 |
 
-fanout은 4 workers × 800 Room 실행에서 184,674 frames, 39,625,488 bytes였고 oversized digest는
-0이었다. 4 workers × 1,000 Room의 연결 종료는 digest 손실 복구 문제가 아니라 shared outbound
-admission 포화의 연결 격리 정책이 작동한 결과다.
+fanout은 성공점인 4 workers × 700 Room 실행의 server 종료 summary에서 161,567 frames,
+25,405,302 bytes였고 oversized digest는 0이었다. 750 Room 이상의 연결 종료는 digest 손실
+복구 문제가 아니라 shared outbound admission 포화의 연결 격리 정책이 작동한 결과다.
 
 느린 client 통합 시나리오는 1 Room × 4명에서 한 socket만 읽기를 중단했다. 포화를 결정적으로
 유도하기 위해 테스트의 `max_pending_send_bytes`를 `GameServerConfig` 기본값 1MiB에서 32KiB로
@@ -115,7 +118,8 @@ event gap이 없으므로 주기적 resync snapshot은 만들지 않는다.
 
 ## 검증
 
-- Docker Debug 전체: 5개 test target 통과, MySQL integration은 환경 미설정으로 skip
-- Docker ASan·UBSan 전체: 동일
-- Docker TSan 전체: 동일
+- Docker Debug: core 5개 test target 통과, 같은 build의 MySQL integration을 local 전용 DB로
+  별도 실행해 통과
+- Docker ASan·UBSan: core 5개와 MySQL integration 통과
+- Docker TSan: core 5개와 MySQL integration 통과
 - Release 부하 종료 smoke: 성공점은 active connection이 모두 닫히고 server summary까지 출력

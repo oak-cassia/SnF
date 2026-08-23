@@ -30,9 +30,8 @@ namespace snf::server
     inline constexpr std::uint32_t SLASH_RANGE = 12;
     inline constexpr std::uint64_t ATTACK_PERCENT_DENOMINATOR = 100;
 
-    // Slash is the whole catalogue on purpose. A skill that hits several enemies
-    // needs several enemies to exist, and a heal needs someone damaged to heal, so
-    // both wait for the state they would read instead of being defined ahead of it.
+    // Slash is the whole catalogue on purpose. It applies to every living enemy in
+    // range; additional targeting shapes and healing wait for content that needs them.
     class SkillCatalog final
     {
     public:

@@ -238,26 +238,6 @@ namespace snf::server
         return &*position;
     }
 
-    Enemy* Room::nearestLivingEnemy(const ArenaPosition origin, const std::uint32_t range)
-    {
-        Enemy* nearest = nullptr;
-        std::uint64_t nearest_distance = std::numeric_limits<std::uint64_t>::max();
-        for (Enemy& enemy : _enemies)
-        {
-            if (enemy.health == 0 || !isWithinRange(origin, enemy.position, range))
-            {
-                continue;
-            }
-            const std::uint64_t distance = squaredDistance(origin, enemy.position);
-            if (nearest == nullptr || distance < nearest_distance || (distance == nearest_distance && enemy.id.value < nearest->id.value))
-            {
-                nearest = &enemy;
-                nearest_distance = distance;
-            }
-        }
-        return nearest;
-    }
-
     Room::Participant* Room::nearestLivingParticipant(const ArenaPosition origin)
     {
         Participant* nearest = nullptr;
@@ -653,37 +633,48 @@ namespace snf::server
             );
         }
 
-        Enemy* target = nearestLivingEnemy(participant->position, skill->range);
-        if (target == nullptr)
+        const std::uint64_t skill_damage = skillDamage(*skill, participant->stats.attack);
+        bool hit_enemy = false;
+        bool killed_boss = false;
+        // Spawn assigns monotonically increasing IDs and erase_if is stable, so
+        // iterating the vector fixes a multi-target cast's wire event order by ID.
+        for (Enemy& target : _enemies)
         {
-            _pending_events.push_back(SkillWhiffed{.actor = command.player, .skill = command.skill});
-        }
-        else
-        {
-            const std::uint64_t damage = std::min(skillDamage(*skill, participant->stats.attack), target->health);
-            target->health -= damage;
+            if (target.health == 0 || !isWithinRange(participant->position, target.position, skill->range))
+            {
+                continue;
+            }
+
+            hit_enemy = true;
+            const std::uint64_t damage = std::min(skill_damage, target.health);
+            target.health -= damage;
             _pending_events.push_back(EnemyDamaged{
-                .target = target->id,
+                .target = target.id,
                 .actor = command.player,
                 .skill = command.skill,
                 .amount = damage,
-                .health = target->health,
+                .health = target.health,
             });
-            if (target->health == 0)
+            if (target.health == 0)
             {
-                _pending_events.push_back(EnemyDied{.id = target->id});
+                _pending_events.push_back(EnemyDied{.id = target.id});
+                killed_boss = killed_boss || target.kind == EnemyKind::Boss;
             }
+        }
 
-            if (target->kind == EnemyKind::Boss && target->health == 0)
-            {
-                _phase = RoomPhase::Cleared;
-                RoomResult result = baseResult(RoomCommandStatus::Applied, command.player);
-                result.digest = takeDigest();
-                result.outcome = BattleOutcome::Cleared;
-                result.audience = audience();
-                rewardClear(result);
-                return result;
-            }
+        if (!hit_enemy)
+        {
+            _pending_events.push_back(SkillWhiffed{.actor = command.player, .skill = command.skill});
+        }
+        else if (killed_boss)
+        {
+            _phase = RoomPhase::Cleared;
+            RoomResult result = baseResult(RoomCommandStatus::Applied, command.player);
+            result.digest = takeDigest();
+            result.outcome = BattleOutcome::Cleared;
+            result.audience = audience();
+            rewardClear(result);
+            return result;
         }
 
         RoomResult result = baseResult(RoomCommandStatus::Applied, command.player);

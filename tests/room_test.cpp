@@ -256,22 +256,23 @@ namespace
         assert(tick.digest && events_of<SkillWhiffed>(*tick.digest).size() == 1);
     }
 
-    void test_casts_choose_the_nearest_enemy_then_the_lowest_id_on_a_tie()
+    void test_cast_hits_every_enemy_in_range_in_enemy_id_order()
     {
         RoomConfig config = wave_room();
         config.wave_count = 1;
         config.max_spawned_enemies = 3;
+        config.digest_flush_threshold = 2;
         Room room = started(config);
 
-        static_cast<void>(room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill = snf::server::SLASH, .request_sequence = 1}, at(0)));
-        static_cast<void>(room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill = snf::server::SLASH, .request_sequence = 2}, at(1000)));
-        const auto tick = room.handle(RoomSimulationTick{}, at(1000));
+        const auto cast =
+            room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill = snf::server::SLASH, .request_sequence = 1}, at(0));
 
-        assert(tick.digest && tick.digest->events.size() == 4);
-        assert(event_at<EnemyDamaged>(*tick.digest, 0).target.value == 1);
-        assert(event_at<EnemyDied>(*tick.digest, 1).id.value == 1);
-        assert(event_at<EnemyDamaged>(*tick.digest, 2).target.value == 2);
-        assert(event_at<EnemyDied>(*tick.digest, 3).id.value == 2);
+        assert(cast.digest && cast.digest->events.size() == 4);
+        assert(event_at<EnemyDamaged>(*cast.digest, 0).target.value == 1);
+        assert(event_at<EnemyDied>(*cast.digest, 1).id.value == 1);
+        assert(event_at<EnemyDamaged>(*cast.digest, 2).target.value == 2);
+        assert(event_at<EnemyDied>(*cast.digest, 3).id.value == 2);
+        static_cast<void>(room.handle(RoomSimulationTick{}, at(100)));
         assert(room.enemyCount() == 0);
     }
 
@@ -379,14 +380,17 @@ namespace
         const auto dead_cast = room.handle(UseSkill{.player = PlayerId{.value = 10}, .skill = snf::server::SLASH, .request_sequence = 1}, at(100));
         const auto dead_move =
             room.handle(SetMoveIntent{.player = PlayerId{.value = 10}, .direction = MoveDirection::East, .request_sequence = 1}, at(100));
-        static_cast<void>(room.handle(UseSkill{.player = PlayerId{.value = 20}, .skill = snf::server::SLASH, .request_sequence = 1}, at(100)));
-        const auto cleared = room.handle(UseSkill{.player = PlayerId{.value = 20}, .skill = snf::server::SLASH, .request_sequence = 2}, at(1100));
+        const auto cleared = room.handle(UseSkill{.player = PlayerId{.value = 20}, .skill = snf::server::SLASH, .request_sequence = 1}, at(100));
+        const auto stale = room.handle(UseSkill{.player = PlayerId{.value = 20}, .skill = snf::server::SLASH, .request_sequence = 2}, at(1100));
 
         assert(dead_cast.status == RoomCommandStatus::ParticipantDead);
         assert(dead_move.status == RoomCommandStatus::ParticipantDead);
         assert(cleared.outcome == BattleOutcome::Cleared);
+        assert(events_of<EnemyDamaged>(*cleared.digest).size() == 2);
+        assert(events_of<EnemyDied>(*cleared.digest).size() == 2);
         assert(cleared.audience == (std::vector<PlayerId>{PlayerId{.value = 10}, PlayerId{.value = 20}}));
         assert(cleared.grants.size() == 2);
+        assert(stale.status == RoomCommandStatus::WrongPhase && !stale.outcome);
     }
 
     void test_late_tick_catches_up_spawns_but_new_enemies_wait_until_the_next_tick()
@@ -485,7 +489,7 @@ void run_room_tests()
     test_start_publishes_arena_participants_and_spawn_positions_in_order();
     test_movement_intent_persists_and_uses_an_independent_sequence();
     test_the_default_opening_cast_whiffs_and_consumes_cooldown_and_sequence();
-    test_casts_choose_the_nearest_enemy_then_the_lowest_id_on_a_tie();
+    test_cast_hits_every_enemy_in_range_in_enemy_id_order();
     test_digest_threshold_keeps_damage_and_death_atomic();
     test_enemy_movement_and_attack_are_interleaved_and_cooldown_is_absolute();
     test_a_late_tick_applies_at_most_one_enemy_attack();

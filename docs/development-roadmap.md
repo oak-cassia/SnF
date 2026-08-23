@@ -67,9 +67,10 @@
 Party가 입장하는 작은 협동 인스턴스다. MMORPG 월드 기능을 넓히지 않고, Actor 상태 소유권이
 공유 콘텐츠에서 주는 장점과 비용을 보여주는 것이 목적이다. 처음에는 위치 없는 wave 전투로
 계획했지만 2a가 tick, ordered digest, fanout, payload 상한과 비용 metric을 먼저 완성한 뒤 범위를
-바꿨다. 정수 좌표는 threat table 없이 가장 가까운 생존 대상이라는 관찰 가능한 targeting 근거를
-주고, 빠르게 변하는 좌표와 HP를 Room Actor 하나가 직렬화하는 비용도 드러낸다. 대신 직선 이동만
-허용하며 충돌·장애물·pathfinding·projectile·Room AOI·resync snapshot은 계속 만들지 않는다.
+바꿨다. 정수 좌표는 적의 가장 가까운 생존 참가자 선택과 Slash의 범위 내 전체 적 판정이라는 관찰
+가능한 targeting 근거를 주고, 빠르게 변하는 좌표와 HP를 Room Actor 하나가 직렬화하는 비용도
+드러낸다. 대신 직선 이동만 허용하며 충돌·장애물·pathfinding·projectile·Room AOI·resync snapshot은
+계속 만들지 않는다.
 
 > **구현 순서 2b 완료.** 실제 TCP에서 이동, 적 추격·피해, boss clear와 `PartyDefeated` 실패가
 > `BattleDigest`로 관찰되고 두 종결 모두 원래 Zone 좌표로 복귀한다. 입장·복귀 saga와 그 보상은
@@ -95,10 +96,10 @@ Waiting → Running → Cleared
 1. **최소 전투** — `UseSkill`, boss HP, deadline 기반 cooldown, request sequence 중복 방어,
    `Cleared`/`Failed`, 참가자 fanout. enemy도 tick도 없다. (완료)
 2. **Wave simulation**
-   - **2a — Wave와 관찰 경계:** 100ms tick, minion/boss spawn, 첫 생존 적 targeting, 즉시 cast와
+   - **2a — Wave와 관찰 경계:** 100ms tick, minion/boss spawn, 범위 내 전체 적 대상 즉시 cast와
      ordered `BattleDigest`, hard deadline, tick 예산 측정. (완료)
-   - **2b — Minimal Arena와 생사:** 8방향 persistent movement, nearest-live targeting, enemy
-     attack/cooldown, participant HP/death와 결정적 ID tie-break. (완료)
+   - **2b — Minimal Arena와 생사:** 8방향 persistent movement, enemy nearest-live targeting,
+     Slash 범위 판정, enemy attack/cooldown, participant HP/death와 결정적 ID 순서. (완료)
 3. **Session 안정성** — generation 기반 admission/routing 방어, Closing 동안 reconnect 차단과
    Player·Connection exact-match passivation. Actor 내부에 중복 generation guard를 두지 않는다. (완료)
 4. **보상 인계 책임 전달** — tell 수락과 최초 load 성공 뒤의 책임 이전, 스냅샷 큐 수락까지
@@ -185,11 +186,12 @@ resync snapshot을 만들지 않는다. shutdown은 측정 종료 smoke로만 �
 - **cast 적용과 관찰은 분리한다.** `UseSkill` turn에서 targeting·damage·cooldown·sequence를 즉시
   적용하고 요청자에게 `SkillAcknowledged`를 보낸다. 발생 이벤트는 ordered buffer에 쌓여 tick 또는
   threshold/terminal 경계에서 `BattleDigest`로 전 참가자에게 fanout된다
-- **한 command의 인과 그룹은 갈라지지 않는다.** Damage 뒤 선택적인 Died를 전부 buffer에 추가한
-  다음 threshold를 검사한다. event를 drop하지 않으며 digest sequence는 실제 방출 때만 증가한다
+- **한 command의 인과 그룹은 갈라지지 않는다.** 범위 안 대상을 EnemyId 순서로 돌며 각 Damage 뒤
+  선택적인 Died를 전부 buffer에 추가한 다음 threshold를 검사한다. event를 drop하지 않으며 digest
+  sequence는 실제 방출 때만 증가한다
 - **좌표는 Room 안에서만 유효하다.** `SetMoveIntent`는 의도만 저장하고 다음 tick이 생존 참가자를
-  움직인다. skill은 현재 좌표에서 사거리 안의 가장 가까운 생존 적을, 적은 가장 가까운 생존
-  참가자를 고르며 동률은 작은 ID다. Room 종료 뒤에는 입장 전 Zone 좌표로 복귀한다
+  움직인다. Slash는 현재 좌표에서 사거리 안의 모든 생존 적을 EnemyId 순서로 공격하고, 적은 가장
+  가까운 생존 참가자를 고르며 동률은 작은 PlayerId다. Room 종료 뒤에는 입장 전 Zone 좌표로 복귀한다
 - **적 행동은 적별로 인터리브한다.** EnemyId 순서로 대상 선택 → 이동 → 선택적 피해 → 선택적
   사망을 끝낸 다음 다음 적이 살아 있는 대상을 다시 고른다. 마지막 생존 참가자가 죽으면
   `PartyDefeated`로 즉시 종결하며 deadline 실패와 wire reason을 구분한다
@@ -247,10 +249,10 @@ connection generation  → admission/routing에서 session 수명을 넘긴 stal
 - **player close reservation:** worker별 async in-flight 상한 1,024가 대량 동시 종료에서 먼저
   찼다. active 전투 부하는 처리하더라도 종료 drain은 별도 admission 부하가 되므로, 더 큰 동시 접속
   목표를 잡을 때 close burst의 backpressure와 capacity 계약을 먼저 정한다
-- **shared outbound:** 모든 worker가 공유하는 queue capacity 4,096은 4 workers × 1,000 Room에서
-  포화됐고, 4 workers × 800 Room은 high-water 3,806으로 정상 종료했다. worker 수만 늘려서는
-  비례 확장되지 않으므로 더 큰 Room 수를 목표로 할 때 capacity·credit 또는 sharding 계약을 먼저
-  정한다
+- **shared outbound:** 모든 worker가 공유하는 queue capacity 4,096은 전체 대상 Slash fanout을
+  포함한 현재 코드의 4 workers × 750 Room에서 포화됐고, 4 workers × 700 Room은 high-water
+  3,232로 정상 종료했다. worker 수만 늘려서는 비례 확장되지 않으므로 더 큰 Room 수를
+  목표로 할 때 capacity·credit 또는 sharding 계약을 먼저 정한다
 
 두 항목은 Step 5의 미완료 조건이 아니라 현재 구성에서 측정된 확장 경계다. 목표 규모가 이 경계에
 도달하기 전에는 TimerService, Room hash co-location이나 resync snapshot 작업을 열지 않는다.

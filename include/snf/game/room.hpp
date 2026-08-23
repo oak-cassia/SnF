@@ -94,7 +94,6 @@ namespace snf::server
         [[nodiscard]] RoomResult handleCommand(const SetMoveIntent& command, std::chrono::steady_clock::time_point observed_at);
 
         [[nodiscard]] Participant* findParticipant(PlayerId player);
-        [[nodiscard]] Enemy* nearestLivingEnemy(ArenaPosition origin, std::uint32_t range);
         [[nodiscard]] Participant* nearestLivingParticipant(ArenaPosition origin);
         [[nodiscard]] const Enemy* boss() const noexcept;
         [[nodiscard]] bool allParticipantsDead() const noexcept;

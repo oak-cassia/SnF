@@ -313,7 +313,7 @@ sequenceDiagram
     participant C as Client
 
     C->>R: UseSkill(skill, sequence)
-    R->>R: 중복·cooldown·거리 판정 → nearest enemy damage → boss 0 → Cleared
+    R->>R: 중복·cooldown·거리 판정 → 범위 내 모든 enemy damage → boss 0 → Cleared
     par reward
         R->>P: StreetExperienceGrant via tryTell
     and notification
@@ -356,11 +356,11 @@ sequence만 즉시 바꾸고, tick이 참가자를 PlayerId 순서로 이동시�
 EnemyId 순서로 처리하며 각 적마다 가장 가까운 생존 참가자 선택 → 직선 추격 → 선택적 공격 → 선택적
 사망을 끝낸다. 동률은 작은 ID이고, 뒤의 적은 앞의 적에게 죽은 참가자를 제외하고 다시 선택한다.
 
-`UseSkill`은 tick까지 기다리지 않고 현재 좌표에서 가장 가까운 사거리 내 적에게 즉시 적용한다. 발생한
-`EnemyDamaged`, `EnemyDied`, `SkillWhiffed`는 Room의 ordered buffer에 쌓이고 다음 tick이
-`BattleDigest`로 비운다. threshold를 넘으면 command의 인과 그룹을 전부 추가한 다음 조기 flush하므로
-Damage+Died와 EnemySpawned+EnemyPositioned가 갈라지지 않는다. 참가자 이동, 적 이동·공격, wave와 boss
-spawn도 같은 이벤트 스트림에 들어간다.
+`UseSkill`은 tick까지 기다리지 않고 현재 좌표에서 사거리 안의 모든 생존 적에게 EnemyId 순서로 즉시
+적용한다. 발생한 `EnemyDamaged`, `EnemyDied`, `SkillWhiffed`는 Room의 ordered buffer에 쌓이고 다음
+tick이 `BattleDigest`로 비운다. threshold를 넘으면 command의 모든 대상에 대한 인과 그룹을 전부
+추가한 다음 조기 flush하므로 대상별 Damage+Died와 EnemySpawned+EnemyPositioned가 갈라지지 않는다.
+참가자 이동, 적 이동·공격, wave와 boss spawn도 같은 이벤트 스트림에 들어간다.
 
 Room tick metric의 범위는 다음과 같다.
 

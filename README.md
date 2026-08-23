@@ -93,8 +93,9 @@ Network Runtime
   skill id와 request sequence만 보내며 damage, targeting, cooldown과 생사는 서버가 판정한다
 - 같은 request sequence는 damage를 두 번 적용하지 않고, cooldown은 turn 시작 시각과 비교하는
   deadline이다 (`ActorContext::observedAt`)
-- `SetMoveIntent`는 persistent 8방향 의도만 바꾸고 다음 tick이 좌표를 이동한다. 플레이어와 적은
-  사거리 안/추격 대상 중 가장 가까운 생존 개체를 고르며 동률은 작은 ID다
+- `SetMoveIntent`는 persistent 8방향 의도만 바꾸고 다음 tick이 좌표를 이동한다. `Slash`는 사거리
+  안의 모든 생존 적을 EnemyId 순서로 공격하고, 적은 가장 가까운 생존 참가자를 추격·공격하며
+  동률은 작은 PlayerId다
 - `UseSkill`은 현재 좌표에서 즉시 판정하고 요청자에게 `SkillAcknowledged`를 보낸다. 좌표·damage·
   death·spawn은 인과 순서를 보존한 `BattleDigest(request_id = 0)`로 전 참가자에게 fanout한다
 - clear 시 참가자마다 `tryTell`로 street 경험치 전달, 미상주 Player는 레코드를 먼저 로드
