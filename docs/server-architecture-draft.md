@@ -27,7 +27,7 @@ CommandRouter
 ActorRuntime
   ├── PlayerActor
   ├── ZoneActor
-  └── PartyActor
+  └── RoomActor
   ↓ typed result/effect
 OutboundChannel
   ↓
@@ -56,10 +56,10 @@ snf_mysql_player_repository   MySQL을 아는 유일한 target
 
 | 소유자 | mutable state |
 | --- | --- |
-| Reactor | Session, connection generation, Player/Zone/Party route, handoff control state |
+| Reactor | Session, connection generation, Player/Zone/Room route, handoff control state |
 | PlayerActor | Player identity, 마지막 위치, currency, purchased item count, idempotency evidence |
 | ZoneActor | Zone participant, position, route epoch, tick state |
-| PartyActor | membership과 membership epoch |
+| RoomActor | participant와 enemy의 전투 중 위치·HP·행동 상태 |
 | PlayerPersistenceService | pending/in-flight Player snapshot과 final save queue |
 | Repository Worker | DB connection과 한 storage job의 로컬 상태 |
 
@@ -203,12 +203,6 @@ Worker completion은 bounded value channel로 돌아온다.
 상태 기계를 동시에 소유하고 있었고, 지금은 gateway가 handoff를 **시작하고 물어보기만** 한다.
 실패 보상과 disconnect/shutdown cleanup은 [Cross-Zone Handoff 계약](./cross-zone-handoff-contract.md)이
 소유한다.
-
-### Party
-
-PartyActor가 membership을 직렬화하고 PartyCoordinator가 connection route와 epoch을 소유한다.
-capacity 초과는 연결 오류가 아니라 typed 결과이며, 마지막 leave는 이미 승인된 mailbox tail을
-버리지 않는 `PassivateIfIdle`을 사용한다.
 
 ## 10. Lifecycle
 

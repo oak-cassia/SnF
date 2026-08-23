@@ -39,7 +39,6 @@
 
 - Zone enter/move/leave, periodic tick, AOI와 빈 Actor passivation
 - route epoch과 failure-safe cross-zone handoff
-- Party membership, capacity, stale leave 차단과 passivation
 - Room `Waiting → Running → Cleared | Failed`. 100ms tick이 정수 좌표 이동, wave/minion/boss spawn,
   가장 가까운 생존 대상 추격·공격과 ordered `BattleDigest`를 진행한다. damage, HP, cooldown과
   중복 판정은 서버가 소유하며 clear 시 참가자 보상 tell, 종결 뒤 passivation한다
@@ -64,7 +63,7 @@
 
 ## 다음 콘텐츠: 4인 협동 Wave Battle
 
-Party가 입장하는 작은 협동 인스턴스다. MMORPG 월드 기능을 넓히지 않고, Actor 상태 소유권이
+최대 4명의 Player가 개별 입장하는 작은 협동 인스턴스다. MMORPG 월드 기능을 넓히지 않고, Actor 상태 소유권이
 공유 콘텐츠에서 주는 장점과 비용을 보여주는 것이 목적이다. 처음에는 위치 없는 wave 전투로
 계획했지만 2a가 tick, ordered digest, fanout, payload 상한과 비용 metric을 먼저 완성한 뒤 범위를
 바꿨다. 정수 좌표는 적의 가장 가까운 생존 참가자 선택과 Slash의 범위 내 전체 적 판정이라는 관찰
@@ -72,7 +71,7 @@ Party가 입장하는 작은 협동 인스턴스다. MMORPG 월드 기능을 넓
 드러낸다. 대신 직선 이동만 허용하며 충돌·장애물·pathfinding·projectile·Room AOI·resync snapshot은
 계속 만들지 않는다.
 
-> **구현 순서 2b 완료.** 실제 TCP에서 이동, 적 추격·피해, boss clear와 `PartyDefeated` 실패가
+> **구현 순서 2b 완료.** 실제 TCP에서 이동, 적 추격·피해, boss clear와 `ParticipantsDefeated` 실패가
 > `BattleDigest`로 관찰되고 두 종결 모두 원래 Zone 좌표로 복귀한다. 입장·복귀 saga와 그 보상은
 > `docs/room-entry-handoff-contract.md`에 기록돼 있다.
 
@@ -194,7 +193,7 @@ resync snapshot을 만들지 않는다. shutdown은 측정 종료 smoke로만 �
   가까운 생존 참가자를 고르며 동률은 작은 PlayerId다. Room 종료 뒤에는 입장 전 Zone 좌표로 복귀한다
 - **적 행동은 적별로 인터리브한다.** EnemyId 순서로 대상 선택 → 이동 → 선택적 피해 → 선택적
   사망을 끝낸 다음 다음 적이 살아 있는 대상을 다시 고른다. 마지막 생존 참가자가 죽으면
-  `PartyDefeated`로 즉시 종결하며 deadline 실패와 wire reason을 구분한다
+  `ParticipantsDefeated`로 즉시 종결하며 deadline 실패와 wire reason을 구분한다
 - **tick은 one-shot 사슬이다.** binding이 deadline을 먼저 예약한 다음 `ExistingOnly` tick을 예약한다.
   deadline 예약이 거절되면 Room을 `Waiting`에 둔 채 `RuntimeOverloaded`로 시작을 거절하고
   `deadline_schedule_rejections`를 올린다. tick 예약 거절은 metric으로 남기고 이미 확보한 deadline을
@@ -207,8 +206,8 @@ resync snapshot을 만들지 않는다. shutdown은 측정 종료 smoke로만 �
 - **죽음과 퇴장은 다른 상태다.** 죽은 participant는 audience와 clear 보상 대상에 남아 관전하지만
   이동·cast·target 대상에서는 빠진다. leave와 disconnect는 participant를 제거하고 보상을 포기하며
   `ParticipantLeft`가 남은 client의 유령 상태를 지운다
-- **시작은 명시적 `StartBattle`이다.** Room은 현재 참가자 수와 상한만 알고 원래 파티가 몇 명인지
-  모른다. 자동 시작은 Party roster를 Room까지 넘기는 별개 작업이므로 이 콘텐츠에 넣지 않는다
+- **시작은 명시적 `StartBattle`이다.** Room은 현재 참가자 수와 상한만 알고 있으며, 입장한
+  client 중 하나가 명시적으로 전투를 시작한다
 
 ### 완료 조건
 
@@ -261,7 +260,7 @@ connection generation  → admission/routing에서 session 수명을 넘긴 stal
 ### 비범위
 
 - 충돌, 장애물, pathfinding, projectile, Room AOI와 진행 중 resync snapshot
-- `Ready`와 countdown, 그리고 자동 시작을 위한 Party roster 전달
+- `Ready`, countdown과 자동 시작
 - 진행 중인 전투로의 reconnect와 주기적 resync snapshot
 - 대규모 seamless world와 process 간 migration
 - matchmaking service

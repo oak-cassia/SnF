@@ -12,7 +12,7 @@
 2. Actor 위치와 mailbox 라우팅은 Runtime이 책임진다.
 3. 게임 시간은 tick 수가 아니라 실제 경과 시간으로 계산한다.
 
-이 결정은 협동 Battle Room이 `PartyActor → Room`, `Room → PlayerActor` 흐름을 필요로 하면서
+이 결정은 협동 Battle Room이 `PlayerActor → Room`, `Room → PlayerActor` 흐름을 필요로 하면서
 나왔다. 그전까지 Actor 간
 상호작용은 result를 reactor로 올려 `ProtocolGateway`와 `CommandRouter`를 거쳐 다시
 내려와야 했고, 그 결과 조율 코드가 도메인 코드보다 세 배 이상 많았다.
@@ -167,7 +167,7 @@ Binding이 번역한다. `deadline_after`/`tick_after` → `trySchedule`, `grant
 종류마다 다르고, Zone에는 대응하는 response 타입이 아예 없다.
 
 Binding이 다른 Binding의 ingress를 직접 들고 있지 않다는 점이 핵심이다. 그래야
-`PlayerBinding → RoomBinding → PartyBinding` 같은 참조 그래프가 생기지 않고, actor
+`PlayerBinding → RoomBinding → PlayerBinding` 같은 직접 참조 그래프가 생기지 않고, actor
 routing이 런타임의 책임으로 남는다.
 
 tell을 `requiredSlots`에 넣지 않는다. 네트워크 backpressure와 mailbox 포화는 다른

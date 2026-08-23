@@ -61,7 +61,6 @@ add_library(snf_game STATIC
     src/game/arena.cpp
     src/game/player.cpp
     src/game/zone.cpp
-    src/game/party.cpp
     src/game/room.cpp
     src/game/street_progression.cpp
     src/game/product_catalog.cpp
@@ -108,10 +107,8 @@ add_library(snf_server_runtime STATIC
     src/server/protocol_response_mapper.cpp
     src/server/protocol_player_response_sink.cpp
     src/server/protocol_zone_result_sink.cpp
-    src/server/protocol_party_result_sink.cpp
     src/server/protocol_room_result_sink.cpp
     src/server/route_coordinator.cpp
-    src/server/party_coordinator.cpp
     src/server/player_actor_binding.cpp
     src/server/player_actor_ingress.cpp
     src/server/player_persistence_service.cpp
@@ -124,8 +121,6 @@ add_library(snf_server_runtime STATIC
     src/server/zone_transition_channel.cpp
     src/server/room_entry_service.cpp
     src/server/room_transition_channel.cpp
-    src/server/party_actor_binding.cpp
-    src/server/party_actor_ingress.cpp
     src/server/outbound_channel.cpp
     src/server/command_terminal.cpp
     src/server/game_server.cpp
@@ -176,10 +171,8 @@ if(BUILD_TESTING)
         tests/protocol_gateway_test.cpp
         tests/protocol_response_mapper_test.cpp
         tests/protocol_zone_result_sink_test.cpp
-        tests/protocol_party_result_sink_test.cpp
         tests/protocol_room_result_sink_test.cpp
         tests/route_coordinator_test.cpp
-        tests/party_coordinator_test.cpp
         tests/player_response_sink_test.cpp
         tests/outbound_channel_test.cpp
         tests/runtime_boundaries_test.cpp
@@ -196,7 +189,6 @@ if(BUILD_TESTING)
         tests/zone_actor_binding_test.cpp
         tests/zone_transition_channel_test.cpp
         tests/room_transition_channel_test.cpp
-        tests/party_actor_binding_test.cpp
     )
     target_link_libraries(snf_unit_tests PRIVATE snf_server_runtime)
     snf_configure_target(snf_unit_tests)
@@ -212,7 +204,6 @@ if(BUILD_TESTING)
         tests/room_test.cpp
         tests/player_test.cpp
         tests/zone_test.cpp
-        tests/party_test.cpp
     )
     target_link_libraries(snf_game_tests PRIVATE snf_game)
     snf_configure_target(snf_game_tests)

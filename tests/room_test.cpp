@@ -351,7 +351,7 @@ namespace
 
         assert(failed.phase == RoomPhase::Failed);
         assert(failed.outcome == BattleOutcome::Failed);
-        assert(failed.failure_reason == BattleFailureReason::PartyDefeated);
+        assert(failed.failure_reason == BattleFailureReason::ParticipantsDefeated);
         assert(failed.digest && failed.digest->events.size() == 4);
         assert(event_at<ParticipantDamaged>(*failed.digest, 0).target == PlayerId{.value = 10});
         assert(event_at<ParticipantDied>(*failed.digest, 1).player == PlayerId{.value = 10});

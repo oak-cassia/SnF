@@ -3,7 +3,6 @@ void run_arena_tests();
 void run_room_tests();
 void run_player_tests();
 void run_zone_tests();
-void run_party_tests();
 
 int main()
 {
@@ -12,5 +11,4 @@ int main()
     run_room_tests();
     run_player_tests();
     run_zone_tests();
-    run_party_tests();
 }

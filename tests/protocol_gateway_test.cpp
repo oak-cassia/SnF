@@ -52,7 +52,6 @@ namespace
     {
         std::size_t max_handoffs{64};
         std::size_t transition_capacity{64};
-        std::size_t max_party_members{8};
         std::size_t max_zone_completions_per_turn{64};
         std::size_t max_room_entries{64};
         std::size_t max_room_entry_completions_per_turn{64};
@@ -67,7 +66,6 @@ namespace
         explicit GatewayFixture(GatewayFixtureConfig config = {})
             : wake(snf::test::make_wake_descriptor())
             , routes(config.max_handoffs)
-            , parties(config.max_party_members)
             , transitions(config.transition_capacity, wake.getDescriptor())
             , room_transitions(config.max_room_entries, wake.getDescriptor())
             , outbound(snf::server::OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 4}, wake.getDescriptor())
@@ -80,7 +78,6 @@ namespace
                   commands,
                   sessions,
                   routes,
-                  parties,
                   handoffs,
                   room_entries,
                   snf::server::ProtocolGatewayConfig{
@@ -94,7 +91,6 @@ namespace
         RecordingRoutedIngress commands;
         snf::server::PlayerSessionDirectory sessions;
         snf::server::RouteCoordinator routes;
-        snf::server::PartyCoordinator parties;
         snf::server::ZoneTransitionChannel transitions;
         snf::server::RoomTransitionChannel room_transitions;
         snf::server::OutboundChannel outbound;
@@ -203,19 +199,6 @@ namespace
                     .type = snf::protocol::MessageType::Purchase,
                     .request_id = 9,
                     .payload = std::move(payload),
-                },
-        };
-    }
-
-    snf::server::FrameEnvelope make_party_join_frame(const snf::net::ConnectionId connection, const std::uint64_t party)
-    {
-        return snf::server::FrameEnvelope{
-            .connection = connection,
-            .frame =
-                snf::protocol::Frame{
-                    .type = snf::protocol::MessageType::PartyJoin,
-                    .request_id = 10,
-                    .payload = player_id_payload(party),
                 },
         };
     }
@@ -339,64 +322,6 @@ namespace
         assert(route->request_id == 9);
         assert(purchase->idempotency_key.value == 3);
         assert(purchase->product == snf::server::BASIC_PRODUCT);
-    }
-
-    void test_party_membership_requires_authentication_and_uses_a_shared_route()
-    {
-        GatewayFixture fixture;
-        const snf::net::ConnectionId connection{.descriptor = 56, .generation = 26};
-        const snf::server::PlayerId player{.value = 91};
-
-        assert(fixture.gateway.tryPost(make_party_join_frame(connection, 7)) == snf::server::FramePostResult::InvalidPayload);
-        assert(fixture.gateway.tryPost(make_auth_frame(connection, player)) == snf::server::FramePostResult::Accepted);
-        assert(fixture.gateway.tryPost(make_party_join_frame(connection, 7)) == snf::server::FramePostResult::Accepted);
-        auto* route = std::get_if<snf::server::PartyCommandRoute>(&fixture.commands.posted->route);
-        assert(route != nullptr);
-        assert(route->party == snf::server::PartyId{.value = 7});
-        const auto* join = std::get_if<snf::server::JoinPartyCommand>(&route->command);
-        assert(join != nullptr);
-        assert(join->player == player);
-        assert(join->membership_epoch == 1);
-
-        const int post_count = fixture.commands.post_count;
-        assert(fixture.gateway.tryPost(make_party_join_frame(connection, 8)) == snf::server::FramePostResult::InvalidPayload);
-        assert(fixture.commands.post_count == post_count);
-        assert(
-            fixture.gateway.tryPost(snf::server::FrameEnvelope{
-                .connection = connection,
-                .frame =
-                    snf::protocol::Frame{
-                        .type = snf::protocol::MessageType::PartyLeave,
-                        .request_id = 11,
-                        .payload = {},
-                    },
-            }) == snf::server::FramePostResult::Accepted
-        );
-        route = std::get_if<snf::server::PartyCommandRoute>(&fixture.commands.posted->route);
-        assert(route != nullptr);
-        assert(std::holds_alternative<snf::server::LeavePartyCommand>(route->command));
-    }
-
-    void test_connection_close_leaves_party_before_player_passivation()
-    {
-        GatewayFixture fixture;
-        const snf::net::ConnectionId connection{.descriptor = 57, .generation = 27};
-        const snf::server::PlayerId player{.value = 92};
-        assert(fixture.gateway.tryPost(make_auth_frame(connection, player)) == snf::server::FramePostResult::Accepted);
-        assert(fixture.gateway.tryPost(make_party_join_frame(connection, 9)) == snf::server::FramePostResult::Accepted);
-
-        const std::size_t before = fixture.commands.route_indices.size();
-        assert(
-            fixture.gateway.tryPostConnectionClosed(snf::server::ConnectionClosed{
-                .connection = connection,
-                .cause = snf::server::ConnectionCloseCause::PeerClosed,
-                .has_location_snapshot = false,
-                .last_location = std::nullopt,
-            }) == snf::server::PostResult::Accepted
-        );
-        assert(fixture.commands.route_indices.size() == before + 2);
-        assert(fixture.commands.route_indices[before] == 3);
-        assert(fixture.commands.route_indices[before + 1] == 1);
     }
 
     void test_rejects_duplicate_player_and_auth_after_provisional_activity()
@@ -547,7 +472,6 @@ namespace
         GatewayFixture fixture{GatewayFixtureConfig{
             .max_handoffs = 2,
             .transition_capacity = 2,
-            .max_party_members = 4,
             .max_zone_completions_per_turn = 1,
         }};
         const snf::net::ConnectionId connection{.descriptor = 62, .generation = 32};
@@ -748,7 +672,6 @@ namespace
         GatewayFixture fixture{GatewayFixtureConfig{
             .max_handoffs = 2,
             .transition_capacity = 2,
-            .max_party_members = 4,
             .max_zone_completions_per_turn = 1,
         }};
         const snf::server::ZoneId source_zone{.value = 20};
@@ -1358,8 +1281,6 @@ void run_protocol_gateway_tests()
     test_routes_connection_closed_with_the_same_provisional_actor_id();
     test_authentication_attaches_and_routes_to_a_persistent_player();
     test_purchase_requires_authentication_and_routes_to_the_attached_player();
-    test_party_membership_requires_authentication_and_uses_a_shared_route();
-    test_connection_close_leaves_party_before_player_passivation();
     test_rejects_duplicate_player_and_auth_after_provisional_activity();
     test_rolls_back_refused_auth_and_keeps_close_retry_target();
     test_routes_authenticated_zone_enter_move_leave_with_one_epoch();

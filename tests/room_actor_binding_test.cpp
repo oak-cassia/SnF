@@ -395,7 +395,7 @@ namespace
         );
 
         // Nobody casts anything. The only thing that can decide this battle is the
-        // deadline the Room armed for itself, and it decides against the party.
+        // deadline the Room armed for itself, and it decides against the participants.
         assert(reached.wait_for(5s) == std::future_status::ready);
         const snf::server::RoomResult result = reached.get();
         assert(result.phase == snf::server::RoomPhase::Failed);

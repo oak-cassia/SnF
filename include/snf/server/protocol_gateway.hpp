@@ -2,7 +2,6 @@
 
 #include "snf/server/frame_ingress.hpp"
 #include "snf/server/message_dispatcher.hpp"
-#include "snf/server/party_coordinator.hpp"
 #include "snf/server/player_session_directory.hpp"
 #include "snf/server/protocol_zone_result_sink.hpp"
 #include "snf/server/room_entry_service.hpp"
@@ -26,7 +25,6 @@ namespace snf::server
         ProtocolGateway(RoutedCommandIngress& commands,
                         PlayerSessionDirectory& sessions,
                         RouteCoordinator& routes,
-                        PartyCoordinator& parties,
                         ZoneHandoffService& handoffs,
                         RoomEntryService& room_entries,
                         ProtocolGatewayConfig config);
@@ -45,7 +43,6 @@ namespace snf::server
         RoutedCommandIngress& _commands;
         PlayerSessionDirectory& _sessions;
         RouteCoordinator& _routes;
-        PartyCoordinator& _parties;
         ZoneHandoffService& _handoffs;
         RoomEntryService& _room_entries;
     };

@@ -12,7 +12,7 @@ namespace snf::server
 {
     // No request id here. Correlating a reply with the frame that asked for it is
     // a protocol concern, so it rides in the envelope -- the same place
-    // ZoneInboundCommand and PartyInboundCommand keep it.
+    // ZoneInboundCommand keeps it.
     struct PingCommand
     {
         std::vector<std::byte> payload;

@@ -1,14 +1,14 @@
 # SnF
 
 SnF는 C++20 Actor 모델로 온라인 게임 콘텐츠의 상태 소유권, 명령 순서와 실패 경계를
-검증하는 MORPG 서버 프로젝트다. MMORPG 규모를 흉내 내기보다 Player·Zone·Party의 작은
+검증하는 MORPG 서버 프로젝트다. MMORPG 규모를 흉내 내기보다 Player·Zone·Room의 작은
 vertical slice를 끝까지 연결하고, 과부하·재접속·저장·종료 상황에서도 상태가 어떻게
 종결되는지를 명시하는 데 집중한다.
 
 ## 계층
 
 ```text
-snf_game                       Player / Zone / Party / Room 상태 기계와 값
+snf_game                       Player / Zone / Room 상태 기계와 값
   ↑ 아무것도 링크하지 않는다
 snf_server_runtime             Binding, ingress, routing, persistence, protocol
   ↑
@@ -30,7 +30,6 @@ ProtocolGateway / CommandRouter
 Sharded Actor Runtime
   ├── PlayerActor  ── PlayerPersistenceService ── Repository
   ├── ZoneActor
-  ├── PartyActor
   └── Room
   ↓ typed result
 Bounded OutboundChannel
@@ -79,13 +78,6 @@ Network Runtime
 
 상세 실패 계약은 [Cross-Zone Handoff 계약](docs/cross-zone-handoff-contract.md)에 있다.
 
-### Party
-
-- Party별 FIFO membership 변경과 정렬된 member snapshot
-- capacity 초과를 typed `PartyFull`로 응답
-- membership epoch으로 stale leave 차단
-- 마지막 member가 나간 뒤 mailbox-safe passivation
-
 ### Battle Room과 street 성장
 
 - `Waiting → Running → Cleared | Failed` 상태 기계, 100ms one-shot tick 사슬과 별도 전투 deadline timer
@@ -102,7 +94,7 @@ Network Runtime
 - clear 시 참가자마다 `tryTell`로 street 경험치 전달, 미상주 Player는 레코드를 먼저 로드
 - 누적 경험치만 저장하고 레벨과 공격/체력은 파생 (레벨당 +10% 선형, 상한 30)
 - `RoomJoin`/`BattleStart`/`SetMoveIntent`/`UseSkill` 요청과, 요청 없이 나가는 `BattleDigest`·
-  `BattleCleared`·`BattleFailed` 알림. `BattleFailed`는 `Deadline`과 `PartyDefeated`를 구분한다
+  `BattleCleared`·`BattleFailed` 알림. `BattleFailed`는 `Deadline`과 `ParticipantsDefeated`를 구분한다
 - Arena 좌표는 Room 종료와 함께 사라지며 `ReturnedToZone`은 입장 전에 저장한 Zone 좌표를 복원한다
 
 충돌, 장애물, pathfinding, projectile, Room AOI와 진행 중 resync snapshot은 없다. matchmaking도
@@ -131,7 +123,7 @@ Actor 사이 원자적 변경에는 별도 상태 기계와 보상이 필요하�
 몰리는 hot Actor 한계도 확인했다.
 
 테스트는 Actor ordering, coroutine completion/cancel 경합, outbound 포화, Player persistence,
-Party/Zone 상태 기계, 실제 TCP 왕복과 graceful shutdown을 포함한다. Debug 외에
+Zone/Room 상태 기계, 실제 TCP 왕복과 graceful shutdown을 포함한다. Debug 외에
 ASan·UBSan과 TSan preset을 제공한다.
 
 ## 빌드와 실행
@@ -202,11 +194,10 @@ cmake --build --preset tsan
 ctest --preset tsan --output-on-failure
 ```
 
-## 개발 범위와 다음 단계
+## 개발 범위
 
-현재 Runtime과 infra 범위는 고정한다. 다음 단계는 새로운 범용 서버 기능이 아니라 Party와
-Player 상태를 실제로 소비하는 작은 인스턴스 콘텐츠다. 구체적인 범위와 완료 조건은
-[개발 로드맵](docs/development-roadmap.md)에만 기록한다.
+현재 Runtime, infra와 Battle Room vertical slice의 범위는 고정한다. 구현 범위와 완료 조건은
+[개발 로드맵](docs/development-roadmap.md)에 기록한다.
 
 콘텐츠의 상태 모델, 규칙, 메시지 흐름과 핵심 C++ 구현은 직접 수행한다. 반복적인 테스트 보강,
 리팩터링과 문서 정리에는 LLM을 사용하며, 변경은 코드 리뷰와 자동화 테스트 및 필요한 부하

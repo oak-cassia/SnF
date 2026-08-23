@@ -14,7 +14,6 @@ namespace snf::runtime
         ProvisionalPlayer,
         Player,
         Zone,
-        Party,
         Room,
     };
 

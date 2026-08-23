@@ -48,9 +48,6 @@ namespace
         case snf::protocol::MessageType::ZoneLeft:
         case snf::protocol::MessageType::Purchase:
         case snf::protocol::MessageType::PurchaseResult:
-        case snf::protocol::MessageType::PartyJoin:
-        case snf::protocol::MessageType::PartyJoined:
-        case snf::protocol::MessageType::PartyLeave:
         case snf::protocol::MessageType::RoomJoin:
         case snf::protocol::MessageType::RoomJoined:
         case snf::protocol::MessageType::BattleStart:
@@ -59,7 +56,6 @@ namespace
         case snf::protocol::MessageType::RoomLeave:
         case snf::protocol::MessageType::RoomLeft:
         case snf::protocol::MessageType::ReturnedToZone:
-        case snf::protocol::MessageType::PartyLeft:
         case snf::protocol::MessageType::UseSkill:
         case snf::protocol::MessageType::SkillApplied:
         case snf::protocol::MessageType::BattleFailed:

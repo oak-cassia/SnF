@@ -338,7 +338,7 @@ sequenceDiagram
 
 보스가 deadline까지 살아남거나 마지막 참가자가 죽으면 같은 그림에서 첫 두 줄만 바뀐다. Room의 자기
 timer, deadline에 도달한 tick/늦은 command는 `Deadline` helper를 호출하고 전원 사망은
-`PartyDefeated` helper를 호출한다. Room은 한 번만 `Failed`가 되며 pending `BattleDigest`, reason을 담은
+`ParticipantsDefeated` helper를 호출한다. Room은 한 번만 `Failed`가 되며 pending `BattleDigest`, reason을 담은
 보상 없는 `BattleFailed`와 복귀 요청이 순서대로 나간다.
 
 ### 8.1 Room tick과 관찰 경계
@@ -499,13 +499,13 @@ return을 명시적으로 정리한다. 단순히 Actor mailbox가 비었다는 
 | completion reservation, 재사용과 동시 publish | [`room_transition_channel_test.cpp`](../tests/room_transition_channel_test.cpp) |
 | entry, InRoom, return과 epoch 상태 전이 | [`route_coordinator_test.cpp`](../tests/route_coordinator_test.cpp) |
 | 정상 입장, 실패 보상과 InRoom command fence | [`protocol_gateway_test.cpp`](../tests/protocol_gateway_test.cpp) |
-| 실제 TCP 이동→추격/피해→boss clear 또는 PartyDefeated→Zone 왕복 | [`tcp_server_integration_test.cpp`](../tests/tcp_server_integration_test.cpp) |
+| 실제 TCP 이동→추격/피해→boss clear 또는 ParticipantsDefeated→Zone 왕복 | [`tcp_server_integration_test.cpp`](../tests/tcp_server_integration_test.cpp) |
 | unsolicited fanout, 최대 digest wire bytes와 outbound 포화 | [`protocol_room_result_sink_test.cpp`](../tests/protocol_room_result_sink_test.cpp) |
 
 통합 테스트는 두 Player가 Zone에 들어가 Room에 합류하고, 이동, 첫 wave 등장, minion 처치, tick에서
 boss 등장과 clear까지의 unsolicited `BattleDigest`를 양쪽 실제 socket에서 확인한다. 이어 두 Player가
 `BattleCleared`와 `ReturnedToZone`을 받고 새 epoch의 Move까지 적용되는지 검증한다. 별도 실제 socket
-시나리오는 적 공격으로 `ParticipantDied → BattleFailed(PartyDefeated) → ReturnedToZone`이 이어지는지
+시나리오는 적 공격으로 `ParticipantDied → BattleFailed(ParticipantsDefeated) → ReturnedToZone`이 이어지는지
 검증해 deadline 실패와 전멸을 구분한다.
 
 ## 13. 구현이 발전한 순서

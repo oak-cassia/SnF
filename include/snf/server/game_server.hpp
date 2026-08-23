@@ -7,16 +7,12 @@
 #include "snf/server/command_router.hpp"
 #include "snf/server/command_terminal.hpp"
 #include "snf/server/outbound_channel.hpp"
-#include "snf/server/party_actor_binding.hpp"
-#include "snf/server/party_actor_ingress.hpp"
-#include "snf/server/party_coordinator.hpp"
 #include "snf/server/player_actor_binding.hpp"
 #include "snf/server/player_actor_ingress.hpp"
 #include "snf/server/player_persistence_service.hpp"
 #include "snf/server/player_repository.hpp"
 #include "snf/server/player_session_directory.hpp"
 #include "snf/server/protocol_gateway.hpp"
-#include "snf/server/protocol_party_result_sink.hpp"
 #include "snf/server/protocol_player_response_sink.hpp"
 #include "snf/server/protocol_room_result_sink.hpp"
 #include "snf/server/protocol_zone_result_sink.hpp"
@@ -63,7 +59,6 @@ namespace snf::server
         ZoneTransitionChannelStats zone_transition_channel;
         RoomEntryStats room_entries;
         RoomTransitionChannelStats room_transition_channel;
-        PartyActorBindingStats party_actors;
         // Commands that were admitted and reached a final result, counted once each
         // whether or not they answered. If playable slow-command measurements justify
         // per-connection credit, its owner consumes this same terminal signal.
@@ -93,7 +88,6 @@ namespace snf::server
         // in-memory adapter. It is a factory rather than a config so that choosing a
         // backend -- and linking it -- stays with whoever runs the server.
         std::function<std::unique_ptr<PlayerRepository>()> player_repository_factory{};
-        std::size_t max_party_members{8};
         std::int32_t zone_aoi_radius{1000};
         std::chrono::milliseconds zone_tick_interval{50};
         std::chrono::nanoseconds zone_tick_budget{std::chrono::milliseconds{5}};
@@ -167,7 +161,6 @@ namespace snf::server
         [[nodiscard]] ZoneActorBindingStats getZoneActorStats() const noexcept;
         [[nodiscard]] PlayerActorBindingStats getPlayerActorStats() const noexcept;
         [[nodiscard]] RoomActorBindingStats getRoomActorStats() const noexcept;
-        [[nodiscard]] PartyActorBindingStats getPartyActorStats() const noexcept;
         // Reads reactor state, so it belongs to the reactor thread: call it from
         // metrics_reporter or after run() has returned.
         [[nodiscard]] ServerMetricsSnapshot getMetricsSnapshot() const;
@@ -191,11 +184,9 @@ namespace snf::server
         RoomTransitionChannel _room_transition_channel;
         ProtocolPlayerResponseSink _player_responses;
         ProtocolZoneResultSink _zone_results;
-        ProtocolPartyResultSink _party_results;
         CountingCommandLifecycleSink _command_lifecycle;
         PlayerSessionDirectory _player_sessions;
         RouteCoordinator _route_coordinator;
-        PartyCoordinator _party_coordinator;
         std::unique_ptr<PlayerRepository> _player_repository;
         PlayerPersistenceService _player_persistence_service;
         snf::runtime::RuntimeCompletionCoordinator _runtime_completion;
@@ -204,7 +195,6 @@ namespace snf::server
         PlayerActorBinding _player_actor_binding;
         PlayerActorBinding _persistent_player_actor_binding;
         ZoneActorBinding _zone_actor_binding;
-        PartyActorBinding _party_actor_binding;
         // Declared here rather than beside the other sinks: it reads the session
         // directory, so it has to be constructed after one.
         ProtocolRoomResultSink _room_result_sink;
@@ -212,7 +202,6 @@ namespace snf::server
         snf::runtime::ActorRuntime _logic_runtime;
         PlayerActorIngress _player_actor_ingress;
         ZoneActorIngress _zone_actor_ingress;
-        PartyActorIngress _party_actor_ingress;
         RoomActorIngress _room_actor_ingress;
         CommandRouter _command_router;
         ZoneHandoffService _zone_handoff_service;

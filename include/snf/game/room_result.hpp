@@ -50,7 +50,7 @@ namespace snf::server
     enum class BattleFailureReason : std::uint8_t
     {
         Deadline = 0,
-        PartyDefeated = 1,
+        ParticipantsDefeated = 1,
     };
 
     // Crosses the wire as an event tag. Keep existing values fixed and append new

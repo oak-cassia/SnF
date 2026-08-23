@@ -1,13 +1,10 @@
 #pragma once
 
-#include "snf/game/party_command.hpp"
-#include "snf/game/party_id.hpp"
 #include "snf/game/player_command.hpp"
 #include "snf/game/zone_command.hpp"
 #include "snf/game/zone_id.hpp"
 #include "snf/net/connection_id.hpp"
 #include "snf/server/connection_lifecycle.hpp"
-#include "snf/server/party_inbound_command.hpp"
 #include "snf/server/player_actor_id.hpp"
 #include "snf/server/room_entry.hpp"
 #include "snf/server/room_inbound_command.hpp"
@@ -48,14 +45,6 @@ namespace snf::server
         std::uint32_t request_id{0};
     };
 
-    struct PartyCommandRoute
-    {
-        PartyId party;
-        PartyCommand command;
-        std::optional<PartyReplyKind> reply_kind;
-        std::uint32_t request_id{0};
-    };
-
     // Internal cross-Zone stages already contain their immutable reactor reply
     // identity. Keeping them in a distinct route alternative prevents a caller
     // from accidentally attaching a normal client reply/credit to the command.
@@ -72,7 +61,7 @@ namespace snf::server
         std::uint32_t request_id{0};
     };
 
-    using CommandRoute = std::variant<PlayerCommandRoute, ConnectionClosedRoute, ZoneCommandRoute, PartyCommandRoute, ZoneHandoffCommandRoute, RoomCommandRoute>;
+    using CommandRoute = std::variant<PlayerCommandRoute, ConnectionClosedRoute, ZoneCommandRoute, ZoneHandoffCommandRoute, RoomCommandRoute>;
 
     struct RoutedCommand
     {

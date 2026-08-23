@@ -7,7 +7,7 @@
 
 ## 1. 해결하려는 문제
 
-온라인 게임 서버에서는 여러 연결과 Worker가 같은 Player, Zone, Party 또는 Room을 동시에
+온라인 게임 서버에서는 여러 연결과 Worker가 같은 Player, Zone 또는 Room을 동시에
 변경하려 할 수 있다. 모든 상태를 lock으로 보호하면 상태마다 lock 범위와 획득 순서를 정해야 하고,
 느린 저장이나 outbound까지 임계 구역에 섞이기 쉽다.
 
@@ -19,7 +19,7 @@ SnF는 mutable gameplay state의 실행 단위를 Actor로 고정한다.
 - 외부 작업을 기다릴 때는 Worker가 아니라 해당 Actor만 suspend한다.
 - Runtime은 scheduling을 담당하고, 게임 규칙은 Runtime을 모르는 도메인 상태 기계가 담당한다.
 
-여기서 **Actor는 도메인 클래스의 상속 계층이 아니다.** `Player`, `Zone`, `Party`, `Room`은
+여기서 **Actor는 도메인 클래스의 상속 계층이 아니다.** `Player`, `Zone`, `Room`은
 공통 Actor base를 상속하지 않는다. 논리적 identity, mailbox와 실행 순서가 이 객체를 Actor로
 실행되게 하며, `ActorBinding`이 generic Runtime과 도메인 타입 사이를 연결한다.
 
@@ -40,9 +40,9 @@ flowchart TB
     Entry --> State[ActorState]
     Entry --> Context[ActorContext]
 
-    Entry --> Binding[Player/Zone/Party/Room ActorBinding]
+    Entry --> Binding[Player/Zone/Room ActorBinding]
     Binding -->|activate / dispatch| State
-    State -->|owns| Model[Player / Zone / Party / Room]
+    State -->|owns| Model[Player / Zone / Room]
     Binding -->|calls handle| Model
     Binding -->|typed result| Sink[Response sink / coordinator]
     Context -->|tryTell| Runtime
@@ -63,7 +63,7 @@ ActorBinding + ActorState
           │
           ▼
 순수 도메인 상태 기계
-Player / Zone / Party / Room
+Player / Zone / Room
 ```
 
 ## 3. 빌드와 의존성 경계
@@ -186,7 +186,6 @@ struct ZoneActorState final : ActorState
 | --- | --- | --- | --- | --- |
 | ProvisionalPlayer / Player | `PlayerActorBinding` | `PlayerActorState` | `Player` | routing identity, load 여부, staging, coroutine task, pending command/result, connection과 request context, deactivation callback |
 | Zone | `ZoneActorBinding` | `ZoneActorState` | `Zone` | 현재는 도메인 모델만 보유 |
-| Party | `PartyActorBinding` | `PartyActorState` | `Party` | 현재는 도메인 모델만 보유 |
 | Room | `RoomActorBinding` | `RoomActorState` | `Room` | 현재는 도메인 모델만 보유 |
 
 `PlayerActorState`는 `Player` 데이터 자체가 아니다.
@@ -426,9 +425,9 @@ entry/state rename은 `59c5270`, 도메인 모델의 Actor 접미사 제거는 `
 | --- | --- | --- |
 | `ActorSlotEntry` | `ActorEntry` | mailbox, 실행 상태와 activation을 포함하는 Runtime 본체 |
 | `ActorSlot` | `ActorState` | Binding이 소유하는 타입별 Runtime adapter state |
-| `*ActorSlot` | `*ActorState` | Player/Zone/Room/Party별 adapter state |
+| `*ActorSlot` | `*ActorState` | Player/Zone/Room별 adapter state |
 | `ActorExecutionState state` | `execution` | `Idle/Ready/Running/Suspended` scheduler 상태 |
-| `*ActorState::actor` | `player/zone/room/party` | wrapper가 합성하는 실제 도메인 모델 |
+| `*ActorState::actor` | `player/zone/room` | wrapper가 합성하는 실제 도메인 모델 |
 
 이 변경은 동작을 바꾸지 않았다. 대신 다음 세 개념이 이름만으로 구분되게 했다.
 
@@ -438,7 +437,7 @@ ActorEntry.state       타입별 adapter state
 PlayerActorState.player 도메인 모델
 ```
 
-또한 Player, Zone, Party와 Room 도메인 클래스에서는 `Actor` 접미사를 제거했다. Actor는 게임 모델의
+또한 Player, Zone과 Room 도메인 클래스에서는 `Actor` 접미사를 제거했다. Actor는 게임 모델의
 정체성이 아니라 실행 방식이기 때문이다. `PlayerActorBinding`, `PlayerActorState`, ingress와 actor ID는
 Runtime에 연결되는 타입이므로 접미사를 유지한다.
 

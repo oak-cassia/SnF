@@ -545,7 +545,7 @@ namespace snf::server
         _pending_events.push_back(ParticipantLeft{.player = command.player});
         if (allParticipantsDead())
         {
-            return failBattle(RoomCommandStatus::Applied, command.player, BattleFailureReason::PartyDefeated);
+            return failBattle(RoomCommandStatus::Applied, command.player, BattleFailureReason::ParticipantsDefeated);
         }
 
         RoomResult result = baseResult(RoomCommandStatus::Applied, command.player);
@@ -747,7 +747,7 @@ namespace snf::server
         moveParticipants();
         if (!actEnemies(observed_at))
         {
-            return failBattle(RoomCommandStatus::Applied, std::nullopt, BattleFailureReason::PartyDefeated);
+            return failBattle(RoomCommandStatus::Applied, std::nullopt, BattleFailureReason::ParticipantsDefeated);
         }
 
         while (_spawned_wave_count < _config.wave_count && observed_at >= _next_wave_at)

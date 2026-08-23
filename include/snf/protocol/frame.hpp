@@ -28,10 +28,8 @@ namespace snf::protocol
         ZoneLeft = 10,
         Purchase = 11,
         PurchaseResult = 12,
-        PartyJoin = 13,
-        PartyJoined = 14,
-        PartyLeave = 15,
-        PartyLeft = 16,
+        // 13-16 are intentionally unassigned so removing an unused protocol
+        // feature does not renumber the existing Room messages.
         RoomJoin = 17,
         RoomJoined = 18,
         BattleStart = 19,

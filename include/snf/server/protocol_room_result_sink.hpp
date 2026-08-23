@@ -20,7 +20,7 @@ namespace snf::server
         std::uint64_t battle_digest_fanout_bytes{0};
     };
 
-    // Translates game results into request replies and unsolicited party facts. It
+    // Translates game results into request replies and unsolicited Room facts. It
     // never decides combat and never writes a socket directly.
     class ProtocolRoomResultSink
     {

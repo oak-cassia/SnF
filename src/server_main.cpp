@@ -143,10 +143,6 @@ namespace
                   << " snapshot admission rejections, " << players.reward_snapshot_retry_giveups << " snapshot retry give-ups, "
                   << players.grant_load_failures << " grant load failures\n";
 
-        const auto& parties = metrics.party_actors;
-        std::cout << "Party actors: " << parties.commands << " commands, " << parties.rejected << " rejected, " << parties.passivation_requests
-                  << " passivation requests\n";
-
         const auto& repository = metrics.player_repository;
         std::cout << "Player repository: " << repository.queue_depth << " queued, " << repository.queue_high_water_mark << " high-water, "
                   << repository.accepted << " accepted, " << repository.rejected << " rejected, " << repository.operation_failures

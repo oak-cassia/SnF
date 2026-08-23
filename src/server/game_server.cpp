@@ -68,19 +68,6 @@ namespace
         return left + right;
     }
 
-    std::size_t checked_party_members(const std::size_t max_members)
-    {
-        constexpr std::size_t FIXED_PARTY_RESPONSE_PAYLOAD_SIZE = 1 + 8 + 8 + 2;
-        constexpr std::size_t MAX_MEMBERS_BY_PAYLOAD = (snf::protocol::MAX_PAYLOAD_SIZE - FIXED_PARTY_RESPONSE_PAYLOAD_SIZE) / 8;
-        constexpr std::size_t MAX_WIRE_MEMBERS =
-            std::min(MAX_MEMBERS_BY_PAYLOAD, static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()));
-        if (max_members == 0 || max_members > MAX_WIRE_MEMBERS)
-        {
-            throw std::invalid_argument{"Party member capacity exceeds its wire response"};
-        }
-        return max_members;
-    }
-
     std::size_t checked_zone_handoffs(const std::size_t max_handoffs, const std::size_t lifecycle_capacity)
     {
         if (max_handoffs == 0 || max_handoffs > lifecycle_capacity)
@@ -136,9 +123,7 @@ namespace snf::server
           )
         , _player_responses(_outbound_channel)
         , _zone_results(_outbound_channel)
-        , _party_results(_outbound_channel)
         , _route_coordinator(checked_zone_handoffs(config.max_zone_handoffs, config.connection_lifecycle_capacity))
-        , _party_coordinator(checked_party_members(config.max_party_members))
         , _player_repository(make_player_repository(config))
         , _player_persistence_service(
               *_player_repository,
@@ -241,38 +226,6 @@ namespace snf::server
               },
               _command_lifecycle
           )
-        , _party_actor_binding(
-              PartyActorBindingConfig{
-                  .actor = PartyConfig{.max_members = checked_party_members(config.max_party_members)},
-                  .on_result =
-                      [this](const PartyInboundCommand& command, const PartyResult& result)
-                  {
-                      if (const auto* leave = std::get_if<LeavePartyCommand>(&command.command))
-                      {
-                          _party_coordinator.completeLeave(PartyRoute{
-                              .connection = command.connection,
-                              .player = leave->player,
-                              .party = command.party,
-                              .membership_epoch = leave->membership_epoch,
-                              .leaving = true,
-                          });
-                      }
-                      else if (result.status != PartyCommandStatus::Applied && result.status != PartyCommandStatus::AlreadyMember)
-                      {
-                          const auto& join = std::get<JoinPartyCommand>(command.command);
-                          _party_coordinator.completeLeave(PartyRoute{
-                              .connection = command.connection,
-                              .player = join.player,
-                              .party = command.party,
-                              .membership_epoch = join.membership_epoch,
-                              .leaving = false,
-                          });
-                      }
-                      _party_results.accept(command, result);
-                  },
-              },
-              _command_lifecycle
-          )
         , _room_result_sink(_outbound_channel, _player_sessions)
         , _room_actor_binding(
               RoomActorBindingConfig{
@@ -360,9 +313,8 @@ namespace snf::server
           )
         , _player_actor_ingress(_logic_runtime, _player_actor_binding, _persistent_player_actor_binding, _command_lifecycle)
         , _zone_actor_ingress(_logic_runtime, _zone_actor_binding, _command_lifecycle)
-        , _party_actor_ingress(_logic_runtime, _party_actor_binding, _command_lifecycle)
         , _room_actor_ingress(_logic_runtime, _room_actor_binding, _command_lifecycle)
-        , _command_router(_player_actor_ingress, _zone_actor_ingress, _party_actor_ingress, _room_actor_ingress)
+        , _command_router(_player_actor_ingress, _zone_actor_ingress, _room_actor_ingress)
         , _zone_handoff_service(
               _command_router,
               _player_sessions,
@@ -386,7 +338,6 @@ namespace snf::server
               _command_router,
               _player_sessions,
               _route_coordinator,
-              _party_coordinator,
               _zone_handoff_service,
               _room_entry_service,
               ProtocolGatewayConfig{}
@@ -424,7 +375,6 @@ namespace snf::server
         _logic_runtime.registerBinding(_player_actor_binding);
         _logic_runtime.registerBinding(_persistent_player_actor_binding);
         _logic_runtime.registerBinding(_zone_actor_binding);
-        _logic_runtime.registerBinding(_party_actor_binding);
         // Registered before start so a cleared Room's reward tell resolves to the
         // persistent Player binding. Nothing routes client frames here yet.
         _logic_runtime.registerBinding(_room_actor_binding);
@@ -493,11 +443,6 @@ namespace snf::server
         return _room_actor_binding.stats();
     }
 
-    PartyActorBindingStats GameServer::getPartyActorStats() const noexcept
-    {
-        return _party_actor_binding.stats();
-    }
-
     ServerMetricsSnapshot GameServer::getMetricsSnapshot() const
     {
         return ServerMetricsSnapshot{
@@ -514,7 +459,6 @@ namespace snf::server
             .zone_transition_channel = _zone_transition_channel.stats(),
             .room_entries = _protocol_gateway.roomEntryStats(),
             .room_transition_channel = _room_transition_channel.stats(),
-            .party_actors = _party_actor_binding.stats(),
             .command_terminals = _command_lifecycle.terminalCount(),
             .command_admission_rejections = _command_lifecycle.admissionRejectionCount(),
             .player_persistence = _player_persistence_service.stats(),

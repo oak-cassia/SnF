@@ -423,7 +423,7 @@ namespace
                 .boss_health = 0,
                 .boss_spawned = false,
                 .outcome = BattleOutcome::Failed,
-                .failure_reason = BattleFailureReason::PartyDefeated,
+                .failure_reason = BattleFailureReason::ParticipantsDefeated,
                 .audience = {player},
             }
         );
@@ -433,7 +433,7 @@ namespace
         assert(failed->payload.size() == 10);
         assert(payload_u64(*failed, 0) == 0);
         assert(failed->payload[8] == std::byte{0});
-        assert(failed->payload[9] == std::byte{static_cast<std::uint8_t>(BattleFailureReason::PartyDefeated)});
+        assert(failed->payload[9] == std::byte{static_cast<std::uint8_t>(BattleFailureReason::ParticipantsDefeated)});
         assert(!fixture.pop());
     }
 

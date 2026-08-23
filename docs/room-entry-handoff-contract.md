@@ -22,7 +22,7 @@ Room을 Zone 위의 overlay로 두면 전투 중 Player가 두 공간에 동시�
 - 복귀는 server가 시작하며 unsolicited 프레임 하나로 끝난다.
 - transition 기록에 고정 상한이 있다.
 
-matchmaking, Party 단위 동시 입장, 프로세스 간 이동, Room 상태 영속화와 mid-battle reconnect는 범위가
+matchmaking, group 단위 동시 입장, 프로세스 간 이동, Room 상태 영속화와 mid-battle reconnect는 범위가
 아니다.
 
 ## 2. 소유권과 상태
@@ -76,7 +76,7 @@ cross-zone handoff에서 가장 비싼 경로다. 이 순서에서는 입장 경
 복귀는 client 요청이 아니다.
 
 ```text
-BattleCleared(boss 사망) | BattleFailed(Deadline | PartyDefeated) | LeaveRoom | Disconnected
+BattleCleared(boss 사망) | BattleFailed(Deadline | ParticipantsDefeated) | LeaveRoom | Disconnected
 → Returning 기록과 return_epoch 발급
 → return Zone EnterZone(return_epoch, return position)
 → Applied 또는 AlreadyPresent 확인
