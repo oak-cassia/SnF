@@ -474,14 +474,9 @@ Actor는 송신 공간을 기다리며 중단될 수 있습니다. Reactor를 �
 | 관심사 | 코드 |
 | --- | --- |
 | epoll Reactor와 Session 수명 | [`src/server/tcp_server.cpp`](src/server/tcp_server.cpp) |
-| TCP 프레임 복원 | [`src/protocol/frame_codec.cpp`](src/protocol/frame_codec.cpp) |
-| 부분 송신과 미전송 데이터 | [`src/net/session.cpp`](src/net/session.cpp) |
-| 송신 공간 예약 | [`src/server/outbound_channel.cpp`](src/server/outbound_channel.cpp) |
 | Actor 실행·코루틴·타이머 | [`src/runtime/actor_runtime.cpp`](src/runtime/actor_runtime.cpp) |
-| 코루틴 공개 인터페이스 | [`include/snf/runtime/actor_task.hpp`](include/snf/runtime/actor_task.hpp) |
 | Player 비동기 연결 계층 | [`src/server/player_actor_binding.cpp`](src/server/player_actor_binding.cpp) |
 | Room 전투 상태 기계 | [`src/game/room.cpp`](src/game/room.cpp) |
-| Room 타이머·메시지·수명 | [`src/server/room_actor_binding.cpp`](src/server/room_actor_binding.cpp) |
 | 스냅샷 병합과 저장 순서 | [`src/server/player_persistence_service.cpp`](src/server/player_persistence_service.cpp) |
 | MySQL 작업 대기열과 SQL | [`src/server/mysql_player_repository.cpp`](src/server/mysql_player_repository.cpp) |
 
