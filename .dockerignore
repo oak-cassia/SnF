@@ -5,3 +5,6 @@ build
 cmake-build-*
 compile_commands.json
 study
+**/.venv*
+**/__pycache__
+**/*.pyc
