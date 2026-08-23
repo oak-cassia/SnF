@@ -11,9 +11,6 @@
 
 namespace
 {
-    // The real channel, because a reservation can only come from one: a follow-up sink
-    // consumes capacity it did not create, and a stub that mints capacity would test
-    // the wrong contract.
     struct ResponseSinkFixture
     {
         explicit ResponseSinkFixture(const std::size_t capacity)
@@ -110,8 +107,6 @@ namespace
         });
 
         auto reservation = fixture.reserve(connection, fixture.response_sink.requiredSlots(result));
-        // One command, one request id: every response it produced answers the same
-        // frame, so the payloads are what tell them apart.
         assert(fixture.response_sink.applyResponses(connection, 7, std::move(result), reservation));
         assert((fixture.popPayload() == std::vector<std::byte>{std::byte{0x01}}));
         assert((fixture.popPayload() == std::vector<std::byte>{std::byte{0x02}}));
@@ -148,9 +143,6 @@ namespace
             .response = snf::server::PongResponse{.payload = {}},
         });
 
-        // One slot for two follow-ups: application is not a transaction, so the first
-        // stays emitted and the shortfall surfaces as a broken invariant rather than a
-        // silently dropped response.
         auto reservation = fixture.reserve(connection, 1);
         bool shortfall_reported = false;
         try

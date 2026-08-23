@@ -281,8 +281,6 @@ void test_rejects_a_body_larger_than_maximum()
 
 void test_rejects_an_unknown_message_type()
 {
-    // Deliberately far past the highest assigned type, so adding one does not turn
-    // this frame valid the way type 0x11 did once RoomJoin took it.
     const std::vector<std::byte> invalid_frame{
         std::byte{0x00},
         std::byte{0x00},

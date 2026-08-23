@@ -27,8 +27,6 @@ namespace snf::server
         }
     };
 
-    // The protocol gateway after frame decoding. It rejects unsupported message
-    // types and converts accepted frames into typed commands before actor routing.
     class MessageDispatcher
     {
     public:

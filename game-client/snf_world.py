@@ -41,9 +41,8 @@ class Entity:
 
 class World:
     def __init__(self, arena_w: int = 100, arena_h: int = 100) -> None:
-        self.mode: str = "zone"  # "zone" or "room"
+        self.mode: str = "zone"
 
-        # Zone state
         self.zone_id: int = 1
         self.zone_x: int = 0
         self.zone_y: int = 0
@@ -54,7 +53,6 @@ class World:
         self.zone_visible_players: list[int] = []
         self.zone_peers: dict[int, Entity] = {}
 
-        # Room / Arena state
         self.arena_w: int = arena_w
         self.arena_h: int = arena_h
         self.phase: RoomPhase = RoomPhase.Waiting
@@ -93,15 +91,12 @@ class World:
         self.zone_pos_updated_at = current_now
         self.zone_visible_players = visible_players
 
-        # Synchronize zone_peers
         current_peers = set(visible_players)
-        # Remove peers no longer visible
         for pid in list(self.zone_peers.keys()):
             if pid not in current_peers:
                 del self.zone_peers[pid]
                 self.add_log(f"Player #{pid} left the area")
 
-        # Add newly visible peers with deterministic dispersed positions around portal / spawn
         for pid in visible_players:
             if pid not in self.zone_peers:
                 angle = (pid * 137.5) * math.pi / 180.0
@@ -129,7 +124,6 @@ class World:
             dist = 28.0 + (peer_id % 4) * 16.0
             return math.cos(angle) * dist, math.sin(angle) * dist
 
-        # Gentle idle motion around base coordinate
         idle_x = peer.x + math.sin(current_now * 1.2 + peer_id * 1.7) * 3.5
         idle_y = peer.y + math.cos(current_now * 0.9 + peer_id * 2.3) * 3.5
         return idle_x, idle_y

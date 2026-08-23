@@ -22,15 +22,11 @@ namespace snf::runtime
         public:
             [[nodiscard]] ActorTask<T> get_return_object() noexcept;
 
-            // Lazy: the scheduler owns the first resume, so a handler body never
-            // runs on the thread that merely created the task.
             [[nodiscard]] std::suspend_always initial_suspend() const noexcept
             {
                 return {};
             }
 
-            // The frame stays alive at completion so the owning Worker can read
-            // the result and then destroy it explicitly.
             [[nodiscard]] std::suspend_always final_suspend() const noexcept
             {
                 return {};
@@ -54,10 +50,6 @@ namespace snf::runtime
         };
     }
 
-    // A single actor command's execution. The frame is owned by the owning
-    // Worker's actor slot: only that Worker resumes it and only that Worker
-    // destroys it, which is what keeps an external completion from ever touching
-    // a coroutine handle.
     template <typename T> class ActorTask final
     {
     public:
@@ -100,9 +92,6 @@ namespace snf::runtime
             return _handle.done() ? ActorTaskStatus::Completed : ActorTaskStatus::Suspended;
         }
 
-        // Valid only once resume() has reported Completed. A handler exception is
-        // rethrown here so it reaches the scheduler's existing worker-failure
-        // path instead of being swallowed by the coroutine frame.
         [[nodiscard]] T takeResult()
         {
             promise_type& promise = _handle.promise();

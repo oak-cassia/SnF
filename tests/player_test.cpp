@@ -110,8 +110,6 @@ namespace
 
         actor.grantStreetExperience(300);
         assert(actor.state().streetExperience() == 300);
-        // Progression owns a persisted value, so a grant on its own is reason enough
-        // to hand a snapshot to the persistence queue.
         assert(actor.hasFlushableDirtyState());
 
         snf::server::PlayerStateComponentMask cleared = 0;
@@ -128,12 +126,10 @@ namespace
 
         actor.grantStreetExperience(300);
         actor.grantStreetExperience(400);
-        // A grant adds to the total rather than replacing it.
         assert(actor.state().streetExperience() == 700);
 
         actor.grantStreetExperience(std::numeric_limits<std::uint64_t>::max());
         assert(actor.state().streetExperience() == std::numeric_limits<std::uint64_t>::max());
-        // Already at the ceiling, so a further grant must not wrap back to nearly zero.
         actor.grantStreetExperience(1);
         assert(actor.state().streetExperience() == std::numeric_limits<std::uint64_t>::max());
     }
@@ -148,7 +144,6 @@ namespace
         });
 
         assert(actor.state().streetExperience() == 29500);
-        // A restore is not a change, so it must not leave the actor asking to be saved.
         assert(!actor.hasFlushableDirtyState());
         assert(actor.snapshot().street_experience == 29500);
     }
@@ -161,8 +156,6 @@ namespace
         const std::uint64_t at_cap = snf::server::EXPERIENCE_PER_STREET_LEVEL * (snf::server::MAX_STREET_LEVEL - 1);
         actor.grantStreetExperience(at_cap + 5000);
 
-        // The level is clamped, the stored experience is not: raising the cap later
-        // has to grant the levels that were already earned, with no backfill.
         assert(snf::server::streetLevel(actor.state().streetExperience()) == snf::server::MAX_STREET_LEVEL);
         assert(actor.state().streetExperience() == at_cap + 5000);
         assert(actor.snapshot().street_experience == at_cap + 5000);
@@ -196,8 +189,6 @@ namespace
         snf::server::PlayerStateComponentMask cleared = 0;
         const auto dirty_snapshot = actor.takeDirtySnapshot(&cleared);
         assert(dirty_snapshot.has_value());
-        // The snapshot has to carry what the handler just decided, not the balance it
-        // started the turn with.
         assert(dirty_snapshot->currency_balance == 900);
         assert(dirty_snapshot->purchased_item_count == 1);
         assert((cleared & snf::server::componentMask(snf::server::PlayerStateComponent::Economy)) != 0);
@@ -278,11 +269,9 @@ void test_a_room_join_carries_stats_derived_from_experience()
     };
     const auto result = actor.handle(command);
 
-    // Nothing answers the client here: the Room decides whether the join lands.
     assert(result.responses.empty());
     assert(result.room_join);
     assert(result.room_join->room == snf::server::RoomId{.value = 7});
-    // 1000 experience is level 2, which is one step of growth off the base.
     assert((result.room_join->stats == snf::server::CombatStats{.attack = 11, .health = 110}));
 }
 
@@ -302,8 +291,6 @@ void test_a_provisional_player_cannot_join_a_room()
     {
         refused = true;
     }
-    // A Room reward is persistent state, so an unauthenticated actor has no
-    // business entering one.
     assert(refused);
 }
 void run_player_tests()

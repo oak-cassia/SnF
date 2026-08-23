@@ -266,8 +266,6 @@ namespace
             }
             catch (...)
             {
-                // This is a test-only anti-hang path. The normal path releases the
-                // completion explicitly and asserts that this fallback was unused.
             }
         }
 
@@ -313,9 +311,6 @@ namespace
                       catch (...)
                       {
                           _server_error = std::current_exception();
-                          // Reported here, not only rethrown from stop(): a server that dies
-                          // mid-test takes every session with it, and the client-side read
-                          // that then fails says nothing about why.
                           try
                           {
                               std::rethrow_exception(_server_error);
@@ -381,8 +376,6 @@ namespace
             return _server.getRoomActorStats();
         }
 
-        // Reads reactor state, so tests may only call it once the reactor thread
-        // has been joined.
         [[nodiscard]] snf::server::ServerMetricsSnapshot getMetricsSnapshot() const
         {
             return _server.getMetricsSnapshot();
@@ -512,10 +505,6 @@ namespace
                 continue;
             }
 
-            // Names itself, because a receive that fails here is otherwise
-            // indistinguishable from any other failed assertion in the suite. The
-            // distinction that matters is peer-closed versus timed out: one means the
-            // server went away, the other that it never answered.
             std::cerr << "[recv] fd " << socket_descriptor << " wanted " << expected_byte_count << ", got " << received_byte_count << ", result "
                       << result << ", errno " << errno << " (" << std::strerror(errno) << ")\n";
             assert(false && "receive_exact: recv failed or timed out");
@@ -637,7 +626,6 @@ namespace
         };
     }
 
-    // status + phase + room id
     snf::protocol::Frame receive_room_frame(const int socket_descriptor, const std::size_t payload_size)
     {
         const std::size_t frame_size = snf::protocol::FRAME_LENGTH_FIELD_SIZE + snf::protocol::MIN_BODY_SIZE + payload_size;
@@ -648,8 +636,6 @@ namespace
         return decoded.frames[0];
     }
 
-    // BattleDigest has a variable payload, so read the length prefix first and
-    // then let the production decoder validate the complete frame.
     snf::protocol::Frame receive_frame(const int socket_descriptor)
     {
         std::vector<std::byte> encoded = receive_exact(socket_descriptor, snf::protocol::FRAME_LENGTH_FIELD_SIZE);
@@ -920,8 +906,6 @@ namespace
         }};
         const auto client = connect_client(server.getPort());
 
-        // Kept small on purpose: every request needs its own reactor turn to be
-        // granted, and the client's receive timeout bounds each wait.
         constexpr std::uint32_t REQUEST_COUNT = 8;
         std::vector<std::byte> bundled_requests;
         for (std::uint32_t request_id = 1; request_id <= REQUEST_COUNT; ++request_id)
@@ -936,9 +920,6 @@ namespace
 
         send_all(client.getDescriptor(), bundled_requests);
 
-        // A channel with one slot makes nearly every command wait for capacity. Every
-        // response still arrives, in order: the actor suspends and the reactor grants
-        // as it drains, so no response is dropped and no Worker blocks.
         for (std::uint32_t request_id = 1; request_id <= REQUEST_COUNT; ++request_id)
         {
             const snf::protocol::Frame request{
@@ -954,14 +935,11 @@ namespace
         const auto metrics = server.getMetricsSnapshot();
         assert(metrics.counters.outbound_admission_failures == 0);
         assert(metrics.counters.actor_queue_overflows == 0);
-        // Graceful shutdown completed even though actor drain depended on the reactor
-        // continuing to consume and grant.
         assert(metrics.network.pending_outbound_reservations == 0);
         assert(metrics.network.reserved_outbound_slots == 0);
         assert(metrics.network.current_outbound_queue_depth == 0);
         assert(actor_count(server.getActorRuntimeStats()) == 0);
         assert(suspended_command_count(server.getActorRuntimeStats()) > 0);
-        // One terminal per command, including the ones that had to wait for capacity.
         assert(metrics.command_terminals == REQUEST_COUNT);
     }
 
@@ -986,22 +964,17 @@ namespace
         assert(metrics.counters.received_frames == 1);
         assert(metrics.network.reactor_turn_nanoseconds.sample_count > 0);
         assert(metrics.network.reactor_turn_nanoseconds.max >= metrics.network.reactor_turn_nanoseconds.p99);
-        // One drain observation for the PONG hand-off and one pending send sample
-        // for the frame it enqueued.
         assert(metrics.network.outbound_queue_depth.sample_count > 0);
         assert(metrics.network.session_pending_send_bytes.sample_count == 1);
-        // The single hand-off from the Logic Worker to the reactor.
         assert(metrics.network.outbound_queue_wait_nanoseconds.sample_count == 1);
         assert(metrics.network.outbound_queue_wait_nanoseconds.max > 0);
         assert(metrics.network.session_pending_send_bytes.max == encoded_request.size());
         assert(metrics.network.outbound_queue_high_water_mark >= 1);
-        // Every session is closed before the reactor loop returns.
         assert(metrics.network.session_count == 0);
         assert(metrics.network.sessions_with_pending_send == 0);
         assert(metrics.network.total_pending_send_bytes == 0);
         assert(queue_wait_sample_count(metrics.actor_runtime) == 1);
         assert(metrics.command_terminals == 1);
-        // Nothing waited for capacity, so the round trip started no async operation.
         assert(suspended_command_count(metrics.actor_runtime) == 0);
         assert(metrics.network.reserved_outbound_slots == 0);
         assert(metrics.network.pending_outbound_reservations == 0);
@@ -1038,8 +1011,6 @@ namespace
         send_all(client.getDescriptor(), encoded_request);
         assert_pong(receive_exact(client.getDescriptor(), encoded_request.size()), request);
 
-        // An idle reactor must still reach its report deadline, so this waits on
-        // the interval rather than on further traffic.
         const auto deadline = std::chrono::steady_clock::now() + 2s;
         while (report_count.load() < 3 && std::chrono::steady_clock::now() < deadline)
         {
@@ -1252,8 +1223,6 @@ namespace
             receive_purchase_response(client.getDescriptor()), duplicate.request_id, snf::server::PurchaseStatus::Committed, true, 1, 1, 900, 1
         );
 
-        // The Actor commits before response emission. Closing immediately after the
-        // send models a client that cannot know whether key 2 was applied in memory.
         const auto lost_response = purchase_frame(113, 2);
         send_all(client.getDescriptor(), snf::protocol::encode_frame(lost_response));
         client.init();
@@ -1324,8 +1293,6 @@ namespace
             .shutdown_grace_period = 200ms,
             .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
             .client_send_buffer_size = std::nullopt,
-            // Compressed production rules: one minion appears at start, the boss
-            // appears from the Tick chain, and neither can be mistaken for timeout.
             .room_battle_duration = 2s,
             .room_clear_experience = 300,
             .room_boss_health = snf::server::BASE_ATTACK,
@@ -1357,13 +1324,6 @@ namespace
             assert_authenticated(receive_exact(socket.get().getDescriptor(), bytes.size()), request_id, player);
         }
 
-        // A Room is entered from a Zone, and it is the Zone the battle hands them back
-        // to. Without this there is nothing to leave and nothing to return to, and the
-        // join is refused.
-        //
-        // The two sit further apart than the AOI radius on purpose: a Zone reply carries
-        // the players it can see, and the fixed-size reader below only holds a reply that
-        // sees none.
         for (const auto& [socket, request_id, y] :
              {std::tuple{std::ref(first), std::uint32_t{310}, std::uint32_t{20}},
               std::tuple{std::ref(second), std::uint32_t{311}, std::uint32_t{5000}}})
@@ -1398,9 +1358,6 @@ namespace
             assert(joined.payload[1] == static_cast<std::byte>(snf::server::RoomPhase::Waiting));
         }
 
-        // In a Room means in no Zone. The Move is answered rather than refused, and it
-        // changes nothing: the position the return restores below is the one they entered
-        // the Room with.
         send_all(
             first.getDescriptor(),
             snf::protocol::encode_frame(snf::protocol::Frame{
@@ -1427,8 +1384,6 @@ namespace
         assert(started.request_id == 304);
         assert(started.payload[1] == static_cast<std::byte>(snf::server::RoomPhase::Running));
 
-        // StartBattle spawns the first wave immediately. BattleDigest is unsolicited
-        // and identical for every participant, including the player who started it.
         const auto first_wave = receive_frame(first.getDescriptor());
         const auto observed_first_wave = receive_frame(second.getDescriptor());
         assert(first_wave.type == snf::protocol::MessageType::BattleDigest);
@@ -1445,8 +1400,6 @@ namespace
         assert(read_u64(first_wave.payload, *first_enemy_offset + 6) == snf::server::BASE_ATTACK);
         assert(first_position_offset && read_u32(first_wave.payload, *first_position_offset + 1) == 1);
 
-        // Movement is a request/acknowledgement pair, while the actual position
-        // change remains an unsolicited observation from the next Tick.
         send_all(first.getDescriptor(), snf::protocol::encode_frame(set_move_intent_frame(313, room, snf::server::MoveDirection::NorthEast, 1)));
         const auto move_ack = receive_until_type(first.getDescriptor(), snf::protocol::MessageType::MoveAcknowledged, 313);
         assert(move_ack.payload == (std::vector<std::byte>{std::byte{0}, std::byte{1}}));
@@ -1456,9 +1409,6 @@ namespace
         send_all(first.getDescriptor(), snf::protocol::encode_frame(set_move_intent_frame(314, room, snf::server::MoveDirection::Stop, 2)));
         static_cast<void>(receive_until_type(first.getDescriptor(), snf::protocol::MessageType::MoveAcknowledged, 314));
 
-        // A cast carries only the Room, skill and client sequence. The server picks
-        // the first living enemy and acknowledges the request separately from the
-        // observation stream.
         const auto use_skill_frame = [](const std::uint32_t request_id, const std::uint64_t sequence)
         {
             std::vector<std::byte> payload = player_id_payload(room);
@@ -1483,8 +1433,6 @@ namespace
              })
         );
 
-        // The following Tick flushes the atomic Damage+Died group. Both clients
-        // observe the same event order even though only one sent UseSkill.
         const auto minion_killed = receive_until_digest_event(first.getDescriptor(), snf::server::BattleEventKind::EnemyDied);
         const auto observed_minion_killed = receive_until_digest_event(second.getDescriptor(), snf::server::BattleEventKind::EnemyDied);
         assert(minion_killed.type == snf::protocol::MessageType::BattleDigest);
@@ -1498,7 +1446,6 @@ namespace
         assert(read_u64(minion_killed.payload, *minion_damage_offset + 25) == 0);
         assert(minion_death_offset && read_u32(minion_killed.payload, *minion_death_offset + 1) == 1);
 
-        // A later Tick creates the boss with the next monotonic EnemyId.
         const auto boss_spawned = receive_until_digest_event(first.getDescriptor(), snf::server::BattleEventKind::EnemySpawned);
         const auto observed_boss_spawned = receive_until_digest_event(second.getDescriptor(), snf::server::BattleEventKind::EnemySpawned);
         assert(boss_spawned.type == snf::protocol::MessageType::BattleDigest);
@@ -1508,8 +1455,6 @@ namespace
         assert(boss_spawn_offset && read_u32(boss_spawned.payload, *boss_spawn_offset + 1) == 2);
         assert(boss_spawned.payload[*boss_spawn_offset + 5] == static_cast<std::byte>(snf::server::EnemyKind::Boss));
 
-        // The second participant has an independent client sequence and kills the
-        // boss. Ack, terminal Digest and BattleCleared are distinct ordered frames.
         send_all(second.getDescriptor(), snf::protocol::encode_frame(use_skill_frame(307, 1)));
         const auto killing_ack = receive_until_type(second.getDescriptor(), snf::protocol::MessageType::SkillAcknowledged, 307);
         assert(killing_ack.type == snf::protocol::MessageType::SkillAcknowledged);
@@ -1526,9 +1471,6 @@ namespace
         const auto boss_death_offset = digest_event_offset(killing_digest, snf::server::BattleEventKind::EnemyDied);
         assert(boss_death_offset && read_u32(killing_digest.payload, *boss_death_offset + 1) == 2);
 
-        // Nobody asks for either of these. The clear rewards both participants --
-        // including the one that never sent BattleStart -- and puts them back in the Zone
-        // they came from.
         constexpr std::size_t RETURN_PAYLOAD_SIZE = 8 + 4 + 4;
         for (const auto& [socket, y] : {std::pair{std::ref(first), std::int32_t{20}}, std::pair{std::ref(second), std::int32_t{5000}}})
         {
@@ -1545,9 +1487,6 @@ namespace
             assert(static_cast<std::int32_t>(read_u32(returned.payload, 12)) == y);
         }
 
-        // The route is real again, on a fresh epoch: entering minted 1, the return minted
-        // 2. A Move that lands proves the whole way back, not just the frame announcing
-        // it.
         for (const auto& [socket, request_id, y] :
              {std::tuple{std::ref(first), std::uint32_t{320}, std::int32_t{21}}, std::tuple{std::ref(second), std::uint32_t{321}, std::int32_t{5001}}
              })
@@ -2109,8 +2048,6 @@ namespace
 
         server.stop();
         assert(server.getStats().protocol_errors >= 1);
-        // Worker-owned wrappers are destroyed before the Logic Runtime worker
-        // exits, so a completed shutdown retains no inactive Player slot.
         assert(actor_count(server.getActorRuntimeStats()) == 0);
     }
 
@@ -2419,10 +2356,6 @@ namespace
             }
         }
 
-        // The slow participant stops reading after the initial state. Moving the
-        // eventual caster alone still fans more than a thousand digests to every connection,
-        // enough to exceed the constrained socket without making range readiness
-        // depend on four independently admitted movement commands.
         send_all(
             clients[FIRST_HEALTHY_INDEX].getDescriptor(),
             snf::protocol::encode_frame(set_move_intent_frame(440, room, snf::server::MoveDirection::North, 1))
@@ -2782,9 +2715,6 @@ namespace
 
 int main()
 {
-    // Named on stderr, unbuffered, before each case runs. A suite of this size that
-    // aborts inside a shared receive helper otherwise says only which helper failed,
-    // and the server's own buffered output is no help in placing it.
     const auto run = [](const char* name, auto&& test)
     {
         std::cerr << "[ run  ] " << name << '\n';

@@ -10,9 +10,6 @@
 
 namespace snf::server
 {
-    // No request id here. Correlating a reply with the frame that asked for it is
-    // a protocol concern, so it rides in the envelope -- the same place
-    // ZoneInboundCommand keeps it.
     struct PingCommand
     {
         std::vector<std::byte> payload;
@@ -29,9 +26,6 @@ namespace snf::server
         ProductId product;
     };
 
-    // Answered by the Room, not here: this Player only decides which stats it
-    // enters with. The reply travels with the request so the Room can answer the
-    // frame that asked.
     struct JoinRoomRequest
     {
         RoomId room{};

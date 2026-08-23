@@ -29,10 +29,6 @@ namespace snf::server
         std::optional<ZonePosition> position{};
     };
 
-    // The saga identity, copied whole. Both publishing sites used to spell it out field
-    // by field, and one of them omitted return_id -- which made every return completion
-    // correlate against zero, fail the ticket check, and take the server down with it.
-    // The outcome fields are the caller's to fill in; the identity is not.
     [[nodiscard]] inline RoomTransitionCompletion completionFrom(const RoomEntryContext& context) noexcept
     {
         return RoomTransitionCompletion{
@@ -44,9 +40,6 @@ namespace snf::server
         };
     }
 
-    // What a cleared Room hands the reactor: this participant is in no Zone and has to
-    // be put back. It carries no ticket, because a clear is not a step of a saga that
-    // reserved one, so this queue is bounded on its own.
     struct RoomReturnRequest
     {
         RoomId room{};
@@ -73,9 +66,6 @@ namespace snf::server
         bool cancelled{false};
     };
 
-    // A reactor admission reserves one ticket for a room entry handoff's whole lifetime.
-    // Only one step is in flight, so that ticket guarantees one allocation-free
-    // Worker completion slot at a time.
     class RoomTransitionChannel final
     {
     public:
@@ -88,10 +78,6 @@ namespace snf::server
         [[nodiscard]] std::optional<RoomTransitionTicket> tryReserve(RoomReturnId return_id);
         [[nodiscard]] bool publish(RoomTransitionTicket ticket, RoomTransitionCompletion completion) noexcept;
         [[nodiscard]] std::optional<RoomTransitionCompletion> tryPop();
-        // The Worker side of a clear. It only states the fact; starting the return is
-        // the reactor's, because the route state the return moves is the reactor's. A
-        // refusal is a logic failure for the caller to report, like a refused publish:
-        // dropping it would leave a player in no Zone with nothing to put them back.
         [[nodiscard]] bool tryPublishReturnRequest(RoomReturnRequest request) noexcept;
         [[nodiscard]] std::optional<RoomReturnRequest> tryPopReturnRequest();
         void release(RoomTransitionTicket ticket) noexcept;
@@ -135,8 +121,6 @@ namespace snf::server
         std::uint64_t _completions_published{0};
         std::uint64_t _completions_consumed{0};
         std::uint64_t _invalid_publishes{0};
-        // Sized like the completion ring. A player can only be in a Room after an entry
-        // admitted them, and both are bounded by the same connection capacity.
         std::vector<std::optional<RoomReturnRequest>> _return_requests;
         std::size_t _return_head{0};
         std::size_t _return_tail{0};

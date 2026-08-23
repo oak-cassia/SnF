@@ -54,13 +54,9 @@ namespace snf::server
         RequestSnapshot,
         JoinRoom,
         LeaveSource,
-        // The way back. It is a step of its own rather than a reused entry step so a
-        // completion names exactly one saga: the dispatch would otherwise have to guess
-        // from which map holds the connection, and a stuck entry makes that ambiguous.
         ReturnZone,
     };
 
-    // Immutable routing identity carried by one internal Room submission.
     struct RoomEntryContext
     {
         RoomEntryId entry_id{};

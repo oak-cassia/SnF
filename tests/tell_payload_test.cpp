@@ -23,8 +23,6 @@ namespace
         assert(!carrier.empty());
 
         assert(!carrier.take<Greeting>());
-        // A refused take leaves the carrier intact, so the owning binding can
-        // still claim it after another binding declined.
         assert(!carrier.empty());
 
         const auto reward = carrier.take<Reward>();
@@ -37,7 +35,6 @@ namespace
 
         assert(carrier.take<Reward>());
         assert(carrier.empty());
-        // At most once: a delivered tell cannot be claimed twice.
         assert(!carrier.take<Reward>());
     }
 

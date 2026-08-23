@@ -59,8 +59,6 @@ namespace
         std::promise<void> failure_reported;
     };
 
-    // Stands in for PlayerActorBinding so this test covers the Room's half of the
-    // tell: that the payload the Room emits is one the target binding can restore.
     class RecordingPlayerBinding final : public snf::runtime::ActorBinding
     {
     public:
@@ -83,8 +81,6 @@ namespace
         std::promise<void> all_arrived;
 
     protected:
-        // Called on whichever Worker owns the sender, so this stays a read-only
-        // transform: no cache, no counter, nothing for TSan to find.
         [[nodiscard]] std::optional<snf::runtime::ActorSubmission>
         makeTell(const snf::runtime::ActorKey target, snf::runtime::TellPayload payload) override
         {
@@ -137,8 +133,6 @@ namespace
         };
     };
 
-    // A failure emits no tell, so there is nothing to wait on the way a clear's
-    // rewards can be waited on. This watches the result stream instead.
     class TerminalPhaseWatch
     {
     public:
@@ -245,8 +239,6 @@ namespace
             snf::server::RoomActorBindingConfig{
                 .actor =
                     snf::server::RoomConfig{
-                        // Far longer than this test takes, so the deadline cannot be
-                        // what ends the battle. One cast is enough to kill the boss.
                         .battle_duration = 5s,
                         .max_participants = 4,
                         .clear_experience = 300,
@@ -300,8 +292,6 @@ namespace
             }) == snf::runtime::PostResult::Accepted
         );
 
-        // The boss does not exist until the one-shot Tick chain reaches its
-        // absolute spawn time. Wait for that digest before casting.
         assert(boss_reached.wait_for(5s) == std::future_status::ready);
         assert(
             ingress.tryPost(snf::server::RoomInboundCommand{
@@ -316,8 +306,6 @@ namespace
             }) == snf::runtime::PostResult::Accepted
         );
 
-        // One player landed the killing blow; both are rewarded, and the reward
-        // reaches the Player through a tell the target binding restores.
         assert(arrived.wait_for(5s) == std::future_status::ready);
 
         runtime.close();
@@ -394,20 +382,16 @@ namespace
             }) == snf::runtime::PostResult::Accepted
         );
 
-        // Nobody casts anything. The only thing that can decide this battle is the
-        // deadline the Room armed for itself, and it decides against the participants.
         assert(reached.wait_for(5s) == std::future_status::ready);
         const snf::server::RoomResult result = reached.get();
         assert(result.phase == snf::server::RoomPhase::Failed);
         assert(result.grants.empty());
-        // Still names everyone, because the return to a Zone reads this list.
         assert((result.audience == std::vector<snf::server::PlayerId>{snf::server::PlayerId{.value = 10}}));
 
         runtime.close();
         runtime.join();
 
         std::lock_guard lock{player_binding.mutex};
-        // A failure pays nothing, so no tell was ever sent.
         assert(player_binding.grants.empty());
         assert(completion.failed.load() == 0);
 
@@ -553,8 +537,6 @@ namespace
                                        };
                                    }));
 
-        // The blocker deadline owns one slot and the target StartBattle owns the
-        // other, so the target cannot reserve its own mandatory backstop.
         assert(rejected_future.wait_for(5s) == std::future_status::ready);
         const auto result = rejected_future.get();
         assert(result.status == snf::server::RoomCommandStatus::RuntimeOverloaded);
@@ -648,8 +630,6 @@ namespace
             }) == snf::runtime::PostResult::Accepted
         );
 
-        // Start owns one slot and its deadline reserves the second. Tick
-        // registration is rejected, but the deadline still terminates the Room.
         assert(terminal_future.wait_for(5s) == std::future_status::ready);
         assert(terminal_future.get().phase == snf::server::RoomPhase::Failed);
         runtime.close();
@@ -673,8 +653,6 @@ namespace
         snf::server::RoomActorIngress ingress{runtime, binding, lifecycle};
         runtime.start();
 
-        // An empty Room is refused a start, so it must not be left resident holding
-        // a slot for a battle that will never run.
         assert(
             ingress.tryPost(snf::server::RoomInboundCommand{
                 .room = snf::server::RoomId{.value = 11},
@@ -735,10 +713,6 @@ namespace
                         return;
                     }
 
-                    // on_result runs immediately before the Room publishes grants.
-                    // Fill this one Worker's outstanding budget here so the following
-                    // tell is deterministically refused without giving the Worker a
-                    // chance to drain the filler commands first.
                     for (std::uint64_t attempt = 0; attempt < 64; ++attempt)
                     {
                         const auto posted = runtime_pointer->tryPost(binding_pointer->makeCommand(snf::server::RoomInboundCommand{
@@ -833,8 +807,6 @@ void test_a_join_naming_another_room_is_refused()
     bool refused = false;
     try
     {
-        // The key says Room 11, the request says Room 99. Only a routing bug does
-        // that, and entering the wrong Room is worse than failing loudly.
         static_cast<void>(runtime.tryTell(
             snf::runtime::ActorKey{
                 .kind = snf::runtime::ActorKind::Room,

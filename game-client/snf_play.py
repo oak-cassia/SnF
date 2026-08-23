@@ -122,7 +122,6 @@ def run_headless(
                     world.return_to_zone_mode(ret_zone, rx, ry)
                     world.add_log(f"Returned to Zone {ret_zone} at ({rx}, {ry})")
 
-            # In Zone mode: take periodic movement steps in headless mode
             if world.mode == "zone" and session.in_zone:
                 if now - last_summary_time >= 1.0:
                     zone_step_count += 1
@@ -130,13 +129,11 @@ def run_headless(
                     target_y = zone_step_count * 5
                     session.send_zone_move(target_x, target_y)
 
-            # Print newly added logs
             if len(world.log) > last_log_count:
                 for idx in range(last_log_count, len(world.log)):
                     print(f"  [LOG] {world.log[idx]}")
                 last_log_count = len(world.log)
 
-            # Periodic status print (1Hz)
             if now - last_summary_time >= 1.0:
                 last_summary_time = now
                 if world.mode == "zone":
@@ -279,7 +276,6 @@ def run_gui(
     slash_cooldown = 1.0
     slash_range = 12
 
-    # Zone movement tracking
     zone_local_x = float(world.zone_x)
     zone_local_y = float(world.zone_y)
     last_zone_move_time = 0.0
@@ -289,21 +285,18 @@ def run_gui(
     while running and session.is_connected:
         now = time.monotonic()
 
-        # Handle events
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     if world.mode == "room" and session.in_room:
-                        # Leave room back to zone
                         session.send_room_leave()
                         for b in bot_list:
                             b.leave_room()
                     else:
                         running = False
 
-                # Enter Room from Zone
                 elif event.key in (pygame.K_j, pygame.K_RETURN):
                     if world.mode == "zone" and session.in_zone and not session.in_room:
                         if bots > 0:
@@ -324,12 +317,10 @@ def run_gui(
                         session.join_room(room_id=room_id, start=start)
                         world.enter_room_mode()
 
-                # Start Battle in Room
                 elif event.key == pygame.K_r:
                     if world.mode == "room" and world.phase == RoomPhase.Waiting and session.in_room:
                         session.send_battle_start()
 
-                # Slash Attack in Room
                 elif event.key == pygame.K_SPACE:
                     if world.mode == "room" and session.in_room and now - last_skill_time >= slash_cooldown:
                         my_entity = world.players.get(player_id)
@@ -337,7 +328,6 @@ def run_gui(
                             session.send_use_skill(1)
                             last_skill_time = now
 
-        # Keys pressed
         keys = pygame.key.get_pressed()
         dx = 0
         dy = 0
@@ -350,24 +340,22 @@ def run_gui(
         if keys[pygame.K_d] or keys[pygame.K_RIGHT]:
             dx += 1
 
-        # Movement in Zone Mode
         if world.mode == "zone" and session.in_zone:
             if dx != 0 or dy != 0:
-                zone_speed = 35.0  # units per second
+                zone_speed = 35.0
                 dt = clock.get_time() / 1000.0
                 zone_local_x += dx * zone_speed * dt
                 zone_local_y += dy * zone_speed * dt
 
-                if now - last_zone_move_time >= 0.1:  # 10Hz throttle
+                if now - last_zone_move_time >= 0.1:
                     session.send_zone_move(int(zone_local_x), int(zone_local_y))
                     last_zone_move_time = now
                     world.zone_x = int(zone_local_x)
                     world.zone_y = int(zone_local_y)
-            elif now - last_zone_move_time >= 1.0:  # 1Hz idle heartbeat to refresh visible peers
+            elif now - last_zone_move_time >= 1.0:
                 session.send_zone_move(int(zone_local_x), int(zone_local_y))
                 last_zone_move_time = now
 
-        # Movement in Room Arena Mode (Continuous Move Intent)
         elif world.mode == "room":
             new_dir = Direction.Stop
             if dx == 0 and dy == -1:
@@ -392,7 +380,6 @@ def run_gui(
                 if session.in_room:
                     session.send_move_intent(new_dir)
 
-        # Drain pushes & update world
         pushes = session.drain_pushes()
         for frame in pushes:
             if frame.type in (MessageType.Moved, MessageType.ZoneEntered):
@@ -427,7 +414,6 @@ def run_gui(
                 zone_local_x = float(rx)
                 zone_local_y = float(ry)
 
-        # Dynamic window resize if arena size changed from default
         cur_arena_w = world.arena_w * scale
         cur_arena_h = world.arena_h * scale
         if cur_arena_w != arena_px_w or cur_arena_h != arena_px_h:
@@ -437,21 +423,15 @@ def run_gui(
             win_h = max(arena_px_h, 600)
             screen = pygame.display.set_mode((win_w, win_h))
 
-        # --- RENDERING ---
         screen.fill((18, 20, 28))
 
-        # ==========================
-        # VIEW 1: ZONE FIELD MODE
-        # ==========================
         if world.mode == "zone":
             field_rect = pygame.Rect(0, 0, arena_px_w, arena_px_h)
             pygame.draw.rect(screen, (20, 32, 28), field_rect)
 
-            # Zone field camera centered on player
             cam_center_x = arena_px_w // 2
             cam_center_y = arena_px_h // 2
 
-            # Infinite grid relative to player
             grid_spacing = 40
             offset_x = int(cam_center_x - zone_local_x * 4) % grid_spacing
             offset_y = int(cam_center_y - zone_local_y * 4) % grid_spacing
@@ -461,7 +441,6 @@ def run_gui(
             for gy in range(offset_y - grid_spacing, arena_px_h + grid_spacing, grid_spacing):
                 pygame.draw.line(screen, (28, 44, 38), (0, gy), (arena_px_w, gy), 1)
 
-            # Draw Dungeon Portal at (0, 0)
             portal_screen_x = int(cam_center_x + (0 - zone_local_x) * 4)
             portal_screen_y = int(cam_center_y + (0 - zone_local_y) * 4)
 
@@ -475,48 +454,39 @@ def run_gui(
             portal_lbl = font_small.render(f"DUNGEON ROOM #{room_id} [J / Enter]", True, (160, 220, 255))
             screen.blit(portal_lbl, (portal_screen_x - portal_lbl.get_width() // 2, portal_screen_y - portal_rad - 16))
 
-            # Draw local player at screen center
             pygame.draw.ellipse(screen, (10, 18, 14), (cam_center_x - 14, cam_center_y + 9, 28, 8))
             pygame.draw.circle(screen, (50, 210, 120), (cam_center_x, cam_center_y), 14)
             pygame.draw.circle(screen, (255, 255, 255), (cam_center_x, cam_center_y), 17, 2)
             my_lbl = font_small.render(f"P{player_id} (YOU)", True, (255, 255, 255))
             screen.blit(my_lbl, (cam_center_x - my_lbl.get_width() // 2, cam_center_y - 32))
 
-            # Draw other visible players in Zone on the field
             for peer_id in world.zone_visible_players:
                 peer_x, peer_y = world.get_zone_peer_pos(peer_id, now)
                 peer_scr_x = int(cam_center_x + (peer_x - zone_local_x) * 4)
                 peer_scr_y = int(cam_center_y + (peer_y - zone_local_y) * 4)
                 dist = int(math.hypot(peer_x - zone_local_x, peer_y - zone_local_y))
 
-                # Check if peer is inside visible viewport
                 if 0 <= peer_scr_x <= arena_px_w and 0 <= peer_scr_y <= arena_px_h:
-                    # Ground shadow
                     pygame.draw.ellipse(screen, (10, 18, 22), (peer_scr_x - 14, peer_scr_y + 9, 28, 8))
 
-                    # Pulsing aura glow
                     pulse = 0.5 + 0.5 * math.sin(now * 3.0 + peer_id)
                     glow_r = int(16 + 2 * pulse)
                     glow_surf = pygame.Surface((glow_r * 2, glow_r * 2), pygame.SRCALPHA)
                     pygame.draw.circle(glow_surf, (80, 160, 255, 60), (glow_r, glow_r), glow_r)
                     screen.blit(glow_surf, (peer_scr_x - glow_r, peer_scr_y - glow_r))
 
-                    # Avatar body and border
                     pygame.draw.circle(screen, (60, 160, 240), (peer_scr_x, peer_scr_y), 14)
                     pygame.draw.circle(screen, (160, 210, 255), (peer_scr_x, peer_scr_y), 16, 2)
 
-                    # Label pill above avatar
                     peer_lbl = font_small.render(f"P{peer_id}", True, (220, 240, 255))
                     lbl_bg = pygame.Surface((peer_lbl.get_width() + 8, peer_lbl.get_height() + 2), pygame.SRCALPHA)
                     lbl_bg.fill((20, 30, 42, 190))
                     screen.blit(lbl_bg, (peer_scr_x - peer_lbl.get_width() // 2 - 4, peer_scr_y - 32))
                     screen.blit(peer_lbl, (peer_scr_x - peer_lbl.get_width() // 2, peer_scr_y - 31))
 
-                    # Distance tag below avatar
                     dist_lbl = font_small.render(f"{dist}m", True, (130, 180, 220))
                     screen.blit(dist_lbl, (peer_scr_x - dist_lbl.get_width() // 2, peer_scr_y + 18))
                 else:
-                    # Off-screen radar indicator along the boundary
                     dx_off = peer_scr_x - cam_center_x
                     dy_off = peer_scr_y - cam_center_y
                     angle = math.atan2(dy_off, dx_off)
@@ -529,11 +499,9 @@ def run_gui(
                     tag = font_small.render(f"P{peer_id} ({dist}m)", True, (160, 210, 255))
                     screen.blit(tag, (int(edge_x) - tag.get_width() // 2, int(edge_y) - 18))
 
-            # Banner on top of Zone screen
             zone_badge = font_large.render(f"OPEN FIELD: ZONE #{world.zone_id}", True, (100, 230, 160))
             screen.blit(zone_badge, (20, 15))
 
-            # Side Panel in Zone Mode
             panel_x = arena_px_w
             panel_rect = pygame.Rect(panel_x, 0, panel_w, win_h)
             pygame.draw.rect(screen, (24, 30, 36), panel_rect)
@@ -572,7 +540,6 @@ def run_gui(
             pygame.draw.line(screen, (40, 60, 55), (pad_x, py_offset), (panel_x + panel_w - 15, py_offset), 1)
             py_offset += 12
 
-            # Dungeon entry prompt
             screen.blit(font_small.render("BATTLE DUNGEON", True, (150, 175, 170)), (pad_x, py_offset))
             py_offset += 16
             dungeon_btn_rect = pygame.Rect(pad_x, py_offset, 210, 36)
@@ -583,31 +550,23 @@ def run_gui(
             py_offset += 46
             screen.blit(font_small.render("Press [J] or [ENTER] to join", True, (160, 200, 230)), (pad_x + 10, py_offset))
 
-            # Controls guide at bottom
             ctrl_y = win_h - 55
             pygame.draw.line(screen, (40, 60, 55), (pad_x, ctrl_y - 8), (panel_x + panel_w - 15, ctrl_y - 8), 1)
             screen.blit(font_small.render("WASD/Arrows: Move in Zone", True, (140, 170, 160)), (pad_x, ctrl_y))
             screen.blit(font_small.render("J/ENTER: Enter Room | ESC: Quit", True, (140, 170, 160)), (pad_x, ctrl_y + 16))
 
-        # ==========================
-        # VIEW 2: ROOM ARENA MODE
-        # ==========================
         else:
-            # 1. Arena rendering
             arena_rect = pygame.Rect(0, 0, arena_px_w, arena_px_h)
             pygame.draw.rect(screen, (24, 27, 38), arena_rect)
 
-            # Grid lines (every 10 units)
             grid_step = 10 * scale
             for gx in range(grid_step, arena_px_w, grid_step):
                 pygame.draw.line(screen, (34, 38, 54), (gx, 0), (gx, arena_px_h), 1)
             for gy in range(grid_step, arena_px_h, grid_step):
                 pygame.draw.line(screen, (34, 38, 54), (0, gy), (arena_px_w, gy), 1)
 
-            # Arena border
             pygame.draw.rect(screen, (70, 80, 110), arena_rect, 2)
 
-            # Range circle around local player
             my_entity = world.players.get(player_id)
             if my_entity and my_entity.alive:
                 my_x, my_y = my_entity.interpolated_pos(now)
@@ -619,7 +578,6 @@ def run_gui(
                 pygame.draw.circle(range_surf, (60, 220, 120, 90), (range_px, range_px), range_px, 1)
                 screen.blit(range_surf, (center_x - range_px, center_y - range_px))
 
-            # Render Enemies
             for enemy in world.enemies.values():
                 ex, ey = enemy.interpolated_pos(now)
                 scr_x = int(ex * scale)
@@ -653,7 +611,6 @@ def run_gui(
                     ratio = max(0.0, min(1.0, enemy.hp / max(1, enemy.max_hp)))
                     pygame.draw.rect(screen, (235, 100, 60), (hp_bar_x, hp_bar_y, int(hp_bar_w * ratio), hp_bar_h))
 
-            # Render Players
             for player in world.players.values():
                 px, py = player.interpolated_pos(now)
                 scr_x = int(px * scale)
@@ -689,7 +646,6 @@ def run_gui(
                     hp_color = (50, 210, 120) if ratio > 0.4 else (220, 50, 50)
                     pygame.draw.rect(screen, hp_color, (hp_bar_x, hp_bar_y, int(hp_bar_w * ratio), hp_bar_h))
 
-            # 2. Side Panel rendering
             panel_x = arena_px_w
             panel_rect = pygame.Rect(panel_x, 0, panel_w, win_h)
             pygame.draw.rect(screen, (26, 30, 42), panel_rect)
@@ -804,7 +760,6 @@ def run_gui(
             screen.blit(font_small.render("WASD/Arrows: Move | SPACE: Slash", True, (130, 140, 165)), (pad_x, ctrl_y))
             screen.blit(font_small.render("R: Battle Start | ESC: Return to Zone", True, (130, 140, 165)), (pad_x, ctrl_y + 16))
 
-            # 3. Game Over Overlay
             if world.phase in (RoomPhase.Cleared, RoomPhase.Failed):
                 overlay = pygame.Surface((arena_px_w, arena_px_h), pygame.SRCALPHA)
                 overlay.fill((0, 0, 0, 160))

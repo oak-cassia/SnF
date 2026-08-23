@@ -39,8 +39,6 @@ namespace snf::server
         }
         catch (...)
         {
-            // Allocation failure is treated as bounded admission failure. The Actor
-            // retains its dirty mask and can retry on a later turn.
         }
 
         {
@@ -151,9 +149,6 @@ namespace snf::server
             }
             catch (...)
             {
-                // All expected repository failures are converted into a save result
-                // in startSave. Keep the service alive if a custom adapter violates
-                // that contract; pending snapshots remain available for the next tick.
             }
             lock.lock();
             if (_flush_requested && isFlushCompleteLocked())
@@ -164,10 +159,6 @@ namespace snf::server
         }
         lock.unlock();
 
-        // stop() is normally called only after flush(), but still drain accepted
-        // final requests and wait for every repository callback before the service
-        // object can be destroyed. Failed background snapshots are intentionally
-        // dropped only at this terminal point; there is no later tick to retry them.
         while (true)
         {
             try
@@ -176,8 +167,6 @@ namespace snf::server
             }
             catch (...)
             {
-                // Keep final callback bookkeeping alive even if a custom adapter
-                // throws outside the normal startSave conversion path.
             }
 
             std::unique_lock stop_lock{_mutex};
@@ -188,8 +177,6 @@ namespace snf::server
             }
             if (_in_flight.empty())
             {
-                // A synchronous completion may have drained one final request
-                // while another remains queued; schedule the next one immediately.
                 continue;
             }
             _idle.wait(stop_lock, [this] { return _in_flight.empty(); });
@@ -256,9 +243,6 @@ namespace snf::server
             {
                 ++final;
             }
-            // A final snapshot contains everything the Actor knows. It supersedes
-            // an older queued background snapshot, but never jumps over an in-flight
-            // save because _in_flight was checked above.
             _pending.erase(player);
             _in_flight.emplace(player, InFlight{.record = request.record, .final = true, .completion = std::move(request.completion)});
             saves.push_back(StartSave{
@@ -341,8 +325,6 @@ namespace snf::server
                 }
                 else if (!_final_requests.contains(player))
                 {
-                    // Keep the exact failed snapshot. A newer snapshot, if any,
-                    // will replace it when the queue is drained.
                     _pending.insert_or_assign(player, std::move(failed_record));
                     ++_background_retries;
                     retry = true;
@@ -369,17 +351,11 @@ namespace snf::server
         }
         catch (...)
         {
-            // A repository completion must not be able to terminate its Worker or
-            // the persistence thread. Runtime-owned completions are noexcept in
-            // production and observe the result through their continuation.
         }
     }
 
     bool PlayerPersistenceService::isFlushCompleteLocked() const noexcept
     {
-        // A failed background snapshot remains in _pending for the next timer tick.
-        // A flush must wait for one attempted save, but it must not spin forever
-        // while an unavailable repository is being retried.
         return _snapshots.size() == 0 && _final_requests.empty() && _in_flight.empty();
     }
 }

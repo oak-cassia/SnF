@@ -178,7 +178,6 @@ class FrameDecoder:
             self._offset = 0
 
 
-# --- Request Builders ---
 
 def authenticate(player_id: int) -> bytes:
     if player_id == 0:
@@ -235,7 +234,6 @@ def room_leave() -> bytes:
     return b""
 
 
-# --- Response Parsers ---
 
 def parse_authenticated(payload: bytes) -> int:
     if len(payload) != 8:

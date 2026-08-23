@@ -54,9 +54,6 @@ function(snf_configure_target target_name)
     endif()
 endfunction()
 
-# The game model. It links nothing: no runtime, no sockets, no protocol, no
-# threads. Anything it needed from those would fail to link snf_game_tests below,
-# which is the wall the compiler keeps for us.
 add_library(snf_game STATIC
     src/game/arena.cpp
     src/game/player.cpp
@@ -129,8 +126,6 @@ add_library(snf_server_runtime STATIC
 target_link_libraries(snf_server_runtime PUBLIC snf_game snf_core snf_runtime)
 snf_configure_target(snf_server_runtime)
 
-# The only target that knows MySQL exists. Kept out of snf_server_runtime so that
-# linking the server does not drag a database client into every test binary.
 add_library(snf_mysql_player_repository STATIC
     src/server/mysql_player_repository.cpp
 )
@@ -195,8 +190,6 @@ if(BUILD_TESTING)
 
     add_test(NAME snf_unit_tests COMMAND snf_unit_tests)
 
-    # Linked against snf_game alone. If a game translation unit ever reaches for the
-    # runtime, a socket or MySQL, this is what stops the build.
     add_executable(snf_game_tests
         tests/game_test_main.cpp
         tests/arena_test.cpp
@@ -210,8 +203,6 @@ if(BUILD_TESTING)
 
     add_test(NAME snf_game_tests COMMAND snf_game_tests)
 
-    # The link gate cannot see an include that resolves but is never linked against,
-    # so the layer is also checked by name.
     add_test(NAME snf_game_layer
              COMMAND ${CMAKE_COMMAND} -DGAME_ROOTS=${CMAKE_SOURCE_DIR}/include/snf/game:${CMAKE_SOURCE_DIR}/src/game
                      -P ${CMAKE_SOURCE_DIR}/cmake/check_game_layer.cmake)

@@ -16,9 +16,6 @@ namespace snf::server
         MessageDispatcher dispatcher{};
     };
 
-    // Every dependency is injected, so the gateway can only exist fully assembled.
-    // Nothing here is optional: a half-wired gateway used to answer a wiring mistake
-    // with a wire-visible protocol error, which is no longer representable.
     class ProtocolGateway final : public FrameIngress
     {
     public:

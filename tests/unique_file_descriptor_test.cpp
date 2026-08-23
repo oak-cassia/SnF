@@ -78,7 +78,7 @@ namespace
         assert(::close(released_fd) == 0);
         assert(::close(pipe_fds[1]) == 0);
     }
-} // namespace
+}
 
 void run_unique_file_descriptor_tests()
 {

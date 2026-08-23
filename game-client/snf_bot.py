@@ -41,7 +41,6 @@ class BotPlayer:
         self.move_interval = 1.0
         self.current_direction = Direction.Stop
 
-        # Zone wandering
         self.bot_x = 0.0
         self.bot_y = 0.0
         self.last_zone_move_time = 0.0
@@ -86,9 +85,7 @@ class BotPlayer:
         if not my_p or not my_p.alive:
             return Direction.Stop
 
-        # 70% chance to move towards the closest enemy if available
         if self.world.enemies and random.random() < 0.7:
-            # Find closest enemy (boss prioritized if exists)
             target = None
             if self.world.boss_id and self.world.boss_id in self.world.enemies:
                 target = self.world.enemies[self.world.boss_id]
@@ -113,7 +110,6 @@ class BotPlayer:
                 elif target.y < my_p.y - 2:
                     dy = -1
 
-                # Map (dx, dy) to Direction
                 dir_map = {
                     (0, 0): Direction.Stop,
                     (0, -1): Direction.North,
@@ -127,7 +123,6 @@ class BotPlayer:
                 }
                 return dir_map.get((dx, dy), Direction.Stop)
 
-        # Otherwise pick a random direction
         return Direction(random.randint(0, 8))
 
     def _run_loop(self) -> None:
@@ -136,7 +131,6 @@ class BotPlayer:
         try:
             self.session.connect()
             if self.zone_first:
-                # Compute initial position around portal
                 angle = (self.player_id * 137.5) * math.pi / 180.0
                 dist = 28.0 + (self.player_id % 4) * 16.0
                 spawn_x = int(math.cos(angle) * dist)
@@ -169,7 +163,6 @@ class BotPlayer:
             while self.running and self.session.is_connected:
                 now = time.monotonic()
 
-                # 1. Drain pushes & update world state
                 pushes = self.session.drain_pushes()
                 for frame in pushes:
                     if frame.type in (MessageType.Moved, MessageType.ZoneEntered):
@@ -197,14 +190,12 @@ class BotPlayer:
                         self.bot_x = float(rx)
                         self.bot_y = float(ry)
 
-                # 2. Zone wandering AI
                 if self.session.in_zone and not self.session.in_room:
                     if now - self.last_zone_move_time >= self.zone_move_interval:
                         wander_dx = random.choice([-8, -4, 0, 4, 8])
                         wander_dy = random.choice([-8, -4, 0, 4, 8])
                         self.bot_x += wander_dx
                         self.bot_y += wander_dy
-                        # Keep within 80 units of spawn/portal
                         if math.hypot(self.bot_x, self.bot_y) > 80:
                             self.bot_x *= 0.85
                             self.bot_y *= 0.85
@@ -212,11 +203,9 @@ class BotPlayer:
                         self.last_zone_move_time = now
                         self.zone_move_interval = random.uniform(1.2, 2.5)
 
-                # 3. Battle action loop
                 elif self.world.phase == RoomPhase.Running and self.session.in_room:
                     my_p = self.world.players.get(self.player_id)
                     if my_p and my_p.alive:
-                        # Move AI: change direction every move_interval
                         if now - self.last_move_time >= self.move_interval:
                             new_dir = self._choose_direction()
                             if new_dir != self.current_direction:
@@ -225,7 +214,6 @@ class BotPlayer:
                             self.last_move_time = now
                             self.move_interval = random.uniform(0.4, 1.2)
 
-                        # Attack AI: cast SLASH every attack_interval (1.0s)
                         if now - self.last_attack_time >= self.attack_interval:
                             self.session.send_use_skill(1)
                             self.last_attack_time = now
@@ -261,7 +249,7 @@ def spawn_bots(
         )
         bot.start()
         bots.append(bot)
-        time.sleep(0.05)  # Stagger connect slightly
+        time.sleep(0.05)
     return bots
 
 

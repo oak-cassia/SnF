@@ -16,7 +16,7 @@ namespace
         std::cerr << label << ": expected '" << expected << "', got '" << actual << "'\n";
         return false;
     }
-} // namespace
+}
 
 void run_build_info_tests()
 {

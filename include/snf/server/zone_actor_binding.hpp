@@ -17,9 +17,6 @@ namespace snf::server
     {
         ZoneConfig actor;
         std::chrono::nanoseconds tick_budget{std::chrono::milliseconds{5}};
-        // Result delivery is intentionally a binding concern. Production routing
-        // can replace this callback with a typed sink without putting connection
-        // or protocol state inside Zone.
         std::function<void(const ZoneInboundCommand&, const ZoneResult&)> on_result;
     };
 

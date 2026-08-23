@@ -48,9 +48,6 @@ namespace snf::server
         snf::runtime::DistributionSnapshot operation_latency_nanoseconds;
     };
 
-    // Read-only diagnostics shared by the in-memory and durable adapters. It is
-    // deliberately separate from PlayerRepository so deterministic test fakes do
-    // not need to expose storage internals.
     class PlayerRepositoryDiagnostics
     {
     public:
@@ -59,9 +56,6 @@ namespace snf::server
         [[nodiscard]] virtual PlayerRepositoryStats stats() const = 0;
     };
 
-    // The repository receives values and completion callbacks only. An adapter
-    // may run blocking storage work elsewhere, but it never receives an Actor,
-    // ActorState, coroutine handle, or mutable runtime object.
     class PlayerRepository
     {
     public:
@@ -71,10 +65,6 @@ namespace snf::server
         virtual void asyncSave(PlayerRecord record, PlayerSaveCompletion completion) = 0;
     };
 
-    // Deterministic first adapter for the vertical slice. Completion is immediate,
-    // but still crosses the Actor continuation queue because the binding wraps it
-    // in an async operation. The mutex also makes it safe for integration tests to
-    // inspect records while the owning Worker may complete a save.
     class InMemoryPlayerRepository final : public PlayerRepository, public PlayerRepositoryDiagnostics
     {
     public:

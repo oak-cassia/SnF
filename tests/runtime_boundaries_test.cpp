@@ -40,8 +40,6 @@ namespace
     {
         const auto wake = make_wake_descriptor();
         snf::server::OutboundChannel channel{snf::server::OutboundChannelConfig{.capacity = 2, .max_slots_per_connection = 2}, wake.getDescriptor()};
-        // The domain's view of the same object: reserving and committing are reachable
-        // through it, draining and granting are not.
         snf::server::OutboundSink& sink = channel;
 
         auto reservation = sink.tryReserve(CONNECTION, 1);
@@ -51,7 +49,6 @@ namespace
         assert(read_wakeup_count(wake.getDescriptor()) == 1);
         const auto posted = channel.tryPop();
         assert(posted.has_value());
-        // The channel stamps the commit instant; the game runtime never sees it.
         assert(posted->posted_at.time_since_epoch().count() != 0);
         const auto* send = std::get_if<snf::server::SendFrame>(&posted->action);
         assert(send != nullptr);
@@ -94,8 +91,6 @@ namespace
         assert(queued);
         assert(sink.commit(*queued, pong_action(1)));
 
-        // A saturated channel refuses without waiting: nothing parks a Worker, and the
-        // caller is left to await capacity through a waiter instead.
         assert(sink.tryReserve(CONNECTION, 1) == std::nullopt);
 
         snf::test::ReservationWaiter waiter{endpoint, 1};
@@ -127,8 +122,6 @@ namespace
         static_cast<void>(sink.registerWaiter(CONNECTION, 1, std::move(waiter.producer)));
         assert(waiter.isPending());
 
-        // A stopped reactor can no longer grant. Cancelling is what turns that into a
-        // terminal outcome instead of a Worker waiting forever.
         assert(channel.cancel() == 1);
         assert(waiter.isCompleted());
         assert(!waiter.state->takeResult().valid());

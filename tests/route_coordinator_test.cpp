@@ -118,28 +118,23 @@ namespace
         constexpr snf::server::RoomId ROOM{.value = 42};
         snf::server::RouteCoordinator routes;
 
-        // 1. Enter Zone
         const auto source = routes.tryEnter(FIRST_CONNECTION, PLAYER, FIRST_ZONE);
         assert(source && source->route.route_epoch == 1);
         assert(routes.routeFor(FIRST_CONNECTION) == source->route);
 
-        // 2. Begin Room Entry
         const auto entry = routes.tryBeginRoomEntry(FIRST_CONNECTION, PLAYER, ROOM, 10);
         assert(entry.has_value());
         assert(entry->room == ROOM);
         assert(entry->step == snf::server::RoomEntryStep::RequestSnapshot);
         assert(entry->source == source->route);
-        // While entering, routeFor is hidden
         assert(!routes.routeFor(FIRST_CONNECTION).has_value());
         assert(routes.roomEntryFor(FIRST_CONNECTION) == entry);
 
-        // Step progression
         assert(routes.noteRoomSnapshotReady(FIRST_CONNECTION, entry->id));
         assert(routes.roomEntryFor(FIRST_CONNECTION)->step == snf::server::RoomEntryStep::JoinRoom);
         assert(routes.noteRoomJoined(FIRST_CONNECTION, entry->id));
         assert(routes.roomEntryFor(FIRST_CONNECTION)->step == snf::server::RoomEntryStep::LeaveSource);
 
-        // Complete Room Entry -> InRoom
         const auto in_room = routes.completeRoomEntry(FIRST_CONNECTION, entry->id, {.x = 15, .y = 25});
         assert(in_room.has_value());
         assert(in_room->player == PLAYER);
@@ -152,19 +147,17 @@ namespace
         assert(routes.inRoomFor(FIRST_CONNECTION) == in_room);
         assert(routes.inRoomCountFor(ROOM) == 1);
 
-        // 3. Begin Room Return
         const auto ret = routes.tryBeginRoomReturn(FIRST_CONNECTION, ROOM);
         assert(ret.has_value());
         assert(ret->player == PLAYER);
         assert(ret->room == ROOM);
         assert(ret->return_zone == FIRST_ZONE);
-        assert(ret->return_epoch == 2); // Monotonically increased from 1
+        assert(ret->return_epoch == 2);
         assert((ret->return_position == snf::server::ZonePosition{.x = 15, .y = 25}));
 
         assert(!routes.inRoomFor(FIRST_CONNECTION).has_value());
         assert(routes.roomReturnFor(FIRST_CONNECTION) == ret);
 
-        // Complete Room Return -> Stable Zone Route
         const auto restored = routes.completeRoomReturn(FIRST_CONNECTION, ret->id);
         assert(restored.has_value());
         assert(restored->player == PLAYER);
@@ -195,7 +188,6 @@ namespace
         assert(!routes.roomEntryFor(FIRST_CONNECTION).has_value());
         assert(routes.stats().room_entries_rolled_back == 1);
 
-        // InRoom abandon
         const auto entry2 = routes.tryBeginRoomEntry(FIRST_CONNECTION, PLAYER, ROOM, 11);
         assert(entry2.has_value());
         assert(routes.completeRoomEntry(FIRST_CONNECTION, entry2->id, {.x = 5, .y = 5}));

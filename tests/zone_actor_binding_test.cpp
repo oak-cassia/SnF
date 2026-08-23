@@ -40,8 +40,6 @@ namespace
         struct Recorded
         {
             std::mutex mutex;
-            // ZoneResult carries a move-only TellActor payload, so the recorder
-            // keeps the field this test asserts on rather than the whole result.
             std::vector<std::optional<snf::server::ZonePosition>> positions;
             std::vector<std::thread::id> threads;
         } recorded;
@@ -299,7 +297,6 @@ namespace
                    .handoff = std::nullopt,
                }) == snf::runtime::PostResult::Accepted);
 
-        // Let simulation tick several times
         std::this_thread::sleep_for(50ms);
 
         assert(ingress.tryPost(snf::server::ZoneInboundCommand{

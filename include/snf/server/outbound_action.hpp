@@ -28,13 +28,6 @@ namespace snf::server
 
     using OutboundAction = std::variant<SendFrame, CloseConnection>;
 
-    // The queue element carries its commit instant so the network backend can
-    // measure hand-off wait. The committing runtime stays unaware of the metric: the
-    // channel stamps the value, and only the consumer reads it.
-    //
-    // The instant is the commit, not the request for capacity. Waiting for capacity
-    // suspends the actor instead of blocking the Worker, and that wait is measured as
-    // the actor's suspension.
     struct PostedOutboundAction
     {
         OutboundAction action;

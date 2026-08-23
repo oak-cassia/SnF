@@ -32,12 +32,8 @@ namespace snf::server
         DuplicateRequest,
         SkillOnCooldown,
         UnknownSkill,
-        // The command reached a Running Room at or after its absolute deadline.
-        // Appended because command statuses cross the wire as one byte.
         BattleExpired,
         ParticipantDead,
-        // The binding could not reserve mandatory runtime capacity, so the
-        // command was rejected before it changed the Room.
         RuntimeOverloaded,
     };
 
@@ -53,8 +49,6 @@ namespace snf::server
         ParticipantsDefeated = 1,
     };
 
-    // Crosses the wire as an event tag. Keep existing values fixed and append new
-    // kinds only at the end.
     enum class BattleEventKind : std::uint8_t
     {
         EnemySpawned = 0,
@@ -130,8 +124,6 @@ namespace snf::server
         [[nodiscard]] bool operator==(const ParticipantMoved&) const noexcept = default;
     };
 
-    // This absolute position update is used both immediately after EnemySpawned
-    // and for later movement, so clients need only one position update handler.
     struct EnemyPositioned
     {
         EnemyId enemy{};
@@ -177,9 +169,6 @@ namespace snf::server
         ParticipantDied,
         ParticipantLeft>;
 
-    // One ordered observation window. The sequence advances only when a digest is
-    // actually emitted, including start, capacity and terminal flushes outside a
-    // simulation tick.
     struct BattleDigest
     {
         std::uint64_t sequence{0};
@@ -196,9 +185,7 @@ namespace snf::server
         std::uint64_t boss_health{0};
         bool boss_spawned{false};
         std::optional<BattleDigest> digest{};
-        // Present only on the result that changed Running into a terminal phase.
         std::optional<BattleOutcome> outcome{};
-        // Present exactly when outcome is Failed.
         std::optional<BattleFailureReason> failure_reason{};
         std::vector<PlayerId> audience{};
         std::vector<StreetExperienceGrant> grants{};

@@ -94,8 +94,6 @@ namespace
             assert(channel.reservedSlotCount() == 1);
         }
 
-        // One slot was committed and the other returned with the reservation, so the
-        // only capacity still held is the queued action's.
         assert(channel.reservedSlotCount() == 0);
         assert(channel.size() == 1);
         assert(channel.tryReserve(connection, 2) == std::nullopt);
@@ -117,15 +115,11 @@ namespace
         }
         assert(channel.tryPop());
 
-        // Idle, but still tracked: the next command of a live connection would only have
-        // to allocate the entry again.
         assert(channel.trackedConnectionCount() == 1);
 
         channel.forgetConnection(connection);
         assert(channel.trackedConnectionCount() == 0);
 
-        // Forgotten while it still holds a queued action: the entry has to outlive the
-        // session until that action drains.
         channel.trackConnection(connection);
         auto reservation = channel.tryReserve(connection, 1);
         assert(reservation);
@@ -140,9 +134,6 @@ namespace
     {
         const auto wake = make_wake_descriptor();
         OutboundChannel channel{OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 4}, wake.getDescriptor()};
-        // A command that reaches the channel after its session closed: the backend never
-        // tracked this connection and will never forget it either, so its accounting has
-        // to go as soon as it is idle. Otherwise connection churn accumulates entries.
         const auto stale = connection_of(4);
         channel.forgetConnection(stale);
 
@@ -153,7 +144,6 @@ namespace
         assert(channel.tryPop());
         assert(channel.trackedConnectionCount() == 0);
 
-        // A refused reserve leaves nothing behind either.
         const auto other = connection_of(5);
         auto blocking = channel.tryReserve(other, 4);
         assert(blocking);
@@ -176,8 +166,6 @@ namespace
         const auto ticket = channel.registerWaiter(blocked, 1, std::move(waiter.producer));
         assert(ticket.valid());
 
-        // Global capacity is free, but granting a request that arrived later would
-        // starve the actor already suspended on the waiter.
         assert(channel.tryReserve(connection_of(5), 1) == std::nullopt);
         assert(channel.pendingWaiterCount() == 1);
     }
@@ -204,7 +192,6 @@ namespace
         assert(blocked_waiter.isPending());
         assert(channel.pendingWaiterCount() == 1);
 
-        // Draining the queued action releases the blocked connection's own limit.
         assert(channel.tryPop());
         assert(channel.grantPending() == 1);
         assert(blocked_waiter.state->outcome() == snf::runtime::AsyncOperationOutcome::Completed);
@@ -268,14 +255,12 @@ namespace
         TestWaiter waiter{endpoint, 1};
         static_cast<void>(channel.registerWaiter(connection, 2, std::move(waiter.producer)));
 
-        // The owning Worker wins the cancel race before the reactor grants.
         assert(waiter.state->claimCancelled());
 
         assert(channel.grantPending() == 1);
         assert(endpoint->published.empty());
         assert(endpoint->rejected_count == 1);
         assert(endpoint->last_rejection == snf::runtime::ContinuationRejection::AlreadyCancelled);
-        // The rejected award destroyed its reservation, so the capacity came back.
         assert(channel.reservedSlotCount() == 0);
         assert(channel.tryReserve(connection, 2));
     }
@@ -299,7 +284,6 @@ namespace
         assert(channel.tryPop());
         assert(channel.grantPending() == 0);
         assert(waiter.isPending());
-        // Withdrawing twice is harmless: the ticket no longer matches any waiter.
         channel.withdrawWaiter(ticket);
     }
 
@@ -355,9 +339,6 @@ namespace
         OutboundChannel channel{OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 2}, wake.getDescriptor()};
         const auto connection = connection_of(4);
 
-        // Above the per-connection limit, so no amount of freed capacity would ever
-        // satisfy it. Refusing keeps this from becoming a Worker failure, and
-        // canEverReserve is what lets the caller tell it apart from saturation.
         assert(!channel.canEverReserve(3));
         assert(channel.tryReserve(connection, 3) == std::nullopt);
         assert(channel.trackedConnectionCount() == 0);
@@ -371,8 +352,6 @@ namespace
         const auto wake = make_wake_descriptor();
         OutboundChannel channel{OutboundChannelConfig{.capacity = 1, .max_slots_per_connection = 1, .max_pending_admission_failures = 2}, wake.getDescriptor()};
 
-        // One connection reporting repeatedly holds one record, so it cannot crowd out
-        // another connection's close.
         channel.reportAdmissionFailure(connection_of(4));
         channel.reportAdmissionFailure(connection_of(4));
         channel.reportAdmissionFailure(connection_of(4));
@@ -388,9 +367,6 @@ namespace
         assert(!channel.takePendingAdmissionFailures(failures));
         assert(failures.empty());
 
-        // Exceeding the exact-record bound neither loses the condition nor throws on the
-        // Worker. The reactor receives a fail-safe bit and closes every current session,
-        // which necessarily includes the affected connection if it is still alive.
         channel.reportAdmissionFailure(connection_of(4));
         channel.reportAdmissionFailure(connection_of(5));
         channel.reportAdmissionFailure(connection_of(6));

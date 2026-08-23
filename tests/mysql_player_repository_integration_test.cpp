@@ -185,7 +185,6 @@ namespace
         assert(loaded.record->handled_command_count == 2);
         assert(loaded.record->currency_balance == 700);
         assert(loaded.record->purchased_item_count == 3);
-        // The UPDATE clause has to carry the column too, or only the first save lands.
         assert(loaded.record->street_experience == 29500);
     }
 

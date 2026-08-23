@@ -28,9 +28,6 @@ namespace snf::server
         bool cancelled{false};
     };
 
-    // A reactor admission reserves one ticket for a handoff's whole lifetime.
-    // Only one step is in flight, so that ticket guarantees one allocation-free
-    // Worker completion slot at a time.
     class ZoneTransitionChannel final
     {
     public:

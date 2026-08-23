@@ -6,21 +6,14 @@
 
 namespace snf::net
 {
-    // Identifies one concrete network-session incarnation. It is valid only for
-    // connection lifetime checks and must never be used as a persistent domain ID.
     struct ConnectionId
     {
-        // TCP generations are issued from 1, so default initialization is the
-        // intentional invalid identity without a second sentinel constant.
         int descriptor{-1};
         std::uint64_t generation{0};
 
         [[nodiscard]] bool operator==(const ConnectionId&) const noexcept = default;
     };
 
-    // The generation is part of the hash because a reused descriptor is a different
-    // incarnation: per-connection accounting for a closed session must never be
-    // charged to the session that inherited its descriptor.
     struct ConnectionIdHash
     {
         [[nodiscard]] std::size_t operator()(const ConnectionId& connection) const noexcept

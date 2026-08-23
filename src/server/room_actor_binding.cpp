@@ -125,14 +125,10 @@ namespace snf::server
         auto join = payload.take<RoomJoinTell>();
         if (!join)
         {
-            // A refused take leaves the carrier intact, and the runtime reports the
-            // mismatch as the wiring bug it is rather than inventing a command.
             return std::nullopt;
         }
         if (join->request.room.value != target.entity)
         {
-            // Only a routing bug puts these out of step, and entering the wrong Room
-            // is worse than failing loudly.
             return std::nullopt;
         }
         CommandReleaseToken release;
@@ -190,9 +186,6 @@ namespace snf::server
         const bool is_tick = std::holds_alternative<RoomSimulationTick>(payload.command.command);
         const auto started_at = std::chrono::steady_clock::now();
 
-        // StartBattle is a two-resource commit: the Room may enter Running only
-        // after its mandatory terminal backstop owns capacity. The Actor is the
-        // single writer, so canStartBattle cannot become stale before handle().
         std::optional<snf::runtime::TimerHandle> deadline_timer;
         if (std::holds_alternative<StartBattle>(payload.command.command) && room_state.room.canStartBattle())
         {
@@ -230,8 +223,6 @@ namespace snf::server
             }
         }
 
-        // observedAt, not the reading above: the Room derives cooldowns from when its
-        // turn began, while the reading here exists to measure how long the turn took.
         RoomResult result = room_state.room.handle(payload.command.command, context.observedAt());
         const auto handled_at = std::chrono::steady_clock::now();
         const auto handle_elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(handled_at - started_at);
@@ -241,9 +232,6 @@ namespace snf::server
             _tick_execution_nanoseconds.record(handle_elapsed);
         }
 
-        // If the preflight and state-machine predicate ever diverge, release a timer
-        // that has no Running Room. A result that requests a deadline without the
-        // pre-reservation is an internal contract violation, not overload.
         if (deadline_timer && !result.deadline_after)
         {
             context.cancelTimer(*deadline_timer);
@@ -294,8 +282,6 @@ namespace snf::server
 
         for (const StreetExperienceGrant& grant : result.grants)
         {
-            // Best effort by design. A full target mailbox drops the reward rather
-            // than blocking the Room, and there is no reply channel to report it on.
             const snf::runtime::PostResult posted = context.tryTell(
                 snf::runtime::ActorKey{
                     .kind = snf::runtime::ActorKind::Player,
@@ -309,9 +295,6 @@ namespace snf::server
             }
         }
 
-        // A decided Room has emitted whatever it owed and has nothing left to do, and
-        // a Room nobody joined was activated by a stray command. A Running Room must
-        // stay resident so its deadline timer can land.
         const RoomPhase phase = room_state.room.phase();
         if (phase == RoomPhase::Cleared || phase == RoomPhase::Failed || room_state.room.participantCount() == 0)
         {

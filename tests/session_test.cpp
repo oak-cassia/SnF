@@ -155,7 +155,7 @@ namespace
 
         assert(::close(pipe_file_descriptors[1]) == 0);
     }
-} // namespace
+}
 
 void run_session_tests()
 {

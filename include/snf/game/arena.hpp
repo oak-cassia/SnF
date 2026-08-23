@@ -13,8 +13,6 @@ namespace snf::server
         [[nodiscard]] bool operator==(const ArenaPosition&) const noexcept = default;
     };
 
-    // Crosses the wire as one byte. Zero is deliberately a valid Stop command;
-    // append any future directions after NorthWest.
     enum class MoveDirection : std::uint8_t
     {
         Stop = 0,
@@ -36,8 +34,6 @@ namespace snf::server
     [[nodiscard]] std::uint64_t squaredDistance(ArenaPosition left, ArenaPosition right) noexcept;
     [[nodiscard]] bool isWithinRange(ArenaPosition left, ArenaPosition right, std::uint32_t range) noexcept;
 
-    // The caller validates that the requested formation fits. Keeping these pure
-    // makes spawn geometry independently testable without a Room or a clock.
     [[nodiscard]] ArenaPosition
     centeredParticipantPosition(std::size_t index, std::size_t count, std::uint32_t width, std::uint32_t height, std::uint32_t spacing) noexcept;
     [[nodiscard]] ArenaPosition

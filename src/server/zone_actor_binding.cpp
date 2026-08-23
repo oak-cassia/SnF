@@ -152,8 +152,6 @@ namespace snf::server
                 .reply = std::nullopt,
                 .handoff = std::nullopt,
             };
-            // ExistingOnly: a tick must not resurrect a Zone that was evicted between
-            // the request and the deadline.
             auto timer_submission = makeSubmission(submission.target(),
                                                    snf::runtime::ActorActivation::ExistingOnly,
                                                    snf::runtime::ActorAccounting::Command,

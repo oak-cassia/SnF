@@ -11,12 +11,6 @@
 
 namespace
 {
-    // Withdraws the waiter whenever the await ends any way other than a grant.
-    //
-    // A per-operation cancel resumes the frame, so this destructor runs before the
-    // frame dies and the registry loses the waiter. A runtime-wide cancel destroys the
-    // frame without resuming, and on that path the channel is cancelled too, which
-    // releases every waiter it holds.
     class ReservationWaiterGuard final
     {
     public:
@@ -49,9 +43,6 @@ namespace
         snf::server::ReservationTicket _ticket{};
     };
 
-    // The first production suspension point. The Worker does not wait here: only this
-    // actor suspends, and the reactor publishes the grant back to the Worker that owns
-    // it.
     snf::runtime::ActorTask<snf::server::OutboundReservation>
     awaitOutboundReservation(snf::server::OutboundSink& outbound, snf::runtime::ActorContext& context, const snf::net::ConnectionId connection, const std::size_t slots)
     {
@@ -61,7 +52,6 @@ namespace
             [&guard, &outbound, connection, slots](snf::runtime::AsyncOperationProducer<snf::server::OutboundReservation> producer)
             { guard.arm(outbound, outbound.registerWaiter(connection, slots, std::move(producer))); });
 
-        // A granted waiter has already left the registry.
         guard.disarm();
         co_return std::move(reservation);
     }
@@ -89,8 +79,6 @@ namespace snf::server
 {
     struct PlayerActorBinding::PlayerActorState final : snf::runtime::ActorState
     {
-        // Applying follow-ups needs capacity the handler must not know about, so a command runs
-        // in two stages: the handler's own task, then the reservation's.
         enum class Stage
         {
             Idle,
@@ -104,8 +92,6 @@ namespace snf::server
             std::function<void(PlayerActorId, std::optional<snf::net::ConnectionId>)> on_deactivated,
             const std::size_t max_purchase_idempotency_records
         )
-            // The Actor gets only the persistent identity: which namespace it is
-            // routed in stays here, where routing lives.
             : player(actor_id.playerId(), max_purchase_idempotency_records)
             , identity(actor_id)
             , on_deactivated(std::move(on_deactivated))
@@ -126,44 +112,24 @@ namespace snf::server
         bool loaded{false};
         Stage stage{Stage::Idle};
         std::optional<PlayerCommand> pending_command;
-        // Held while the record loads when a tell arrived before it. A grant is not a
-        // client request, so it cannot ride in pending_command.
         std::optional<StreetExperienceGrant> pending_grant;
-        // True while no session command has claimed an actor that a tell brought to
-        // life. A command may arrive while a snapshot retry timer is outstanding, so
-        // this describes current residency rather than immutable activation history.
         bool sessionless{false};
         bool reward_snapshot_pending{false};
         bool snapshot_retry_scheduled{false};
         int snapshot_retries_remaining{0};
         snf::runtime::ActorTask<PlayerLoadResult> load_task;
-        // Started only when capacity was not immediately available, and owned by the
-        // state for the same reason.
         snf::runtime::ActorTask<OutboundReservation> reservation_task;
         snf::runtime::ActorTask<PlayerSaveResult> save_task;
-        // Stable passivation identity captured only from ConnectionClosed. The
-        // response connection below is per-command scratch and cannot identify the
-        // session whose final save caused this Actor to leave.
         std::optional<snf::net::ConnectionId> closing_connection;
-        // The handler's decisions, held between its normal return and the application
-        // whose capacity is still being awaited.
         PlayerResult pending_result;
-        // Captured at dispatch because resume() does not carry the submission, and
-        // responses still have to reach the connection and answer the frame that asked.
         snf::net::ConnectionId connection{};
         std::uint32_t request_id{0};
-        // Captured for the same reason, and kept out of the Player for another one: a
-        // ticket and a connection are reactor identity, and the game model must not
-        // name them. The handler answers with the room and the stats; this says which
-        // entry saga asked.
         std::optional<RoomEntryContext> room_entry{};
     };
 
     struct PlayerActorBinding::CommandPayload
     {
         PlayerInboundCommand command;
-        // Destroyed with this payload, which is what makes the release fire exactly once
-        // per command on every path the scheduler has.
         CommandReleaseToken release;
     };
 
@@ -257,10 +223,6 @@ namespace snf::server
             snf::runtime::ActorAccounting::Command,
             CommandPayload{
                 .command = std::move(command),
-                // Armed here, at the boundary that admits a command. A frame the protocol
-                // rejected earlier never became a command, so it takes no credit and
-                // reports nothing. A refused post does release, because it took credit
-                // here before the runtime turned it away.
                 .release = CommandReleaseToken{_lifecycle, connection},
             });
     }
@@ -288,28 +250,20 @@ namespace snf::server
     {
         if (_kind != snf::runtime::ActorKind::Player)
         {
-            // Only the persistent namespace has a record to grant against.
             return std::nullopt;
         }
 
         auto grant = payload.take<StreetExperienceGrant>();
         if (!grant)
         {
-            // A refused take leaves the carrier intact, and the runtime reports the
-            // mismatch as the wiring bug it is rather than delivering a wrong command.
             return std::nullopt;
         }
 
         if (grant->player.value != target.entity)
         {
-            // The grant names its player and the key names the actor. They can only
-            // disagree through a routing bug, and delivering it anyway would credit
-            // the wrong account.
             return std::nullopt;
         }
 
-        // ActivateIfMissing: a reward has to reach a player who logged out between the
-        // battle and the clear. ExistingOnly would report Accepted and drop it.
         return makeSubmission(target, snf::runtime::ActorActivation::ActivateIfMissing, snf::runtime::ActorAccounting::Command, StreetExperienceGrantPayload{.grant = *grant});
     }
 
@@ -368,9 +322,6 @@ namespace snf::server
         {
             if (!player_state.loaded)
             {
-                // Applying to a default-constructed actor would then save zeros over the
-                // stored currency, so the record loads first exactly as a command makes
-                // it. Evicting instead -- what a close does -- would lose the reward.
                 player_state.pending_grant = grant->grant;
                 player_state.sessionless = true;
                 player_state.stage = PlayerActorState::Stage::Loading;
@@ -378,8 +329,6 @@ namespace snf::server
                 return advance(player_state, context, stop_token);
             }
 
-            // A tell carries no connection, so nothing here emits a response or takes
-            // outbound capacity.
             player_state.player.grantStreetExperience(grant->grant.experience);
             player_state.reward_snapshot_pending = true;
             const SnapshotPublishOutcome outcome = publishDirtySnapshot(player_state, context, false);
@@ -489,16 +438,11 @@ namespace snf::server
             const std::size_t required_slots = _response_sink.requiredSlots(state.pending_result);
             if (!_outbound.canEverReserve(required_slots))
             {
-                // More than one connection may ever hold. Waiting would never end and
-                // throwing would take down every actor this Worker owns, so the command
-                // ends here and the backend closes the connection.
                 return abandonResponses(state);
             }
 
             if (auto reservation = _outbound.tryReserve(state.connection, required_slots))
             {
-                // Outside saturation this is the whole story: no operation is begun, so
-                // no in-flight slot, no continuation and no suspension.
                 return applyResponses(state, *reservation, stop_token);
             }
 
@@ -539,9 +483,6 @@ namespace snf::server
         }
         catch (const snf::runtime::AsyncOperationRejected&)
         {
-            // Outbound is saturated and this Worker's in-flight budget is exhausted, so
-            // the response cannot be emitted. It is not dropped in silence: the backend
-            // closes the connection under the same overflow policy inbound uses.
             return abandonResponses(state);
         }
         catch (const snf::runtime::AsyncOperationCancelled&)
@@ -552,7 +493,6 @@ namespace snf::server
         state.reservation_task = {};
         if (!reservation.valid())
         {
-            // Only a cancelled outbound backend hands back an invalid grant.
             resetPendingCommand(state);
             if (stop_token.stop_requested())
             {
@@ -590,10 +530,6 @@ namespace snf::server
         state.pending_result = state.player.handle(command);
         if (state.pending_result.room_join)
         {
-            // Applied after the handler returned, like every other follow-up, and not
-            // priced into the outbound reservation below: a mailbox and a socket are
-            // different resources. A full Room mailbox therefore drops the join rather
-            // than blocking this Player.
             const RoomId room = state.pending_result.room_join->room;
             const snf::runtime::PostResult posted = context.tryTell(
                 snf::runtime::ActorKey{
@@ -612,10 +548,6 @@ namespace snf::server
                     .entry = state.room_entry,
                 })
             );
-            // A dropped join is only harmless when nobody is waiting for it. An entry
-            // saga is, and it has no timeout: without this the connection would sit in
-            // a hidden route forever, so the refusal is reported and becomes the
-            // saga's terminal outcome.
             if (posted != snf::runtime::PostResult::Accepted && state.room_entry && _on_room_join_undelivered)
             {
                 _on_room_join_undelivered(*state.room_entry, room);

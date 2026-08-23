@@ -5,10 +5,6 @@
 
 namespace snf::server
 {
-    // A Player asking to enter a Room, carrying the combat snapshot it is entering
-    // with. The stats come from the Player rather than from the client or a cache:
-    // the Player owns the experience they derive from, so reading them anywhere else
-    // means reading a copy that can be a battle behind.
     struct RoomJoinRequest
     {
         RoomId room{};

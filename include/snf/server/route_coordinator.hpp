@@ -86,8 +86,6 @@ namespace snf::server
         std::size_t in_room_count{0};
     };
 
-    // Reactor-owned authority for the stable Player -> Zone destination and the
-    // hidden transition record used while a cross-Zone handoff or Room handoff is in progress.
     class RouteCoordinator
     {
     public:

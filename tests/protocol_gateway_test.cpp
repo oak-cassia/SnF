@@ -58,9 +58,6 @@ namespace
         snf::server::MessageDispatcher dispatcher{};
     };
 
-    // The gateway no longer keeps stand-ins for the dependencies it requires, so the
-    // test owns them. One declaration is enough for a case that only drives frames,
-    // and the handoff cases lower the capacities they want to exhaust.
     struct GatewayFixture
     {
         explicit GatewayFixture(GatewayFixtureConfig config = {})
@@ -886,21 +883,18 @@ namespace
         assert(fixture.gateway.tryPost(make_enter_frame(connection, zone.value, 15, 25)) == snf::server::FramePostResult::Accepted);
         assert(fixture.routes.routeFor(connection).has_value());
 
-        // 1. Send RoomJoin
         assert(fixture.gateway.tryPost(make_room_join_frame(connection, room.value)) == snf::server::FramePostResult::Accepted);
-        assert(!fixture.routes.routeFor(connection).has_value()); // Hidden during entry
+        assert(!fixture.routes.routeFor(connection).has_value());
         const auto entry = fixture.routes.roomEntryFor(connection);
         assert(entry && entry->room == room);
 
         const auto* join_stage = std::get_if<snf::server::PlayerCommandRoute>(&fixture.commands.posted->route);
         assert(join_stage != nullptr);
         const auto* join_req = std::get_if<snf::server::JoinRoomRequest>(&join_stage->command);
-        // The saga's identity travels beside the game command, never inside it.
         assert(join_req != nullptr && join_req->room == room);
         assert(join_stage->room_entry.has_value());
         const snf::server::RoomEntryContext join_context = *join_stage->room_entry;
 
-        // 2. RoomActor completes JoinRoom -> Applied
         assert(fixture.room_transitions.publish(
             join_context.ticket,
             snf::server::RoomTransitionCompletion{
@@ -914,13 +908,11 @@ namespace
         ));
         fixture.gateway.drainTransitions();
 
-        // 3. Next step posted: LeaveSource on source zone
         const auto* leave_stage = std::get_if<snf::server::ZoneHandoffCommandRoute>(&fixture.commands.posted->route);
         assert(leave_stage != nullptr && leave_stage->command.room_entry.has_value());
         const snf::server::RoomEntryContext leave_context = *leave_stage->command.room_entry;
         assert(leave_context.step == snf::server::RoomEntryStep::LeaveSource);
 
-        // 4. ZoneActor completes LeaveZone -> Applied with position {15, 25}
         assert(fixture.room_transitions.publish(
             leave_context.ticket,
             snf::server::RoomTransitionCompletion{
@@ -935,28 +927,22 @@ namespace
         ));
         fixture.gateway.drainTransitions();
 
-        // Now InRoom! Zone route is erased, connection is authoritative in Room
         assert(!fixture.routes.routeFor(connection).has_value());
         assert(fixture.routes.inRoomFor(connection).has_value());
         assert(fixture.routes.inRoomFor(connection)->room == room);
         assert(fixture.routes.inRoomFor(connection)->return_zone == zone);
 
-        // Outbound receives RoomJoined frame
         const auto join_reply = fixture.outbound.tryPop();
         assert(join_reply);
         const auto* join_send = std::get_if<snf::server::SendFrame>(&join_reply->action);
         assert(join_send != nullptr && join_send->frame.type == snf::protocol::MessageType::RoomJoined);
 
-        // 5. While InRoom, a Zone command is answered rather than refused. InvalidPayload
-        // would close the connection, and a Move already in flight when the entry landed
-        // is an ordinary client race.
         assert(fixture.gateway.tryPost(make_move_frame(connection, 20, 30)) == snf::server::FramePostResult::Accepted);
         const auto move_reply = fixture.outbound.tryPop();
         assert(move_reply);
         const auto* move_send = std::get_if<snf::server::SendFrame>(&move_reply->action);
         assert(move_send != nullptr && move_send->frame.type == snf::protocol::MessageType::Moved);
         assert(move_send->frame.payload.at(0) == static_cast<std::byte>(static_cast<std::uint8_t>(snf::server::ZoneCommandStatus::InRoom)));
-        // Nothing reached a ZoneActor, so the route is untouched.
         assert(!fixture.routes.routeFor(connection).has_value());
         assert(fixture.routes.inRoomFor(connection)->room == room);
 
@@ -967,13 +953,9 @@ namespace
         assert(enter_send != nullptr && enter_send->frame.type == snf::protocol::MessageType::ZoneEntered);
         assert(enter_send->frame.payload.at(0) == static_cast<std::byte>(static_cast<std::uint8_t>(snf::server::ZoneCommandStatus::InRoom)));
 
-        // 6. StartBattle for wrong room rejected; for correct room accepted
         assert(fixture.gateway.tryPost(make_battle_start_frame(connection, 999)) == snf::server::FramePostResult::InvalidPayload);
         assert(fixture.gateway.tryPost(make_battle_start_frame(connection, room.value)) == snf::server::FramePostResult::Accepted);
 
-        // 6b. A cast names the battle the route says this connection is in, and carries a
-        // skill and a sequence. Anything else is a malformed frame rather than something
-        // for the Room to judge.
         assert(
             fixture.gateway.tryPost(make_use_skill_frame(connection, 999, snf::server::SLASH.value, 1)) ==
             snf::server::FramePostResult::InvalidPayload
@@ -999,13 +981,10 @@ namespace
         assert(cast_route->reply_kind == snf::server::RoomReplyKind::SkillAcknowledged);
         const auto* cast = std::get_if<snf::server::UseSkill>(&cast_route->command);
         assert(cast != nullptr);
-        // The player comes from the session, not from the frame.
         assert(cast->player == player);
         assert(cast->skill == snf::server::SLASH);
         assert(cast->request_sequence == 7);
 
-        // 6c. Movement has its own sequence. Direction zero is the valid Stop
-        // action, while values past NorthWest are malformed at the wire edge.
         assert(fixture.gateway.tryPost(make_set_move_intent_frame(connection, 999, 0, 1)) == snf::server::FramePostResult::InvalidPayload);
         assert(fixture.gateway.tryPost(make_set_move_intent_frame(connection, room.value, 9, 1)) == snf::server::FramePostResult::InvalidPayload);
         assert(fixture.gateway.tryPost(make_set_move_intent_frame(connection, room.value, 0, 0)) == snf::server::FramePostResult::InvalidPayload);
@@ -1022,15 +1001,12 @@ namespace
         assert(move_intent->direction == snf::server::MoveDirection::Stop);
         assert(move_intent->request_sequence == 8);
 
-        // 7. RoomLeave -> Leaves room and begins return to zone
         assert(fixture.gateway.tryPost(make_room_leave_frame(connection)) == snf::server::FramePostResult::Accepted);
 
-        // Return posted: EnterZone to return_zone
         const auto* enter_return_stage = std::get_if<snf::server::ZoneHandoffCommandRoute>(&fixture.commands.posted->route);
         assert(enter_return_stage != nullptr && enter_return_stage->command.room_entry.has_value());
         const snf::server::RoomEntryContext return_context = *enter_return_stage->command.room_entry;
 
-        // ZoneActor completes EnterZone
         assert(fixture.room_transitions.publish(
             return_context.ticket,
             snf::server::RoomTransitionCompletion{
@@ -1046,21 +1022,16 @@ namespace
         ));
         fixture.gateway.drainTransitions();
 
-        // Restored to Zone!
         const auto restored_route = fixture.routes.routeFor(connection);
         assert(restored_route && restored_route->zone == zone && restored_route->route_epoch == 2);
         assert(!fixture.routes.inRoomFor(connection).has_value());
 
-        // Outbound receives unsolicited ReturnedToZone frame
         const auto return_reply = fixture.outbound.tryPop();
         assert(return_reply);
         const auto* return_send = std::get_if<snf::server::SendFrame>(&return_reply->action);
         assert(return_send != nullptr && return_send->frame.type == snf::protocol::MessageType::ReturnedToZone);
     }
 
-    // The only path that ends an entry before it touched the source Zone, and the path
-    // a refused Room mailbox now reports through. Nothing covered it before, so the
-    // rollback it performs was never executed.
     void test_a_refused_room_join_ends_the_entry_and_restores_the_zone_route()
     {
         GatewayFixture fixture;
@@ -1081,9 +1052,6 @@ namespace
         assert(fixture.room_transitions.stats().reservations == 1);
         const std::uint64_t releases_before = fixture.lifecycle.releaseCount();
 
-        // What the Room answers when it refuses, and what the Player's binding publishes
-        // when the join never reached a Room at all: the same completion, so the same
-        // ending. EntryFailed is the second case.
         assert(fixture.room_transitions.publish(
             join_context.ticket,
             snf::server::RoomTransitionCompletion{
@@ -1101,31 +1069,23 @@ namespace
         assert(reply);
         const auto* send = std::get_if<snf::server::SendFrame>(&reply->action);
         assert(send != nullptr && send->frame.type == snf::protocol::MessageType::RoomJoined);
-        // The frame that asked, answered once.
         assert(send->frame.request_id == 40);
         assert(send->frame.payload.at(0) == static_cast<std::byte>(static_cast<std::uint8_t>(snf::server::RoomCommandStatus::EntryFailed)));
 
-        // The source Zone was never touched, so the route comes back exactly as it was
-        // rather than as a new epoch.
         const auto restored = fixture.routes.routeFor(connection);
         assert(restored.has_value() && *restored == *source_route);
         assert(!fixture.routes.roomEntryFor(connection).has_value());
         assert(!fixture.routes.inRoomFor(connection).has_value());
 
-        // Nothing is left holding the saga: no ticket, no pending entry, and the client
-        // command reached exactly one terminal.
         assert(fixture.room_transitions.stats().reservations == 0);
         assert(fixture.room_entries.stats().pending == 0);
         assert(fixture.lifecycle.releaseCount() == releases_before + 1);
 
-        // And the connection is usable again, in the Zone it never left.
         assert(fixture.gateway.tryPost(make_move_frame(connection, 20, 30)) == snf::server::FramePostResult::Accepted);
         const auto* move_route = std::get_if<snf::server::ZoneCommandRoute>(&fixture.commands.posted->route);
         assert(move_route != nullptr && move_route->zone == zone);
     }
 
-    // Both of these used to close the connection, because tryStart reads the zone route
-    // and RouteCoordinator hides it in either state.
     void test_a_room_join_without_a_zone_is_answered_rather_than_closed()
     {
         GatewayFixture fixture;
@@ -1136,9 +1096,6 @@ namespace
         assert(fixture.gateway.tryPost(make_auth_frame(connection, player)) == snf::server::FramePostResult::Accepted);
         const int posts_before = fixture.commands.post_count;
 
-        // Authenticated but in no Zone: there is nothing to leave and nothing to return
-        // to when the battle ends. A client reaches this by leaving a Zone first, so it
-        // is a refused join and not a protocol error.
         assert(fixture.gateway.tryPost(make_room_join_frame(connection, room.value)) == snf::server::FramePostResult::Accepted);
 
         const auto reply = fixture.outbound.tryPop();
@@ -1147,7 +1104,6 @@ namespace
         assert(send != nullptr && send->frame.type == snf::protocol::MessageType::RoomJoined);
         assert(send->frame.payload.at(0) == static_cast<std::byte>(static_cast<std::uint8_t>(snf::server::RoomCommandStatus::EntryFailed)));
 
-        // Nothing was started, so nothing has to be cleaned up.
         assert(fixture.commands.post_count == posts_before);
         assert(!fixture.routes.roomEntryFor(connection).has_value());
         assert(fixture.room_transitions.stats().reservations == 0);
@@ -1195,11 +1151,9 @@ namespace
         ));
         fixture.gateway.drainTransitions();
         assert(fixture.routes.inRoomFor(connection).has_value());
-        static_cast<void>(fixture.outbound.tryPop()); // the RoomJoined that was granted
+        static_cast<void>(fixture.outbound.tryPop());
         const int posts_before = fixture.commands.post_count;
 
-        // A retry, or a second tap. The client already holds the grant, so the answer
-        // says so instead of dropping it mid-battle.
         assert(fixture.gateway.tryPost(make_room_join_frame(connection, room.value)) == snf::server::FramePostResult::Accepted);
 
         const auto reply = fixture.outbound.tryPop();
@@ -1260,7 +1214,6 @@ namespace
         fixture.gateway.drainTransitions();
         assert(fixture.routes.inRoomFor(connection).has_value());
 
-        // Disconnect while in room
         const auto close_res = fixture.gateway.tryPostConnectionClosed(snf::server::ConnectionClosed{
             .connection = connection,
             .cause = snf::server::ConnectionCloseCause::PeerClosed,

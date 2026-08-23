@@ -27,14 +27,9 @@ namespace snf::server
 
     inline constexpr std::size_t DEFAULT_PURCHASE_IDEMPOTENCY_CAPACITY = 1024;
 
-    // The state is intentionally only mutable by Player. These are ownership
-    // boundaries inside one Actor, not additional Actors.
     class PlayerState
     {
     public:
-        // Absent before authentication. The Actor does not name the pre-auth
-        // namespace it is running in -- that is a routing fact, and the binding
-        // holds it.
         [[nodiscard]] std::optional<PlayerId> identity() const noexcept;
         [[nodiscard]] std::uint64_t handledCommandCount() const noexcept;
         [[nodiscard]] std::optional<PlayerLocation> lastLocation() const noexcept;
@@ -67,8 +62,6 @@ namespace snf::server
         PlayerStateComponentMask _dirty_components{0};
     };
 
-    // The game model, not the execution unit: being an actor is how a Player is
-    // run, which is PlayerActorBinding's business.
     class Player
     {
     public:
@@ -81,25 +74,16 @@ namespace snf::server
         Player(Player&&) noexcept = default;
         Player& operator=(Player&&) noexcept = default;
 
-        // Only a const view escapes the actor, but it is safe to read only on the
-        // owning Worker. Cross-thread queries must use an immutable snapshot or a
-        // command; const does not provide synchronization.
         [[nodiscard]] const PlayerState& state() const noexcept;
         void restore(const PlayerRecord& record);
         void setLastLocation(std::optional<PlayerLocation> location) noexcept;
         void grantStreetExperience(std::uint64_t experience) noexcept;
         [[nodiscard]] bool hasFlushableDirtyState() const noexcept;
         [[nodiscard]] PlayerStateComponentMask dirtyComponents() const noexcept;
-        // Must be called on the owning Worker. It clears all currently dirty
-        // components and returns a flat persistence record for the service queue.
         [[nodiscard]] std::optional<PlayerRecord> takeDirtySnapshot(PlayerStateComponentMask* cleared_components = nullptr);
         void restoreDirtyComponents(PlayerStateComponentMask components) noexcept;
         [[nodiscard]] PlayerRecord snapshot() const;
 
-        // Synchronous, and returns only decisions. Everything that has to wait --
-        // loading a record, saving one, acquiring outbound capacity -- is awaited by
-        // PlayerActorBinding around this call, which is what lets the handler stay a
-        // plain function of its command and the state it owns.
         [[nodiscard]] PlayerResult handle(const PlayerCommand& command);
 
     private:

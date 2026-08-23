@@ -198,8 +198,6 @@ namespace snf::server
             throw std::logic_error{"JoinRoomRequest reached a provisional Player actor"};
         }
 
-        // The stats are read here because the experience they come from is owned here.
-        // Nothing answers the client yet: the Room decides whether the join lands.
         return PlayerResult{
             .room_join =
                 RoomJoinRequest{
@@ -243,7 +241,7 @@ namespace snf::server
         }
         else if (const auto definition = findProduct(command.product); !definition)
         {
-            // Unknown products are rejected before any repository operation.
+            result.status = PurchaseStatus::ProductNotFound;
         }
         else if (_purchase_evidence.size() >= _max_purchase_idempotency_records)
         {

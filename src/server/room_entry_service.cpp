@@ -70,16 +70,10 @@ namespace snf::server
         const auto source_route = _routes.routeFor(connection);
         if (source_route && source_route->player != player)
         {
-            // The session and the route disagree about who this connection is. Only a
-            // routing bug produces that, and it is worse than a refused join.
             return FramePostResult::InvalidPayload;
         }
         if (!source_route)
         {
-            // No Zone to leave, and none to return to when the battle ends. A client can
-            // reach this legitimately -- leave a Zone, then ask for a Room -- so it is
-            // answered like the admission failures below rather than closed as a
-            // protocol error.
             const CommandReleaseToken refused{_lifecycle, connection};
             replyRoomJoined(connection, request_id, room, RoomCommandStatus::EntryFailed, RoomPhase::Waiting);
             ++_failures_before_source_leave;
@@ -138,9 +132,6 @@ namespace snf::server
                         .actor = PlayerActorId{player},
                         .command = JoinRoomRequest{.room = room},
                         .request_id = request_id,
-                        // Beside the command, not inside it. The Player answers with the
-                        // room and the stats it read; which entry saga asked is reactor
-                        // identity that its binding pairs back on.
                         .room_entry =
                             RoomEntryContext{
                                 .entry_id = entry->id,
@@ -175,8 +166,6 @@ namespace snf::server
         return FramePostResult::Accepted;
     }
 
-    // The phase in every reply here is Waiting because the reactor does not own it: only
-    // the Room knows whether a battle is running. The status is the load-bearing byte.
     bool RoomEntryService::tryReplyRoomBusy(const snf::net::ConnectionId connection, const std::uint32_t request_id, const RoomReplyKind kind)
     {
         const auto entry = _routes.roomEntryFor(connection);
@@ -190,9 +179,6 @@ namespace snf::server
 
         if (const auto in_room = _routes.inRoomFor(connection))
         {
-            // Already in a Room, which hides the zone route -- so without this the join
-            // would fall through to tryStart, find no route, and the client would be
-            // closed for retrying a join it had already been granted.
             const CommandReleaseToken release{_lifecycle, connection};
             if (kind == RoomReplyKind::Joined)
             {
@@ -219,9 +205,6 @@ namespace snf::server
 
     bool RoomEntryService::tryReplyZoneBlockedByRoom(const snf::net::ConnectionId connection, const std::uint32_t request_id, const ZoneReplyKind kind)
     {
-        // An entry in flight has already hidden the zone route, so the command cannot be
-        // applied even though the player has not left the Zone yet. That is a transition,
-        // and it gets the answer a cross-zone transition gives.
         if (const auto entry = _routes.roomEntryFor(connection))
         {
             const CommandReleaseToken release{_lifecycle, connection};
@@ -234,9 +217,6 @@ namespace snf::server
         if (const auto in_room = _routes.inRoomFor(connection))
         {
             const CommandReleaseToken release{_lifecycle, connection};
-            // The zone named here is the one the return will put them back in. It is the
-            // only Zone this connection still has a relationship with, and the epoch is
-            // zero because it holds no route while the battle runs.
             _zone_results.replyStatus(connection, in_room->player, in_room->return_zone, 0, in_room->return_position, request_id, kind, ZoneCommandStatus::InRoom);
             ++_transition_busy_replies;
             return true;
@@ -273,7 +253,6 @@ namespace snf::server
         const auto in_room = _routes.inRoomFor(connection);
         if (in_room)
         {
-            // Player in room disconnected: post LeaveRoom and abandon
             static_cast<void>(_commands.tryPost(RoutedCommand{
                 .connection = connection,
                 .route =
@@ -376,9 +355,6 @@ namespace snf::server
             handleCompletion(std::move(*completion));
         }
 
-        // Clears arrive as facts published by a Worker, and the return they ask for is
-        // started here, on the thread that owns the route state. Same budget as the
-        // completions above: whatever is left over waits for the next wake-up.
         for (std::size_t index = 0; index < _max_completions_per_turn; ++index)
         {
             const auto request = _room_transitions.tryPopReturnRequest();
@@ -389,8 +365,6 @@ namespace snf::server
             const auto connection = _sessions.connectionFor(request->player);
             if (!connection)
             {
-                // No live session left. The disconnect path already released the Room
-                // presence, so there is nothing to put back.
                 continue;
             }
             startReturn(*connection, request->room);
@@ -400,10 +374,6 @@ namespace snf::server
 
     void RoomEntryService::handleCompletion(RoomTransitionCompletion completion)
     {
-        // The step picks the saga, and the map only confirms it. A connection can hold
-        // an entry and a return at once -- a battle can clear while an entry is stuck
-        // disconnecting -- so choosing by map first would hand a return's completion to
-        // the entry that happens to still be there.
         if (completion.step == RoomEntryStep::ReturnZone)
         {
             if (const auto return_it = _active_returns.find(completion.connection); return_it != _active_returns.end())
@@ -436,7 +406,6 @@ namespace snf::server
     {
         if (completion.room_status != RoomCommandStatus::Applied)
         {
-            // Room rejected the join (e.g. RoomFull, WrongPhase, AlreadyJoined)
             static_cast<void>(_routes.rollbackRoomEntryBeforeLeave(active.connection, active.entry_id));
             _room_transitions.release(active.ticket);
             replyRoomJoined(active.connection, active.request_id, active.room, completion.room_status, RoomPhase::Waiting);
@@ -445,11 +414,9 @@ namespace snf::server
             return;
         }
 
-        // Room accepted! Next step: Leave source zone.
         static_cast<void>(_routes.noteRoomJoined(active.connection, active.entry_id));
         if (active.disconnecting)
         {
-            // Disconnected before leave source: compensate by leaving room
             static_cast<void>(_commands.tryPost(RoutedCommand{
                 .connection = active.connection,
                 .route =

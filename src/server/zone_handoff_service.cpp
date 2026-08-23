@@ -52,8 +52,6 @@ namespace snf::server
             return false;
         }
 
-        // The close is not applied yet. Cleanup removes the active record, and the
-        // caller's retry then continues through the normal Player close path.
         active->second.disconnecting = true;
         return true;
     }

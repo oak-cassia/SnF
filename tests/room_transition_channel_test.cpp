@@ -36,7 +36,7 @@ namespace
         {
             return -1;
         }
-        return fds[1]; // write end
+        return fds[1];
     }
 
     void test_reservation_guarantees_one_reusable_completion_slot()
@@ -166,12 +166,10 @@ namespace
             .position = snf::server::ZonePosition{.x = 10, .y = 20},
         };
 
-        // Mismatched correlation ID is rejected
         auto wrong_comp = comp;
         wrong_comp.return_id.value = 99;
         assert(!channel.publish(*ticket, wrong_comp));
 
-        // Matching correlation ID succeeds
         assert(channel.publish(*ticket, comp));
         const auto popped = channel.tryPop();
         assert(popped && popped->return_id.value == 42);
@@ -195,15 +193,11 @@ namespace
             .player = snf::server::PlayerId{.value = 12},
         };
 
-        // A clear is not a saga step, so there is no ticket to reserve first. The queue
-        // stands on its own bound instead.
         assert(channel.tryPublishReturnRequest(first));
         assert(channel.tryPublishReturnRequest(second));
         assert(channel.stats().return_requests_queued == 2);
         assert(!channel.drained());
 
-        // Full is a refusal rather than a silent drop: the caller has to report it, or a
-        // player stays in no Zone with nothing to put them back.
         assert(!channel.tryPublishReturnRequest(first));
         assert(channel.stats().return_requests_rejected == 1);
 
@@ -215,7 +209,6 @@ namespace
         assert(channel.stats().return_requests_consumed == 2);
         assert(channel.drained());
 
-        // An unidentified request would name no route to move.
         assert(!channel.tryPublishReturnRequest(snf::server::RoomReturnRequest{.room = {}, .player = snf::server::PlayerId{.value = 11}}));
         assert(!channel.tryPublishReturnRequest(snf::server::RoomReturnRequest{.room = snf::server::RoomId{.value = 7}, .player = {}}));
     }
@@ -259,10 +252,6 @@ namespace
         const auto ticket = channel.tryReserve(context.return_id);
         assert(ticket);
 
-        // A return carries no entry id, so a completion that drops return_id correlates
-        // against zero and is refused. The publisher reads that as a logic failure and
-        // takes the runtime down, which is why the identity is copied whole rather than
-        // field by field.
         auto forgetful = snf::server::RoomTransitionCompletion{
             .entry_id = context.entry_id,
             .connection = context.connection,

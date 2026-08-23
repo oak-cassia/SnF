@@ -20,8 +20,6 @@ namespace snf::server
         std::chrono::milliseconds tick_interval{100};
     };
 
-    // The game model, not the execution unit: being an actor is how a Zone is run,
-    // which is ZoneActorBinding's business.
     class Zone
     {
     public:
