@@ -1,5 +1,7 @@
 #include "snf/game/room.hpp"
 
+import snf.game.skill_catalog;
+
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
@@ -610,6 +612,12 @@ namespace snf::server
             return baseResult(RoomCommandStatus::UnknownSkill, command.player);
         }
 
+        const auto* area_attack = std::get_if<AreaAttackBehavior>(&skill->behavior);
+        if (area_attack == nullptr)
+        {
+            return baseResult(RoomCommandStatus::UnknownSkill, command.player);
+        }
+
         const auto cooldown = std::ranges::lower_bound(participant->cooldowns, command.skill, BY_SKILL_ID, &SkillCooldown::skill);
         const bool tracked = cooldown != participant->cooldowns.end() && cooldown->skill == command.skill;
         if (tracked && observed_at < cooldown->ready_at)
@@ -638,7 +646,7 @@ namespace snf::server
         bool killed_boss = false;
         for (Enemy& target : _enemies)
         {
-            if (target.health == 0 || !isWithinRange(participant->position, target.position, skill->range))
+            if (target.health == 0 || !isWithinRange(participant->position, target.position, area_attack->range))
             {
                 continue;
             }

@@ -2,7 +2,6 @@
 
 #include "snf/game/arena.hpp"
 #include "snf/game/room_result.hpp"
-#include "snf/game/skill_catalog.hpp"
 #include "snf/net/socket_options.hpp"
 #include "snf/net/system_error.hpp"
 
@@ -19,6 +18,8 @@
 #include <system_error>
 #include <type_traits>
 #include <utility>
+
+import snf.game.skill_catalog;
 
 namespace
 {

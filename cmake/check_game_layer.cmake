@@ -1,7 +1,7 @@
 string(REPLACE ":" ";" roots "${GAME_ROOTS}")
 set(offenders "")
 foreach(root IN LISTS roots)
-    file(GLOB_RECURSE sources "${root}/*.hpp" "${root}/*.cpp")
+    file(GLOB_RECURSE sources "${root}/*.hpp" "${root}/*.cpp" "${root}/*.cppm")
     foreach(source IN LISTS sources)
         file(STRINGS "${source}" hits REGEX "#[ \t]*include[ \t]*[\"<]snf/(server|runtime|net|protocol|core)/")
         if(hits)

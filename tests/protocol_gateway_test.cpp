@@ -1,14 +1,15 @@
 #include "outbound_reservation_test_support.hpp"
-#include "snf/game/skill_catalog.hpp"
+#include "snf/game/skill_id.hpp"
 #include "snf/server/outbound_channel.hpp"
 #include "snf/server/protocol_gateway.hpp"
 
 #include <cassert>
-#include <cstdint>
 #include <deque>
 #include <optional>
 #include <utility>
 #include <variant>
+
+import snf.game.skill_catalog;
 
 namespace
 {
