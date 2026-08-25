@@ -292,6 +292,16 @@ namespace snf::server
         return nearest;
     }
 
+    Enemy* Room::findLivingEnemy(const EnemyId target) noexcept
+    {
+        const auto position = std::ranges::find(_enemies, target, &Enemy::id);
+        if (position == _enemies.end() || position->health == 0)
+        {
+            return nullptr;
+        }
+        return &*position;
+    }
+
     const Enemy* Room::findTargetEnemy(const ArenaPosition origin, const std::uint32_t acquisition_range) const noexcept
     {
         const Enemy* nearest = nullptr;
@@ -389,6 +399,18 @@ namespace snf::server
         result.outcome = BattleOutcome::Failed;
         result.failure_reason = reason;
         result.audience = audience();
+        return result;
+    }
+
+    RoomResult Room::clearBattle(const std::optional<PlayerId> player)
+    {
+        _phase = RoomPhase::Cleared;
+        _projectiles.clear();
+        RoomResult result = baseResult(RoomCommandStatus::Applied, player);
+        result.digest = takeDigest();
+        result.outcome = BattleOutcome::Cleared;
+        result.audience = audience();
+        rewardClear(result);
         return result;
     }
 
@@ -711,20 +733,19 @@ namespace snf::server
         }
         else if (boss_killed)
         {
-            _phase = RoomPhase::Cleared;
-            _projectiles.clear();
-            RoomResult result = baseResult(RoomCommandStatus::Applied, context.command.player);
-            result.digest = takeDigest();
-            result.outcome = BattleOutcome::Cleared;
-            result.audience = audience();
-            rewardClear(result);
-            return result;
+            return clearBattle(context.command.player);
         }
 
         return finishSkillUse(context.command.player);
     }
 
-    RoomResult Room::spawnHomingProjectile(SkillCastContext& context, const std::uint32_t acquisition_range, const std::chrono::milliseconds lifetime)
+    RoomResult Room::spawnHomingProjectile(
+        SkillCastContext& context,
+        const std::uint32_t acquisition_range,
+        const std::uint32_t speed_per_tick,
+        const std::uint32_t hit_range,
+        const std::chrono::milliseconds lifetime
+    )
     {
         const Enemy* target = findTargetEnemy(context.participant.position, acquisition_range);
         if (target == nullptr)
@@ -758,12 +779,80 @@ namespace snf::server
                 .skill = context.command.skill_id,
                 .target = target->id,
                 .position = context.participant.position,
+                .speed_per_tick = speed_per_tick,
+                .hit_range = hit_range,
                 .damage = context.damage,
                 .expires_at = context.observed_at + lifetime,
             }
         );
 
         return finishSkillUse(context.command.player);
+    }
+
+    Room::ProjectileAdvanceResult Room::advanceProjectile(Projectile& projectile, const std::chrono::steady_clock::time_point observed_at)
+    {
+        if (projectile.expires_at <= observed_at)
+        {
+            return ProjectileAdvanceResult::Removed;
+        }
+
+        Enemy* target = findLivingEnemy(projectile.target);
+        if (target == nullptr)
+        {
+            return ProjectileAdvanceResult::Removed;
+        }
+
+        if (!isWithinRange(projectile.position, target->position, projectile.hit_range))
+        {
+            projectile.position =
+                moveToward(projectile.position, target->position, projectile.speed_per_tick, _config.arena_width, _config.arena_height);
+        }
+
+        if (!isWithinRange(projectile.position, target->position, projectile.hit_range))
+        {
+            return ProjectileAdvanceResult::Active;
+        }
+
+        const std::uint64_t damage = std::min(projectile.damage, target->health);
+        target->health -= damage;
+        _pending_events.push_back(
+            EnemyDamaged{
+                .target = target->id,
+                .actor = projectile.owner,
+                .skill = projectile.skill,
+                .amount = damage,
+                .health = target->health,
+            }
+        );
+        if (target->health == 0)
+        {
+            _pending_events.push_back(EnemyDied{.id = target->id});
+            if (target->kind == EnemyKind::Boss)
+            {
+                return ProjectileAdvanceResult::BossKilled;
+            }
+        }
+        return ProjectileAdvanceResult::Removed;
+    }
+
+    bool Room::advanceProjectiles(const std::chrono::steady_clock::time_point observed_at)
+    {
+        auto projectile = _projectiles.begin();
+        while (projectile != _projectiles.end())
+        {
+            switch (advanceProjectile(*projectile, observed_at))
+            {
+            case ProjectileAdvanceResult::Active:
+                ++projectile;
+                break;
+            case ProjectileAdvanceResult::Removed:
+                projectile = _projectiles.erase(projectile);
+                break;
+            case ProjectileAdvanceResult::BossKilled:
+                return true;
+            }
+        }
+        return false;
     }
 
     RoomResult Room::handleCommand(const UseSkill& command, const std::chrono::steady_clock::time_point observed_at)
@@ -820,7 +909,7 @@ namespace snf::server
                 },
                 [this, &context](const HomingProjectileAttackBehavior& behavior)
                 {
-                    return spawnHomingProjectile(context, behavior.acquisition_range, behavior.lifetime);
+                    return spawnHomingProjectile(context, behavior.acquisition_range, behavior.speed_per_tick, behavior.hit_range, behavior.lifetime);
                 },
             },
             skill_definition->behavior
@@ -886,6 +975,10 @@ namespace snf::server
         );
 
         moveParticipants();
+        if (advanceProjectiles(observed_at))
+        {
+            return clearBattle(std::nullopt);
+        }
         if (!actEnemies(observed_at))
         {
             return failBattle(RoomCommandStatus::Applied, std::nullopt, BattleFailureReason::ParticipantsDefeated);

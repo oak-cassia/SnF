@@ -92,6 +92,13 @@ namespace snf::server
             std::uint64_t damage{0};
         };
 
+        enum class ProjectileAdvanceResult : std::uint8_t
+        {
+            Active,
+            Removed,
+            BossKilled,
+        };
+
         [[nodiscard]] RoomResult handleCommand(const JoinRoom& command, std::chrono::steady_clock::time_point observed_at);
         [[nodiscard]] RoomResult handleCommand(const LeaveRoom& command, std::chrono::steady_clock::time_point observed_at);
         [[nodiscard]] RoomResult handleCommand(const StartBattle& command, std::chrono::steady_clock::time_point observed_at);
@@ -102,6 +109,7 @@ namespace snf::server
 
         [[nodiscard]] Participant* findParticipant(PlayerId player);
         [[nodiscard]] Participant* nearestLivingParticipant(ArenaPosition origin);
+        [[nodiscard]] Enemy* findLivingEnemy(EnemyId target) noexcept;
         [[nodiscard]] const Enemy* findTargetEnemy(ArenaPosition origin, std::uint32_t acquisition_range) const noexcept;
         [[nodiscard]] const Enemy* boss() const noexcept;
         [[nodiscard]] bool allParticipantsDead() const noexcept;
@@ -112,12 +120,19 @@ namespace snf::server
         [[nodiscard]] std::vector<PlayerId> audience() const;
         [[nodiscard]] RoomResult baseResult(RoomCommandStatus status, std::optional<PlayerId> player) const;
         [[nodiscard]] RoomResult failBattle(RoomCommandStatus status, std::optional<PlayerId> player, BattleFailureReason reason);
+        [[nodiscard]] RoomResult clearBattle(std::optional<PlayerId> player);
         void commitSkillUse(const SkillCastContext& context);
         [[nodiscard]] RoomResult finishSkillUse(PlayerId player);
         [[nodiscard]] RoomResult applyAreaAttack(SkillCastContext& context, std::uint32_t range);
         [[nodiscard]] RoomResult spawnHomingProjectile(
-            SkillCastContext& context, std::uint32_t acquisition_range, std::chrono::milliseconds lifetime
+            SkillCastContext& context,
+            std::uint32_t acquisition_range,
+            std::uint32_t speed_per_tick,
+            std::uint32_t hit_range,
+            std::chrono::milliseconds lifetime
         );
+        [[nodiscard]] ProjectileAdvanceResult advanceProjectile(Projectile& projectile, std::chrono::steady_clock::time_point observed_at);
+        [[nodiscard]] bool advanceProjectiles(std::chrono::steady_clock::time_point observed_at);
         [[nodiscard]] std::optional<BattleDigest> takeDigest();
         void initializeArena();
         void moveParticipants();
