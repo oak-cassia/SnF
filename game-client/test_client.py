@@ -95,6 +95,12 @@ class TestWireProtocol(unittest.TestCase):
         self.assertEqual(status, RoomStatus.Applied)
         self.assertEqual(phase, RoomPhase.Running)
 
+        status, phase = snf_wire.parse_ack(
+            struct.pack(">BB", int(RoomStatus.ProjectileCapacityExceeded), int(RoomPhase.Running))
+        )
+        self.assertEqual(status, RoomStatus.ProjectileCapacityExceeded)
+        self.assertEqual(phase, RoomPhase.Running)
+
         self.assertEqual(snf_wire.parse_cleared(struct.pack(">Q", 500)), 500)
 
         hp, spawned, reason = snf_wire.parse_failed(

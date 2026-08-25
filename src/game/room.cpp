@@ -9,6 +9,11 @@ import snf.game.skill_catalog;
 
 namespace
 {
+    template <typename... Visitors> struct Overloaded : Visitors...
+    {
+        using Visitors::operator()...;
+    };
+
     constexpr auto BY_PLAYER_ID = [](const snf::server::PlayerId left, const snf::server::PlayerId right)
     {
         return left.value < right.value;
@@ -61,6 +66,10 @@ namespace snf::server
         if (_config.max_spawned_enemies == 0 || _config.max_spawned_enemies > std::numeric_limits<std::uint32_t>::max())
         {
             throw std::invalid_argument{"Room spawned enemy capacity must fit EnemyId"};
+        }
+        if (_config.max_active_projectiles == 0 || _config.max_active_projectiles > std::numeric_limits<std::uint32_t>::max())
+        {
+            throw std::invalid_argument{"Room projectile capacity must fit ProjectileId"};
         }
         if (_config.digest_flush_threshold == 0)
         {
@@ -145,6 +154,7 @@ namespace snf::server
         _participants.reserve(_config.max_participants);
         _enemies.reserve(total_enemies);
         _pending_events.reserve(event_reserve);
+        _projectiles.reserve(_config.max_active_projectiles);
     }
 
     RoomId Room::id() const noexcept
@@ -165,6 +175,11 @@ namespace snf::server
     std::size_t Room::enemyCount() const noexcept
     {
         return _enemies.size();
+    }
+
+    std::size_t Room::projectileCount() const noexcept
+    {
+        return _projectiles.size();
     }
 
     bool Room::canStartBattle() const noexcept
@@ -191,8 +206,8 @@ namespace snf::server
 
     std::optional<CombatStats> Room::statsOf(const PlayerId player) const
     {
-        const auto position = std::ranges::lower_bound(_participants, player, BY_PLAYER_ID, &Participant::player);
-        if (position == _participants.end() || position->player != player)
+        const auto position = std::ranges::lower_bound(_participants, player, BY_PLAYER_ID, &Participant::player_id);
+        if (position == _participants.end() || position->player_id != player)
         {
             return std::nullopt;
         }
@@ -201,8 +216,8 @@ namespace snf::server
 
     std::optional<std::uint64_t> Room::healthOf(const PlayerId player) const
     {
-        const auto position = std::ranges::lower_bound(_participants, player, BY_PLAYER_ID, &Participant::player);
-        if (position == _participants.end() || position->player != player)
+        const auto position = std::ranges::lower_bound(_participants, player, BY_PLAYER_ID, &Participant::player_id);
+        if (position == _participants.end() || position->player_id != player)
         {
             return std::nullopt;
         }
@@ -211,12 +226,28 @@ namespace snf::server
 
     std::optional<ArenaPosition> Room::positionOf(const PlayerId player) const
     {
-        const auto position = std::ranges::lower_bound(_participants, player, BY_PLAYER_ID, &Participant::player);
-        if (position == _participants.end() || position->player != player)
+        const auto position = std::ranges::lower_bound(_participants, player, BY_PLAYER_ID, &Participant::player_id);
+        if (position == _participants.end() || position->player_id != player)
         {
             return std::nullopt;
         }
         return position->position;
+    }
+
+    std::optional<Projectile> Room::projectileById(const ProjectileId id) const
+    {
+        const auto position = std::ranges::find_if(
+            _projectiles,
+            [id](const Projectile& projectile)
+            {
+                return projectile.id == id;
+            }
+        );
+        if (position == _projectiles.end())
+        {
+            return std::nullopt;
+        }
+        return *position;
     }
 
     RoomResult Room::handle(const RoomCommand& command, const std::chrono::steady_clock::time_point observed_at)
@@ -232,8 +263,8 @@ namespace snf::server
 
     Room::Participant* Room::findParticipant(const PlayerId player)
     {
-        const auto position = std::ranges::lower_bound(_participants, player, BY_PLAYER_ID, &Participant::player);
-        if (position == _participants.end() || position->player != player)
+        const auto position = std::ranges::lower_bound(_participants, player, BY_PLAYER_ID, &Participant::player_id);
+        if (position == _participants.end() || position->player_id != player)
         {
             return nullptr;
         }
@@ -252,9 +283,29 @@ namespace snf::server
             }
             const std::uint64_t distance = squaredDistance(origin, participant.position);
             if (nearest == nullptr || distance < nearest_distance ||
-                (distance == nearest_distance && participant.player.value < nearest->player.value))
+                (distance == nearest_distance && participant.player_id.value < nearest->player_id.value))
             {
                 nearest = &participant;
+                nearest_distance = distance;
+            }
+        }
+        return nearest;
+    }
+
+    const Enemy* Room::findTargetEnemy(const ArenaPosition origin, const std::uint32_t acquisition_range) const noexcept
+    {
+        const Enemy* nearest = nullptr;
+        std::uint64_t nearest_distance = std::numeric_limits<std::uint64_t>::max();
+        for (const Enemy& enemy : _enemies)
+        {
+            if (enemy.health == 0 || !isWithinRange(origin, enemy.position, acquisition_range))
+            {
+                continue;
+            }
+            const std::uint64_t distance = squaredDistance(origin, enemy.position);
+            if (nearest == nullptr || distance < nearest_distance || (distance == nearest_distance && enemy.id.value < nearest->id.value))
+            {
+                nearest = &enemy;
                 nearest_distance = distance;
             }
         }
@@ -298,7 +349,7 @@ namespace snf::server
         players.reserve(_participants.size());
         for (const Participant& participant : _participants)
         {
-            players.push_back(participant.player);
+            players.push_back(participant.player_id);
         }
         return players;
     }
@@ -332,6 +383,7 @@ namespace snf::server
     RoomResult Room::failBattle(const RoomCommandStatus status, const std::optional<PlayerId> player, const BattleFailureReason reason)
     {
         _phase = RoomPhase::Failed;
+        _projectiles.clear();
         RoomResult result = baseResult(status, player);
         result.digest = takeDigest();
         result.outcome = BattleOutcome::Failed;
@@ -351,11 +403,13 @@ namespace snf::server
                 index, _participants.size(), _config.arena_width, _config.arena_height, _config.participant_spawn_spacing
             );
             participant.move_intent = MoveDirection::Stop;
-            _pending_events.push_back(ParticipantSpawned{
-                .player = participant.player,
-                .position = participant.position,
-                .health = participant.current_health,
-            });
+            _pending_events.push_back(
+                ParticipantSpawned{
+                    .player = participant.player_id,
+                    .position = participant.position,
+                    .health = participant.current_health,
+                }
+            );
         }
     }
 
@@ -374,7 +428,7 @@ namespace snf::server
                 continue;
             }
             participant.position = moved;
-            _pending_events.push_back(ParticipantMoved{.player = participant.player, .position = moved});
+            _pending_events.push_back(ParticipantMoved{.player = participant.player_id, .position = moved});
         }
     }
 
@@ -413,16 +467,18 @@ namespace snf::server
             const std::uint64_t damage = std::min(enemyAttackDamage(enemy.kind), target->current_health);
             target->current_health -= damage;
             enemy.attack_ready_at = observed_at + enemyAttackCooldown(enemy.kind);
-            _pending_events.push_back(ParticipantDamaged{
-                .target = target->player,
-                .attacker = enemy.id,
-                .amount = damage,
-                .health = target->current_health,
-            });
+            _pending_events.push_back(
+                ParticipantDamaged{
+                    .target = target->player_id,
+                    .attacker = enemy.id,
+                    .amount = damage,
+                    .health = target->current_health,
+                }
+            );
             if (target->current_health == 0)
             {
                 target->move_intent = MoveDirection::Stop;
-                _pending_events.push_back(ParticipantDied{.player = target->player});
+                _pending_events.push_back(ParticipantDied{.player = target->player_id});
                 if (allParticipantsDead())
                 {
                     return false;
@@ -481,10 +537,12 @@ namespace snf::server
         result.grants.reserve(_participants.size());
         for (const Participant& participant : _participants)
         {
-            result.grants.push_back(StreetExperienceGrant{
-                .player = participant.player,
-                .experience = _config.clear_experience,
-            });
+            result.grants.push_back(
+                StreetExperienceGrant{
+                    .player = participant.player_id,
+                    .experience = _config.clear_experience,
+                }
+            );
         }
     }
 
@@ -496,8 +554,8 @@ namespace snf::server
             return baseResult(RoomCommandStatus::WrongPhase, command.player);
         }
 
-        const auto position = std::ranges::lower_bound(_participants, command.player, BY_PLAYER_ID, &Participant::player);
-        if (position != _participants.end() && position->player == command.player)
+        const auto position = std::ranges::lower_bound(_participants, command.player, BY_PLAYER_ID, &Participant::player_id);
+        if (position != _participants.end() && position->player_id == command.player)
         {
             return baseResult(RoomCommandStatus::AlreadyJoined, command.player);
         }
@@ -509,7 +567,7 @@ namespace snf::server
         _participants.insert(
             position,
             Participant{
-                .player = command.player,
+                .player_id = command.player,
                 .stats = command.stats,
                 .current_health = command.stats.health,
                 .cooldowns = {},
@@ -526,8 +584,8 @@ namespace snf::server
             return baseResult(RoomCommandStatus::WrongPhase, command.player);
         }
 
-        const auto position = std::ranges::lower_bound(_participants, command.player, BY_PLAYER_ID, &Participant::player);
-        if (position == _participants.end() || position->player != command.player)
+        const auto position = std::ranges::lower_bound(_participants, command.player, BY_PLAYER_ID, &Participant::player_id);
+        if (position == _participants.end() || position->player_id != command.player)
         {
             return baseResult(RoomCommandStatus::NotJoined, command.player);
         }
@@ -541,6 +599,7 @@ namespace snf::server
         if (_participants.empty())
         {
             _pending_events.clear();
+            _projectiles.clear();
             return baseResult(RoomCommandStatus::Applied, command.player);
         }
 
@@ -581,6 +640,132 @@ namespace snf::server
         return result;
     }
 
+    void Room::commitSkillUse(const SkillCastContext& context)
+    {
+        Participant& participant = context.participant;
+        const SkillId context_skill_id = context.command.skill_id;
+        const auto cooldown = std::ranges::lower_bound(participant.cooldowns, context_skill_id, BY_SKILL_ID, &SkillCooldown::skill_id);
+        if (cooldown != participant.cooldowns.end() && cooldown->skill_id == context_skill_id)
+        {
+            cooldown->ready_at = context.observed_at + context.cooldown;
+        }
+        else
+        {
+            participant.cooldowns.insert(
+                cooldown,
+                SkillCooldown{
+                    .skill_id = context_skill_id,
+                    .ready_at = context.observed_at + context.cooldown,
+                }
+            );
+        }
+        participant.applied_skill_sequence = context.command.request_sequence;
+    }
+
+    RoomResult Room::finishSkillUse(const PlayerId player)
+    {
+        RoomResult result = baseResult(RoomCommandStatus::Applied, player);
+        if (_pending_events.size() >= _config.digest_flush_threshold)
+        {
+            result.digest = takeDigest();
+            result.audience = audience();
+        }
+        return result;
+    }
+
+    RoomResult Room::applyAreaAttack(SkillCastContext& context, const std::uint32_t range)
+    {
+        commitSkillUse(context);
+
+        bool any_enemy_hit = false;
+        bool boss_killed = false;
+        for (Enemy& target : _enemies)
+        {
+            if (target.health == 0 || !isWithinRange(context.participant.position, target.position, range))
+            {
+                continue;
+            }
+
+            any_enemy_hit = true;
+            const std::uint64_t damage = std::min(context.damage, target.health);
+            target.health -= damage;
+            _pending_events.push_back(
+                EnemyDamaged{
+                    .target = target.id,
+                    .actor = context.command.player,
+                    .skill = context.command.skill_id,
+                    .amount = damage,
+                    .health = target.health,
+                }
+            );
+            if (target.health == 0)
+            {
+                _pending_events.push_back(EnemyDied{.id = target.id});
+                boss_killed = boss_killed || target.kind == EnemyKind::Boss;
+            }
+        }
+
+        if (!any_enemy_hit)
+        {
+            _pending_events.push_back(SkillWhiffed{.actor = context.command.player, .skill = context.command.skill_id});
+        }
+        else if (boss_killed)
+        {
+            _phase = RoomPhase::Cleared;
+            _projectiles.clear();
+            RoomResult result = baseResult(RoomCommandStatus::Applied, context.command.player);
+            result.digest = takeDigest();
+            result.outcome = BattleOutcome::Cleared;
+            result.audience = audience();
+            rewardClear(result);
+            return result;
+        }
+
+        return finishSkillUse(context.command.player);
+    }
+
+    RoomResult Room::spawnHomingProjectile(SkillCastContext& context, const std::uint32_t acquisition_range, const std::chrono::milliseconds lifetime)
+    {
+        const Enemy* target = findTargetEnemy(context.participant.position, acquisition_range);
+        if (target == nullptr)
+        {
+            commitSkillUse(context);
+            _pending_events.push_back(SkillWhiffed{.actor = context.command.player, .skill = context.command.skill_id});
+            return finishSkillUse(context.command.player);
+        }
+
+        if (_projectiles.size() >= _config.max_active_projectiles || _next_projectile_id == 0)
+        {
+            return baseResult(RoomCommandStatus::ProjectileCapacityExceeded, context.command.player);
+        }
+
+        commitSkillUse(context);
+
+        const ProjectileId projectile_id{.value = _next_projectile_id};
+        if (_next_projectile_id == std::numeric_limits<std::uint32_t>::max())
+        {
+            _next_projectile_id = 0;
+        }
+        else
+        {
+            ++_next_projectile_id;
+        }
+
+        _projectiles.push_back(
+            Projectile{
+                .id = projectile_id,
+                .owner = context.command.player,
+                .skill = context.command.skill_id,
+                .target = target->id,
+                .position = context.participant.position,
+                .damage = context.damage,
+                .expires_at = context.observed_at + lifetime,
+            }
+        );
+
+        return finishSkillUse(context.command.player);
+    }
+
     RoomResult Room::handleCommand(const UseSkill& command, const std::chrono::steady_clock::time_point observed_at)
     {
         if (_phase != RoomPhase::Running)
@@ -612,12 +797,6 @@ namespace snf::server
             return baseResult(RoomCommandStatus::UnknownSkill, command.player);
         }
 
-        const auto* area_attack = std::get_if<AreaAttackBehavior>(&skill_definition->behavior);
-        if (area_attack == nullptr)
-        {
-            return baseResult(RoomCommandStatus::UnknownSkill, command.player);
-        }
-
         const auto cooldown = std::ranges::lower_bound(participant->cooldowns, command.skill_id, BY_SKILL_ID, &SkillCooldown::skill_id);
         const bool tracked = cooldown != participant->cooldowns.end() && cooldown->skill_id == command.skill_id;
         if (tracked && observed_at < cooldown->ready_at)
@@ -625,71 +804,27 @@ namespace snf::server
             return baseResult(RoomCommandStatus::SkillOnCooldown, command.player);
         }
 
-        participant->applied_skill_sequence = command.request_sequence;
-        if (tracked)
-        {
-            cooldown->ready_at = observed_at + skill_definition->cooldown;
-        }
-        else
-        {
-            participant->cooldowns.insert(
-                cooldown,
-                SkillCooldown{
-                    .skill_id = command.skill_id,
-                    .ready_at = observed_at + skill_definition->cooldown,
-                }
-            );
-        }
+        SkillCastContext context{
+            .participant = *participant,
+            .command = command,
+            .observed_at = observed_at,
+            .cooldown = skill_definition->cooldown,
+            .damage = calculateSkillDamage(*skill_definition, participant->stats.attack),
+        };
 
-        const std::uint64_t skill_damage = calculateSkillDamage(*skill_definition, participant->stats.attack);
-        bool any_enemy_hit = false;
-        bool boss_killed = false;
-        for (Enemy& target : _enemies)
-        {
-            if (target.health == 0 || !isWithinRange(participant->position, target.position, area_attack->range))
-            {
-                continue;
-            }
-
-            any_enemy_hit = true;
-            const std::uint64_t damage = std::min(skill_damage, target.health);
-            target.health -= damage;
-            _pending_events.push_back(EnemyDamaged{
-                .target = target.id,
-                .actor = command.player,
-                .skill = command.skill_id,
-                .amount = damage,
-                .health = target.health,
-            });
-            if (target.health == 0)
-            {
-                _pending_events.push_back(EnemyDied{.id = target.id});
-                boss_killed = boss_killed || target.kind == EnemyKind::Boss;
-            }
-        }
-
-        if (!any_enemy_hit)
-        {
-            _pending_events.push_back(SkillWhiffed{.actor = command.player, .skill = command.skill_id});
-        }
-        else if (boss_killed)
-        {
-            _phase = RoomPhase::Cleared;
-            RoomResult result = baseResult(RoomCommandStatus::Applied, command.player);
-            result.digest = takeDigest();
-            result.outcome = BattleOutcome::Cleared;
-            result.audience = audience();
-            rewardClear(result);
-            return result;
-        }
-
-        RoomResult result = baseResult(RoomCommandStatus::Applied, command.player);
-        if (_pending_events.size() >= _config.digest_flush_threshold)
-        {
-            result.digest = takeDigest();
-            result.audience = audience();
-        }
-        return result;
+        return std::visit(
+            Overloaded{
+                [this, &context](const AreaAttackBehavior& behavior)
+                {
+                    return applyAreaAttack(context, behavior.range);
+                },
+                [this, &context](const HomingProjectileAttackBehavior& behavior)
+                {
+                    return spawnHomingProjectile(context, behavior.acquisition_range, behavior.lifetime);
+                },
+            },
+            skill_definition->behavior
+        );
     }
 
     RoomResult Room::handleCommand(const SetMoveIntent& command, const std::chrono::steady_clock::time_point observed_at)

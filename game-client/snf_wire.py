@@ -49,6 +49,7 @@ class RoomStatus(IntEnum):
     BattleExpired = 9
     ParticipantDead = 10
     RuntimeOverloaded = 11
+    ProjectileCapacityExceeded = 12
 
 
 class ZoneCommandStatus(IntEnum):
