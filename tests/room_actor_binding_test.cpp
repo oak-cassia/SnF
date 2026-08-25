@@ -300,7 +300,7 @@ namespace
                 .command =
                     snf::server::UseSkill{
                         .player = snf::server::PlayerId{.value = 10},
-                        .skill = snf::server::SLASH,
+                        .skill_id = snf::server::SLASH,
                         .request_sequence = 1,
                     },
                 .reply = std::nullopt,
@@ -768,7 +768,7 @@ namespace
                 .command =
                     snf::server::UseSkill{
                         .player = snf::server::PlayerId{.value = 10},
-                        .skill = snf::server::SLASH,
+                        .skill_id = snf::server::SLASH,
                         .request_sequence = 1,
                     },
                 .reply = std::nullopt,

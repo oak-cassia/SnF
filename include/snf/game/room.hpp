@@ -1,6 +1,7 @@
 #pragma once
 
 #include "snf/game/enemy.hpp"
+#include "snf/game/projectile.hpp"
 #include "snf/game/room_command.hpp"
 #include "snf/game/room_id.hpp"
 #include "snf/game/room_result.hpp"
@@ -27,6 +28,7 @@ namespace snf::server
         std::chrono::milliseconds boss_spawn_after{40000};
         std::size_t max_spawned_enemies{64};
         std::size_t digest_flush_threshold{512};
+        std::size_t max_active_projectiles{128};
         std::uint32_t arena_width{100};
         std::uint32_t arena_height{100};
         std::uint32_t player_move_speed{4};
@@ -51,25 +53,27 @@ namespace snf::server
         [[nodiscard]] RoomPhase phase() const noexcept;
         [[nodiscard]] std::size_t participantCount() const noexcept;
         [[nodiscard]] std::size_t enemyCount() const noexcept;
+        [[nodiscard]] std::size_t projectileCount() const noexcept;
         [[nodiscard]] bool canStartBattle() const noexcept;
         [[nodiscard]] bool bossSpawned() const noexcept;
         [[nodiscard]] std::uint64_t bossHealth() const noexcept;
         [[nodiscard]] std::optional<CombatStats> statsOf(PlayerId player) const;
         [[nodiscard]] std::optional<std::uint64_t> healthOf(PlayerId player) const;
         [[nodiscard]] std::optional<ArenaPosition> positionOf(PlayerId player) const;
+        [[nodiscard]] std::optional<Projectile> projectileById(ProjectileId id) const;
 
         [[nodiscard]] RoomResult handle(const RoomCommand& command, std::chrono::steady_clock::time_point observed_at);
 
     private:
         struct SkillCooldown
         {
-            SkillId skill;
+            SkillId skill_id;
             std::chrono::steady_clock::time_point ready_at;
         };
 
         struct Participant
         {
-            PlayerId player;
+            PlayerId player_id;
             CombatStats stats;
             std::uint64_t current_health{0};
             ArenaPosition position{};
@@ -77,6 +81,15 @@ namespace snf::server
             std::uint64_t applied_skill_sequence{0};
             std::uint64_t applied_movement_sequence{0};
             std::vector<SkillCooldown> cooldowns;
+        };
+
+        struct SkillCastContext
+        {
+            Participant& participant;
+            const UseSkill& command;
+            std::chrono::steady_clock::time_point observed_at;
+            std::chrono::milliseconds cooldown;
+            std::uint64_t damage{0};
         };
 
         [[nodiscard]] RoomResult handleCommand(const JoinRoom& command, std::chrono::steady_clock::time_point observed_at);
@@ -89,6 +102,7 @@ namespace snf::server
 
         [[nodiscard]] Participant* findParticipant(PlayerId player);
         [[nodiscard]] Participant* nearestLivingParticipant(ArenaPosition origin);
+        [[nodiscard]] const Enemy* findTargetEnemy(ArenaPosition origin, std::uint32_t acquisition_range) const noexcept;
         [[nodiscard]] const Enemy* boss() const noexcept;
         [[nodiscard]] bool allParticipantsDead() const noexcept;
         [[nodiscard]] std::uint32_t enemyMoveSpeed(EnemyKind kind) const noexcept;
@@ -98,6 +112,12 @@ namespace snf::server
         [[nodiscard]] std::vector<PlayerId> audience() const;
         [[nodiscard]] RoomResult baseResult(RoomCommandStatus status, std::optional<PlayerId> player) const;
         [[nodiscard]] RoomResult failBattle(RoomCommandStatus status, std::optional<PlayerId> player, BattleFailureReason reason);
+        void commitSkillUse(const SkillCastContext& context);
+        [[nodiscard]] RoomResult finishSkillUse(PlayerId player);
+        [[nodiscard]] RoomResult applyAreaAttack(SkillCastContext& context, std::uint32_t range);
+        [[nodiscard]] RoomResult spawnHomingProjectile(
+            SkillCastContext& context, std::uint32_t acquisition_range, std::chrono::milliseconds lifetime
+        );
         [[nodiscard]] std::optional<BattleDigest> takeDigest();
         void initializeArena();
         void moveParticipants();
@@ -114,11 +134,13 @@ namespace snf::server
         std::chrono::steady_clock::time_point _boss_spawn_at{};
         std::size_t _spawned_wave_count{0};
         std::uint32_t _next_enemy_id{1};
+        std::uint32_t _next_projectile_id{1};
         std::uint64_t _digest_sequence{0};
         bool _boss_spawned{false};
 
         std::vector<Participant> _participants;
         std::vector<Enemy> _enemies;
+        std::vector<Projectile> _projectiles;
         std::vector<BattleEvent> _pending_events;
     };
 }

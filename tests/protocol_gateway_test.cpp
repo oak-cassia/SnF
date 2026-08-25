@@ -983,7 +983,7 @@ namespace
         const auto* cast = std::get_if<snf::server::UseSkill>(&cast_route->command);
         assert(cast != nullptr);
         assert(cast->player == player);
-        assert(cast->skill == snf::server::SLASH);
+        assert(cast->skill_id == snf::server::SLASH);
         assert(cast->request_sequence == 7);
 
         assert(fixture.gateway.tryPost(make_set_move_intent_frame(connection, 999, 0, 1)) == snf::server::FramePostResult::InvalidPayload);

@@ -29,7 +29,7 @@ export namespace snf::server
 
     struct SkillDefinition
     {
-        SkillId skill{};
+        SkillId skill_id{};
         std::chrono::milliseconds cooldown{0};
         AttackBehavior behavior{};
     };
@@ -48,7 +48,7 @@ export namespace snf::server
     inline constexpr std::uint64_t ATTACK_PERCENT_DENOMINATOR = 100;
 
     [[nodiscard]] std::optional<SkillDefinition> findSkill(SkillId skill) noexcept;
-    [[nodiscard]] std::uint64_t skillDamage(const SkillDefinition& skill, std::uint64_t attack) noexcept;
+    [[nodiscard]] std::uint64_t calculateSkillDamage(const SkillDefinition& skill, std::uint64_t attack) noexcept;
 }
 
 namespace
@@ -58,7 +58,7 @@ namespace
     [[nodiscard]] SkillDefinition makeSlash() noexcept
     {
         return SkillDefinition{
-            .skill = SLASH,
+            .skill_id = SLASH,
             .cooldown = SLASH_COOLDOWN,
             .behavior = AreaAttackBehavior{
                 .attack_percent = SLASH_ATTACK_PERCENT,
@@ -70,7 +70,7 @@ namespace
     [[nodiscard]] SkillDefinition makeArcaneBolt() noexcept
     {
         return SkillDefinition{
-            .skill = ARCANE_BOLT,
+            .skill_id = ARCANE_BOLT,
             .cooldown = ARCANE_BOLT_COOLDOWN,
             .behavior = HomingProjectileAttackBehavior{
                 .attack_percent = ARCANE_BOLT_ATTACK_PERCENT,
@@ -103,7 +103,7 @@ namespace snf::server
         return findDefinition(skill);
     }
 
-    std::uint64_t skillDamage(const SkillDefinition& skill, const std::uint64_t attack) noexcept
+    std::uint64_t calculateSkillDamage(const SkillDefinition& skill, const std::uint64_t attack) noexcept
     {
         return std::visit(
             [attack](const auto& behavior)

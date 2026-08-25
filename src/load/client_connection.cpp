@@ -573,7 +573,7 @@ namespace snf::load
             _outstanding_request->request_type == snf::protocol::MessageType::SetMoveIntent)
         {
             if (response.payload.size() != 2 ||
-                std::to_integer<std::uint8_t>(response.payload[0]) > static_cast<std::uint8_t>(snf::server::RoomCommandStatus::RuntimeOverloaded) ||
+                std::to_integer<std::uint8_t>(response.payload[0]) > static_cast<std::uint8_t>(snf::server::RoomCommandStatus::ProjectileCapacityExceeded) ||
                 std::to_integer<std::uint8_t>(response.payload[1]) > static_cast<std::uint8_t>(snf::server::RoomPhase::Failed))
             {
                 return protocol_error("Battle acknowledgement fields are invalid");

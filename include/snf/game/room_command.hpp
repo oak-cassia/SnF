@@ -28,7 +28,7 @@ namespace snf::server
     struct UseSkill
     {
         PlayerId player{};
-        SkillId skill{};
+        SkillId skill_id{};
         std::uint64_t request_sequence{0};
     };
 
