@@ -142,9 +142,9 @@ namespace snf::server
 
             const std::span<const std::byte> payload{envelope.frame.payload};
             const RoomId room{.value = read_u64(payload, 0)};
-            const SkillId skill{.value = read_u32(payload, 8)};
+            const SkillId skill_id{.value = read_u32(payload, 8)};
             const std::uint64_t request_sequence = read_u64(payload, 12);
-            if (room.value == 0 || in_room->room != room || skill.value == 0 || request_sequence == 0)
+            if (room.value == 0 || in_room->room != room || skill_id.value == 0 || request_sequence == 0)
             {
                 return FramePostResult::InvalidPayload;
             }
@@ -154,7 +154,7 @@ namespace snf::server
                 .command =
                     UseSkill{
                         .player = *player,
-                        .skill = skill,
+                        .skill_id = skill_id,
                         .request_sequence = request_sequence,
                     },
                 .reply_kind = RoomReplyKind::SkillAcknowledged,

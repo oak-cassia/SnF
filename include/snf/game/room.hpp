@@ -63,7 +63,7 @@ namespace snf::server
     private:
         struct SkillCooldown
         {
-            SkillId skill;
+            SkillId skill_id;
             std::chrono::steady_clock::time_point ready_at;
         };
 

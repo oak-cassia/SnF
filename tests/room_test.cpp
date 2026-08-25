@@ -222,7 +222,7 @@ namespace
 
         const auto move =
             room.handle(SetMoveIntent{.player = PlayerId{.value = 7}, .direction = MoveDirection::NorthEast, .request_sequence = 1}, at(0));
-        const auto cast = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill = snf::server::SLASH, .request_sequence = 1}, at(0));
+        const auto cast = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = snf::server::SLASH, .request_sequence = 1}, at(0));
         const auto first_tick = room.handle(RoomSimulationTick{}, at(100));
         const auto second_tick = room.handle(RoomSimulationTick{}, at(200));
         const auto duplicate =
@@ -245,9 +245,9 @@ namespace
     {
         Room room = started(RoomConfig{});
 
-        const auto whiff = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill = snf::server::SLASH, .request_sequence = 1}, at(0));
-        const auto early = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill = snf::server::SLASH, .request_sequence = 2}, at(999));
-        const auto duplicate = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill = snf::server::SLASH, .request_sequence = 1}, at(1000));
+        const auto whiff = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = snf::server::SLASH, .request_sequence = 1}, at(0));
+        const auto early = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = snf::server::SLASH, .request_sequence = 2}, at(999));
+        const auto duplicate = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = snf::server::SLASH, .request_sequence = 1}, at(1000));
         const auto tick = room.handle(RoomSimulationTick{}, at(100));
 
         assert(whiff.status == RoomCommandStatus::Applied && !whiff.digest);
@@ -265,7 +265,7 @@ namespace
         Room room = started(config);
 
         const auto cast =
-            room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill = snf::server::SLASH, .request_sequence = 1}, at(0));
+            room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = snf::server::SLASH, .request_sequence = 1}, at(0));
 
         assert(cast.digest && cast.digest->events.size() == 4);
         assert(event_at<EnemyDamaged>(*cast.digest, 0).target.value == 1);
@@ -285,7 +285,7 @@ namespace
         config.digest_flush_threshold = 2;
         Room room = started(config);
 
-        const auto cast = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill = snf::server::SLASH, .request_sequence = 1}, at(0));
+        const auto cast = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = snf::server::SLASH, .request_sequence = 1}, at(0));
 
         assert(cast.digest && cast.digest->events.size() == 2);
         static_cast<void>(event_at<EnemyDamaged>(*cast.digest, 0));
@@ -377,11 +377,11 @@ namespace
         static_cast<void>(room.handle(StartBattle{}, at(0)));
         static_cast<void>(room.handle(RoomSimulationTick{}, at(100)));
 
-        const auto dead_cast = room.handle(UseSkill{.player = PlayerId{.value = 10}, .skill = snf::server::SLASH, .request_sequence = 1}, at(100));
+        const auto dead_cast = room.handle(UseSkill{.player = PlayerId{.value = 10}, .skill_id = snf::server::SLASH, .request_sequence = 1}, at(100));
         const auto dead_move =
             room.handle(SetMoveIntent{.player = PlayerId{.value = 10}, .direction = MoveDirection::East, .request_sequence = 1}, at(100));
-        const auto cleared = room.handle(UseSkill{.player = PlayerId{.value = 20}, .skill = snf::server::SLASH, .request_sequence = 1}, at(100));
-        const auto stale = room.handle(UseSkill{.player = PlayerId{.value = 20}, .skill = snf::server::SLASH, .request_sequence = 2}, at(1100));
+        const auto cleared = room.handle(UseSkill{.player = PlayerId{.value = 20}, .skill_id = snf::server::SLASH, .request_sequence = 1}, at(100));
+        const auto stale = room.handle(UseSkill{.player = PlayerId{.value = 20}, .skill_id = snf::server::SLASH, .request_sequence = 2}, at(1100));
 
         assert(dead_cast.status == RoomCommandStatus::ParticipantDead);
         assert(dead_move.status == RoomCommandStatus::ParticipantDead);
@@ -441,7 +441,7 @@ namespace
 
         const auto left = room.handle(snf::server::LeaveRoom{.player = PlayerId{.value = 20}}, at(0));
         static_cast<void>(room.handle(RoomSimulationTick{}, at(1000)));
-        const auto cleared = room.handle(UseSkill{.player = PlayerId{.value = 10}, .skill = snf::server::SLASH, .request_sequence = 1}, at(1000));
+        const auto cleared = room.handle(UseSkill{.player = PlayerId{.value = 10}, .skill_id = snf::server::SLASH, .request_sequence = 1}, at(1000));
 
         assert(left.digest && event_at<ParticipantLeft>(*left.digest, 0).player == PlayerId{.value = 20});
         assert(left.audience == std::vector<PlayerId>{PlayerId{.value = 10}});
@@ -455,7 +455,7 @@ namespace
         config.battle_duration = 3000ms;
         config.boss_spawn_after = 2000ms;
         Room room = started(config);
-        const auto allowed = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill = snf::server::SLASH, .request_sequence = 1}, at(2999));
+        const auto allowed = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = snf::server::SLASH, .request_sequence = 1}, at(2999));
 
         const auto expired =
             room.handle(SetMoveIntent{.player = PlayerId{.value = 7}, .direction = MoveDirection::East, .request_sequence = 1}, at(3000));

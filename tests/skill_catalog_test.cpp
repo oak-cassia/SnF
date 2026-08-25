@@ -17,21 +17,21 @@ namespace
     {
         const auto definition = snf::server::findSkill(SLASH);
         assert(definition);
-        assert(definition->skill == SLASH);
+        assert(definition->skill_id == SLASH);
         assert(definition->cooldown == snf::server::SLASH_COOLDOWN);
 
         const auto* area = std::get_if<AreaAttackBehavior>(&definition->behavior);
         assert(area != nullptr);
         assert(area->attack_percent == snf::server::SLASH_ATTACK_PERCENT);
         assert(area->range == snf::server::SLASH_RANGE);
-        assert(snf::server::skillDamage(*definition, 37) == 37);
+        assert(snf::server::calculateSkillDamage(*definition, 37) == 37);
     }
 
     void test_catalog_defines_arcane_bolt_as_a_projectile_attack()
     {
         const auto definition = snf::server::findSkill(ARCANE_BOLT);
         assert(definition);
-        assert(definition->skill == ARCANE_BOLT);
+        assert(definition->skill_id == ARCANE_BOLT);
         assert(definition->cooldown == snf::server::ARCANE_BOLT_COOLDOWN);
 
         const auto* projectile = std::get_if<HomingProjectileAttackBehavior>(&definition->behavior);
@@ -41,7 +41,7 @@ namespace
         assert(projectile->speed_per_tick == snf::server::ARCANE_BOLT_SPEED_PER_TICK);
         assert(projectile->hit_range == snf::server::ARCANE_BOLT_HIT_RANGE);
         assert(projectile->lifetime == snf::server::ARCANE_BOLT_LIFETIME);
-        assert(snf::server::skillDamage(*definition, 37) == 59);
+        assert(snf::server::calculateSkillDamage(*definition, 37) == 59);
     }
 
     void test_catalog_rejects_unknown_skills()

@@ -84,7 +84,7 @@ namespace
             .command =
                 snf::server::UseSkill{
                     .player = player,
-                    .skill = snf::server::SLASH,
+                    .skill_id = snf::server::SLASH,
                     .request_sequence = 1,
                 },
             .reply =

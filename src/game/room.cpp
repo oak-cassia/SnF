@@ -606,20 +606,20 @@ namespace snf::server
             return baseResult(RoomCommandStatus::ParticipantDead, command.player);
         }
 
-        const auto skill = findSkill(command.skill);
-        if (!skill)
+        const auto skill_definition = findSkill(command.skill_id);
+        if (!skill_definition)
         {
             return baseResult(RoomCommandStatus::UnknownSkill, command.player);
         }
 
-        const auto* area_attack = std::get_if<AreaAttackBehavior>(&skill->behavior);
+        const auto* area_attack = std::get_if<AreaAttackBehavior>(&skill_definition->behavior);
         if (area_attack == nullptr)
         {
             return baseResult(RoomCommandStatus::UnknownSkill, command.player);
         }
 
-        const auto cooldown = std::ranges::lower_bound(participant->cooldowns, command.skill, BY_SKILL_ID, &SkillCooldown::skill);
-        const bool tracked = cooldown != participant->cooldowns.end() && cooldown->skill == command.skill;
+        const auto cooldown = std::ranges::lower_bound(participant->cooldowns, command.skill_id, BY_SKILL_ID, &SkillCooldown::skill_id);
+        const bool tracked = cooldown != participant->cooldowns.end() && cooldown->skill_id == command.skill_id;
         if (tracked && observed_at < cooldown->ready_at)
         {
             return baseResult(RoomCommandStatus::SkillOnCooldown, command.player);
@@ -628,22 +628,22 @@ namespace snf::server
         participant->applied_skill_sequence = command.request_sequence;
         if (tracked)
         {
-            cooldown->ready_at = observed_at + skill->cooldown;
+            cooldown->ready_at = observed_at + skill_definition->cooldown;
         }
         else
         {
             participant->cooldowns.insert(
                 cooldown,
                 SkillCooldown{
-                    .skill = command.skill,
-                    .ready_at = observed_at + skill->cooldown,
+                    .skill_id = command.skill_id,
+                    .ready_at = observed_at + skill_definition->cooldown,
                 }
             );
         }
 
-        const std::uint64_t skill_damage = skillDamage(*skill, participant->stats.attack);
-        bool hit_enemy = false;
-        bool killed_boss = false;
+        const std::uint64_t skill_damage = calculateSkillDamage(*skill_definition, participant->stats.attack);
+        bool any_enemy_hit = false;
+        bool boss_killed = false;
         for (Enemy& target : _enemies)
         {
             if (target.health == 0 || !isWithinRange(participant->position, target.position, area_attack->range))
@@ -651,28 +651,28 @@ namespace snf::server
                 continue;
             }
 
-            hit_enemy = true;
+            any_enemy_hit = true;
             const std::uint64_t damage = std::min(skill_damage, target.health);
             target.health -= damage;
             _pending_events.push_back(EnemyDamaged{
                 .target = target.id,
                 .actor = command.player,
-                .skill = command.skill,
+                .skill = command.skill_id,
                 .amount = damage,
                 .health = target.health,
             });
             if (target.health == 0)
             {
                 _pending_events.push_back(EnemyDied{.id = target.id});
-                killed_boss = killed_boss || target.kind == EnemyKind::Boss;
+                boss_killed = boss_killed || target.kind == EnemyKind::Boss;
             }
         }
 
-        if (!hit_enemy)
+        if (!any_enemy_hit)
         {
-            _pending_events.push_back(SkillWhiffed{.actor = command.player, .skill = command.skill});
+            _pending_events.push_back(SkillWhiffed{.actor = command.player, .skill = command.skill_id});
         }
-        else if (killed_boss)
+        else if (boss_killed)
         {
             _phase = RoomPhase::Cleared;
             RoomResult result = baseResult(RoomCommandStatus::Applied, command.player);
