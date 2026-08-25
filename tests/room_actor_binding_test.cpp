@@ -11,7 +11,6 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
-#include <cstdint>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -20,6 +19,8 @@
 #include <thread>
 #include <variant>
 #include <vector>
+
+import snf.game.skill_catalog;
 
 using namespace std::chrono_literals;
 

@@ -1,5 +1,5 @@
 #include "snf/game/arena.hpp"
-#include "snf/game/skill_catalog.hpp"
+#include "snf/game/skill_id.hpp"
 #include "snf/net/socket_options.hpp"
 #include "snf/net/termination_signal.hpp"
 #include "snf/net/unique_file_descriptor.hpp"
@@ -35,6 +35,8 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+import snf.game.skill_catalog;
 
 namespace
 {

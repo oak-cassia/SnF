@@ -679,6 +679,9 @@ docker build -t snf-server-dev .
 docker run --rm -v "$PWD:/workspace" -w /workspace snf-server-dev bash -c \
   "cmake --preset asan-ubsan && cmake --build --preset asan-ubsan"
 
+# C++20 named module 의존성 순서를 위해 preset은 Ninja와 Clang을 사용한다.
+# IDE에서 별도 프로파일을 만들 때도 Unix Makefiles 대신 Ninja를 선택한다.
+
 # Python 클라이언트 가상환경 생성 및 pygame 설치
 cd game-client
 python3 -m venv .venv-play

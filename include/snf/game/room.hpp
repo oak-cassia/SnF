@@ -4,7 +4,6 @@
 #include "snf/game/room_command.hpp"
 #include "snf/game/room_id.hpp"
 #include "snf/game/room_result.hpp"
-#include "snf/game/skill_catalog.hpp"
 
 #include <chrono>
 #include <cstddef>

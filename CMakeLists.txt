@@ -1,10 +1,11 @@
-cmake_minimum_required(VERSION 3.25)
+cmake_minimum_required(VERSION 3.28)
 
 project(SnF VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(SNF_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
@@ -61,9 +62,14 @@ add_library(snf_game STATIC
     src/game/room.cpp
     src/game/street_progression.cpp
     src/game/product_catalog.cpp
-    src/game/skill_catalog.cpp
 )
 target_include_directories(snf_game PUBLIC include)
+target_sources(snf_game
+    PUBLIC
+        FILE_SET cxx_modules TYPE CXX_MODULES
+        FILES
+            src/game/skill_catalog.cppm
+)
 snf_configure_target(snf_game)
 
 add_library(snf_core STATIC
@@ -143,6 +149,7 @@ add_library(snf_load_client_runtime STATIC
     src/load/load_client.cpp
 )
 target_link_libraries(snf_load_client_runtime PUBLIC snf_core)
+target_link_libraries(snf_load_client_runtime PUBLIC snf_game)
 snf_configure_target(snf_load_client_runtime)
 
 add_executable(snf_load_client
@@ -193,6 +200,7 @@ if(BUILD_TESTING)
     add_executable(snf_game_tests
         tests/game_test_main.cpp
         tests/arena_test.cpp
+        tests/skill_catalog_test.cpp
         tests/street_progression_test.cpp
         tests/room_test.cpp
         tests/player_test.cpp

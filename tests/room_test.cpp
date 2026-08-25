@@ -1,13 +1,13 @@
 #include "snf/game/room.hpp"
-#include "snf/game/skill_catalog.hpp"
 
 #include <cassert>
 #include <chrono>
-#include <cstdint>
 #include <limits>
 #include <stdexcept>
 #include <variant>
 #include <vector>
+
+import snf.game.skill_catalog;
 
 namespace
 {
