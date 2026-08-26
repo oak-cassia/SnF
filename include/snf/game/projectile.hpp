@@ -24,6 +24,8 @@ namespace snf::server
         SkillId skill{};
         EnemyId target{};
         ArenaPosition position{};
+        std::uint32_t speed_per_tick{0};
+        std::uint32_t hit_range{0};
         std::uint64_t damage{0};
         std::chrono::steady_clock::time_point expires_at{};
 

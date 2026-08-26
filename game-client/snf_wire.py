@@ -103,6 +103,15 @@ class EventTag(IntEnum):
     ParticipantDamaged = 8
     ParticipantDied = 9
     ParticipantLeft = 10
+    ProjectileSpawned = 11
+    ProjectileMoved = 12
+    ProjectileRemoved = 13
+
+
+class ProjectileRemovalReason(IntEnum):
+    Hit = 0
+    TargetLost = 1
+    Expired = 2
 
 
 _EVENT_SPECS: dict[EventTag, tuple[str, tuple[str, ...]]] = {
@@ -117,11 +126,16 @@ _EVENT_SPECS: dict[EventTag, tuple[str, tuple[str, ...]]] = {
     EventTag.ParticipantDamaged: (">QIQQ", ("target", "attacker", "amount", "hp")),
     EventTag.ParticipantDied: (">Q", ("player",)),
     EventTag.ParticipantLeft: (">Q", ("player",)),
+    EventTag.ProjectileSpawned: (">IQIIII", ("projectile", "owner", "skill", "target", "x", "y")),
+    EventTag.ProjectileMoved: (">III", ("projectile", "x", "y")),
+    EventTag.ProjectileRemoved: (">IB", ("projectile", "reason")),
 }
 
 MIN_BODY_SIZE = 6
 MAX_BODY_SIZE = 64 * 1024
 UNSOLICITED_REQUEST_ID = 0
+SLASH_SKILL_ID = 1
+ARCANE_BOLT_SKILL_ID = 2
 
 
 @dataclass(frozen=True)

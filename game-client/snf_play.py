@@ -7,8 +7,45 @@ import time
 
 import snf_wire
 from snf_session import Session
-from snf_wire import Direction, EnemyKind, MessageType, RoomPhase
+from snf_wire import Direction, EnemyKind, MessageType, RoomPhase, ZoneCommandStatus
 from snf_world import World
+
+
+def zone_render_position_after_response(
+    local_x: float,
+    local_y: float,
+    message_type: MessageType,
+    response: dict,
+) -> tuple[float, float]:
+    status = ZoneCommandStatus(response["status"])
+    if message_type == MessageType.ZoneEntered or status != ZoneCommandStatus.Applied:
+        return float(response["x"]), float(response["y"])
+    return local_x, local_y
+
+
+def join_party_room(
+    session: Session,
+    world: World,
+    bot_list: list,
+    room_id: int,
+    start: bool,
+) -> bool:
+    for bot in bot_list:
+        bot.join_room(room_id=room_id, start=False)
+
+    try:
+        session.join_room(room_id=room_id, start=start)
+    except (ConnectionError, OSError, RuntimeError, TimeoutError) as error:
+        if session.in_room:
+            world.enter_room_mode()
+            world.add_log(f"Joined Room #{room_id}, but start failed: {error}")
+            return True
+
+        world.add_log(f"Room #{room_id} entry failed: {error}")
+        return False
+
+    world.enter_room_mode()
+    return True
 
 
 def run_headless(
@@ -109,11 +146,13 @@ def run_headless(
                 elif frame.type == MessageType.BattleCleared:
                     exp = snf_wire.parse_cleared(frame.payload)
                     world.phase = RoomPhase.Cleared
+                    world.projectiles.clear()
                     world.cleared_exp = exp
                     world.add_log(f"BATTLE CLEARED! Experience +{exp}")
                 elif frame.type == MessageType.BattleFailed:
                     boss_hp, boss_spawned, reason = snf_wire.parse_failed(frame.payload)
                     world.phase = RoomPhase.Failed
+                    world.projectiles.clear()
                     world.failure_reason = reason.name
                     world.boss_final_hp = boss_hp
                     world.add_log(f"BATTLE FAILED! Reason={reason.name}, Boss HP={boss_hp}")
@@ -158,7 +197,7 @@ def run_headless(
                     print(
                         f"[{time.strftime('%H:%M:%S')}] P{player_id} R{room_id} | "
                         f"Phase: {world.phase.name} | DigestSeq: {world.digest_seq} | "
-                        f"Players: {len(world.players)} | Enemies: {len(world.enemies)} | "
+                        f"Players: {len(world.players)} | Enemies: {len(world.enemies)} | Projectiles: {len(world.projectiles)} | "
                         f"Boss: {boss_str}{elapsed_str}"
                     )
 
@@ -271,6 +310,14 @@ def run_gui(
     font_small = pygame.font.SysFont("Helvetica,Arial,sans-serif", 12)
     font_banner = pygame.font.SysFont("Helvetica,Arial,sans-serif", 32, bold=True)
 
+    projectile_glow_radius = max(7, int(2.2 * scale))
+    projectile_core_radius = max(2, int(0.7 * scale))
+    projectile_glow = pygame.Surface((projectile_glow_radius * 2, projectile_glow_radius * 2), pygame.SRCALPHA)
+    projectile_center = (projectile_glow_radius, projectile_glow_radius)
+    pygame.draw.circle(projectile_glow, (80, 180, 255, 35), projectile_center, projectile_glow_radius)
+    pygame.draw.circle(projectile_glow, (100, 210, 255, 90), projectile_center, max(3, projectile_glow_radius // 2))
+    pygame.draw.circle(projectile_glow, (225, 250, 255, 255), projectile_center, projectile_core_radius)
+
     current_direction = Direction.Stop
     last_skill_time = 0.0
     slash_cooldown = 1.0
@@ -279,6 +326,7 @@ def run_gui(
     zone_local_x = float(world.zone_x)
     zone_local_y = float(world.zone_y)
     last_zone_move_time = 0.0
+    zone_was_moving = False
 
     running = True
 
@@ -311,11 +359,13 @@ def run_gui(
                                     port=port,
                                     zone_first=False,
                                 )
-                            else:
-                                for b in bot_list:
-                                    b.join_room(room_id=room_id, start=start)
-                        session.join_room(room_id=room_id, start=start)
-                        world.enter_room_mode()
+                        join_party_room(
+                            session=session,
+                            world=world,
+                            bot_list=bot_list,
+                            room_id=room_id,
+                            start=start,
+                        )
 
                 elif event.key == pygame.K_r:
                     if world.mode == "room" and world.phase == RoomPhase.Waiting and session.in_room:
@@ -325,7 +375,7 @@ def run_gui(
                     if world.mode == "room" and session.in_room and now - last_skill_time >= slash_cooldown:
                         my_entity = world.players.get(player_id)
                         if my_entity and my_entity.alive:
-                            session.send_use_skill(1)
+                            session.send_use_skill(snf_wire.SLASH_SKILL_ID)
                             last_skill_time = now
 
         keys = pygame.key.get_pressed()
@@ -344,19 +394,28 @@ def run_gui(
             if dx != 0 or dy != 0:
                 zone_speed = 35.0
                 dt = clock.get_time() / 1000.0
-                zone_local_x += dx * zone_speed * dt
-                zone_local_y += dy * zone_speed * dt
+                direction_length = math.hypot(dx, dy)
+                zone_local_x += (dx / direction_length) * zone_speed * dt
+                zone_local_y += (dy / direction_length) * zone_speed * dt
 
                 if now - last_zone_move_time >= 0.1:
                     session.send_zone_move(int(zone_local_x), int(zone_local_y))
                     last_zone_move_time = now
                     world.zone_x = int(zone_local_x)
                     world.zone_y = int(zone_local_y)
+                zone_was_moving = True
+            elif zone_was_moving:
+                session.send_zone_move(int(zone_local_x), int(zone_local_y))
+                last_zone_move_time = now
+                world.zone_x = int(zone_local_x)
+                world.zone_y = int(zone_local_y)
+                zone_was_moving = False
             elif now - last_zone_move_time >= 1.0:
                 session.send_zone_move(int(zone_local_x), int(zone_local_y))
                 last_zone_move_time = now
 
         elif world.mode == "room":
+            zone_was_moving = False
             new_dir = Direction.Stop
             if dx == 0 and dy == -1:
                 new_dir = Direction.North
@@ -392,19 +451,25 @@ def run_gui(
                     visible_players=z_data["visible_players"],
                     now=now,
                 )
-                zone_local_x = float(z_data["x"])
-                zone_local_y = float(z_data["y"])
+                zone_local_x, zone_local_y = zone_render_position_after_response(
+                    zone_local_x,
+                    zone_local_y,
+                    frame.type,
+                    z_data,
+                )
             elif frame.type == MessageType.BattleDigest:
                 seq, phase, events = snf_wire.parse_digest(frame.payload)
                 world.apply_digest(seq, phase, events, now=now)
             elif frame.type == MessageType.BattleCleared:
                 exp = snf_wire.parse_cleared(frame.payload)
                 world.phase = RoomPhase.Cleared
+                world.projectiles.clear()
                 world.cleared_exp = exp
                 world.add_log(f"CLEARED! Exp +{exp}")
             elif frame.type == MessageType.BattleFailed:
                 boss_hp, boss_spawned, reason = snf_wire.parse_failed(frame.payload)
                 world.phase = RoomPhase.Failed
+                world.projectiles.clear()
                 world.failure_reason = reason.name
                 world.boss_final_hp = boss_hp
                 world.add_log(f"FAILED! {reason.name}")
@@ -413,6 +478,7 @@ def run_gui(
                 world.return_to_zone_mode(ret_zone, rx, ry)
                 zone_local_x = float(rx)
                 zone_local_y = float(ry)
+                zone_was_moving = False
 
         cur_arena_w = world.arena_w * scale
         cur_arena_h = world.arena_h * scale
@@ -610,6 +676,12 @@ def run_gui(
                     pygame.draw.rect(screen, (50, 50, 50), (hp_bar_x, hp_bar_y, hp_bar_w, hp_bar_h))
                     ratio = max(0.0, min(1.0, enemy.hp / max(1, enemy.max_hp)))
                     pygame.draw.rect(screen, (235, 100, 60), (hp_bar_x, hp_bar_y, int(hp_bar_w * ratio), hp_bar_h))
+
+            for projectile in world.projectiles.values():
+                projectile_x, projectile_y = projectile.interpolated_pos(now)
+                screen_x = int(projectile_x * scale)
+                screen_y = int(projectile_y * scale)
+                screen.blit(projectile_glow, (screen_x - projectile_glow_radius, screen_y - projectile_glow_radius))
 
             for player in world.players.values():
                 px, py = player.interpolated_pos(now)

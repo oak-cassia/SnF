@@ -677,6 +677,12 @@ namespace
         case snf::server::BattleEventKind::ParticipantDied:
         case snf::server::BattleEventKind::ParticipantLeft:
             return 1 + 8;
+        case snf::server::BattleEventKind::ProjectileSpawned:
+            return 1 + 4 + 8 + 4 + 4 + 4 + 4;
+        case snf::server::BattleEventKind::ProjectileMoved:
+            return 1 + 4 + 4 + 4;
+        case snf::server::BattleEventKind::ProjectileRemoved:
+            return 1 + 4 + 1;
         }
         assert(false && "unknown BattleEventKind");
         return 0;
@@ -1525,6 +1531,140 @@ namespace
         assert(player_metrics.reward_snapshot_admission_rejections == 0);
         assert(player_metrics.reward_snapshot_retry_giveups == 0);
         assert(player_metrics.grant_load_failures == 0);
+    }
+
+    void test_arcane_bolt_spawn_move_hit_and_removal_are_observed_over_tcp()
+    {
+        RunningServer server{snf::server::GameServerConfig{
+            .port = 0,
+            .shutdown_grace_period = 200ms,
+            .max_pending_send_bytes = snf::net::MAX_PENDING_SEND_BYTES,
+            .client_send_buffer_size = std::nullopt,
+            .room_battle_duration = 2s,
+            .room_boss_health = 1000,
+            .room_tick_interval = 50ms,
+            .room_wave_interval = 1s,
+            .room_wave_count = 1,
+            .room_minions_per_wave = 1,
+            .room_minion_health = snf::server::BASE_ATTACK,
+            .room_boss_spawn_after = 1500ms,
+            .max_room_spawned_enemies = 2,
+            .room_arena_width = 40,
+            .room_arena_height = 40,
+            .room_participant_spawn_spacing = 2,
+            .room_minion_spawn_radius = 15,
+            .room_minion_attack_range = 100,
+            .room_minion_attack_cooldown = 10s,
+        }};
+        constexpr std::uint64_t player = 620;
+        constexpr std::uint64_t zone = 89;
+        constexpr std::uint64_t room = 78;
+        constexpr std::size_t ROOM_REPLY_PAYLOAD_SIZE = 1 + 1 + 8;
+
+        auto client = connect_client(server.getPort());
+        const auto auth = authentication_frame(330, player);
+        const auto auth_bytes = snf::protocol::encode_frame(auth);
+        send_all(client.getDescriptor(), auth_bytes);
+        assert_authenticated(receive_exact(client.getDescriptor(), auth_bytes.size()), auth.request_id, player);
+
+        std::vector<std::byte> enter_payload = player_id_payload(zone);
+        append_u32(enter_payload, 10);
+        append_u32(enter_payload, 20);
+        send_all(
+            client.getDescriptor(),
+            snf::protocol::encode_frame(snf::protocol::Frame{
+                .type = snf::protocol::MessageType::EnterZone,
+                .request_id = 331,
+                .payload = std::move(enter_payload),
+            })
+        );
+        const auto entered = receive_zone_response(client.getDescriptor());
+        assert(entered.type == snf::protocol::MessageType::ZoneEntered);
+        assert(entered.payload[0] == static_cast<std::byte>(snf::server::ZoneCommandStatus::Applied));
+
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(room_frame(snf::protocol::MessageType::RoomJoin, 332, room)));
+        const auto joined = receive_room_frame(client.getDescriptor(), ROOM_REPLY_PAYLOAD_SIZE);
+        assert(joined.type == snf::protocol::MessageType::RoomJoined);
+        assert(joined.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::Applied));
+
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(room_frame(snf::protocol::MessageType::BattleStart, 333, room)));
+        const auto started = receive_room_frame(client.getDescriptor(), ROOM_REPLY_PAYLOAD_SIZE);
+        assert(started.type == snf::protocol::MessageType::BattleStarted);
+        assert(started.payload[1] == static_cast<std::byte>(snf::server::RoomPhase::Running));
+
+        const auto initial = receive_frame(client.getDescriptor());
+        assert(initial.type == snf::protocol::MessageType::BattleDigest);
+        assert(read_u64(initial.payload, 0) == 1);
+
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(use_skill_frame(334, room, snf::server::ARCANE_BOLT, 1)));
+
+        bool acknowledged = false;
+        bool spawned = false;
+        bool moved = false;
+        bool damaged = false;
+        bool died = false;
+        bool removed = false;
+        std::optional<std::uint32_t> projectile_id;
+        std::uint64_t last_digest_sequence = 1;
+        while (!acknowledged || !removed)
+        {
+            const auto frame = receive_frame(client.getDescriptor());
+            if (frame.type == snf::protocol::MessageType::SkillAcknowledged && frame.request_id == 334)
+            {
+                assert(frame.payload == (std::vector<std::byte>{std::byte{0}, std::byte{1}}));
+                acknowledged = true;
+                continue;
+            }
+            if (frame.type != snf::protocol::MessageType::BattleDigest)
+            {
+                continue;
+            }
+
+            const std::uint64_t sequence = read_u64(frame.payload, 0);
+            assert(sequence == last_digest_sequence + 1);
+            last_digest_sequence = sequence;
+            for (const auto& [kind, offset] : digest_events(frame))
+            {
+                if (kind == snf::server::BattleEventKind::ProjectileSpawned)
+                {
+                    projectile_id = read_u32(frame.payload, offset + 1);
+                    assert(*projectile_id == 1);
+                    assert(read_u64(frame.payload, offset + 5) == player);
+                    assert(read_u32(frame.payload, offset + 13) == snf::server::ARCANE_BOLT.value);
+                    assert(read_u32(frame.payload, offset + 17) == 1);
+                    assert(read_u32(frame.payload, offset + 21) == 20);
+                    assert(read_u32(frame.payload, offset + 25) == 20);
+                    spawned = true;
+                }
+                else if (kind == snf::server::BattleEventKind::ProjectileMoved)
+                {
+                    assert(spawned && projectile_id && read_u32(frame.payload, offset + 1) == *projectile_id);
+                    moved = true;
+                }
+                else if (kind == snf::server::BattleEventKind::EnemyDamaged)
+                {
+                    assert(moved);
+                    assert(read_u32(frame.payload, offset + 13) == snf::server::ARCANE_BOLT.value);
+                    damaged = true;
+                }
+                else if (kind == snf::server::BattleEventKind::EnemyDied)
+                {
+                    assert(damaged && read_u32(frame.payload, offset + 1) == 1);
+                    died = true;
+                }
+                else if (kind == snf::server::BattleEventKind::ProjectileRemoved)
+                {
+                    assert(damaged && died && projectile_id && read_u32(frame.payload, offset + 1) == *projectile_id);
+                    assert(
+                        frame.payload[offset + 5] == static_cast<std::byte>(snf::server::ProjectileRemovalReason::Hit)
+                    );
+                    removed = true;
+                }
+            }
+        }
+
+        assert(spawned && moved && damaged && died && removed);
+        server.stop();
     }
 
     void test_participant_defeat_reports_its_reason_and_returns_the_player_to_the_zone()
@@ -2730,6 +2870,8 @@ int main()
     run("test_reconnect_waits_while_the_previous_session_is_closing", test_reconnect_waits_while_the_previous_session_is_closing);
     run("test_live_purchase_is_memory_authoritative_and_flushes", test_live_purchase_is_memory_authoritative_and_flushes);
     run("test_two_players_kill_a_boss_and_are_told_without_asking", test_two_players_kill_a_boss_and_are_told_without_asking);
+    run("test_arcane_bolt_spawn_move_hit_and_removal_are_observed_over_tcp",
+        test_arcane_bolt_spawn_move_hit_and_removal_are_observed_over_tcp);
     run("test_participant_defeat_reports_its_reason_and_returns_the_player_to_the_zone",
         test_participant_defeat_reports_its_reason_and_returns_the_player_to_the_zone);
     run("test_authenticated_player_enters_moves_and_leaves_a_zone", test_authenticated_player_enters_moves_and_leaves_a_zone);
