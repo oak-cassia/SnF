@@ -30,6 +30,11 @@ namespace
     using snf::server::ParticipantMoved;
     using snf::server::ParticipantSpawned;
     using snf::server::PlayerId;
+    using snf::server::ProjectileId;
+    using snf::server::ProjectileMoved;
+    using snf::server::ProjectileRemoved;
+    using snf::server::ProjectileRemovalReason;
+    using snf::server::ProjectileSpawned;
     using snf::server::RoomCommandStatus;
     using snf::server::RoomId;
     using snf::server::RoomInboundCommand;
@@ -158,6 +163,15 @@ namespace
                     ParticipantDamaged{.target = PlayerId{.value = 10}, .attacker = EnemyId{.value = 1}, .amount = 3, .health = 97},
                     ParticipantDied{.player = PlayerId{.value = 20}},
                     ParticipantLeft{.player = PlayerId{.value = 30}},
+                    ProjectileSpawned{
+                        .projectile = ProjectileId{.value = 7},
+                        .owner = PlayerId{.value = 20},
+                        .skill = snf::server::ARCANE_BOLT,
+                        .target = EnemyId{.value = 3},
+                        .position = {.x = 54, .y = 46},
+                    },
+                    ProjectileMoved{.projectile = ProjectileId{.value = 7}, .position = {.x = 50, .y = 42}},
+                    ProjectileRemoved{.projectile = ProjectileId{.value = 7}, .reason = ProjectileRemovalReason::Hit},
                 },
         };
     }
@@ -259,7 +273,11 @@ namespace
         assert(frame->request_id == snf::protocol::UNSOLICITED_REQUEST_ID);
         assert(payload_u64(*frame, 0) == 9);
         assert(frame->payload[8] == std::byte{static_cast<std::uint8_t>(RoomPhase::Running)});
-        assert(payload_u16(*frame, 9) == 11);
+        assert(payload_u16(*frame, 9) == 14);
+        static_assert(static_cast<std::uint8_t>(snf::server::BattleEventKind::ParticipantLeft) == 10);
+        static_assert(static_cast<std::uint8_t>(snf::server::BattleEventKind::ProjectileSpawned) == 11);
+        static_assert(static_cast<std::uint8_t>(snf::server::BattleEventKind::ProjectileMoved) == 12);
+        static_assert(static_cast<std::uint8_t>(snf::server::BattleEventKind::ProjectileRemoved) == 13);
 
         assert(frame->payload[11] == std::byte{static_cast<std::uint8_t>(snf::server::BattleEventKind::EnemySpawned)});
         assert(payload_u32(*frame, 12) == 1);
@@ -308,10 +326,27 @@ namespace
         assert(payload_u64(*frame, 170) == 20);
         assert(frame->payload[178] == std::byte{static_cast<std::uint8_t>(snf::server::BattleEventKind::ParticipantLeft)});
         assert(payload_u64(*frame, 179) == 30);
-        assert(frame->payload.size() == 187);
+
+        assert(frame->payload[187] == std::byte{static_cast<std::uint8_t>(snf::server::BattleEventKind::ProjectileSpawned)});
+        assert(payload_u32(*frame, 188) == 7);
+        assert(payload_u64(*frame, 192) == 20);
+        assert(payload_u32(*frame, 200) == snf::server::ARCANE_BOLT.value);
+        assert(payload_u32(*frame, 204) == 3);
+        assert(payload_u32(*frame, 208) == 54);
+        assert(payload_u32(*frame, 212) == 46);
+
+        assert(frame->payload[216] == std::byte{static_cast<std::uint8_t>(snf::server::BattleEventKind::ProjectileMoved)});
+        assert(payload_u32(*frame, 217) == 7);
+        assert(payload_u32(*frame, 221) == 50);
+        assert(payload_u32(*frame, 225) == 42);
+
+        assert(frame->payload[229] == std::byte{static_cast<std::uint8_t>(snf::server::BattleEventKind::ProjectileRemoved)});
+        assert(payload_u32(*frame, 230) == 7);
+        assert(frame->payload[234] == std::byte{static_cast<std::uint8_t>(ProjectileRemovalReason::Hit)});
+        assert(frame->payload.size() == 235);
         const auto stats = fixture.sink.stats();
         assert(stats.battle_digest_frames == 1);
-        assert(stats.battle_digest_fanout_bytes == 197);
+        assert(stats.battle_digest_fanout_bytes == 245);
     }
 
     void test_ack_precedes_the_same_digest_for_caster_and_observer()
@@ -488,6 +523,41 @@ namespace
         assert(fixture.sink.stats().battle_digest_fanout_bytes == audience.size() * ENCODED_FRAME_BYTES);
     }
 
+    void test_maximum_projectile_movement_fanout_stays_within_the_digest_payload_bound()
+    {
+        SinkFixture fixture{4};
+        const PlayerId player{.value = 10};
+        static_cast<void>(fixture.attach(4, player));
+
+        std::vector<snf::server::BattleEvent> events;
+        events.reserve(128);
+        for (std::uint32_t projectile = 1; projectile <= 128; ++projectile)
+        {
+            events.emplace_back(
+                ProjectileMoved{.projectile = ProjectileId{.value = projectile}, .position = {.x = projectile, .y = projectile}}
+            );
+        }
+
+        fixture.sink.accept(
+            RoomInboundCommand{.room = RoomId{.value = 7}, .command = snf::server::RoomSimulationTick{}, .reply = std::nullopt},
+            RoomResult{
+                .status = RoomCommandStatus::Applied,
+                .phase = RoomPhase::Running,
+                .digest = BattleDigest{.sequence = 1, .events = std::move(events)},
+                .audience = {player},
+            }
+        );
+
+        constexpr std::size_t DIGEST_PAYLOAD_BYTES = 11 + 128 * 13;
+        constexpr std::size_t ENCODED_FRAME_BYTES = 10 + DIGEST_PAYLOAD_BYTES;
+        static_assert(DIGEST_PAYLOAD_BYTES == 1675);
+        const auto frame = fixture.pop();
+        assert(frame && frame->type == snf::protocol::MessageType::BattleDigest);
+        assert(frame->payload.size() == DIGEST_PAYLOAD_BYTES);
+        assert(payload_u16(*frame, 9) == 128);
+        assert(fixture.sink.stats().battle_digest_fanout_bytes == ENCODED_FRAME_BYTES);
+    }
+
     void test_a_saturated_client_does_not_block_a_healthy_client_or_terminal_result()
     {
         SinkFixture fixture{3, 1};
@@ -588,6 +658,7 @@ void run_protocol_room_result_sink_tests()
     test_a_clear_follows_the_digest_and_pays_each_grant();
     test_failure_before_boss_spawn_carries_zero_health_and_false_gate();
     test_maximum_movement_fanout_reports_wire_bytes_for_every_client();
+    test_maximum_projectile_movement_fanout_stays_within_the_digest_payload_bound();
     test_a_saturated_client_does_not_block_a_healthy_client_or_terminal_result();
     test_an_oversized_digest_closes_its_audience_instead_of_encoding();
 }

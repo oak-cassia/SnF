@@ -33,6 +33,10 @@ namespace
     using snf::server::PlayerId;
     using snf::server::Projectile;
     using snf::server::ProjectileId;
+    using snf::server::ProjectileMoved;
+    using snf::server::ProjectileRemoved;
+    using snf::server::ProjectileRemovalReason;
+    using snf::server::ProjectileSpawned;
     using snf::server::Room;
     using snf::server::RoomCommandStatus;
     using snf::server::RoomConfig;
@@ -599,7 +603,9 @@ namespace
 
     void test_arcane_bolt_spawns_projectile_snapshot_without_immediate_damage()
     {
-        Room room = started(boss_room(), PlayerId{.value = 7}, 37, 100);
+        RoomConfig config = boss_room();
+        config.digest_flush_threshold = 1;
+        Room room = started(config, PlayerId{.value = 7}, 37, 100);
         static_cast<void>(room.handle(RoomSimulationTick{}, at(1000)));
         const std::uint64_t health_before_cast = room.bossHealth();
 
@@ -607,6 +613,17 @@ namespace
         assert(first_cast.status == RoomCommandStatus::Applied);
         assert(room.projectileCount() == 1);
         assert(room.bossHealth() == health_before_cast);
+        assert(
+            first_cast.digest &&
+            event_at<ProjectileSpawned>(*first_cast.digest, 0) ==
+                (ProjectileSpawned{
+                    .projectile = ProjectileId{.value = 1},
+                    .owner = PlayerId{.value = 7},
+                    .skill = ARCANE_BOLT,
+                    .target = EnemyId{.value = 1},
+                    .position = ArenaPosition{.x = 10, .y = 10},
+                })
+        );
 
         const auto projectile1 = room.projectileById(ProjectileId{.value = 1});
         assert(projectile1.has_value());
@@ -628,6 +645,7 @@ namespace
         assert(second_cast.status == RoomCommandStatus::Applied);
         assert(room.projectileCount() == 2);
         assert(room.bossHealth() == health_before_cast);
+        assert(second_cast.digest && event_at<ProjectileSpawned>(*second_cast.digest, 0).projectile == (ProjectileId{.value = 2}));
 
         const auto projectile2 = room.projectileById(ProjectileId{.value = 2});
         assert(projectile2.has_value());
@@ -687,12 +705,22 @@ namespace
 
         assert(cast.status == RoomCommandStatus::Applied);
         assert(projectile_after_first && projectile_after_first->position == (ArenaPosition{.x = 20, .y = 16}));
+        assert(first.digest && first.digest->events.size() == 4);
+        assert(event_at<ProjectileSpawned>(*first.digest, 0).projectile == (ProjectileId{.value = 1}));
+        assert(event_at<ProjectileMoved>(*first.digest, 2).position == (ArenaPosition{.x = 20, .y = 16}));
         assert(first.digest && events_of<EnemyPositioned>(*first.digest).front()->position == (ArenaPosition{.x = 22, .y = 7}));
         assert(projectile_after_second && projectile_after_second->position == (ArenaPosition{.x = 22, .y = 12}));
+        assert(second.digest && event_at<ProjectileMoved>(*second.digest, 1).position == (ArenaPosition{.x = 22, .y = 12}));
         assert(second.digest && events_of<EnemyPositioned>(*second.digest).front()->position == (ArenaPosition{.x = 24, .y = 9}));
         assert(room.projectileCount() == 0);
-        assert(hit.digest && events_of<EnemyDamaged>(*hit.digest).size() == 1);
-        assert(events_of<EnemyDied>(*hit.digest).size() == 1);
+        assert(hit.digest && hit.digest->events.size() == 5);
+        static_cast<void>(event_at<ProjectileMoved>(*hit.digest, 1));
+        static_cast<void>(event_at<EnemyDamaged>(*hit.digest, 2));
+        static_cast<void>(event_at<EnemyDied>(*hit.digest, 3));
+        assert(
+            event_at<ProjectileRemoved>(*hit.digest, 4) ==
+            (ProjectileRemoved{.projectile = ProjectileId{.value = 1}, .reason = ProjectileRemovalReason::Hit})
+        );
         assert(!after_hit.digest || events_of<EnemyDamaged>(*after_hit.digest).empty());
     }
 
@@ -708,8 +736,12 @@ namespace
         const auto next = room.handle(RoomSimulationTick{}, at(200));
 
         assert(room.projectileCount() == 0);
-        assert(hit.digest && events_of<EnemyDamaged>(*hit.digest).size() == 1);
+        assert(hit.digest && hit.digest->events.size() == 3);
+        static_cast<void>(event_at<ProjectileSpawned>(*hit.digest, 0));
+        static_cast<void>(event_at<EnemyDamaged>(*hit.digest, 1));
+        assert(events_of<ProjectileMoved>(*hit.digest).empty());
         assert(events_of<EnemyDamaged>(*hit.digest).front()->health == 14);
+        assert(event_at<ProjectileRemoved>(*hit.digest, 2).reason == ProjectileRemovalReason::Hit);
         assert(!next.digest || events_of<EnemyDamaged>(*next.digest).empty());
     }
 
@@ -736,6 +768,9 @@ namespace
         assert(lost.digest);
         const auto damage = events_of<EnemyDamaged>(*lost.digest);
         assert(damage.size() == 1 && damage.front()->skill == SLASH);
+        assert(events_of<ProjectileMoved>(*lost.digest).empty());
+        const auto removed = events_of<ProjectileRemoved>(*lost.digest);
+        assert(removed.size() == 1 && removed.front()->reason == ProjectileRemovalReason::TargetLost);
     }
 
     void test_projectile_lifetime_boundary_expires_before_movement_or_damage()
@@ -755,6 +790,9 @@ namespace
         assert(projectile && projectile->position == (ArenaPosition{.x = 100, .y = 96}));
         assert(room.projectileCount() == 0);
         assert(expired.digest && events_of<EnemyDamaged>(*expired.digest).empty());
+        const auto removed = events_of<ProjectileRemoved>(*expired.digest);
+        assert(removed.size() == 1 && removed.front()->reason == ProjectileRemovalReason::Expired);
+        assert(events_of<ProjectileMoved>(*expired.digest).empty());
     }
 
     void test_projectiles_resolve_in_id_order_and_later_shots_drop_the_dead_target()
@@ -775,6 +813,10 @@ namespace
         assert(damage.size() == 1 && damage.front()->actor == (PlayerId{.value = 20}));
         assert(damage.front()->amount == 10 && damage.front()->health == 0);
         assert(events_of<EnemyDied>(*tick.digest).size() == 1);
+        const auto removed = events_of<ProjectileRemoved>(*tick.digest);
+        assert(removed.size() == 2);
+        assert(removed[0]->projectile == (ProjectileId{.value = 1}) && removed[0]->reason == ProjectileRemovalReason::Hit);
+        assert(removed[1]->projectile == (ProjectileId{.value = 2}) && removed[1]->reason == ProjectileRemovalReason::TargetLost);
     }
 
     void test_projectile_boss_kill_clears_before_enemy_actions_and_discards_remaining_shots()
@@ -803,6 +845,8 @@ namespace
         assert(cleared.digest && events_of<EnemyDamaged>(*cleared.digest).size() == 1);
         assert(events_of<EnemyDied>(*cleared.digest).size() == 1);
         assert(events_of<ParticipantDamaged>(*cleared.digest).empty());
+        const auto removed = events_of<ProjectileRemoved>(*cleared.digest);
+        assert(removed.size() == 1 && removed.front()->reason == ProjectileRemovalReason::Hit);
         assert(cleared.grants.size() == 2);
         assert(room.projectileCount() == 0);
         assert(stale.status == RoomCommandStatus::WrongPhase && !stale.outcome && stale.grants.empty());
@@ -821,10 +865,14 @@ namespace
         const auto hit = room.handle(RoomSimulationTick{}, at(100));
 
         assert(leave.status == RoomCommandStatus::Applied && room.participantCount() == 1);
+        assert(leave.digest && leave.digest->events.size() == 2);
+        static_cast<void>(event_at<ProjectileSpawned>(*leave.digest, 0));
+        static_cast<void>(event_at<ParticipantLeft>(*leave.digest, 1));
         assert(room.projectileCount() == 0);
         assert(hit.digest);
         const auto damage = events_of<EnemyDamaged>(*hit.digest);
         assert(damage.size() == 1 && damage.front()->actor == (PlayerId{.value = 10}));
+        assert(events_of<ProjectileRemoved>(*hit.digest).front()->reason == ProjectileRemovalReason::Hit);
         assert(hit.audience == std::vector<PlayerId>{PlayerId{.value = 20}});
     }
 
@@ -838,9 +886,10 @@ namespace
         Room room = started(config);
 
         static_cast<void>(room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = ARCANE_BOLT, .request_sequence = 1}, at(0)));
-        static_cast<void>(room.handle(RoomSimulationTick{}, at(3000)));
+        const auto expired = room.handle(RoomSimulationTick{}, at(3000));
         const auto next = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = ARCANE_BOLT, .request_sequence = 2}, at(3000));
 
+        assert(expired.digest && events_of<ProjectileRemoved>(*expired.digest).front()->reason == ProjectileRemovalReason::Expired);
         assert(next.status == RoomCommandStatus::Applied);
         assert(room.projectileCount() == 1);
         const auto projectile = room.projectileById(ProjectileId{.value = 2});

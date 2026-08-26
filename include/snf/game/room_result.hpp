@@ -2,6 +2,7 @@
 
 #include "snf/game/enemy.hpp"
 #include "snf/game/player_id.hpp"
+#include "snf/game/projectile.hpp"
 #include "snf/game/skill_id.hpp"
 #include "snf/game/street_experience_grant.hpp"
 
@@ -63,6 +64,9 @@ namespace snf::server
         ParticipantDamaged = 8,
         ParticipantDied = 9,
         ParticipantLeft = 10,
+        ProjectileSpawned = 11,
+        ProjectileMoved = 12,
+        ProjectileRemoved = 13,
     };
 
     struct EnemySpawned
@@ -157,6 +161,40 @@ namespace snf::server
         [[nodiscard]] bool operator==(const ParticipantLeft&) const noexcept = default;
     };
 
+    struct ProjectileSpawned
+    {
+        ProjectileId projectile{};
+        PlayerId owner{};
+        SkillId skill{};
+        EnemyId target{};
+        ArenaPosition position{};
+
+        [[nodiscard]] bool operator==(const ProjectileSpawned&) const noexcept = default;
+    };
+
+    struct ProjectileMoved
+    {
+        ProjectileId projectile{};
+        ArenaPosition position{};
+
+        [[nodiscard]] bool operator==(const ProjectileMoved&) const noexcept = default;
+    };
+
+    enum class ProjectileRemovalReason : std::uint8_t
+    {
+        Hit,
+        TargetLost,
+        Expired,
+    };
+
+    struct ProjectileRemoved
+    {
+        ProjectileId projectile{};
+        ProjectileRemovalReason reason{ProjectileRemovalReason::Expired};
+
+        [[nodiscard]] bool operator==(const ProjectileRemoved&) const noexcept = default;
+    };
+
     using BattleEvent = std::variant<
         EnemySpawned,
         EnemyDamaged,
@@ -168,7 +206,10 @@ namespace snf::server
         EnemyPositioned,
         ParticipantDamaged,
         ParticipantDied,
-        ParticipantLeft>;
+        ParticipantLeft,
+        ProjectileSpawned,
+        ProjectileMoved,
+        ProjectileRemoved>;
 
     struct BattleDigest
     {

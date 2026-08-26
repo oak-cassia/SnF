@@ -4,7 +4,6 @@
 #include "snf/server/outbound_action.hpp"
 
 #include <cstddef>
-#include <cstdint>
 #include <limits>
 #include <type_traits>
 #include <utility>
@@ -79,10 +78,22 @@ namespace
                 {
                     return 1 + 8 + 4 + 8 + 8;
                 }
+                else if constexpr (std::is_same_v<Event, snf::server::ParticipantDied> || std::is_same_v<Event, snf::server::ParticipantLeft>)
+                {
+                    return 1 + 8;
+                }
+                else if constexpr (std::is_same_v<Event, snf::server::ProjectileSpawned>)
+                {
+                    return 1 + 4 + 8 + 4 + 4 + 4 + 4;
+                }
+                else if constexpr (std::is_same_v<Event, snf::server::ProjectileMoved>)
+                {
+                    return 1 + 4 + 4 + 4;
+                }
                 else
                 {
-                    static_assert(std::is_same_v<Event, snf::server::ParticipantDied> || std::is_same_v<Event, snf::server::ParticipantLeft>);
-                    return 1 + 8;
+                    static_assert(std::is_same_v<Event, snf::server::ProjectileRemoved>);
+                    return 1 + 4 + 1;
                 }
             },
             event
@@ -163,11 +174,34 @@ namespace
                     payload.push_back(static_cast<std::byte>(snf::server::BattleEventKind::ParticipantDied));
                     append_u64(payload, value.player.value);
                 }
-                else
+                else if constexpr (std::is_same_v<Event, snf::server::ParticipantLeft>)
                 {
-                    static_assert(std::is_same_v<Event, snf::server::ParticipantLeft>);
                     payload.push_back(static_cast<std::byte>(snf::server::BattleEventKind::ParticipantLeft));
                     append_u64(payload, value.player.value);
+                }
+                else if constexpr (std::is_same_v<Event, snf::server::ProjectileSpawned>)
+                {
+                    payload.push_back(static_cast<std::byte>(snf::server::BattleEventKind::ProjectileSpawned));
+                    append_u32(payload, value.projectile.value);
+                    append_u64(payload, value.owner.value);
+                    append_u32(payload, value.skill.value);
+                    append_u32(payload, value.target.value);
+                    append_u32(payload, value.position.x);
+                    append_u32(payload, value.position.y);
+                }
+                else if constexpr (std::is_same_v<Event, snf::server::ProjectileMoved>)
+                {
+                    payload.push_back(static_cast<std::byte>(snf::server::BattleEventKind::ProjectileMoved));
+                    append_u32(payload, value.projectile.value);
+                    append_u32(payload, value.position.x);
+                    append_u32(payload, value.position.y);
+                }
+                else
+                {
+                    static_assert(std::is_same_v<Event, snf::server::ProjectileRemoved>);
+                    payload.push_back(static_cast<std::byte>(snf::server::BattleEventKind::ProjectileRemoved));
+                    append_u32(payload, value.projectile.value);
+                    payload.push_back(static_cast<std::byte>(value.reason));
                 }
             },
             event

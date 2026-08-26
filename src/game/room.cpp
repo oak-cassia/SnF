@@ -145,11 +145,19 @@ namespace snf::server
             throw std::invalid_argument{"Room event reserve exceeds size_t"};
         }
         const std::size_t reserve_base = _config.digest_flush_threshold + _config.max_participants;
-        if (_config.max_spawned_enemies > (max_size - reserve_base) / 3)
+        constexpr std::size_t MAX_EVENTS_PER_ENEMY = 3;
+        constexpr std::size_t MAX_EVENTS_PER_PROJECTILE = 4;
+        if (_config.max_spawned_enemies > (max_size - reserve_base) / MAX_EVENTS_PER_ENEMY)
         {
             throw std::invalid_argument{"Room event reserve exceeds size_t"};
         }
-        const std::size_t event_reserve = reserve_base + 3 * _config.max_spawned_enemies;
+        const std::size_t enemy_event_reserve = MAX_EVENTS_PER_ENEMY * _config.max_spawned_enemies;
+        const std::size_t remaining_event_capacity = max_size - reserve_base - enemy_event_reserve;
+        if (_config.max_active_projectiles > remaining_event_capacity / MAX_EVENTS_PER_PROJECTILE)
+        {
+            throw std::invalid_argument{"Room event reserve exceeds size_t"};
+        }
+        const std::size_t event_reserve = reserve_base + enemy_event_reserve + MAX_EVENTS_PER_PROJECTILE * _config.max_active_projectiles;
 
         _participants.reserve(_config.max_participants);
         _enemies.reserve(total_enemies);
@@ -772,17 +780,25 @@ namespace snf::server
             ++_next_projectile_id;
         }
 
-        _projectiles.push_back(
-            Projectile{
-                .id = projectile_id,
-                .owner = context.command.player,
-                .skill = context.command.skill_id,
-                .target = target->id,
-                .position = context.participant.position,
-                .speed_per_tick = speed_per_tick,
-                .hit_range = hit_range,
-                .damage = context.damage,
-                .expires_at = context.observed_at + lifetime,
+        const Projectile projectile{
+            .id = projectile_id,
+            .owner = context.command.player,
+            .skill = context.command.skill_id,
+            .target = target->id,
+            .position = context.participant.position,
+            .speed_per_tick = speed_per_tick,
+            .hit_range = hit_range,
+            .damage = context.damage,
+            .expires_at = context.observed_at + lifetime,
+        };
+        _projectiles.push_back(projectile);
+        _pending_events.push_back(
+            ProjectileSpawned{
+                .projectile = projectile.id,
+                .owner = projectile.owner,
+                .skill = projectile.skill,
+                .target = projectile.target,
+                .position = projectile.position,
             }
         );
 
@@ -793,19 +809,26 @@ namespace snf::server
     {
         if (projectile.expires_at <= observed_at)
         {
+            _pending_events.push_back(ProjectileRemoved{.projectile = projectile.id, .reason = ProjectileRemovalReason::Expired});
             return ProjectileAdvanceResult::Removed;
         }
 
         Enemy* target = findLivingEnemy(projectile.target);
         if (target == nullptr)
         {
+            _pending_events.push_back(ProjectileRemoved{.projectile = projectile.id, .reason = ProjectileRemovalReason::TargetLost});
             return ProjectileAdvanceResult::Removed;
         }
 
         if (!isWithinRange(projectile.position, target->position, projectile.hit_range))
         {
-            projectile.position =
+            const ArenaPosition moved =
                 moveToward(projectile.position, target->position, projectile.speed_per_tick, _config.arena_width, _config.arena_height);
+            if (moved != projectile.position)
+            {
+                projectile.position = moved;
+                _pending_events.push_back(ProjectileMoved{.projectile = projectile.id, .position = moved});
+            }
         }
 
         if (!isWithinRange(projectile.position, target->position, projectile.hit_range))
@@ -827,12 +850,9 @@ namespace snf::server
         if (target->health == 0)
         {
             _pending_events.push_back(EnemyDied{.id = target->id});
-            if (target->kind == EnemyKind::Boss)
-            {
-                return ProjectileAdvanceResult::BossKilled;
-            }
         }
-        return ProjectileAdvanceResult::Removed;
+        _pending_events.push_back(ProjectileRemoved{.projectile = projectile.id, .reason = ProjectileRemovalReason::Hit});
+        return target->health == 0 && target->kind == EnemyKind::Boss ? ProjectileAdvanceResult::BossKilled : ProjectileAdvanceResult::Removed;
     }
 
     bool Room::advanceProjectiles(const std::chrono::steady_clock::time_point observed_at)
