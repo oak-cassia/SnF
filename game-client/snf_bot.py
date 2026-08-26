@@ -20,7 +20,8 @@ class BotPlayer:
         zone_id: int = 1,
         host: str = "127.0.0.1",
         port: int = 7777,
-        attack_interval: float = 1.0,
+        attack_interval: float = 1.5,
+        attack_skill_id: int = snf_wire.ARCANE_BOLT_SKILL_ID,
         zone_first: bool = False,
     ) -> None:
         self.player_id = player_id
@@ -29,6 +30,7 @@ class BotPlayer:
         self.host = host
         self.port = port
         self.attack_interval = attack_interval
+        self.attack_skill_id = attack_skill_id
         self.zone_first = zone_first
 
         self.session = Session(host=host, port=port)
@@ -62,15 +64,17 @@ class BotPlayer:
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=1.0)
 
-    def join_room(self, room_id: int | None = None, start: bool = False) -> None:
+    def join_room(self, room_id: int | None = None, start: bool = False) -> bool:
         target_room = room_id if room_id is not None else self.room_id
         if self.session.in_zone and not self.session.in_room:
             try:
                 self.session.join_room(room_id=target_room, start=start)
                 self.world.enter_room_mode()
                 print(f"[Bot P{self.player_id}] Joined Room #{target_room} from Zone.")
+                return True
             except Exception as e:
                 print(f"[Bot P{self.player_id}] Join room failed: {e}")
+        return False
 
     def leave_room(self) -> None:
         if self.session.in_room:
@@ -182,8 +186,10 @@ class BotPlayer:
                         self.world.apply_digest(seq, phase, events, now=now)
                     elif frame.type == MessageType.BattleCleared:
                         self.world.phase = RoomPhase.Cleared
+                        self.world.projectiles.clear()
                     elif frame.type == MessageType.BattleFailed:
                         self.world.phase = RoomPhase.Failed
+                        self.world.projectiles.clear()
                     elif frame.type == MessageType.ReturnedToZone:
                         rz, rx, ry = snf_wire.parse_returned(frame.payload)
                         self.world.return_to_zone_mode(rz, rx, ry)
@@ -215,7 +221,7 @@ class BotPlayer:
                             self.move_interval = random.uniform(0.4, 1.2)
 
                         if now - self.last_attack_time >= self.attack_interval:
-                            self.session.send_use_skill(1)
+                            self.session.send_use_skill(self.attack_skill_id)
                             self.last_attack_time = now
 
                 time.sleep(0.05)
@@ -234,6 +240,7 @@ def spawn_bots(
     zone_id: int = 1,
     host: str = "127.0.0.1",
     port: int = 7777,
+    attack_skill_id: int = snf_wire.ARCANE_BOLT_SKILL_ID,
     zone_first: bool = False,
 ) -> list[BotPlayer]:
     bots = []
@@ -245,6 +252,7 @@ def spawn_bots(
             zone_id=zone_id,
             host=host,
             port=port,
+            attack_skill_id=attack_skill_id,
             zone_first=zone_first,
         )
         bot.start()
@@ -261,6 +269,7 @@ def main() -> None:
     parser.add_argument("--zone", type=int, default=1, help="Zone ID (default: 1)")
     parser.add_argument("--count", type=int, default=3, help="Number of bots to spawn (default: 3)")
     parser.add_argument("--start-id", type=int, default=2, help="Starting Player ID for bots (default: 2)")
+    parser.add_argument("--skill", type=int, default=snf_wire.ARCANE_BOLT_SKILL_ID, help="Attack SkillId for bots (default: 2, ArcaneBolt)")
     parser.add_argument("--zone-first", action="store_true", help="Start bots in Zone open field first")
 
     args = parser.parse_args()
@@ -274,6 +283,7 @@ def main() -> None:
         zone_id=args.zone,
         host=args.host,
         port=args.port,
+        attack_skill_id=args.skill,
         zone_first=args.zone_first,
     )
 

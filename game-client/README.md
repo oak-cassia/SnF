@@ -55,9 +55,16 @@ python3 -m venv .venv-play
 ---
 
 ### 3. 🤖 4인 파티 한 번에 띄우기 (`--bots 3`)
-메인 플레이어 1명과 함께 AI 봇 팀원 3명을 한 방에 자동 생성합니다.
+메인 플레이어 1명과 함께 AI 봇 팀원 3명을 한 방에 자동 생성합니다. 메인 플레이어의 `Space` 공격은
+`Slash`를 유지하고, 봇은 기본적으로 `ArcaneBolt`(SkillId 2)를 사용하므로 투사체 이동을 화면에서 확인할 수 있습니다.
 ```bash
 .venv-play/bin/python snf_play.py --player 1 --zone 1 --room 1 --bots 3 --start
+```
+
+독립 봇 실행기에서는 `--skill`로 사용할 SkillId를 바꿀 수 있습니다.
+
+```bash
+.venv-play/bin/python snf_bot.py --room 1 --count 3 --skill 2
 ```
 
 ---
@@ -92,6 +99,9 @@ python3 snf_play.py --player 1 --zone 1 --room 1 --start --headless
 | `Space` | 스킬 공격 (`UseSkill`) | SLASH (10 피해, 사거리 12, 1.0초 쿨다운) |
 | `R` | 전투 시작 (`BattleStart`) | `Waiting` 단계에서 전투를 시작 |
 | `ESC` | 방 퇴장 / 필드 복귀 (`RoomLeave`) | 방을 떠나 원래 Zone 필드 좌표로 복귀 (`ReturnedToZone`) |
+
+현재 봇의 SkillId 선택은 Projectile 시각화를 위한 client-side 전투 설정입니다. 서버가 보유·장착 Skill을
+검증하는 정식 loadout은 projectile 계약의 Step 6에서 추가됩니다.
 
 ---
 

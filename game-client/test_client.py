@@ -4,6 +4,8 @@ import struct
 import unittest
 
 import snf_wire
+from snf_bot import BotPlayer
+from snf_play import join_party_room, zone_render_position_after_response
 from snf_wire import (
     BattleFailureReason,
     Direction,
@@ -11,10 +13,13 @@ from snf_wire import (
     EventTag,
     FrameDecoder,
     MessageType,
+    ProjectileRemovalReason,
     RoomPhase,
     RoomStatus,
+    ZoneCommandStatus,
 )
 from snf_world import World
+from snf_session import Session
 
 
 class TestWireProtocol(unittest.TestCase):
@@ -117,7 +122,7 @@ class TestWireProtocol(unittest.TestCase):
 
     def test_parse_digest(self) -> None:
         buf = bytearray()
-        buf.extend(struct.pack(">QBH", 1, int(RoomPhase.Running), 3))
+        buf.extend(struct.pack(">QBH", 1, int(RoomPhase.Running), 6))
 
         buf.append(int(EventTag.ArenaStarted))
         buf.extend(struct.pack(">II", 100, 100))
@@ -128,10 +133,19 @@ class TestWireProtocol(unittest.TestCase):
         buf.append(int(EventTag.ParticipantSpawned))
         buf.extend(struct.pack(">QIIQ", 1, 50, 50, 100))
 
+        buf.append(int(EventTag.ProjectileSpawned))
+        buf.extend(struct.pack(">IQIIII", 7, 1, 2, 10, 50, 50))
+
+        buf.append(int(EventTag.ProjectileMoved))
+        buf.extend(struct.pack(">III", 7, 50, 46))
+
+        buf.append(int(EventTag.ProjectileRemoved))
+        buf.extend(struct.pack(">IB", 7, int(ProjectileRemovalReason.Hit)))
+
         seq, phase, events = snf_wire.parse_digest(bytes(buf))
         self.assertEqual(seq, 1)
         self.assertEqual(phase, RoomPhase.Running)
-        self.assertEqual(len(events), 3)
+        self.assertEqual(len(events), 6)
 
         self.assertEqual(events[0][0], EventTag.ArenaStarted)
         self.assertEqual(events[0][1]["width"], 100)
@@ -147,6 +161,30 @@ class TestWireProtocol(unittest.TestCase):
         self.assertEqual(events[2][1]["x"], 50)
         self.assertEqual(events[2][1]["y"], 50)
         self.assertEqual(events[2][1]["hp"], 100)
+
+        self.assertEqual(
+            events[3],
+            (
+                EventTag.ProjectileSpawned,
+                {"projectile": 7, "owner": 1, "skill": 2, "target": 10, "x": 50, "y": 50},
+            ),
+        )
+        self.assertEqual(events[4], (EventTag.ProjectileMoved, {"projectile": 7, "x": 50, "y": 46}))
+        self.assertEqual(events[5][0], EventTag.ProjectileRemoved)
+        self.assertEqual(events[5][1]["reason"], int(ProjectileRemovalReason.Hit))
+
+    def test_push_drain_does_not_steal_a_pending_request_response(self) -> None:
+        session = Session()
+        response = snf_wire.Frame(MessageType.RoomJoined, 7, b"response")
+        session._queue.put(response)
+
+        session._receive_lock.acquire()
+        try:
+            self.assertEqual(session.drain_pushes(), [])
+        finally:
+            session._receive_lock.release()
+
+        self.assertEqual(session.drain_pushes(), [response])
 
 
 class TestWorldState(unittest.TestCase):
@@ -176,14 +214,35 @@ class TestWorldState(unittest.TestCase):
         self.assertEqual(world.zone_x, 50)
         self.assertEqual(world.zone_y, -50)
 
+    def test_applied_zone_move_does_not_rewind_local_prediction(self) -> None:
+        response = {"status": int(ZoneCommandStatus.Applied), "x": 8, "y": -4}
+
+        position = zone_render_position_after_response(10.75, -2.25, MessageType.Moved, response)
+
+        self.assertEqual(position, (10.75, -2.25))
+
+    def test_zone_entry_and_rejected_move_snap_to_server_position(self) -> None:
+        entered = {"status": int(ZoneCommandStatus.Applied), "x": 8, "y": -4}
+        rejected = {"status": int(ZoneCommandStatus.StaleRoute), "x": 6, "y": -2}
+
+        self.assertEqual(
+            zone_render_position_after_response(10.75, -2.25, MessageType.ZoneEntered, entered),
+            (8.0, -4.0),
+        )
+        self.assertEqual(
+            zone_render_position_after_response(10.75, -2.25, MessageType.Moved, rejected),
+            (6.0, -2.0),
+        )
+
     def test_world_digest_application(self) -> None:
         world = World()
         events = [
             (EventTag.ArenaStarted, {"width": 120, "height": 120}),
             (EventTag.EnemySpawned, {"id": 1, "kind": int(EnemyKind.Boss), "hp": 1000}),
             (EventTag.ParticipantSpawned, {"player": 1, "x": 60, "y": 60, "hp": 100}),
+            (EventTag.ProjectileSpawned, {"projectile": 7, "owner": 1, "skill": 2, "target": 1, "x": 60, "y": 60}),
         ]
-        world.apply_digest(1, RoomPhase.Running, events)
+        world.apply_digest(1, RoomPhase.Running, events, now=10.0)
 
         self.assertEqual(world.arena_w, 120)
         self.assertEqual(world.arena_h, 120)
@@ -193,14 +252,92 @@ class TestWorldState(unittest.TestCase):
         self.assertEqual(world.enemies[1].kind, EnemyKind.Boss)
         self.assertEqual(len(world.players), 1)
         self.assertEqual(world.players[1].x, 60.0)
+        self.assertEqual(world.projectiles[7].target, 1)
 
         events2 = [
             (EventTag.ParticipantMoved, {"player": 1, "x": 64, "y": 60}),
+            (EventTag.ProjectileMoved, {"projectile": 7, "x": 60, "y": 56}),
             (EventTag.EnemyDamaged, {"target": 1, "actor": 1, "skill": 1, "amount": 10, "hp": 990}),
         ]
-        world.apply_digest(2, RoomPhase.Running, events2)
+        world.apply_digest(2, RoomPhase.Running, events2, now=10.05)
         self.assertEqual(world.players[1].x, 64.0)
         self.assertEqual(world.enemies[1].hp, 990)
+        self.assertEqual(world.projectiles[7].y, 56.0)
+        projectile_x, projectile_y = world.projectiles[7].interpolated_pos(now=10.1)
+        self.assertAlmostEqual(projectile_x, 60.0)
+        self.assertAlmostEqual(projectile_y, 58.0)
+
+        world.apply_digest(
+            3,
+            RoomPhase.Running,
+            [
+                (EventTag.ProjectileSpawned, {"projectile": 8, "owner": 1, "skill": 2, "target": 1, "x": 60, "y": 60}),
+                (EventTag.ProjectileSpawned, {"projectile": 9, "owner": 1, "skill": 2, "target": 1, "x": 60, "y": 60}),
+            ],
+        )
+        world.apply_digest(
+            4,
+            RoomPhase.Running,
+            [
+                (EventTag.ProjectileRemoved, {"projectile": 7, "reason": int(ProjectileRemovalReason.Hit)}),
+                (EventTag.ProjectileRemoved, {"projectile": 8, "reason": int(ProjectileRemovalReason.TargetLost)}),
+                (EventTag.ProjectileRemoved, {"projectile": 9, "reason": int(ProjectileRemovalReason.Expired)}),
+            ],
+        )
+        self.assertEqual(world.projectiles, {})
+
+        world.apply_digest(
+            5,
+            RoomPhase.Running,
+            [(EventTag.ProjectileSpawned, {"projectile": 10, "owner": 1, "skill": 2, "target": 1, "x": 60, "y": 60})],
+        )
+        world.apply_digest(6, RoomPhase.Failed, [])
+        self.assertEqual(world.projectiles, {})
+
+
+class TestBotDefaults(unittest.TestCase):
+    def test_bot_uses_arcane_bolt_by_default(self) -> None:
+        bot = BotPlayer(player_id=2, room_id=1)
+        self.assertEqual(bot.attack_skill_id, snf_wire.ARCANE_BOLT_SKILL_ID)
+        self.assertEqual(bot.attack_interval, 1.5)
+
+    def test_party_reentry_joins_bots_before_main_starts_battle(self) -> None:
+        calls: list[tuple[str, bool]] = []
+
+        class FakeBot:
+            def join_room(self, room_id: int, start: bool) -> bool:
+                self.room_id = room_id
+                calls.append(("bot", start))
+                return True
+
+        class FakeSession:
+            in_room = False
+
+            def join_room(self, room_id: int, start: bool) -> None:
+                self.room_id = room_id
+                calls.append(("main", start))
+                self.in_room = True
+
+        world = World()
+        joined = join_party_room(FakeSession(), world, [FakeBot(), FakeBot(), FakeBot()], room_id=1, start=True)
+
+        self.assertTrue(joined)
+        self.assertEqual(calls, [("bot", False), ("bot", False), ("bot", False), ("main", True)])
+        self.assertEqual(world.mode, "room")
+
+    def test_party_reentry_rejection_does_not_change_world_mode(self) -> None:
+        class RejectingSession:
+            in_room = False
+
+            def join_room(self, room_id: int, start: bool) -> None:
+                raise RuntimeError("WrongPhase")
+
+        world = World()
+        joined = join_party_room(RejectingSession(), world, [], room_id=1, start=True)
+
+        self.assertFalse(joined)
+        self.assertEqual(world.mode, "zone")
+        self.assertIn("WrongPhase", world.log[-1])
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ import collections
 import time
 from dataclasses import dataclass, field
 
-from snf_wire import EnemyKind, EventTag, RoomPhase
+from snf_wire import EnemyKind, EventTag, ProjectileRemovalReason, RoomPhase
 
 
 @dataclass
@@ -39,6 +39,37 @@ class Entity:
         return ix, iy
 
 
+@dataclass
+class ProjectileState:
+    id: int
+    owner: int
+    skill: int
+    target: int
+    x: float
+    y: float
+    prev_x: float
+    prev_y: float
+    updated_at: float = field(default_factory=time.monotonic)
+
+    def set_pos(self, new_x: float, new_y: float, now: float | None = None) -> None:
+        current_now = time.monotonic() if now is None else now
+        self.prev_x = self.x
+        self.prev_y = self.y
+        self.x = float(new_x)
+        self.y = float(new_y)
+        self.updated_at = current_now
+
+    def interpolated_pos(self, now: float | None = None, window: float = 0.1) -> tuple[float, float]:
+        current_now = time.monotonic() if now is None else now
+        if window <= 0.0:
+            return self.x, self.y
+        alpha = max(0.0, min(1.0, (current_now - self.updated_at) / window))
+        return (
+            self.prev_x + (self.x - self.prev_x) * alpha,
+            self.prev_y + (self.y - self.prev_y) * alpha,
+        )
+
+
 class World:
     def __init__(self, arena_w: int = 100, arena_h: int = 100) -> None:
         self.mode: str = "zone"
@@ -59,6 +90,7 @@ class World:
         self.digest_seq: int = 0
         self.players: dict[int, Entity] = {}
         self.enemies: dict[int, Entity] = {}
+        self.projectiles: dict[int, ProjectileState] = {}
         self.boss_id: int | None = None
         self.log: collections.deque[str] = collections.deque(maxlen=8)
         self.battle_start_time: float | None = None
@@ -132,6 +164,7 @@ class World:
         self.mode = "room"
         self.players.clear()
         self.enemies.clear()
+        self.projectiles.clear()
         self.boss_id = None
         self.digest_seq = 0
         self.phase = RoomPhase.Waiting
@@ -151,6 +184,7 @@ class World:
         self.zone_pos_updated_at = time.monotonic()
         self.players.clear()
         self.enemies.clear()
+        self.projectiles.clear()
         self.boss_id = None
         self.add_log(f"Returned to Zone {zone_id} at ({x}, {y})")
 
@@ -207,6 +241,31 @@ class World:
                     self.boss_id = None
                 self.add_log(f"Enemy #{eid} died")
 
+            elif tag == EventTag.ProjectileSpawned:
+                projectile = ProjectileState(
+                    id=ev["projectile"],
+                    owner=ev["owner"],
+                    skill=ev["skill"],
+                    target=ev["target"],
+                    x=float(ev["x"]),
+                    y=float(ev["y"]),
+                    prev_x=float(ev["x"]),
+                    prev_y=float(ev["y"]),
+                    updated_at=current_now,
+                )
+                self.projectiles[projectile.id] = projectile
+
+            elif tag == EventTag.ProjectileMoved:
+                projectile = self.projectiles.get(ev["projectile"])
+                if projectile:
+                    projectile.set_pos(ev["x"], ev["y"], now=current_now)
+
+            elif tag == EventTag.ProjectileRemoved:
+                projectile_id = ev["projectile"]
+                self.projectiles.pop(projectile_id, None)
+                reason = ProjectileRemovalReason(ev["reason"])
+                self.add_log(f"Projectile #{projectile_id} removed ({reason.name})")
+
             elif tag == EventTag.ParticipantSpawned:
                 pid = ev["player"]
                 p = Entity(
@@ -249,3 +308,6 @@ class World:
 
             elif tag == EventTag.SkillWhiffed:
                 self.add_log(f"Player {ev['actor']} whiffed skill #{ev['skill']}")
+
+        if phase in (RoomPhase.Cleared, RoomPhase.Failed):
+            self.projectiles.clear()

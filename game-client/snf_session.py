@@ -28,6 +28,7 @@ class Session:
         self._reader_thread: Optional[threading.Thread] = None
         self._queue: queue.Queue[Optional[Frame]] = queue.Queue()
         self._pending_pushes: list[Frame] = []
+        self._receive_lock = threading.Lock()
         self._connected: bool = False
         self._close_requested: bool = False
         self._decoder = FrameDecoder()
@@ -86,56 +87,63 @@ class Session:
         expect_type: MessageType,
         timeout: float = 5.0,
     ) -> Frame:
-        req_id = self._alloc_request_id()
-        self._send_frame(msg_type, req_id, payload)
+        with self._receive_lock:
+            req_id = self._alloc_request_id()
+            self._send_frame(msg_type, req_id, payload)
 
-        deadline = time.monotonic() + timeout
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(f"Timed out waiting for response to {msg_type.name} (req_id={req_id})")
+            deadline = time.monotonic() + timeout
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"Timed out waiting for response to {msg_type.name} (req_id={req_id})")
 
-            try:
-                frame = self._queue.get(timeout=remaining)
-            except queue.Empty:
-                raise TimeoutError(f"Timed out waiting for response to {msg_type.name} (req_id={req_id})")
+                try:
+                    frame = self._queue.get(timeout=remaining)
+                except queue.Empty:
+                    raise TimeoutError(f"Timed out waiting for response to {msg_type.name} (req_id={req_id})")
 
-            if frame is None:
-                raise ConnectionResetError("Server closed the connection during request")
+                if frame is None:
+                    raise ConnectionResetError("Server closed the connection during request")
 
-            if frame.request_id == req_id:
-                if frame.type != expect_type:
-                    raise RuntimeError(
-                        f"Expected {expect_type.name} for request {msg_type.name} (req_id={req_id}), got {frame.type.name}"
-                    )
-                return frame
+                if frame.request_id == req_id:
+                    if frame.type != expect_type:
+                        raise RuntimeError(
+                            f"Expected {expect_type.name} for request {msg_type.name} (req_id={req_id}), got {frame.type.name}"
+                        )
+                    return frame
 
-            self._pending_pushes.append(frame)
+                self._pending_pushes.append(frame)
 
     def drain_pushes(self) -> list[Frame]:
-        results = list(self._pending_pushes)
-        self._pending_pushes.clear()
+        if not self._receive_lock.acquire(blocking=False):
+            return []
 
-        while True:
-            try:
-                frame = self._queue.get_nowait()
-            except queue.Empty:
-                break
+        try:
+            results = list(self._pending_pushes)
+            self._pending_pushes.clear()
 
-            if frame is None:
-                self._connected = False
-                break
+            while True:
+                try:
+                    frame = self._queue.get_nowait()
+                except queue.Empty:
+                    break
 
-            results.append(frame)
+                if frame is None:
+                    self._connected = False
+                    break
 
-        for frame in results:
-            if frame.type in (MessageType.BattleCleared, MessageType.BattleFailed):
-                self.in_room = False
-            elif frame.type == MessageType.ReturnedToZone:
-                self.in_room = False
-                self.in_zone = True
+                results.append(frame)
 
-        return results
+            for frame in results:
+                if frame.type in (MessageType.BattleCleared, MessageType.BattleFailed):
+                    self.in_room = False
+                elif frame.type == MessageType.ReturnedToZone:
+                    self.in_room = False
+                    self.in_zone = True
+
+            return results
+        finally:
+            self._receive_lock.release()
 
     def bootstrap_zone(
         self,
