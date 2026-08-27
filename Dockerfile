@@ -17,6 +17,7 @@ RUN apt-get update \
         gdb \
         git \
         iproute2 \
+        libclang-rt-dev \
         libhiredis-dev \
         libprotobuf-dev \
         libssl-dev \

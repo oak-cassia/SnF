@@ -673,6 +673,7 @@ PlayerActor
 
 ```bash
 # Docker 개발 이미지 빌드
+# 이미지에는 Clang sanitizer runtime(libclang-rt-dev)이 포함된다. 이전에 만든 이미지는 다시 빌드한다.
 docker build -t snf-server-dev .
 
 # Docker에서 C++ 서버 빌드 (ASan·UBSan)
