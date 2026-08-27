@@ -38,6 +38,16 @@ namespace
         return payload;
     }
 
+    std::vector<std::byte> skill_id_payload(const std::uint32_t skill_id)
+    {
+        return {
+            static_cast<std::byte>((skill_id >> 24U) & 0xFFU),
+            static_cast<std::byte>((skill_id >> 16U) & 0xFFU),
+            static_cast<std::byte>((skill_id >> 8U) & 0xFFU),
+            static_cast<std::byte>(skill_id & 0xFFU),
+        };
+    }
+
     void test_dispatches_ping_to_the_registered_handler()
     {
         snf::server::MessageDispatcher dispatcher;
@@ -120,6 +130,31 @@ namespace
         }
     }
 
+    void test_dispatches_and_validates_equip_skill()
+    {
+        const snf::server::MessageDispatcher dispatcher;
+        const auto result = dispatcher.dispatch(snf::protocol::Frame{
+            .type = snf::protocol::MessageType::EquipSkill,
+            .request_id = 12,
+            .payload = skill_id_payload(2),
+        });
+
+        assert(result.handled());
+        const auto* equip = std::get_if<snf::server::EquipSkillCommand>(&*result.command);
+        assert(equip != nullptr);
+        assert(equip->skill_id == snf::server::SkillId{.value = 2});
+
+        for (const auto& payload : {skill_id_payload(0), std::vector<std::byte>(3)})
+        {
+            const auto invalid = dispatcher.dispatch(snf::protocol::Frame{
+                .type = snf::protocol::MessageType::EquipSkill,
+                .request_id = 13,
+                .payload = payload,
+            });
+            assert(invalid.status == snf::server::DispatchStatus::InvalidPayload);
+        }
+    }
+
     void test_registers_an_additional_handler()
     {
         snf::server::MessageDispatcher dispatcher;
@@ -182,6 +217,7 @@ void run_message_dispatcher_tests()
     test_reports_a_missing_handler();
     test_dispatches_a_valid_persistent_player_authentication();
     test_dispatches_and_validates_a_purchase();
+    test_dispatches_and_validates_equip_skill();
     test_registers_an_additional_handler();
     test_rejects_a_duplicate_handler();
     test_reports_invalid_payload_from_a_registered_handler();

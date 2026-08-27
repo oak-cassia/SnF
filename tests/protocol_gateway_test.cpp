@@ -201,6 +201,21 @@ namespace
         };
     }
 
+    snf::server::FrameEnvelope make_equip_skill_frame(const snf::net::ConnectionId connection, const std::uint32_t skill_id)
+    {
+        std::vector<std::byte> payload;
+        append_u32(payload, skill_id);
+        return snf::server::FrameEnvelope{
+            .connection = connection,
+            .frame =
+                snf::protocol::Frame{
+                    .type = snf::protocol::MessageType::EquipSkill,
+                    .request_id = 10,
+                    .payload = std::move(payload),
+                },
+        };
+    }
+
     void test_dispatches_and_routes_a_supported_frame()
     {
         GatewayFixture fixture;
@@ -320,6 +335,23 @@ namespace
         assert(route->request_id == 9);
         assert(purchase->idempotency_key.value == 3);
         assert(purchase->product == snf::server::BASIC_PRODUCT);
+    }
+
+    void test_equip_skill_requires_authentication_and_routes_to_the_attached_player()
+    {
+        GatewayFixture fixture;
+        const snf::net::ConnectionId connection{.descriptor = 56, .generation = 26};
+        const snf::server::PlayerId player{.value = 91};
+
+        assert(fixture.gateway.tryPost(make_equip_skill_frame(connection, 2)) == snf::server::FramePostResult::InvalidPayload);
+        assert(fixture.commands.post_count == 0);
+        assert(fixture.gateway.tryPost(make_auth_frame(connection, player)) == snf::server::FramePostResult::Accepted);
+        assert(fixture.gateway.tryPost(make_equip_skill_frame(connection, 2)) == snf::server::FramePostResult::Accepted);
+
+        const auto* route = std::get_if<snf::server::PlayerCommandRoute>(&fixture.commands.posted->route);
+        assert(route != nullptr && route->actor == player && route->request_id == 10);
+        const auto* equip = std::get_if<snf::server::EquipSkillCommand>(&route->command);
+        assert(equip != nullptr && equip->skill_id == snf::server::ARCANE_BOLT_SKILL_ID);
     }
 
     void test_rejects_duplicate_player_and_auth_after_provisional_activity()
@@ -1240,6 +1272,7 @@ void run_protocol_gateway_tests()
     test_routes_connection_closed_with_the_same_provisional_actor_id();
     test_authentication_attaches_and_routes_to_a_persistent_player();
     test_purchase_requires_authentication_and_routes_to_the_attached_player();
+    test_equip_skill_requires_authentication_and_routes_to_the_attached_player();
     test_rejects_duplicate_player_and_auth_after_provisional_activity();
     test_rolls_back_refused_auth_and_keeps_close_retry_target();
     test_routes_authenticated_zone_enter_move_leave_with_one_epoch();

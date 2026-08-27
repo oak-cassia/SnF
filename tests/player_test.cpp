@@ -257,6 +257,97 @@ namespace
         assert(missing_response->result.status == snf::server::PurchaseStatus::ProductNotFound);
     }
 
+    void test_skill_purchase_and_equip_are_atomic_player_state_changes()
+    {
+        const snf::server::PlayerId player{.value = 891};
+        snf::server::Player actor{player};
+
+        assert(actor.state().getSkillLoadout().getEquippedSkillId() == snf::server::SLASH_SKILL_ID);
+        assert(!actor.state().getSkillLoadout().hasOwnedSkillId(snf::server::ARCANE_BOLT_SKILL_ID));
+
+        const auto purchased = actor.handle(snf::server::PurchaseCommand{
+            .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = 10},
+            .product = snf::server::ARCANE_BOLT_PRODUCT,
+        });
+        const auto* purchase_response = std::get_if<snf::server::PurchaseResponse>(&purchased.responses.front().response);
+        assert(purchase_response != nullptr);
+        assert(purchase_response->result.status == snf::server::PurchaseStatus::Committed);
+        assert(purchase_response->result.currency_balance == 500);
+        assert(purchase_response->result.purchased_item_count == 0);
+        assert(actor.state().getSkillLoadout().hasOwnedSkillId(snf::server::ARCANE_BOLT_SKILL_ID));
+        assert(actor.state().getSkillLoadout().getEquippedSkillId() == snf::server::SLASH_SKILL_ID);
+        assert((actor.dirtyComponents() & snf::server::componentMask(snf::server::PlayerStateComponent::Economy)) != 0);
+        assert((actor.dirtyComponents() & snf::server::componentMask(snf::server::PlayerStateComponent::Skills)) != 0);
+
+        const auto replay = actor.handle(snf::server::PurchaseCommand{
+            .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = 10},
+            .product = snf::server::ARCANE_BOLT_PRODUCT,
+        });
+        const auto* replay_response = std::get_if<snf::server::PurchaseResponse>(&replay.responses.front().response);
+        assert(replay_response != nullptr);
+        assert(replay_response->result.status == snf::server::PurchaseStatus::Committed);
+        assert(replay_response->result.replayed);
+        assert(replay_response->result.currency_balance == 500);
+
+        const auto conflict = actor.handle(snf::server::PurchaseCommand{
+            .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = 10},
+            .product = snf::server::BASIC_PRODUCT,
+        });
+        const auto* conflict_response = std::get_if<snf::server::PurchaseResponse>(&conflict.responses.front().response);
+        assert(conflict_response != nullptr);
+        assert(conflict_response->result.status == snf::server::PurchaseStatus::IdempotencyConflict);
+        assert(actor.state().currencyBalance() == 500);
+
+        const auto duplicate_purchase = actor.handle(snf::server::PurchaseCommand{
+            .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = 11},
+            .product = snf::server::ARCANE_BOLT_PRODUCT,
+        });
+        const auto* duplicate_response = std::get_if<snf::server::PurchaseResponse>(&duplicate_purchase.responses.front().response);
+        assert(duplicate_response != nullptr);
+        assert(duplicate_response->result.status == snf::server::PurchaseStatus::AlreadyOwned);
+        assert(duplicate_response->result.currency_balance == 500);
+
+        snf::server::PlayerStateComponentMask purchase_components = 0;
+        assert(actor.takeDirtySnapshot(&purchase_components).has_value());
+        assert((purchase_components & snf::server::componentMask(snf::server::PlayerStateComponent::Economy)) != 0);
+        assert((purchase_components & snf::server::componentMask(snf::server::PlayerStateComponent::Skills)) != 0);
+
+        const auto equipped = actor.handle(snf::server::EquipSkillCommand{.skill_id = snf::server::ARCANE_BOLT_SKILL_ID});
+        const auto* equip_response = std::get_if<snf::server::EquipSkillResponse>(&equipped.responses.front().response);
+        assert(equip_response != nullptr);
+        assert(equip_response->status == snf::server::EquipSkillStatus::Equipped);
+        assert(equip_response->equipped_skill_id == snf::server::ARCANE_BOLT_SKILL_ID);
+        assert(actor.dirtyComponents() == snf::server::componentMask(snf::server::PlayerStateComponent::Skills));
+
+        const snf::server::PlayerRecord snapshot = actor.snapshot();
+        snf::server::Player restored{player};
+        restored.restore(snapshot);
+        assert(restored.state().getSkillLoadout() == actor.state().getSkillLoadout());
+
+        const auto room_join = restored.handle(snf::server::JoinRoomRequest{.room = snf::server::RoomId{.value = 8}});
+        assert(room_join.room_join);
+        assert(room_join.room_join->equipped_skill_id == snf::server::ARCANE_BOLT_SKILL_ID);
+    }
+
+    void test_equip_skill_reports_unknown_unowned_and_already_equipped()
+    {
+        const snf::server::PlayerId player{.value = 892};
+        snf::server::Player actor{player};
+
+        const auto already_equipped = actor.handle(snf::server::EquipSkillCommand{.skill_id = snf::server::SLASH_SKILL_ID});
+        const auto* already_response = std::get_if<snf::server::EquipSkillResponse>(&already_equipped.responses.front().response);
+        assert(already_response != nullptr && already_response->status == snf::server::EquipSkillStatus::AlreadyEquipped);
+
+        const auto unowned = actor.handle(snf::server::EquipSkillCommand{.skill_id = snf::server::ARCANE_BOLT_SKILL_ID});
+        const auto* unowned_response = std::get_if<snf::server::EquipSkillResponse>(&unowned.responses.front().response);
+        assert(unowned_response != nullptr && unowned_response->status == snf::server::EquipSkillStatus::SkillNotOwned);
+
+        const auto unknown = actor.handle(snf::server::EquipSkillCommand{.skill_id = snf::server::SkillId{.value = 999}});
+        const auto* unknown_response = std::get_if<snf::server::EquipSkillResponse>(&unknown.responses.front().response);
+        assert(unknown_response != nullptr && unknown_response->status == snf::server::EquipSkillStatus::UnknownSkill);
+        assert(!actor.hasFlushableDirtyState());
+    }
+
     void test_skill_purchase_checks_ownership_before_funds_and_rejects_insufficient_funds_atomically()
     {
         const snf::server::PlayerId owned_player{.value = 893};
@@ -309,6 +400,7 @@ void test_a_room_join_carries_stats_derived_from_experience()
     assert(result.room_join);
     assert(result.room_join->room == snf::server::RoomId{.value = 7});
     assert((result.room_join->stats == snf::server::CombatStats{.attack = 11, .health = 110}));
+    assert(result.room_join->equipped_skill_id == snf::server::SLASH_SKILL_ID);
 }
 
 void test_a_provisional_player_cannot_join_a_room()
@@ -342,5 +434,7 @@ void run_player_tests()
     test_street_experience_keeps_accumulating_past_the_level_cap();
     test_live_purchase_is_memory_authoritative_and_bounded();
     test_live_purchase_rejects_unknown_and_reports_insufficient_funds();
+    test_skill_purchase_and_equip_are_atomic_player_state_changes();
+    test_equip_skill_reports_unknown_unowned_and_already_equipped();
     test_skill_purchase_checks_ownership_before_funds_and_rejects_insufficient_funds_atomically();
 }

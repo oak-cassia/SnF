@@ -63,6 +63,8 @@ namespace
         case snf::protocol::MessageType::SkillAcknowledged:
         case snf::protocol::MessageType::SetMoveIntent:
         case snf::protocol::MessageType::MoveAcknowledged:
+        case snf::protocol::MessageType::EquipSkill:
+        case snf::protocol::MessageType::EquipSkillResult:
             return true;
         }
 

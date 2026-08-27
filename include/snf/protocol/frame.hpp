@@ -43,6 +43,8 @@ namespace snf::protocol
         SkillAcknowledged = 29,
         SetMoveIntent = 30,
         MoveAcknowledged = 31,
+        EquipSkill = 32,
+        EquipSkillResult = 33,
     };
 
     inline constexpr std::uint32_t UNSOLICITED_REQUEST_ID = 0;

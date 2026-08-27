@@ -1,5 +1,6 @@
 #pragma once
 
+#include "snf/game/equip_skill.hpp"
 #include "snf/game/player_id.hpp"
 #include "snf/game/purchase.hpp"
 #include "snf/game/room_id.hpp"
@@ -31,5 +32,5 @@ namespace snf::server
         RoomId room{};
     };
 
-    using PlayerCommand = std::variant<PingCommand, AuthenticateCommand, PurchaseCommand, JoinRoomRequest>;
+    using PlayerCommand = std::variant<PingCommand, AuthenticateCommand, PurchaseCommand, JoinRoomRequest, EquipSkillCommand>;
 }

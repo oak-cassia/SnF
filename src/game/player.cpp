@@ -213,6 +213,46 @@ namespace snf::server
                 RoomJoinRequest{
                     .room = command.room,
                     .stats = combatStats(streetLevel(_state._progression.street_experience)),
+                    .equipped_skill_id = _state._skills.skill_loadout.getEquippedSkillId(),
+                },
+        };
+    }
+
+    PlayerResult Player::handleCommand(const EquipSkillCommand& command)
+    {
+        if (!_state._session.identity)
+        {
+            throw std::logic_error{"EquipSkillCommand reached a provisional Player actor"};
+        }
+
+        EquipSkillStatus status = EquipSkillStatus::UnknownSkill;
+        switch (_state._skills.skill_loadout.equipSkillId(command.skill_id))
+        {
+        case EquipSkillResult::Equipped:
+            status = EquipSkillStatus::Equipped;
+            _state._dirty_components |= componentMask(PlayerStateComponent::Skills);
+            break;
+        case EquipSkillResult::AlreadyEquipped:
+            status = EquipSkillStatus::AlreadyEquipped;
+            break;
+        case EquipSkillResult::SkillNotOwned:
+            status = EquipSkillStatus::SkillNotOwned;
+            break;
+        case EquipSkillResult::UnknownSkill:
+            status = EquipSkillStatus::UnknownSkill;
+            break;
+        }
+
+        return PlayerResult{
+            .responses =
+                {
+                    SendResponse{
+                        .response =
+                            EquipSkillResponse{
+                                .status = status,
+                                .equipped_skill_id = _state._skills.skill_loadout.getEquippedSkillId(),
+                            },
+                    },
                 },
         };
     }

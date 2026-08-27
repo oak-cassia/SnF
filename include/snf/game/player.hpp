@@ -104,6 +104,7 @@ namespace snf::server
         [[nodiscard]] PlayerResult handleCommand(const AuthenticateCommand& command);
         [[nodiscard]] PlayerResult handleCommand(const PurchaseCommand& command);
         [[nodiscard]] PlayerResult handleCommand(const JoinRoomRequest& command);
+        [[nodiscard]] PlayerResult handleCommand(const EquipSkillCommand& command);
 
         PlayerState _state;
         std::size_t _max_purchase_idempotency_records{DEFAULT_PURCHASE_IDEMPOTENCY_CAPACITY};

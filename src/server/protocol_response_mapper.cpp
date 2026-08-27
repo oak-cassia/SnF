@@ -73,6 +73,20 @@ namespace snf::server
                         .payload = std::move(payload),
                     };
                 }
+                else if constexpr (std::is_same_v<Response, EquipSkillResponse>)
+                {
+                    constexpr std::size_t EQUIP_SKILL_RESULT_PAYLOAD_SIZE = 5;
+                    std::vector<std::byte> payload;
+                    payload.reserve(EQUIP_SKILL_RESULT_PAYLOAD_SIZE);
+                    payload.push_back(static_cast<std::byte>(value.status));
+                    append_big_endian(payload, value.equipped_skill_id.value);
+
+                    return snf::protocol::Frame{
+                        .type = snf::protocol::MessageType::EquipSkillResult,
+                        .request_id = request_id,
+                        .payload = std::move(payload),
+                    };
+                }
                 else
                 {
                     static_assert(always_false_v<Response>, "Unhandled PlayerResponse alternative");

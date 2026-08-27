@@ -72,7 +72,31 @@ namespace snf::server
                                                              }};
                                                          });
 
-        if (!ping_registered || !authenticate_registered || !purchase_registered)
+        const bool equip_skill_registered = registerHandler(snf::protocol::MessageType::EquipSkill,
+                                                            [](snf::protocol::Frame request) -> std::optional<PlayerCommand>
+                                                            {
+                                                                constexpr std::size_t EQUIP_SKILL_PAYLOAD_SIZE = 4;
+                                                                if (request.payload.size() != EQUIP_SKILL_PAYLOAD_SIZE)
+                                                                {
+                                                                    return std::nullopt;
+                                                                }
+
+                                                                std::uint32_t skill_id = 0;
+                                                                for (const std::byte byte : request.payload)
+                                                                {
+                                                                    skill_id = (skill_id << 8U) | std::to_integer<std::uint32_t>(byte);
+                                                                }
+                                                                if (skill_id == 0)
+                                                                {
+                                                                    return std::nullopt;
+                                                                }
+
+                                                                return PlayerCommand{EquipSkillCommand{
+                                                                    .skill_id = SkillId{.value = skill_id},
+                                                                }};
+                                                            });
+
+        if (!ping_registered || !authenticate_registered || !purchase_registered || !equip_skill_registered)
         {
             throw std::logic_error{"A built-in message handler is already registered"};
         }

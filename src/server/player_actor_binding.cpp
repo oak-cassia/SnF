@@ -355,7 +355,8 @@ namespace snf::server
             return advance(player_state, context, stop_token);
         }
 
-        if (std::holds_alternative<PurchaseCommand>(payload.command.command))
+        if (std::holds_alternative<PurchaseCommand>(payload.command.command) ||
+            std::holds_alternative<EquipSkillCommand>(payload.command.command))
         {
             if (kind() != snf::runtime::ActorKind::Player)
             {
