@@ -9,6 +9,8 @@ from typing import Optional
 import snf_wire
 from snf_wire import Direction, EquipSkillStatus, Frame, FrameDecoder, MessageType, PurchaseStatus, RoomPhase, RoomStatus, ZoneCommandStatus
 
+UNKNOWN_SKILL_PROBE_ID = 0xFFFFFFFF
+
 
 class Session:
     def __init__(self, host: str = "127.0.0.1", port: int = 7777) -> None:
@@ -233,6 +235,19 @@ class Session:
         if status not in (EquipSkillStatus.Equipped, EquipSkillStatus.AlreadyEquipped):
             raise RuntimeError(f"EquipSkill rejected: status={status.name} ({status.value})")
         return status, equipped_skill_id
+
+    def query_equipped_skill_id(self) -> int:
+        # A skill id no catalog defines is rejected as UnknownSkill without touching the
+        # loadout, and the response still carries the currently equipped skill id.
+        response = self.request(
+            MessageType.EquipSkill,
+            snf_wire.equip_skill(UNKNOWN_SKILL_PROBE_ID),
+            MessageType.EquipSkillResult,
+        )
+        status, equipped_skill_id = snf_wire.parse_equip_skill_result(response.payload)
+        if status != EquipSkillStatus.UnknownSkill:
+            raise RuntimeError(f"Equipped skill query changed the loadout: status={status.name}")
+        return equipped_skill_id
 
     def bootstrap(
         self,

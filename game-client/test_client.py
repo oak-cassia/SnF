@@ -3,9 +3,10 @@ from __future__ import annotations
 import struct
 import unittest
 
+import snf_session
 import snf_wire
 from snf_bot import BotPlayer
-from snf_play import join_party_room, zone_render_position_after_response
+from snf_play import SKILL_SPECS, join_party_room, skill_name, skill_rejection_log, zone_render_position_after_response
 from snf_wire import (
     BattleFailureReason,
     Direction,
@@ -356,6 +357,47 @@ class TestBotDefaults(unittest.TestCase):
         self.assertFalse(joined)
         self.assertEqual(world.mode, "zone")
         self.assertIn("WrongPhase", world.log[-1])
+
+
+class TestSkillLoadout(unittest.TestCase):
+    def test_skill_specs_mirror_the_server_catalog(self) -> None:
+        self.assertEqual(set(SKILL_SPECS), {snf_wire.SLASH_SKILL_ID, snf_wire.ARCANE_BOLT_SKILL_ID})
+        self.assertEqual(SKILL_SPECS[snf_wire.SLASH_SKILL_ID]["cooldown"], 1.0)
+        self.assertEqual(SKILL_SPECS[snf_wire.SLASH_SKILL_ID]["range"], 12)
+        self.assertEqual(SKILL_SPECS[snf_wire.ARCANE_BOLT_SKILL_ID]["cooldown"], 1.5)
+        self.assertEqual(SKILL_SPECS[snf_wire.ARCANE_BOLT_SKILL_ID]["range"], 40)
+        self.assertEqual(skill_name(snf_wire.ARCANE_BOLT_SKILL_ID), "ARCANE BOLT")
+        self.assertEqual(skill_name(999), "SKILL #999")
+
+    def test_only_a_refused_cast_is_logged(self) -> None:
+        self.assertIsNone(skill_rejection_log(RoomStatus.Applied))
+        self.assertEqual(skill_rejection_log(RoomStatus.SkillNotEquipped), "Skill rejected: SkillNotEquipped")
+        self.assertEqual(skill_rejection_log(RoomStatus.WrongPhase), "Skill rejected: WrongPhase")
+
+    def test_equipped_skill_query_reads_the_loadout_without_changing_it(self) -> None:
+        session = Session()
+        sent: list[tuple[MessageType, bytes]] = []
+
+        def fake_request(msg_type: MessageType, payload: bytes, expect: MessageType) -> snf_wire.Frame:
+            sent.append((msg_type, payload))
+            return snf_wire.Frame(expect, 1, struct.pack(">BI", int(EquipSkillStatus.UnknownSkill), 2))
+
+        session.request = fake_request  # type: ignore[assignment]
+
+        self.assertEqual(session.query_equipped_skill_id(), snf_wire.ARCANE_BOLT_SKILL_ID)
+        self.assertEqual(sent[0][0], MessageType.EquipSkill)
+        self.assertEqual(struct.unpack(">I", sent[0][1])[0], snf_session.UNKNOWN_SKILL_PROBE_ID)
+
+    def test_equipped_skill_query_refuses_a_mutating_response(self) -> None:
+        session = Session()
+
+        def fake_request(msg_type: MessageType, payload: bytes, expect: MessageType) -> snf_wire.Frame:
+            return snf_wire.Frame(expect, 1, struct.pack(">BI", int(EquipSkillStatus.Equipped), 1))
+
+        session.request = fake_request  # type: ignore[assignment]
+
+        with self.assertRaises(RuntimeError):
+            session.query_equipped_skill_id()
 
 
 if __name__ == "__main__":
