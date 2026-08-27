@@ -599,6 +599,7 @@ namespace snf::server
             Participant{
                 .player_id = command.player,
                 .stats = command.stats,
+                .equipped_skill_id = command.equipped_skill_id,
                 .current_health = command.stats.health,
                 .cooldowns = {},
             }
@@ -904,6 +905,10 @@ namespace snf::server
         if (!skill_definition)
         {
             return baseResult(RoomCommandStatus::UnknownSkill, command.player);
+        }
+        if (command.skill_id != participant->equipped_skill_id)
+        {
+            return baseResult(RoomCommandStatus::SkillNotEquipped, command.player);
         }
 
         const auto cooldown = std::ranges::lower_bound(participant->cooldowns, command.skill_id, BY_SKILL_ID, &SkillCooldown::skill_id);

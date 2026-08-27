@@ -44,6 +44,7 @@ namespace
     using snf::server::RoomPhase;
     using snf::server::RoomSimulationTick;
     using snf::server::SetMoveIntent;
+    using snf::server::SkillId;
     using snf::server::SkillWhiffed;
     using snf::server::SLASH;
     using snf::server::StartBattle;
@@ -104,17 +105,32 @@ namespace
         return config;
     }
 
-    void join(Room& room, const PlayerId player, const std::uint64_t attack = 10, const std::uint64_t health = 100)
+    void join(
+        Room& room,
+        const PlayerId player,
+        const std::uint64_t attack = 10,
+        const std::uint64_t health = 100,
+        const SkillId equipped_skill_id = SLASH
+    )
     {
-        const auto result = room.handle(JoinRoom{.player = player, .stats = {.attack = attack, .health = health}}, at(0));
+        const auto result = room.handle(
+            JoinRoom{.player = player, .stats = {.attack = attack, .health = health}, .equipped_skill_id = equipped_skill_id},
+            at(0)
+        );
         assert(result.status == RoomCommandStatus::Applied);
     }
 
     [[nodiscard]] Room
-    started(const RoomConfig& config, const PlayerId player = PlayerId{.value = 7}, const std::uint64_t attack = 10, const std::uint64_t health = 100)
+    started(
+        const RoomConfig& config,
+        const PlayerId player = PlayerId{.value = 7},
+        const std::uint64_t attack = 10,
+        const std::uint64_t health = 100,
+        const SkillId equipped_skill_id = SLASH
+    )
     {
         Room room{RoomId{.value = 1}, config};
-        join(room, player, attack, health);
+        join(room, player, attack, health, equipped_skill_id);
         const auto result = room.handle(StartBattle{}, at(0));
         assert(result.status == RoomCommandStatus::Applied);
         return room;
@@ -510,11 +526,46 @@ namespace
         assert(spawned.digest && spawned.digest->sequence == 2);
     }
 
+    void test_each_participant_can_only_use_the_skill_snapshotted_at_join()
+    {
+        Room room{RoomId{.value = 1}, wave_room()};
+        join(room, PlayerId{.value = 7}, 10, 100, SLASH);
+        join(room, PlayerId{.value = 8}, 10, 100, ARCANE_BOLT);
+        static_cast<void>(room.handle(StartBattle{}, at(0)));
+
+        const auto unknown = room.handle(
+            UseSkill{.player = PlayerId{.value = 7}, .skill_id = SkillId{.value = 999}, .request_sequence = 1}, at(0)
+        );
+        const auto slash_using_bolt = room.handle(
+            UseSkill{.player = PlayerId{.value = 7}, .skill_id = ARCANE_BOLT, .request_sequence = 1}, at(0)
+        );
+        const auto bolt_using_slash = room.handle(
+            UseSkill{.player = PlayerId{.value = 8}, .skill_id = SLASH, .request_sequence = 1}, at(0)
+        );
+
+        assert(unknown.status == RoomCommandStatus::UnknownSkill);
+        assert(slash_using_bolt.status == RoomCommandStatus::SkillNotEquipped);
+        assert(bolt_using_slash.status == RoomCommandStatus::SkillNotEquipped);
+        assert(room.projectileCount() == 0);
+        assert(room.enemyCount() == 2);
+
+        // Reusing sequence 1 proves rejected requests did not consume sequence or cooldown.
+        const auto bolt = room.handle(
+            UseSkill{.player = PlayerId{.value = 8}, .skill_id = ARCANE_BOLT, .request_sequence = 1}, at(0)
+        );
+        assert(bolt.status == RoomCommandStatus::Applied);
+        assert(room.projectileCount() == 1);
+        const auto slash = room.handle(
+            UseSkill{.player = PlayerId{.value = 7}, .skill_id = SLASH, .request_sequence = 1}, at(0)
+        );
+        assert(slash.status == RoomCommandStatus::Applied);
+    }
+
     void test_arcane_bolt_target_selection()
     {
         // 1. Single nearest enemy
         {
-            Room room = started(wave_room());
+            Room room = started(wave_room(), PlayerId{.value = 7}, 10, 100, ARCANE_BOLT);
             // Move player north by 2: (10, 10) -> (10, 8). Minion 1 at (10, 5) -> (10, 7). Minion 2 at (10, 15) -> (10, 13).
             static_cast<void>(room.handle(SetMoveIntent{.player = PlayerId{.value = 7}, .direction = MoveDirection::North, .request_sequence = 1}, at(0)));
             static_cast<void>(room.handle(RoomSimulationTick{}, at(100)));
@@ -529,7 +580,7 @@ namespace
 
         // 2. Higher ID is closer
         {
-            Room room = started(wave_room());
+            Room room = started(wave_room(), PlayerId{.value = 7}, 10, 100, ARCANE_BOLT);
             // Move player south by 2: (10, 10) -> (10, 12). Minion 1 at (10, 5) -> (10, 7). Minion 2 at (10, 15) -> (10, 13).
             static_cast<void>(room.handle(SetMoveIntent{.player = PlayerId{.value = 7}, .direction = MoveDirection::South, .request_sequence = 1}, at(0)));
             static_cast<void>(room.handle(RoomSimulationTick{}, at(100)));
@@ -544,7 +595,7 @@ namespace
 
         // 3. Tie-breaker selects smaller EnemyId when distances are equal
         {
-            Room room = started(wave_room());
+            Room room = started(wave_room(), PlayerId{.value = 7}, 10, 100, ARCANE_BOLT);
             // Player at (10, 10), Minion 1 at (10, 5) (dist 5), Minion 2 at (10, 15) (dist 5)
             const auto cast = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = ARCANE_BOLT, .request_sequence = 1}, at(0));
             assert(cast.status == RoomCommandStatus::Applied);
@@ -559,20 +610,25 @@ namespace
             config.arena_width = 40;
             config.arena_height = 40;
             config.minion_spawn_radius = 15;
-            Room room = started(config);
+            Room room = started(config, PlayerId{.value = 7}, 10, 100, ARCANE_BOLT);
             // Move north: player at (20, 18). Minion 1 at (20, 7) [dist 11], Minion 2 at (20, 33) [dist 15].
             static_cast<void>(room.handle(SetMoveIntent{.player = PlayerId{.value = 7}, .direction = MoveDirection::North, .request_sequence = 1}, at(0)));
             static_cast<void>(room.handle(RoomSimulationTick{}, at(100)));
 
-            // Kill Minion 1 using Slash (range 12 hits Minion 1 at dist 11, deals 10 damage; Minion 2 at dist 15 is out of range)
-            const auto slash = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = SLASH, .request_sequence = 2}, at(100));
-            assert(slash.status == RoomCommandStatus::Applied);
+            // Kill Minion 1 with the equipped projectile, then verify the next cast excludes it.
+            const auto first_bolt = room.handle(
+                UseSkill{.player = PlayerId{.value = 7}, .skill_id = ARCANE_BOLT, .request_sequence = 2}, at(100)
+            );
+            assert(first_bolt.status == RoomCommandStatus::Applied);
+            static_cast<void>(room.handle(RoomSimulationTick{}, at(200)));
+            static_cast<void>(room.handle(RoomSimulationTick{}, at(300)));
+            static_cast<void>(room.handle(RoomSimulationTick{}, at(400)));
+            assert(room.enemyCount() == 1);
 
-            // Wait for slash cooldown (1000ms) to pass -> at(1100)
-            const auto bolt = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = ARCANE_BOLT, .request_sequence = 3}, at(1100));
+            const auto bolt = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = ARCANE_BOLT, .request_sequence = 3}, at(1600));
             assert(bolt.status == RoomCommandStatus::Applied);
             assert(room.projectileCount() == 1);
-            const auto projectile = room.projectileById(ProjectileId{.value = 1});
+            const auto projectile = room.projectileById(ProjectileId{.value = 2});
             assert(projectile && projectile->target == (EnemyId{.value = 2}));
         }
 
@@ -582,7 +638,7 @@ namespace
             config.arena_width = 200;
             config.arena_height = 200;
             config.minion_spawn_radius = 50; // Distance is 50 > acquisition_range (40)
-            Room room = started(config);
+            Room room = started(config, PlayerId{.value = 7}, 10, 100, ARCANE_BOLT);
 
             const auto whiff = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = ARCANE_BOLT, .request_sequence = 1}, at(0));
             assert(whiff.status == RoomCommandStatus::Applied);
@@ -605,7 +661,7 @@ namespace
     {
         RoomConfig config = boss_room();
         config.digest_flush_threshold = 1;
-        Room room = started(config, PlayerId{.value = 7}, 37, 100);
+        Room room = started(config, PlayerId{.value = 7}, 37, 100, ARCANE_BOLT);
         static_cast<void>(room.handle(RoomSimulationTick{}, at(1000)));
         const std::uint64_t health_before_cast = room.bossHealth();
 
@@ -662,7 +718,7 @@ namespace
 
     void test_arcane_bolt_request_semantics_and_cooldown()
     {
-        Room room = started(wave_room());
+        Room room = started(wave_room(), PlayerId{.value = 7}, 10, 100, ARCANE_BOLT);
 
         const auto cast = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = ARCANE_BOLT, .request_sequence = 1}, at(0));
         assert(cast.status == RoomCommandStatus::Applied);
@@ -690,7 +746,7 @@ namespace
         config.arena_width = 40;
         config.arena_height = 40;
         config.minion_spawn_radius = 15;
-        Room room = started(config);
+        Room room = started(config, PlayerId{.value = 7}, 10, 100, ARCANE_BOLT);
 
         static_cast<void>(
             room.handle(SetMoveIntent{.player = PlayerId{.value = 7}, .direction = MoveDirection::East, .request_sequence = 1}, at(0))
@@ -729,7 +785,7 @@ namespace
         RoomConfig config = single_minion_room();
         config.minion_spawn_radius = 1;
         config.minion_health = 30;
-        Room room = started(config);
+        Room room = started(config, PlayerId{.value = 7}, 10, 100, ARCANE_BOLT);
 
         static_cast<void>(room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = ARCANE_BOLT, .request_sequence = 1}, at(0)));
         const auto hit = room.handle(RoomSimulationTick{}, at(100));
@@ -753,13 +809,19 @@ namespace
         config.arena_width = 40;
         config.arena_height = 40;
         config.minion_spawn_radius = 15;
-        Room room = started(config);
+        Room room{RoomId{.value = 1}, config};
+        join(room, PlayerId{.value = 7}, 10, 100, SLASH);
+        join(room, PlayerId{.value = 8}, 10, 100, ARCANE_BOLT);
+        static_cast<void>(room.handle(StartBattle{}, at(0)));
 
         static_cast<void>(
             room.handle(SetMoveIntent{.player = PlayerId{.value = 7}, .direction = MoveDirection::North, .request_sequence = 1}, at(0))
         );
+        static_cast<void>(
+            room.handle(SetMoveIntent{.player = PlayerId{.value = 8}, .direction = MoveDirection::North, .request_sequence = 1}, at(0))
+        );
         static_cast<void>(room.handle(RoomSimulationTick{}, at(100)));
-        static_cast<void>(room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = ARCANE_BOLT, .request_sequence = 1}, at(100)));
+        static_cast<void>(room.handle(UseSkill{.player = PlayerId{.value = 8}, .skill_id = ARCANE_BOLT, .request_sequence = 1}, at(100)));
         static_cast<void>(room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = SLASH, .request_sequence = 2}, at(100)));
         const auto lost = room.handle(RoomSimulationTick{}, at(200));
 
@@ -779,7 +841,7 @@ namespace
         config.arena_width = 200;
         config.arena_height = 200;
         config.minion_spawn_radius = 40;
-        Room room = started(config);
+        Room room = started(config, PlayerId{.value = 7}, 10, 100, ARCANE_BOLT);
 
         static_cast<void>(room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = ARCANE_BOLT, .request_sequence = 1}, at(0)));
         const auto before_expiry = room.handle(RoomSimulationTick{}, at(2999));
@@ -799,8 +861,8 @@ namespace
     {
         RoomConfig config = single_minion_room();
         Room room{RoomId{.value = 1}, config};
-        join(room, PlayerId{.value = 20});
-        join(room, PlayerId{.value = 10});
+        join(room, PlayerId{.value = 20}, 10, 100, ARCANE_BOLT);
+        join(room, PlayerId{.value = 10}, 10, 100, ARCANE_BOLT);
         static_cast<void>(room.handle(StartBattle{}, at(0)));
 
         static_cast<void>(room.handle(UseSkill{.player = PlayerId{.value = 20}, .skill_id = ARCANE_BOLT, .request_sequence = 1}, at(0)));
@@ -826,8 +888,8 @@ namespace
         config.boss_attack_range = 10;
         config.boss_attack_cooldown = 100ms;
         Room room{RoomId{.value = 1}, config};
-        join(room, PlayerId{.value = 20});
-        join(room, PlayerId{.value = 10});
+        join(room, PlayerId{.value = 20}, 10, 100, ARCANE_BOLT);
+        join(room, PlayerId{.value = 10}, 10, 100, ARCANE_BOLT);
         static_cast<void>(room.handle(StartBattle{}, at(0)));
         static_cast<void>(room.handle(RoomSimulationTick{}, at(1000)));
 
@@ -856,7 +918,7 @@ namespace
     {
         RoomConfig config = single_minion_room();
         Room room{RoomId{.value = 1}, config};
-        join(room, PlayerId{.value = 10});
+        join(room, PlayerId{.value = 10}, 10, 100, ARCANE_BOLT);
         join(room, PlayerId{.value = 20});
         static_cast<void>(room.handle(StartBattle{}, at(0)));
 
@@ -883,7 +945,7 @@ namespace
         config.arena_width = 200;
         config.arena_height = 200;
         config.minion_spawn_radius = 40;
-        Room room = started(config);
+        Room room = started(config, PlayerId{.value = 7}, 10, 100, ARCANE_BOLT);
 
         static_cast<void>(room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = ARCANE_BOLT, .request_sequence = 1}, at(0)));
         const auto expired = room.handle(RoomSimulationTick{}, at(3000));
@@ -900,7 +962,7 @@ namespace
     {
         RoomConfig config = wave_room();
         config.max_active_projectiles = 2;
-        Room room = started(config);
+        Room room = started(config, PlayerId{.value = 7}, 10, 100, ARCANE_BOLT);
 
         const auto cast1 = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = ARCANE_BOLT, .request_sequence = 1}, at(0));
         assert(cast1.status == RoomCommandStatus::Applied);
@@ -919,18 +981,25 @@ namespace
         const auto retry3 = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = ARCANE_BOLT, .request_sequence = 3}, at(3000));
         assert(retry3.status == RoomCommandStatus::ProjectileCapacityExceeded);
 
-        // Atomicity: Sequence 3 and cooldown were NOT consumed, so sequence 3 can be used for another skill (e.g. SLASH)
-        const auto slash = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = SLASH, .request_sequence = 3}, at(3000));
-        assert(slash.status == RoomCommandStatus::Applied);
+        // Atomicity: sequence 3 and cooldown were not consumed. Once capacity is freed,
+        // the same equipped skill can reuse sequence 3 at the same timestamp.
+        static_cast<void>(room.handle(RoomSimulationTick{}, at(3000)));
+        const auto accepted = room.handle(
+            UseSkill{.player = PlayerId{.value = 7}, .skill_id = ARCANE_BOLT, .request_sequence = 3}, at(3000)
+        );
+        assert(accepted.status == RoomCommandStatus::Applied);
     }
 
     void test_projectile_lifecycle_cleanup()
     {
-        // 1. Cleared room by Slash clears projectiles
+        // 1. A Slash-equipped participant clearing the room removes another participant's projectile.
         {
             RoomConfig config = boss_room();
             config.boss_health = 10;
-            Room room = started(config);
+            Room room{RoomId{.value = 1}, config};
+            join(room, PlayerId{.value = 7}, 10, 100, ARCANE_BOLT);
+            join(room, PlayerId{.value = 8}, 10, 100, SLASH);
+            static_cast<void>(room.handle(StartBattle{}, at(0)));
             // Spawn boss at 1000ms
             static_cast<void>(room.handle(RoomSimulationTick{}, at(1000)));
             assert(room.bossSpawned());
@@ -941,7 +1010,7 @@ namespace
             assert(room.projectileCount() == 1);
 
             // Cast Slash -> kills boss -> room Cleared
-            const auto slash = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = SLASH, .request_sequence = 2}, at(1000));
+            const auto slash = room.handle(UseSkill{.player = PlayerId{.value = 8}, .skill_id = SLASH, .request_sequence = 1}, at(1000));
             assert(slash.status == RoomCommandStatus::Applied);
             assert(room.phase() == RoomPhase::Cleared);
             assert(room.projectileCount() == 0);
@@ -950,7 +1019,7 @@ namespace
         // 2. Battle failed clears projectiles
         {
             RoomConfig config = wave_room();
-            Room room = started(config);
+            Room room = started(config, PlayerId{.value = 7}, 10, 100, ARCANE_BOLT);
 
             const auto bolt = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = ARCANE_BOLT, .request_sequence = 1}, at(0));
             assert(bolt.status == RoomCommandStatus::Applied);
@@ -965,7 +1034,7 @@ namespace
         // 3. Last participant leaving clears projectiles
         {
             RoomConfig config = wave_room();
-            Room room = started(config);
+            Room room = started(config, PlayerId{.value = 7}, 10, 100, ARCANE_BOLT);
 
             const auto bolt = room.handle(UseSkill{.player = PlayerId{.value = 7}, .skill_id = ARCANE_BOLT, .request_sequence = 1}, at(0));
             assert(bolt.status == RoomCommandStatus::Applied);
@@ -997,6 +1066,7 @@ void run_room_tests()
     test_leave_is_observable_and_forfeits_reward();
     test_deadline_failure_has_an_explicit_reason_and_flushes_once();
     test_quiet_ticks_emit_no_digest_and_do_not_advance_sequence();
+    test_each_participant_can_only_use_the_skill_snapshotted_at_join();
     test_arcane_bolt_target_selection();
     test_arcane_bolt_spawns_projectile_snapshot_without_immediate_damage();
     test_arcane_bolt_request_semantics_and_cooldown();

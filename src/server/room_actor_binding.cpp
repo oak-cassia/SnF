@@ -153,6 +153,7 @@ namespace snf::server
                             JoinRoom{
                                 .player = join->player,
                                 .stats = join->request.stats,
+                                .equipped_skill_id = join->request.equipped_skill_id,
                             },
                         .reply = join->entry ? std::nullopt : std::optional{join->reply},
                         .entry = join->entry,

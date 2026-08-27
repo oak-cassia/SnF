@@ -592,6 +592,17 @@ namespace
         };
     }
 
+    snf::protocol::Frame equip_skill_frame(const std::uint32_t request_id, const snf::server::SkillId skill_id)
+    {
+        std::vector<std::byte> payload;
+        append_u32(payload, skill_id.value);
+        return snf::protocol::Frame{
+            .type = snf::protocol::MessageType::EquipSkill,
+            .request_id = request_id,
+            .payload = std::move(payload),
+        };
+    }
+
     snf::protocol::Frame room_frame(const snf::protocol::MessageType type, const std::uint32_t request_id, const std::uint64_t room)
     {
         return snf::protocol::Frame{
@@ -1567,6 +1578,28 @@ namespace
         send_all(client.getDescriptor(), auth_bytes);
         assert_authenticated(receive_exact(client.getDescriptor(), auth_bytes.size()), auth.request_id, player);
 
+        const auto purchase = purchase_frame(331, 1, snf::server::ARCANE_BOLT_PRODUCT.value);
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(purchase));
+        assert_purchase_response(
+            receive_purchase_response(client.getDescriptor()),
+            purchase.request_id,
+            snf::server::PurchaseStatus::Committed,
+            false,
+            1,
+            snf::server::ARCANE_BOLT_PRODUCT.value,
+            500,
+            0
+        );
+
+        const auto equip = equip_skill_frame(332, snf::server::ARCANE_BOLT);
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(equip));
+        const auto equipped = receive_frame(client.getDescriptor());
+        assert(equipped.type == snf::protocol::MessageType::EquipSkillResult);
+        assert(equipped.request_id == equip.request_id);
+        assert(equipped.payload.size() == 5);
+        assert(equipped.payload[0] == static_cast<std::byte>(snf::server::EquipSkillStatus::Equipped));
+        assert(read_u32(equipped.payload, 1) == snf::server::ARCANE_BOLT.value);
+
         std::vector<std::byte> enter_payload = player_id_payload(zone);
         append_u32(enter_payload, 10);
         append_u32(enter_payload, 20);
@@ -1582,12 +1615,12 @@ namespace
         assert(entered.type == snf::protocol::MessageType::ZoneEntered);
         assert(entered.payload[0] == static_cast<std::byte>(snf::server::ZoneCommandStatus::Applied));
 
-        send_all(client.getDescriptor(), snf::protocol::encode_frame(room_frame(snf::protocol::MessageType::RoomJoin, 332, room)));
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(room_frame(snf::protocol::MessageType::RoomJoin, 334, room)));
         const auto joined = receive_room_frame(client.getDescriptor(), ROOM_REPLY_PAYLOAD_SIZE);
         assert(joined.type == snf::protocol::MessageType::RoomJoined);
         assert(joined.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::Applied));
 
-        send_all(client.getDescriptor(), snf::protocol::encode_frame(room_frame(snf::protocol::MessageType::BattleStart, 333, room)));
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(room_frame(snf::protocol::MessageType::BattleStart, 335, room)));
         const auto started = receive_room_frame(client.getDescriptor(), ROOM_REPLY_PAYLOAD_SIZE);
         assert(started.type == snf::protocol::MessageType::BattleStarted);
         assert(started.payload[1] == static_cast<std::byte>(snf::server::RoomPhase::Running));
@@ -1596,7 +1629,7 @@ namespace
         assert(initial.type == snf::protocol::MessageType::BattleDigest);
         assert(read_u64(initial.payload, 0) == 1);
 
-        send_all(client.getDescriptor(), snf::protocol::encode_frame(use_skill_frame(334, room, snf::server::ARCANE_BOLT, 1)));
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(use_skill_frame(336, room, snf::server::ARCANE_BOLT, 1)));
 
         bool acknowledged = false;
         bool spawned = false;
@@ -1609,7 +1642,7 @@ namespace
         while (!acknowledged || !removed)
         {
             const auto frame = receive_frame(client.getDescriptor());
-            if (frame.type == snf::protocol::MessageType::SkillAcknowledged && frame.request_id == 334)
+            if (frame.type == snf::protocol::MessageType::SkillAcknowledged && frame.request_id == 336)
             {
                 assert(frame.payload == (std::vector<std::byte>{std::byte{0}, std::byte{1}}));
                 acknowledged = true;
@@ -1709,7 +1742,7 @@ namespace
             client.getDescriptor(),
             snf::protocol::encode_frame(snf::protocol::Frame{
                 .type = snf::protocol::MessageType::EnterZone,
-                .request_id = 331,
+                .request_id = 333,
                 .payload = std::move(enter_payload),
             })
         );

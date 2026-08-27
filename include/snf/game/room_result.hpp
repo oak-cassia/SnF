@@ -37,6 +37,7 @@ namespace snf::server
         ParticipantDead,
         RuntimeOverloaded,
         ProjectileCapacityExceeded,
+        SkillNotEquipped,
     };
 
     enum class BattleOutcome : std::uint8_t

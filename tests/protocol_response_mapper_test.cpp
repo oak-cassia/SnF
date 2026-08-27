@@ -1,4 +1,5 @@
 #include "snf/server/protocol_response_mapper.hpp"
+#include "snf/game/room_result.hpp"
 
 #include <cassert>
 
@@ -10,6 +11,7 @@ namespace
     static_assert(static_cast<std::uint16_t>(snf::protocol::MessageType::EquipSkill) == 32);
     static_assert(static_cast<std::uint16_t>(snf::protocol::MessageType::EquipSkillResult) == 33);
     static_assert(static_cast<std::uint8_t>(snf::server::PurchaseStatus::AlreadyOwned) == 7);
+    static_assert(static_cast<std::uint8_t>(snf::server::RoomCommandStatus::SkillNotEquipped) == 13);
 
     void test_maps_typed_pong_response_to_wire_frame()
     {

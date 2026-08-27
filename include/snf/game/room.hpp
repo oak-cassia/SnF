@@ -75,6 +75,7 @@ namespace snf::server
         {
             PlayerId player_id;
             CombatStats stats;
+            SkillId equipped_skill_id{SLASH_SKILL_ID};
             std::uint64_t current_health{0};
             ArenaPosition position{};
             MoveDirection move_intent{MoveDirection::Stop};
