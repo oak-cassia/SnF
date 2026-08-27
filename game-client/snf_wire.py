@@ -116,9 +116,9 @@ class ProjectileRemovalReason(IntEnum):
 
 _EVENT_SPECS: dict[EventTag, tuple[str, tuple[str, ...]]] = {
     EventTag.EnemySpawned: (">IBQ", ("id", "kind", "hp")),
-    EventTag.EnemyDamaged: (">IQIQQ", ("target", "actor", "skill", "amount", "hp")),
+    EventTag.EnemyDamaged: (">IQIQQ", ("target", "actor", "skill_id", "amount", "hp")),
     EventTag.EnemyDied: (">I", ("id",)),
-    EventTag.SkillWhiffed: (">QI", ("actor", "skill")),
+    EventTag.SkillWhiffed: (">QI", ("actor", "skill_id")),
     EventTag.ArenaStarted: (">II", ("width", "height")),
     EventTag.ParticipantSpawned: (">QIIQ", ("player", "x", "y", "hp")),
     EventTag.ParticipantMoved: (">QII", ("player", "x", "y")),
@@ -126,7 +126,7 @@ _EVENT_SPECS: dict[EventTag, tuple[str, tuple[str, ...]]] = {
     EventTag.ParticipantDamaged: (">QIQQ", ("target", "attacker", "amount", "hp")),
     EventTag.ParticipantDied: (">Q", ("player",)),
     EventTag.ParticipantLeft: (">Q", ("player",)),
-    EventTag.ProjectileSpawned: (">IQIIII", ("projectile", "owner", "skill", "target", "x", "y")),
+    EventTag.ProjectileSpawned: (">IQIIII", ("projectile", "owner", "skill_id", "target", "x", "y")),
     EventTag.ProjectileMoved: (">III", ("projectile", "x", "y")),
     EventTag.ProjectileRemoved: (">IB", ("projectile", "reason")),
 }

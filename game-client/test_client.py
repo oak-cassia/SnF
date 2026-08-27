@@ -166,7 +166,7 @@ class TestWireProtocol(unittest.TestCase):
             events[3],
             (
                 EventTag.ProjectileSpawned,
-                {"projectile": 7, "owner": 1, "skill": 2, "target": 10, "x": 50, "y": 50},
+                {"projectile": 7, "owner": 1, "skill_id": 2, "target": 10, "x": 50, "y": 50},
             ),
         )
         self.assertEqual(events[4], (EventTag.ProjectileMoved, {"projectile": 7, "x": 50, "y": 46}))
@@ -240,7 +240,7 @@ class TestWorldState(unittest.TestCase):
             (EventTag.ArenaStarted, {"width": 120, "height": 120}),
             (EventTag.EnemySpawned, {"id": 1, "kind": int(EnemyKind.Boss), "hp": 1000}),
             (EventTag.ParticipantSpawned, {"player": 1, "x": 60, "y": 60, "hp": 100}),
-            (EventTag.ProjectileSpawned, {"projectile": 7, "owner": 1, "skill": 2, "target": 1, "x": 60, "y": 60}),
+            (EventTag.ProjectileSpawned, {"projectile": 7, "owner": 1, "skill_id": 2, "target": 1, "x": 60, "y": 60}),
         ]
         world.apply_digest(1, RoomPhase.Running, events, now=10.0)
 
@@ -257,12 +257,14 @@ class TestWorldState(unittest.TestCase):
         events2 = [
             (EventTag.ParticipantMoved, {"player": 1, "x": 64, "y": 60}),
             (EventTag.ProjectileMoved, {"projectile": 7, "x": 60, "y": 56}),
-            (EventTag.EnemyDamaged, {"target": 1, "actor": 1, "skill": 1, "amount": 10, "hp": 990}),
+            (EventTag.EnemyDamaged, {"target": 1, "actor": 1, "skill_id": 1, "amount": 10, "hp": 990}),
+            (EventTag.SkillWhiffed, {"actor": 1, "skill_id": 1}),
         ]
         world.apply_digest(2, RoomPhase.Running, events2, now=10.05)
         self.assertEqual(world.players[1].x, 64.0)
         self.assertEqual(world.enemies[1].hp, 990)
         self.assertEqual(world.projectiles[7].y, 56.0)
+        self.assertIn("skill #1", world.log[-1])
         projectile_x, projectile_y = world.projectiles[7].interpolated_pos(now=10.1)
         self.assertAlmostEqual(projectile_x, 60.0)
         self.assertAlmostEqual(projectile_y, 58.0)
@@ -271,8 +273,8 @@ class TestWorldState(unittest.TestCase):
             3,
             RoomPhase.Running,
             [
-                (EventTag.ProjectileSpawned, {"projectile": 8, "owner": 1, "skill": 2, "target": 1, "x": 60, "y": 60}),
-                (EventTag.ProjectileSpawned, {"projectile": 9, "owner": 1, "skill": 2, "target": 1, "x": 60, "y": 60}),
+                (EventTag.ProjectileSpawned, {"projectile": 8, "owner": 1, "skill_id": 2, "target": 1, "x": 60, "y": 60}),
+                (EventTag.ProjectileSpawned, {"projectile": 9, "owner": 1, "skill_id": 2, "target": 1, "x": 60, "y": 60}),
             ],
         )
         world.apply_digest(
@@ -289,7 +291,7 @@ class TestWorldState(unittest.TestCase):
         world.apply_digest(
             5,
             RoomPhase.Running,
-            [(EventTag.ProjectileSpawned, {"projectile": 10, "owner": 1, "skill": 2, "target": 1, "x": 60, "y": 60})],
+            [(EventTag.ProjectileSpawned, {"projectile": 10, "owner": 1, "skill_id": 2, "target": 1, "x": 60, "y": 60})],
         )
         world.apply_digest(6, RoomPhase.Failed, [])
         self.assertEqual(world.projectiles, {})

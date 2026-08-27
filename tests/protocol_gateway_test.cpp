@@ -823,11 +823,16 @@ namespace
     }
 
     snf::server::FrameEnvelope
-    make_use_skill_frame(const snf::net::ConnectionId connection, const std::uint64_t room, const std::uint32_t skill, const std::uint64_t sequence)
+    make_use_skill_frame(
+        const snf::net::ConnectionId connection,
+        const std::uint64_t room,
+        const std::uint32_t skill_id,
+        const std::uint64_t sequence
+    )
     {
         std::vector<std::byte> payload;
         append_u64(payload, room);
-        append_u32(payload, skill);
+        append_u32(payload, skill_id);
         append_u64(payload, sequence);
         return snf::server::FrameEnvelope{
             .connection = connection,

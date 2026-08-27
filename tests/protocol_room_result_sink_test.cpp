@@ -150,12 +150,12 @@ namespace
                     EnemyDamaged{
                         .target = EnemyId{.value = 1},
                         .actor = PlayerId{.value = 10},
-                        .skill = snf::server::SLASH,
+                        .skill_id = snf::server::SLASH,
                         .amount = 10,
                         .health = 20,
                     },
                     EnemyDied{.id = EnemyId{.value = 1}},
-                    SkillWhiffed{.actor = PlayerId{.value = 20}, .skill = snf::server::SLASH},
+                    SkillWhiffed{.actor = PlayerId{.value = 20}, .skill_id = snf::server::SLASH},
                     ArenaStarted{.width = 100, .height = 100},
                     ParticipantSpawned{.player = PlayerId{.value = 10}, .position = {.x = 50, .y = 50}, .health = 100},
                     ParticipantMoved{.player = PlayerId{.value = 10}, .position = {.x = 54, .y = 46}},
@@ -166,7 +166,7 @@ namespace
                     ProjectileSpawned{
                         .projectile = ProjectileId{.value = 7},
                         .owner = PlayerId{.value = 20},
-                        .skill = snf::server::ARCANE_BOLT,
+                        .skill_id = snf::server::ARCANE_BOLT,
                         .target = EnemyId{.value = 3},
                         .position = {.x = 54, .y = 46},
                     },
@@ -393,7 +393,7 @@ namespace
                 .phase = RoomPhase::Failed,
                 .boss_health = 40,
                 .boss_spawned = true,
-                .digest = BattleDigest{.sequence = 2, .events = {SkillWhiffed{.actor = first, .skill = snf::server::SLASH}}},
+                .digest = BattleDigest{.sequence = 2, .events = {SkillWhiffed{.actor = first, .skill_id = snf::server::SLASH}}},
                 .outcome = BattleOutcome::Failed,
                 .failure_reason = BattleFailureReason::Deadline,
                 .audience = {first, second},
@@ -621,7 +621,7 @@ namespace
             EnemyDamaged{
                 .target = EnemyId{.value = 1},
                 .actor = first,
-                .skill = snf::server::SLASH,
+                .skill_id = snf::server::SLASH,
                 .amount = 1,
                 .health = 1,
             }

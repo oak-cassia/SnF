@@ -723,7 +723,7 @@ namespace snf::server
                 EnemyDamaged{
                     .target = target.id,
                     .actor = context.command.player,
-                    .skill = context.command.skill_id,
+                    .skill_id = context.command.skill_id,
                     .amount = damage,
                     .health = target.health,
                 }
@@ -737,7 +737,7 @@ namespace snf::server
 
         if (!any_enemy_hit)
         {
-            _pending_events.push_back(SkillWhiffed{.actor = context.command.player, .skill = context.command.skill_id});
+            _pending_events.push_back(SkillWhiffed{.actor = context.command.player, .skill_id = context.command.skill_id});
         }
         else if (boss_killed)
         {
@@ -759,7 +759,7 @@ namespace snf::server
         if (target == nullptr)
         {
             commitSkillUse(context);
-            _pending_events.push_back(SkillWhiffed{.actor = context.command.player, .skill = context.command.skill_id});
+            _pending_events.push_back(SkillWhiffed{.actor = context.command.player, .skill_id = context.command.skill_id});
             return finishSkillUse(context.command.player);
         }
 
@@ -783,7 +783,7 @@ namespace snf::server
         const Projectile projectile{
             .id = projectile_id,
             .owner = context.command.player,
-            .skill = context.command.skill_id,
+            .skill_id = context.command.skill_id,
             .target = target->id,
             .position = context.participant.position,
             .speed_per_tick = speed_per_tick,
@@ -796,7 +796,7 @@ namespace snf::server
             ProjectileSpawned{
                 .projectile = projectile.id,
                 .owner = projectile.owner,
-                .skill = projectile.skill,
+                .skill_id = projectile.skill_id,
                 .target = projectile.target,
                 .position = projectile.position,
             }
@@ -842,7 +842,7 @@ namespace snf::server
             EnemyDamaged{
                 .target = target->id,
                 .actor = projectile.owner,
-                .skill = projectile.skill,
+                .skill_id = projectile.skill_id,
                 .amount = damage,
                 .health = target->health,
             }

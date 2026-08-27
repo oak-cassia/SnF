@@ -47,7 +47,7 @@ export namespace snf::server
     inline constexpr std::chrono::milliseconds ARCANE_BOLT_LIFETIME{3000};
     inline constexpr std::uint64_t ATTACK_PERCENT_DENOMINATOR = 100;
 
-    [[nodiscard]] std::optional<SkillDefinition> findSkill(SkillId skill) noexcept;
+    [[nodiscard]] std::optional<SkillDefinition> findSkill(SkillId skill_id) noexcept;
     [[nodiscard]] std::uint64_t calculateSkillDamage(const SkillDefinition& skill, std::uint64_t attack) noexcept;
 }
 
@@ -82,13 +82,13 @@ namespace
         };
     }
 
-    [[nodiscard]] std::optional<SkillDefinition> findDefinition(const SkillId skill) noexcept
+    [[nodiscard]] std::optional<SkillDefinition> findDefinition(const SkillId skill_id) noexcept
     {
-        if (skill == SLASH)
+        if (skill_id == SLASH)
         {
             return makeSlash();
         }
-        if (skill == snf::server::ARCANE_BOLT)
+        if (skill_id == snf::server::ARCANE_BOLT)
         {
             return makeArcaneBolt();
         }
@@ -98,9 +98,9 @@ namespace
 
 namespace snf::server
 {
-    std::optional<SkillDefinition> findSkill(const SkillId skill) noexcept
+    std::optional<SkillDefinition> findSkill(const SkillId skill_id) noexcept
     {
-        return findDefinition(skill);
+        return findDefinition(skill_id);
     }
 
     std::uint64_t calculateSkillDamage(const SkillDefinition& skill, const std::uint64_t attack) noexcept

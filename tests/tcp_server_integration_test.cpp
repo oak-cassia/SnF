@@ -616,10 +616,10 @@ namespace
     }
 
     snf::protocol::Frame
-    use_skill_frame(const std::uint32_t request_id, const std::uint64_t room, const snf::server::SkillId skill, const std::uint64_t sequence)
+    use_skill_frame(const std::uint32_t request_id, const std::uint64_t room, const snf::server::SkillId skill_id, const std::uint64_t sequence)
     {
         std::vector<std::byte> payload = player_id_payload(room);
-        append_u32(payload, skill.value);
+        append_u32(payload, skill_id.value);
         append_u64(payload, sequence);
         return snf::protocol::Frame{
             .type = snf::protocol::MessageType::UseSkill,

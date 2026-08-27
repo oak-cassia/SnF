@@ -133,7 +133,7 @@ using AttackBehavior = std::variant<AreaAttackBehavior, HomingProjectileAttackBe
 
 struct SkillDefinition
 {
-    SkillId skill{};
+    SkillId skill_id{};
     std::chrono::milliseconds cooldown{0};
     AttackBehavior behavior{};
 };
@@ -157,7 +157,7 @@ struct Projectile
 {
     ProjectileId id{};
     PlayerId owner{};
-    SkillId skill{};
+    SkillId skill_id{};
     EnemyId target{};
     ArenaPosition position{};
     std::uint32_t speed_per_tick{0};
@@ -275,7 +275,7 @@ struct ProjectileSpawned
 {
     ProjectileId projectile{};
     PlayerId owner{};
-    SkillId skill{};
+    SkillId skill_id{};
     EnemyId target{};
     ArenaPosition position{};
 };

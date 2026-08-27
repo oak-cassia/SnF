@@ -82,7 +82,7 @@ namespace snf::server
     {
         EnemyId target{};
         PlayerId actor{};
-        SkillId skill{};
+        SkillId skill_id{};
         std::uint64_t amount{0};
         std::uint64_t health{0};
 
@@ -99,7 +99,7 @@ namespace snf::server
     struct SkillWhiffed
     {
         PlayerId actor{};
-        SkillId skill{};
+        SkillId skill_id{};
 
         [[nodiscard]] bool operator==(const SkillWhiffed&) const noexcept = default;
     };
@@ -165,7 +165,7 @@ namespace snf::server
     {
         ProjectileId projectile{};
         PlayerId owner{};
-        SkillId skill{};
+        SkillId skill_id{};
         EnemyId target{};
         ArenaPosition position{};
 

@@ -118,7 +118,7 @@ namespace
                     payload.push_back(static_cast<std::byte>(snf::server::BattleEventKind::EnemyDamaged));
                     append_u32(payload, value.target.value);
                     append_u64(payload, value.actor.value);
-                    append_u32(payload, value.skill.value);
+                    append_u32(payload, value.skill_id.value);
                     append_u64(payload, value.amount);
                     append_u64(payload, value.health);
                 }
@@ -131,7 +131,7 @@ namespace
                 {
                     payload.push_back(static_cast<std::byte>(snf::server::BattleEventKind::SkillWhiffed));
                     append_u64(payload, value.actor.value);
-                    append_u32(payload, value.skill.value);
+                    append_u32(payload, value.skill_id.value);
                 }
                 else if constexpr (std::is_same_v<Event, snf::server::ArenaStarted>)
                 {
@@ -184,7 +184,7 @@ namespace
                     payload.push_back(static_cast<std::byte>(snf::server::BattleEventKind::ProjectileSpawned));
                     append_u32(payload, value.projectile.value);
                     append_u64(payload, value.owner.value);
-                    append_u32(payload, value.skill.value);
+                    append_u32(payload, value.skill_id.value);
                     append_u32(payload, value.target.value);
                     append_u32(payload, value.position.x);
                     append_u32(payload, value.position.y);

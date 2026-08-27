@@ -619,7 +619,7 @@ namespace
                 (ProjectileSpawned{
                     .projectile = ProjectileId{.value = 1},
                     .owner = PlayerId{.value = 7},
-                    .skill = ARCANE_BOLT,
+                    .skill_id = ARCANE_BOLT,
                     .target = EnemyId{.value = 1},
                     .position = ArenaPosition{.x = 10, .y = 10},
                 })
@@ -629,7 +629,7 @@ namespace
         assert(projectile1.has_value());
         assert(projectile1->id == (ProjectileId{.value = 1}));
         assert(projectile1->owner == (PlayerId{.value = 7}));
-        assert(projectile1->skill == ARCANE_BOLT);
+        assert(projectile1->skill_id == ARCANE_BOLT);
         assert(projectile1->target == (EnemyId{.value = 1}));
         assert(projectile1->position == (ArenaPosition{.x = 10, .y = 10}));
         assert(projectile1->speed_per_tick == 4);
@@ -651,7 +651,7 @@ namespace
         assert(projectile2.has_value());
         assert(projectile2->id == (ProjectileId{.value = 2}));
         assert(projectile2->owner == (PlayerId{.value = 7}));
-        assert(projectile2->skill == ARCANE_BOLT);
+        assert(projectile2->skill_id == ARCANE_BOLT);
         assert(projectile2->target == (EnemyId{.value = 1}));
         assert(projectile2->position == (ArenaPosition{.x = 10, .y = 10}));
         assert(projectile2->speed_per_tick == 4);
@@ -767,7 +767,7 @@ namespace
         assert(room.projectileCount() == 0);
         assert(lost.digest);
         const auto damage = events_of<EnemyDamaged>(*lost.digest);
-        assert(damage.size() == 1 && damage.front()->skill == SLASH);
+        assert(damage.size() == 1 && damage.front()->skill_id == SLASH);
         assert(events_of<ProjectileMoved>(*lost.digest).empty());
         const auto removed = events_of<ProjectileRemoved>(*lost.digest);
         assert(removed.size() == 1 && removed.front()->reason == ProjectileRemovalReason::TargetLost);
