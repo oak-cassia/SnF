@@ -9,7 +9,15 @@ namespace snf::server
             return ProductDefinition{
                 .product = BASIC_PRODUCT,
                 .price = BASIC_PRODUCT_PRICE,
-                .grant_count = BASIC_PRODUCT_GRANT_COUNT,
+                .reward = AddPurchasedItemCountReward{.item_count = BASIC_PRODUCT_GRANT_COUNT},
+            };
+        }
+        if (product == ARCANE_BOLT_PRODUCT)
+        {
+            return ProductDefinition{
+                .product = ARCANE_BOLT_PRODUCT,
+                .price = ARCANE_BOLT_PRODUCT_PRICE,
+                .reward = AddOwnedSkillReward{.skill_id = ARCANE_BOLT_SKILL_ID},
             };
         }
         return std::nullopt;

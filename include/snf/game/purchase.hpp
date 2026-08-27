@@ -29,6 +29,7 @@ namespace snf::server
         IdempotencyConflict = 4,
         IdempotencyCapacityExceeded = 5,
         Unavailable = 6,
+        AlreadyOwned = 7,
     };
 
     struct PurchaseTransactionResult
@@ -50,5 +51,7 @@ namespace snf::server
     inline constexpr ProductId BASIC_PRODUCT{.value = 1};
     inline constexpr std::uint64_t BASIC_PRODUCT_PRICE = 100;
     inline constexpr std::uint64_t BASIC_PRODUCT_GRANT_COUNT = 1;
+    inline constexpr ProductId ARCANE_BOLT_PRODUCT{.value = 2};
+    inline constexpr std::uint64_t ARCANE_BOLT_PRODUCT_PRICE = 500;
     inline constexpr std::uint64_t INITIAL_CURRENCY_BALANCE = 1000;
 }

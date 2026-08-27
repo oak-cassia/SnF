@@ -1,16 +1,31 @@
 #pragma once
 
 #include "snf/game/purchase.hpp"
+#include "snf/game/skill_id.hpp"
 
+#include <cstdint>
 #include <optional>
+#include <variant>
 
 namespace snf::server
 {
+    struct AddPurchasedItemCountReward
+    {
+        std::uint64_t item_count{0};
+    };
+
+    struct AddOwnedSkillReward
+    {
+        SkillId skill_id{};
+    };
+
+    using ProductReward = std::variant<AddPurchasedItemCountReward, AddOwnedSkillReward>;
+
     struct ProductDefinition
     {
         ProductId product;
         std::uint64_t price{0};
-        std::uint64_t grant_count{0};
+        ProductReward reward{};
     };
 
     class ProductCatalog final

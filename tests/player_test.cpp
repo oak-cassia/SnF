@@ -256,6 +256,42 @@ namespace
         assert(missing_response != nullptr);
         assert(missing_response->result.status == snf::server::PurchaseStatus::ProductNotFound);
     }
+
+    void test_skill_purchase_checks_ownership_before_funds_and_rejects_insufficient_funds_atomically()
+    {
+        const snf::server::PlayerId owned_player{.value = 893};
+        snf::server::Player owned{owned_player};
+        owned.restore(snf::server::PlayerRecord{
+            .player = owned_player,
+            .currency_balance = 0,
+            .skill_loadout = snf::server::SkillLoadout{
+                {snf::server::SLASH_SKILL_ID, snf::server::ARCANE_BOLT_SKILL_ID}, snf::server::SLASH_SKILL_ID
+            },
+        });
+        const auto already_owned = owned.handle(snf::server::PurchaseCommand{
+            .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = 20},
+            .product = snf::server::ARCANE_BOLT_PRODUCT,
+        });
+        const auto* owned_response = std::get_if<snf::server::PurchaseResponse>(&already_owned.responses.front().response);
+        assert(owned_response != nullptr);
+        assert(owned_response->result.status == snf::server::PurchaseStatus::AlreadyOwned);
+        assert(owned.state().currencyBalance() == 0);
+        assert(!owned.hasFlushableDirtyState());
+
+        const snf::server::PlayerId poor_player{.value = 894};
+        snf::server::Player poor{poor_player};
+        poor.restore(snf::server::PlayerRecord{.player = poor_player, .currency_balance = 499});
+        const auto insufficient = poor.handle(snf::server::PurchaseCommand{
+            .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = 21},
+            .product = snf::server::ARCANE_BOLT_PRODUCT,
+        });
+        const auto* poor_response = std::get_if<snf::server::PurchaseResponse>(&insufficient.responses.front().response);
+        assert(poor_response != nullptr);
+        assert(poor_response->result.status == snf::server::PurchaseStatus::InsufficientFunds);
+        assert(!poor.state().getSkillLoadout().hasOwnedSkillId(snf::server::ARCANE_BOLT_SKILL_ID));
+        assert(poor.state().currencyBalance() == 499);
+        assert(!poor.hasFlushableDirtyState());
+    }
 }
 
 void test_a_room_join_carries_stats_derived_from_experience()
@@ -306,4 +342,5 @@ void run_player_tests()
     test_street_experience_keeps_accumulating_past_the_level_cap();
     test_live_purchase_is_memory_authoritative_and_bounded();
     test_live_purchase_rejects_unknown_and_reports_insufficient_funds();
+    test_skill_purchase_checks_ownership_before_funds_and_rejects_insufficient_funds_atomically();
 }
