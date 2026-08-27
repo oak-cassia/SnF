@@ -7,7 +7,7 @@ import time
 from typing import Optional
 
 import snf_wire
-from snf_wire import Direction, Frame, FrameDecoder, MessageType, RoomPhase, RoomStatus, ZoneCommandStatus
+from snf_wire import Direction, EquipSkillStatus, Frame, FrameDecoder, MessageType, PurchaseStatus, RoomPhase, RoomStatus, ZoneCommandStatus
 
 
 class Session:
@@ -211,6 +211,28 @@ class Session:
             phase = s_phase
 
         return status, phase
+
+    def purchase(self, idempotency_key: int, product_id: int) -> dict:
+        response = self.request(
+            MessageType.Purchase,
+            snf_wire.purchase(idempotency_key, product_id),
+            MessageType.PurchaseResult,
+        )
+        result = snf_wire.parse_purchase_result(response.payload)
+        if result["status"] not in (PurchaseStatus.Committed, PurchaseStatus.AlreadyOwned):
+            raise RuntimeError(f"Purchase rejected: status={result['status'].name} ({result['status'].value})")
+        return result
+
+    def equip_skill(self, skill_id: int) -> tuple[EquipSkillStatus, int]:
+        response = self.request(
+            MessageType.EquipSkill,
+            snf_wire.equip_skill(skill_id),
+            MessageType.EquipSkillResult,
+        )
+        status, equipped_skill_id = snf_wire.parse_equip_skill_result(response.payload)
+        if status not in (EquipSkillStatus.Equipped, EquipSkillStatus.AlreadyEquipped):
+            raise RuntimeError(f"EquipSkill rejected: status={status.name} ({status.value})")
+        return status, equipped_skill_id
 
     def bootstrap(
         self,

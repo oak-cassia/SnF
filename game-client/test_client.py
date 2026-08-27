@@ -10,9 +10,11 @@ from snf_wire import (
     BattleFailureReason,
     Direction,
     EnemyKind,
+    EquipSkillStatus,
     EventTag,
     FrameDecoder,
     MessageType,
+    PurchaseStatus,
     ProjectileRemovalReason,
     RoomPhase,
     RoomStatus,
@@ -77,12 +79,17 @@ class TestWireProtocol(unittest.TestCase):
         self.assertEqual(d, int(Direction.NorthEast))
         self.assertEqual(sq, 5)
 
-        skill = snf_wire.use_skill(7, 1, 10)
-        self.assertEqual(len(skill), 20)
-        rm, sk, sq = struct.unpack(">QIQ", skill)
+        use_skill_payload = snf_wire.use_skill(7, 1, 10)
+        self.assertEqual(len(use_skill_payload), 20)
+        rm, sk, sq = struct.unpack(">QIQ", use_skill_payload)
         self.assertEqual(rm, 7)
         self.assertEqual(sk, 1)
         self.assertEqual(sq, 10)
+
+        purchase = snf_wire.purchase(123, snf_wire.ARCANE_BOLT_PRODUCT_ID)
+        self.assertEqual(struct.unpack(">QI", purchase), (123, 2))
+        equip = snf_wire.equip_skill(snf_wire.ARCANE_BOLT_SKILL_ID)
+        self.assertEqual(struct.unpack(">I", equip), (2,))
 
     def test_response_parsers(self) -> None:
         self.assertEqual(snf_wire.parse_authenticated(struct.pack(">Q", 99)), 99)
@@ -107,6 +114,16 @@ class TestWireProtocol(unittest.TestCase):
         self.assertEqual(phase, RoomPhase.Running)
 
         self.assertEqual(snf_wire.parse_cleared(struct.pack(">Q", 500)), 500)
+
+        purchase_result = snf_wire.parse_purchase_result(
+            struct.pack(">BBQIQQ", int(PurchaseStatus.Committed), 0, 123, 2, 500, 0)
+        )
+        self.assertEqual(purchase_result["status"], PurchaseStatus.Committed)
+        self.assertEqual(purchase_result["currency_balance"], 500)
+        self.assertEqual(
+            snf_wire.parse_equip_skill_result(struct.pack(">BI", int(EquipSkillStatus.Equipped), 2)),
+            (EquipSkillStatus.Equipped, 2),
+        )
 
         hp, spawned, reason = snf_wire.parse_failed(
             struct.pack(">QBB", 250, 1, int(BattleFailureReason.ParticipantsDefeated))
@@ -298,10 +315,9 @@ class TestWorldState(unittest.TestCase):
 
 
 class TestBotDefaults(unittest.TestCase):
-    def test_bot_uses_arcane_bolt_by_default(self) -> None:
+    def test_bot_uses_starter_slash_by_default(self) -> None:
         bot = BotPlayer(player_id=2, room_id=1)
-        self.assertEqual(bot.attack_skill_id, snf_wire.ARCANE_BOLT_SKILL_ID)
-        self.assertEqual(bot.attack_interval, 1.5)
+        self.assertEqual(bot.attack_skill_id, snf_wire.SLASH_SKILL_ID)
 
     def test_party_reentry_joins_bots_before_main_starts_battle(self) -> None:
         calls: list[tuple[str, bool]] = []

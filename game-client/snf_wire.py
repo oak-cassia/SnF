@@ -34,6 +34,8 @@ class MessageType(IntEnum):
     SkillAcknowledged = 29
     SetMoveIntent = 30
     MoveAcknowledged = 31
+    EquipSkill = 32
+    EquipSkillResult = 33
 
 
 class RoomStatus(IntEnum):
@@ -50,6 +52,25 @@ class RoomStatus(IntEnum):
     ParticipantDead = 10
     RuntimeOverloaded = 11
     ProjectileCapacityExceeded = 12
+    SkillNotEquipped = 13
+
+
+class PurchaseStatus(IntEnum):
+    Committed = 0
+    InsufficientFunds = 1
+    ProductNotFound = 2
+    InventoryCapacityExceeded = 3
+    IdempotencyConflict = 4
+    IdempotencyCapacityExceeded = 5
+    Unavailable = 6
+    AlreadyOwned = 7
+
+
+class EquipSkillStatus(IntEnum):
+    Equipped = 0
+    AlreadyEquipped = 1
+    SkillNotOwned = 2
+    UnknownSkill = 3
 
 
 class ZoneCommandStatus(IntEnum):
@@ -136,6 +157,7 @@ MAX_BODY_SIZE = 64 * 1024
 UNSOLICITED_REQUEST_ID = 0
 SLASH_SKILL_ID = 1
 ARCANE_BOLT_SKILL_ID = 2
+ARCANE_BOLT_PRODUCT_ID = 2
 
 
 @dataclass(frozen=True)
@@ -200,6 +222,20 @@ def authenticate(player_id: int) -> bytes:
     return struct.pack(">Q", player_id)
 
 
+def purchase(idempotency_key: int, product_id: int) -> bytes:
+    if idempotency_key == 0:
+        raise ValueError("idempotency_key must be non-zero")
+    if product_id == 0:
+        raise ValueError("product_id must be non-zero")
+    return struct.pack(">QI", idempotency_key, product_id)
+
+
+def equip_skill(skill_id: int) -> bytes:
+    if skill_id == 0:
+        raise ValueError("skill_id must be non-zero")
+    return struct.pack(">I", skill_id)
+
+
 def enter_zone(zone_id: int, x: int = 0, y: int = 0) -> bytes:
     return struct.pack(">Qii", zone_id, x, y)
 
@@ -254,6 +290,29 @@ def parse_authenticated(payload: bytes) -> int:
     if len(payload) != 8:
         raise ValueError(f"Authenticated payload must be 8 bytes, got {len(payload)}")
     return struct.unpack(">Q", payload)[0]
+
+
+def parse_purchase_result(payload: bytes) -> dict:
+    if len(payload) != 30:
+        raise ValueError(f"PurchaseResult payload must be 30 bytes, got {len(payload)}")
+    status, replayed, idempotency_key, product_id, currency_balance, purchased_item_count = struct.unpack(
+        ">BBQIQQ", payload
+    )
+    return {
+        "status": PurchaseStatus(status),
+        "replayed": bool(replayed),
+        "idempotency_key": idempotency_key,
+        "product_id": product_id,
+        "currency_balance": currency_balance,
+        "purchased_item_count": purchased_item_count,
+    }
+
+
+def parse_equip_skill_result(payload: bytes) -> tuple[EquipSkillStatus, int]:
+    if len(payload) != 5:
+        raise ValueError(f"EquipSkillResult payload must be 5 bytes, got {len(payload)}")
+    status, equipped_skill_id = struct.unpack(">BI", payload)
+    return EquipSkillStatus(status), equipped_skill_id
 
 
 def parse_zone_entered(payload: bytes) -> dict:
