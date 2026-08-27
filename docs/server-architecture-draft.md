@@ -164,8 +164,9 @@ Session은 partial frame과 pending send를 보존한다.
 
 ## 8. Player persistence
 
-Live gameplay state의 authority는 PlayerActor다. 구매 handler는 상품, 잔액, grant와 Actor 수명 범위
-idempotency를 같은 turn에서 판정한다. 성공한 Economy 변경은 dirty snapshot으로 제출한다.
+Live gameplay state의 authority는 PlayerActor다. 구매 handler는 상품, 잔액, 구체적인 item/skill reward와
+Actor 수명 범위 idempotency를 같은 turn에서 판정한다. 성공한 Economy·Progression·Skills 변경은 dirty
+snapshot으로 제출한다.
 
 `PlayerPersistenceService`는 다음 규칙을 소유한다.
 
@@ -178,9 +179,11 @@ idempotency를 같은 turn에서 판정한다. 성공한 Economy 변경은 dirty
 
 Repository 계약은 `asyncLoad`와 `asyncSave`뿐이다. 기본 in-memory adapter는 결정적 테스트에,
 MySQL adapter는 blocking C API를 전용 bounded Worker Pool에서 실행하는 실제 저장 경계에 사용한다.
-DB Worker는 Actor 상태를 다시 판정하지 않고 immutable snapshot만 저장한다.
+DB Worker는 Actor 상태를 다시 판정하지 않고 immutable snapshot만 저장한다. MySQL schema v8은 main
+Player row와 정렬된 owned skill rows를 READ COMMITTED transaction 하나로 저장해 동시 신규 Player의
+gap-lock 충돌을 피하면서 loadout 원자성을 유지한다.
 
-현재 NPC 구매는 저장 완료 전에 성공을 응답하는 deferred durability 정책이다. flush 전 process crash면
+현재 NPC 구매와 스킬 장착은 저장 완료 전에 성공을 응답하는 deferred durability 정책이다. flush 전 process crash면
 마지막 변경과 Actor 수명 범위 idempotency evidence가 사라질 수 있다. 이 위험을 허용할 수 없는
 거래는 같은 경로에 옵션을 추가하지 않고 별도 요구사항과 authority를 정의해야 한다.
 

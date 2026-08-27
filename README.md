@@ -605,6 +605,12 @@ PlayerActor
 교체하고, 저장 중인 Player는 다음 저장 대상으로 선택하지 않습니다. 따라서 같은 Player의 저장은
 직렬화되지만 서로 다른 Player는 Repository Worker에서 병렬로 저장할 수 있습니다.
 
+schema v8에서는 `snf_players.equipped_skill_id`와
+`snf_player_skills(player_id, skill_id)`를 함께 사용합니다. 전체 Player snapshot 저장은 main row
+upsert, 기존 skill row 삭제, 정렬된 owned skill row 삽입을 하나의 READ COMMITTED transaction으로
+처리합니다. 어느 SQL에서든 실패하면 rollback되어 main row와 skill row가 서로 다른 버전으로 남지
+않습니다. 기존 v7 Player는 migration에서 Slash 보유·장착 상태로 이관됩니다.
+
 - 실행 중 스냅샷 저장이 실패하면 해당 스냅샷을 다시 대기 상태로 돌립니다.
 - 새 스냅샷이 들어오면 실패한 이전 값보다 최신 값으로 교체할 수 있습니다.
 - 연결·서버 종료 시의 최종 스냅샷은 진행 중인 저장을 추월하지 않고, 이전 대기 값은 대체합니다.

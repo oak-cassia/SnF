@@ -498,8 +498,8 @@ Projectile 전투가 독립적으로 완성된 뒤 Player 진행 상태에 연�
 ```cpp
 struct SkillLoadout
 {
-    std::vector<SkillId> owned_skills{};
-    SkillId equipped_attack{};
+    std::vector<SkillId> owned_skill_ids{};
+    SkillId equipped_skill_id{};
 };
 ```
 
@@ -520,20 +520,20 @@ struct SkillLoadout
 ProductCatalog의 추상적인 `grant_count`를 구체적인 지급 값으로 확장한다.
 
 ```cpp
-struct GrantItemCount
+struct AddPurchasedItemCountReward
 {
-    std::uint64_t count{0};
+    std::uint64_t item_count{0};
 };
 
-struct GrantSkill
+struct AddOwnedSkillReward
 {
-    SkillId skill{};
+    SkillId skill_id{};
 };
 
-using ProductGrant = std::variant<GrantItemCount, GrantSkill>;
+using ProductReward = std::variant<AddPurchasedItemCountReward, AddOwnedSkillReward>;
 ```
 
-- ArcaneBolt 상품은 `GrantSkill{ARCANE_BOLT}`를 지급한다.
+- ArcaneBolt 상품은 `AddOwnedSkillReward{ARCANE_BOLT_SKILL_ID}`를 지급한다.
 - 이미 보유하면 `AlreadyOwned`이고 재화를 차감하지 않는다.
 - 재화 차감과 보유 목록 추가는 하나의 Player command 안에서 함께 성공하거나 함께 실패한다.
 - 기존 Actor 수명 범위 idempotency와 영속 보유 목록의 중복 방어를 모두 유지한다.
@@ -544,10 +544,10 @@ using ProductGrant = std::variant<GrantItemCount, GrantSkill>;
 
 ### Step 8 — 장착 protocol과 영속화
 
-- `EquipAttackSkill` command/response를 추가한다.
+- `EquipSkillCommand`와 `EquipSkillResponse`를 추가한다.
 - `PlayerStateComponent::Skills`를 추가한다.
-- `PlayerRecord`에 owned SkillId 목록과 equipped attack SkillId를 추가한다.
-- MySQL `snf_player_skills(player_id, skill_id)`와 `equipped_attack_skill_id`를 추가한다.
+- `PlayerRecord`에 `SkillLoadout`을 추가한다.
+- MySQL `snf_player_skills(player_id, skill_id)`와 `equipped_skill_id`를 추가한다.
 - Player 기본 row와 기존 row는 Slash 보유·장착으로 복원한다.
 - main Player row와 skill rows는 하나의 DB transaction에서 저장한다.
 

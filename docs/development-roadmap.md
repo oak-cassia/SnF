@@ -34,6 +34,7 @@
 - connection generation 기반 one-live-session과 exact-match passivation
 - in-memory 및 bounded MySQL load/save adapter
 - street 누적 경험치 영속화와, 그로부터 파생되는 레벨·공격/체력
+- Slash 기본 로드아웃, ArcaneBolt 구매·장착과 MySQL v8 보유/장착 영속화
 
 ### Shared state
 
@@ -66,9 +67,9 @@
 최대 4명의 Player가 개별 입장하는 작은 협동 인스턴스다. MMORPG 월드 기능을 넓히지 않고, Actor 상태 소유권이
 공유 콘텐츠에서 주는 장점과 비용을 보여주는 것이 목적이다. 처음에는 위치 없는 wave 전투로
 계획했지만 2a가 tick, ordered digest, fanout, payload 상한과 비용 metric을 먼저 완성한 뒤 범위를
-바꿨다. 정수 좌표는 적의 가장 가까운 생존 참가자 선택과 Slash의 범위 내 전체 적 판정이라는 관찰
+바꿨다. 정수 좌표는 적의 가장 가까운 생존 참가자 선택과 스킬별 범위 판정이라는 관찰
 가능한 targeting 근거를 주고, 빠르게 변하는 좌표와 HP를 Room Actor 하나가 직렬화하는 비용도
-드러낸다. 대신 직선 이동만 허용하며 충돌·장애물·pathfinding·projectile·Room AOI·resync snapshot은
+드러낸다. 대신 직선 이동만 허용하며 충돌·장애물·pathfinding·Room AOI·resync snapshot은
 계속 만들지 않는다.
 
 > **구현 순서 2b 완료.** 실제 TCP에서 이동, 적 추격·피해, boss clear와 `ParticipantsDefeated` 실패가
@@ -259,13 +260,13 @@ connection generation  → admission/routing에서 session 수명을 넘긴 stal
 
 ### 비범위
 
-- 충돌, 장애물, pathfinding, projectile, Room AOI와 진행 중 resync snapshot
+- 충돌, 장애물, pathfinding, Room AOI와 진행 중 resync snapshot
 - `Ready`, countdown과 자동 시작
 - 진행 중인 전투로의 reconnect와 주기적 resync snapshot
 - 대규모 seamless world와 process 간 migration
 - matchmaking service
 - 복잡한 전투 수치와 클라이언트 표현
-- skill unlock, loadout과 추가 skill 콘텐츠. 현재 단일 Slash 카탈로그를 유지한다
+- 세 번째 이후 skill 콘텐츠와 다중 슬롯 loadout
 - 별도 projection, read model, 보상 원장 테이블. 구현 순서 4도 새 테이블을 만들지 않는다
 - Runtime 통합, io_uring 또는 Actor 내부 병렬화
 

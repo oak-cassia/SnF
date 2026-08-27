@@ -11,13 +11,15 @@ PlayerActor
 │   ├── identity
 │   ├── handled command count
 │   └── last Zone location
-└── Economy
-    ├── currency balance
-    ├── purchased item count
-    └── bounded purchase evidence
+├── Economy
+│   ├── currency balance
+│   ├── purchased item count
+│   └── bounded purchase evidence
+└── Skills
+    └── sorted owned skill IDs + equipped skill ID
 ```
 
-Session과 Economy는 별도 Actor가 아니라 PlayerActor 내부 구성 단위다. 잔액 차감과 상품 지급처럼
+Session, Economy와 Skills는 별도 Actor가 아니라 PlayerActor 내부 구성 단위다. 잔액 차감과 상품 지급처럼
 하나의 불변식으로 변경되는 값은 같은 mailbox에서 처리한다.
 
 ## 2. Command 규칙
@@ -26,6 +28,8 @@ Session과 Economy는 별도 Actor가 아니라 PlayerActor 내부 구성 단위
 - 다른 thread는 const reference를 읽지 않고 command 또는 immutable snapshot을 사용한다.
 - `restore()`는 login/복구 시 owning Worker에서만 실행한다.
 - `PurchaseCommand`는 상품 정의, 잔액, 지급량과 idempotency를 한 turn에서 판정한다.
+- 스킬 상품은 이미 보유했는지를 잔액보다 먼저 판정하고, 성공할 때만 잔액과 보유 목록을 함께 확정한다.
+- `EquipSkillCommand`는 알려진 보유 스킬만 장착하며 Room 입장 뒤 변경은 다음 입장부터 적용한다.
 - 같은 key와 product는 저장된 outcome을 replay한다.
 - 같은 key와 다른 product는 `IdempotencyConflict`다.
 - evidence 상한에 도달하면 기존 증거를 지우지 않고 새 key를 거부한다.
@@ -53,13 +57,13 @@ generation을 포함한 `ConnectionId`로 admission, persistent Player routing�
 
 ## 4. Dirty snapshot
 
-성공한 Economy 변경은 Economy dirty bit을 설정한다. owning Worker는 flat `PlayerRecord` snapshot을
+성공한 Economy·Progression·Skills 변경은 해당 dirty bit을 설정한다. owning Worker는 전체 `PlayerRecord` snapshot을
 만들어 `PlayerPersistenceService`의 bounded queue에 non-blocking으로 제출한다.
 
 - admission 성공: 제출 시점의 dirty bit을 지운다.
 - admission 실패: dirty bit을 복원해 다음 command에서 재시도한다.
 - DB completion은 PlayerActor state를 다시 덮어쓰지 않는다.
-- location과 economy는 같은 authoritative snapshot으로 저장한다.
+- location, economy, progression과 skill loadout은 같은 authoritative snapshot으로 저장한다.
 
 ## 5. PlayerPersistenceService
 
@@ -85,8 +89,8 @@ Repository는 Actor, ActorState, mutable state 또는 coroutine handle을 받지
 
 ## 7. Durability 한계와 다음 확장
 
-현재 구매 성공은 snapshot 저장 완료 전에 응답된다. 따라서 flush 전 process crash에서는 최근 economy
-변경이 사라질 수 있다. 이는 무료/게임 내 NPC 상품을 가정한 명시적 정책이지 durable transaction과
+현재 구매·장착 성공은 snapshot 저장 완료 전에 응답된다. 따라서 flush 전 process crash에서는 최근 economy나
+skill loadout 변경이 사라질 수 있다. 이는 무료/게임 내 NPC 상품을 가정한 명시적 정책이지 durable transaction과
 동일한 보장이 아니다.
 
 구현 순서 4의 battle reward도 이 한계를 없애지 않고 책임 경계만 명확히 한다. Room은 새 테이블을
@@ -111,6 +115,7 @@ retry window와 authority를 별도 vertical slice로 정의한다.
 ## 8. 검증
 
 - 구매 성공/잔액 부족/없는 상품/inventory overflow
+- 스킬 구매/중복 보유/장착 성공·실패와 보유·장착 round trip
 - 같은 key replay와 다른 product conflict
 - evidence capacity
 - snapshot queue rejection 시 dirty 복원
