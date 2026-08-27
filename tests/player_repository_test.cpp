@@ -29,6 +29,9 @@ namespace
                 .currency_balance = 600,
                 .purchased_item_count = 4,
                 .street_experience = 2500,
+                .skill_loadout = snf::server::SkillLoadout{
+                    {snf::server::SLASH_SKILL_ID, snf::server::ARCANE_BOLT_SKILL_ID}, snf::server::ARCANE_BOLT_SKILL_ID
+                },
             },
             [&save](snf::server::PlayerSaveResult result) { save = result; });
         assert(save.has_value());
@@ -43,6 +46,9 @@ namespace
         assert(loaded->record->currency_balance == 600);
         assert(loaded->record->purchased_item_count == 4);
         assert(loaded->record->street_experience == 2500);
+        assert(loaded->record->skill_loadout.getOwnedSkillIds().size() == 2);
+        assert(loaded->record->skill_loadout.hasOwnedSkillId(snf::server::ARCANE_BOLT_SKILL_ID));
+        assert(loaded->record->skill_loadout.getEquippedSkillId() == snf::server::ARCANE_BOLT_SKILL_ID);
         assert((loaded->record->last_location == snf::server::PlayerLocation{
                                                      .zone = snf::server::ZoneId{.value = 3},
                                                      .position = {.x = -4, .y = 5},

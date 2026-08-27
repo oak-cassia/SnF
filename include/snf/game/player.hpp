@@ -16,6 +16,7 @@ namespace snf::server
         Session = 1U << 0U,
         Economy = 1U << 1U,
         Progression = 1U << 2U,
+        Skills = 1U << 3U,
     };
 
     using PlayerStateComponentMask = std::uint8_t;
@@ -36,6 +37,7 @@ namespace snf::server
         [[nodiscard]] std::uint64_t currencyBalance() const noexcept;
         [[nodiscard]] std::uint64_t purchasedItemCount() const noexcept;
         [[nodiscard]] std::uint64_t streetExperience() const noexcept;
+        [[nodiscard]] const SkillLoadout& getSkillLoadout() const noexcept;
         [[nodiscard]] PlayerStateComponentMask dirtyComponents() const noexcept;
 
     private:
@@ -58,6 +60,11 @@ namespace snf::server
         {
             std::uint64_t street_experience{0};
         } _progression;
+
+        struct Skills
+        {
+            SkillLoadout skill_loadout{};
+        } _skills;
 
         PlayerStateComponentMask _dirty_components{0};
     };

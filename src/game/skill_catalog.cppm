@@ -34,11 +34,11 @@ export namespace snf::server
         AttackBehavior behavior{};
     };
 
-    inline constexpr SkillId SLASH{.value = 1};
+    inline constexpr SkillId SLASH = SLASH_SKILL_ID;
     inline constexpr std::uint64_t SLASH_ATTACK_PERCENT = 100;
     inline constexpr std::chrono::milliseconds SLASH_COOLDOWN{1000};
     inline constexpr std::uint32_t SLASH_RANGE = 12;
-    inline constexpr SkillId ARCANE_BOLT{.value = 2};
+    inline constexpr SkillId ARCANE_BOLT = ARCANE_BOLT_SKILL_ID;
     inline constexpr std::uint64_t ARCANE_BOLT_ATTACK_PERCENT = 160;
     inline constexpr std::chrono::milliseconds ARCANE_BOLT_COOLDOWN{1500};
     inline constexpr std::uint32_t ARCANE_BOLT_ACQUISITION_RANGE = 40;

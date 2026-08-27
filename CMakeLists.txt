@@ -60,6 +60,7 @@ add_library(snf_game STATIC
     src/game/player.cpp
     src/game/zone.cpp
     src/game/room.cpp
+    src/game/skill_loadout.cpp
     src/game/street_progression.cpp
     src/game/product_catalog.cpp
 )
@@ -201,6 +202,7 @@ if(BUILD_TESTING)
         tests/game_test_main.cpp
         tests/arena_test.cpp
         tests/skill_catalog_test.cpp
+        tests/skill_loadout_test.cpp
         tests/street_progression_test.cpp
         tests/room_test.cpp
         tests/player_test.cpp

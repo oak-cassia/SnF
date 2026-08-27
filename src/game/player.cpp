@@ -40,6 +40,11 @@ namespace snf::server
         return _progression.street_experience;
     }
 
+    const SkillLoadout& PlayerState::getSkillLoadout() const noexcept
+    {
+        return _skills.skill_loadout;
+    }
+
     PlayerStateComponentMask PlayerState::dirtyComponents() const noexcept
     {
         return _dirty_components;
@@ -62,6 +67,7 @@ namespace snf::server
         _state._economy.currency_balance = record.currency_balance;
         _state._economy.purchased_item_count = record.purchased_item_count;
         _state._progression.street_experience = record.street_experience;
+        _state._skills.skill_loadout = record.skill_loadout;
         _state._dirty_components = 0;
         _purchase_evidence.clear();
     }
@@ -81,7 +87,9 @@ namespace snf::server
 
     bool Player::hasFlushableDirtyState() const noexcept
     {
-        constexpr PlayerStateComponentMask flushable = componentMask(PlayerStateComponent::Economy) | componentMask(PlayerStateComponent::Progression);
+        constexpr PlayerStateComponentMask flushable = componentMask(PlayerStateComponent::Economy) |
+                                                       componentMask(PlayerStateComponent::Progression) |
+                                                       componentMask(PlayerStateComponent::Skills);
         return (_state._dirty_components & flushable) != 0;
     }
 
@@ -131,6 +139,7 @@ namespace snf::server
             .currency_balance = _state._economy.currency_balance,
             .purchased_item_count = _state._economy.purchased_item_count,
             .street_experience = _state._progression.street_experience,
+            .skill_loadout = _state._skills.skill_loadout,
         };
     }
 
