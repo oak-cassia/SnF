@@ -90,18 +90,27 @@ python3 snf_play.py --player 1 --zone 1 --room 1 --start --headless
 | --- | --- | --- |
 | `WASD` / `방향키` | 필드 이동 (`Move`) | 오픈 필드 좌표 이동. 주변 플레이어 목록(`visible_players`) 실시간 갱신 |
 | `J` / `Enter` | 던전 입장 (`RoomJoin`) | 해당 번호의 Room 전투 아레나로 진입 |
+| `B` | ArcaneBolt 구매 (`Purchase`) | 상품 ID 2를 500 재화로 구매. 이미 보유하면 `AlreadyOwned`로 차감 없이 응답 |
+| `1` / `2` | Slash / ArcaneBolt 장착 (`EquipSkill`) | 보유하지 않은 스킬은 `SkillNotOwned`로 거절되어 로그에 남습니다 |
 | `ESC` | 게임 종료 | 클라이언트 종료 |
 
 ### ⚔️ Room(전투 아레나) 모드
 | 키 | 동작 | 설명 |
 | --- | --- | --- |
 | `WASD` / `방향키` | 아레나 이동 (`SetMoveIntent`) | 8방향 지속 의도 이동. 키를 떼면 정지(`Stop`) |
-| `Space` | 스킬 공격 (`UseSkill`) | SLASH (10 피해, 사거리 12, 1.0초 쿨다운) |
+| `Space` | 스킬 공격 (`UseSkill`) | 입장 시점에 장착했던 스킬로 공격. SLASH(100% 피해, 사거리 12, 1.0초) 또는 ARCANE BOLT(160% 피해, 탐색 40, 1.5초) |
 | `R` | 전투 시작 (`BattleStart`) | `Waiting` 단계에서 전투를 시작 |
+| `B` | ArcaneBolt 구매 (`Purchase`) | Room 안에서도 구매할 수 있습니다 |
+| `1` / `2` | Slash / ArcaneBolt 장착 (`EquipSkill`) | Room 안에서 바꿔도 현재 전투에는 반영되지 않고 다음 입장부터 적용됩니다 |
 | `ESC` | 방 퇴장 / 필드 복귀 (`RoomLeave`) | 방을 떠나 원래 Zone 필드 좌표로 복귀 (`ReturnedToZone`) |
 
-현재 봇의 SkillId 선택은 Projectile 시각화를 위한 client-side 전투 설정입니다. 서버가 보유·장착 Skill을
-검증하는 정식 loadout은 projectile 계약의 Step 6에서 추가됩니다.
+Room은 입장 시점의 장착 스킬만 스냅샷으로 들고 있으므로, 클라이언트도 전투 중에는 그 스냅샷 스킬을
+발사하고 패널에 `Equipped ... - next room`을 함께 보여줍니다. 서버가 장착하지 않은 스킬을 거절하면
+(`SkillNotEquipped`) 전투 로그에 표시됩니다.
+
+접속 직후에는 `EquipSkill`에 카탈로그에 없는 ID를 보내 현재 장착 스킬만 읽어옵니다. 이 요청은
+`UnknownSkill`로 거절되어 loadout을 바꾸지 않으므로, 재접속 시 영속된 장착 스킬을 그대로 표시합니다.
+재화 잔액은 조회 API가 없어 첫 구매 응답 전까지 `?`로 표시됩니다.
 
 ---
 
