@@ -96,6 +96,35 @@ namespace
         execute_sql(repository_config, "DELETE FROM snf_players");
     }
 
+    snf::server::PlayerLoadResult load(snf::server::PlayerRepository& repository, snf::server::PlayerId player);
+
+    void test_v7_player_rows_migrate_to_the_default_slash_loadout(
+        const snf::server::MySqlPlayerRepositoryConfig& repository_config
+    )
+    {
+        {
+            snf::server::MySqlPlayerRepository repository{repository_config};
+        }
+        execute_sql(repository_config, "DROP TRIGGER IF EXISTS snf_test_reject_skill_insert");
+        execute_sql(repository_config, "DELETE FROM snf_players");
+        execute_sql(repository_config, "DROP TABLE snf_player_skills");
+        execute_sql(repository_config, "ALTER TABLE snf_players DROP COLUMN equipped_skill_id");
+        execute_sql(repository_config, "DELETE FROM snf_schema_version WHERE version >= 8");
+        execute_sql(
+            repository_config,
+            "INSERT INTO snf_players (player_id, handled_command_count, zone_id, position_x, position_y, "
+            "currency_balance, purchased_item_count, street_experience) VALUES (9001,4,NULL,NULL,NULL,750,2,3000)"
+        );
+
+        snf::server::MySqlPlayerRepository migrated{repository_config};
+        const auto loaded = load(migrated, snf::server::PlayerId{.value = 9001});
+        assert(loaded.status == snf::server::PlayerRepositoryStatus::Success);
+        assert(loaded.record.has_value());
+        assert(loaded.record->skill_loadout.getOwnedSkillIds().size() == 1);
+        assert(loaded.record->skill_loadout.hasOwnedSkillId(snf::server::SLASH_SKILL_ID));
+        assert(loaded.record->skill_loadout.getEquippedSkillId() == snf::server::SLASH_SKILL_ID);
+    }
+
     snf::server::PlayerLoadResult load(snf::server::PlayerRepository& repository, const snf::server::PlayerId player)
     {
         std::promise<snf::server::PlayerLoadResult> completion;
@@ -131,6 +160,10 @@ namespace
                             .currency_balance = 700,
                             .purchased_item_count = 3,
                             .street_experience = 29500,
+                            .skill_loadout = snf::server::SkillLoadout{
+                                {snf::server::SLASH_SKILL_ID, snf::server::ARCANE_BOLT_SKILL_ID},
+                                snf::server::ARCANE_BOLT_SKILL_ID
+                            },
                         })
                        .saved());
         }
@@ -147,6 +180,9 @@ namespace
         assert(loaded.record->currency_balance == 700);
         assert(loaded.record->purchased_item_count == 3);
         assert(loaded.record->street_experience == 29500);
+        assert(loaded.record->skill_loadout.getOwnedSkillIds().size() == 2);
+        assert(loaded.record->skill_loadout.hasOwnedSkillId(snf::server::ARCANE_BOLT_SKILL_ID));
+        assert(loaded.record->skill_loadout.getEquippedSkillId() == snf::server::ARCANE_BOLT_SKILL_ID);
     }
 
     void test_actor_snapshot_overwrites_the_complete_player_record(const snf::server::MySqlPlayerRepositoryConfig& repository_config)
@@ -176,6 +212,9 @@ namespace
             .currency_balance = 700,
             .purchased_item_count = 3,
             .street_experience = 29500,
+            .skill_loadout = snf::server::SkillLoadout{
+                {snf::server::SLASH_SKILL_ID, snf::server::ARCANE_BOLT_SKILL_ID}, snf::server::ARCANE_BOLT_SKILL_ID
+            },
         }));
         persistence.flush();
         persistence.stop();
@@ -186,6 +225,63 @@ namespace
         assert(loaded.record->currency_balance == 700);
         assert(loaded.record->purchased_item_count == 3);
         assert(loaded.record->street_experience == 29500);
+        assert(loaded.record->skill_loadout.hasOwnedSkillId(snf::server::ARCANE_BOLT_SKILL_ID));
+        assert(loaded.record->skill_loadout.getEquippedSkillId() == snf::server::ARCANE_BOLT_SKILL_ID);
+    }
+
+    void test_failed_snapshot_save_rolls_back_main_and_skill_rows(
+        const snf::server::MySqlPlayerRepositoryConfig& repository_config
+    )
+    {
+        const snf::server::PlayerId player{.value = 1003};
+        snf::server::MySqlPlayerRepository repository{repository_config};
+        assert(save(repository,
+                    snf::server::PlayerRecord{
+                        .player = player,
+                        .handled_command_count = 1,
+                        .currency_balance = 900,
+                        .purchased_item_count = 1,
+                    })
+                   .saved());
+
+        execute_sql(
+            repository_config,
+            "ALTER TABLE snf_player_skills ADD CONSTRAINT snf_test_reject_arcane_skill "
+            "CHECK (player_id <> 1003 OR skill_id = 1)"
+        );
+        const auto failed = save(repository,
+                                 snf::server::PlayerRecord{
+                                     .player = player,
+                                     .handled_command_count = 2,
+                                     .currency_balance = 500,
+                                     .purchased_item_count = 1,
+                                     .skill_loadout = snf::server::SkillLoadout{
+                                         {snf::server::SLASH_SKILL_ID, snf::server::ARCANE_BOLT_SKILL_ID},
+                                         snf::server::ARCANE_BOLT_SKILL_ID
+                                     },
+                                 });
+        assert(!failed.saved());
+        execute_sql(repository_config, "ALTER TABLE snf_player_skills DROP CHECK snf_test_reject_arcane_skill");
+
+        const auto loaded = load(repository, player);
+        assert(loaded.status == snf::server::PlayerRepositoryStatus::Success);
+        assert(loaded.record.has_value());
+        assert(loaded.record->handled_command_count == 1);
+        assert(loaded.record->currency_balance == 900);
+        assert(loaded.record->skill_loadout.getOwnedSkillIds().size() == 1);
+        assert(loaded.record->skill_loadout.getEquippedSkillId() == snf::server::SLASH_SKILL_ID);
+    }
+
+    void test_corrupt_v8_skill_rows_fail_the_load(const snf::server::MySqlPlayerRepositoryConfig& repository_config)
+    {
+        const snf::server::PlayerId player{.value = 1004};
+        snf::server::MySqlPlayerRepository repository{repository_config};
+        assert(save(repository, snf::server::PlayerRecord{.player = player}).saved());
+        execute_sql(repository_config, "DELETE FROM snf_player_skills WHERE player_id=1004");
+
+        const auto loaded = load(repository, player);
+        assert(loaded.status == snf::server::PlayerRepositoryStatus::Unavailable);
+        assert(!loaded.record.has_value());
     }
 
     class RunningMySqlServer final
@@ -282,8 +378,11 @@ int main()
     }
 
     const auto repository_config = config();
+    test_v7_player_rows_migrate_to_the_default_slash_loadout(repository_config);
     reset_storage(repository_config);
     test_record_survives_repository_restart(repository_config);
     test_actor_snapshot_overwrites_the_complete_player_record(repository_config);
+    test_failed_snapshot_save_rolls_back_main_and_skill_rows(repository_config);
+    test_corrupt_v8_skill_rows_fail_the_load(repository_config);
     test_game_server_restores_mysql_players_across_restart(repository_config);
 }
