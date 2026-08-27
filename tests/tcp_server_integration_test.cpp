@@ -1305,6 +1305,88 @@ namespace
         assert(saved->purchased_item_count == 3);
     }
 
+    void test_skill_purchase_and_equip_survive_disconnect_and_reconnect()
+    {
+        RunningServer server;
+        constexpr std::uint64_t player_id = 791;
+        const snf::server::PlayerId player{.value = player_id};
+
+        auto client = connect_client(server.getPort());
+        const auto auth = authentication_frame(119, player_id);
+        const auto auth_bytes = snf::protocol::encode_frame(auth);
+        send_all(client.getDescriptor(), auth_bytes);
+        assert_authenticated(receive_exact(client.getDescriptor(), auth_bytes.size()), auth.request_id, player_id);
+
+        const auto purchase = purchase_frame(120, 1, snf::server::ARCANE_BOLT_PRODUCT.value);
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(purchase));
+        assert_purchase_response(
+            receive_purchase_response(client.getDescriptor()),
+            purchase.request_id,
+            snf::server::PurchaseStatus::Committed,
+            false,
+            1,
+            snf::server::ARCANE_BOLT_PRODUCT.value,
+            500,
+            0
+        );
+
+        const auto equip = equip_skill_frame(121, snf::server::ARCANE_BOLT_SKILL_ID);
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(equip));
+        const auto equipped = receive_frame(client.getDescriptor());
+        assert(equipped.type == snf::protocol::MessageType::EquipSkillResult);
+        assert(equipped.request_id == equip.request_id);
+        assert(equipped.payload.size() == 5);
+        assert(equipped.payload[0] == static_cast<std::byte>(snf::server::EquipSkillStatus::Equipped));
+        assert(read_u32(equipped.payload, 1) == snf::server::ARCANE_BOLT_SKILL_ID.value);
+
+        client.init();
+        const auto passivation_deadline = std::chrono::steady_clock::now() + 1s;
+        while (actor_count(server.getActorRuntimeStats()) != 0 && std::chrono::steady_clock::now() < passivation_deadline)
+        {
+            std::this_thread::sleep_for(1ms);
+        }
+        assert(actor_count(server.getActorRuntimeStats()) == 0);
+        const auto saved = server.getPlayerRecord(player);
+        assert(saved.has_value());
+        assert(saved->currency_balance == 500);
+        assert(saved->purchased_item_count == 0);
+        assert(saved->skill_loadout.hasOwnedSkillId(snf::server::ARCANE_BOLT_SKILL_ID));
+        assert(saved->skill_loadout.getEquippedSkillId() == snf::server::ARCANE_BOLT_SKILL_ID);
+
+        auto reconnected = connect_client(server.getPort());
+        const auto reconnect_auth = authentication_frame(122, player_id);
+        const auto reconnect_auth_bytes = snf::protocol::encode_frame(reconnect_auth);
+        send_all(reconnected.getDescriptor(), reconnect_auth_bytes);
+        assert_authenticated(
+            receive_exact(reconnected.getDescriptor(), reconnect_auth_bytes.size()), reconnect_auth.request_id, player_id
+        );
+
+        const auto duplicate_purchase = purchase_frame(123, 2, snf::server::ARCANE_BOLT_PRODUCT.value);
+        send_all(reconnected.getDescriptor(), snf::protocol::encode_frame(duplicate_purchase));
+        assert_purchase_response(
+            receive_purchase_response(reconnected.getDescriptor()),
+            duplicate_purchase.request_id,
+            snf::server::PurchaseStatus::AlreadyOwned,
+            false,
+            2,
+            snf::server::ARCANE_BOLT_PRODUCT.value,
+            500,
+            0
+        );
+
+        const auto equip_again = equip_skill_frame(124, snf::server::ARCANE_BOLT_SKILL_ID);
+        send_all(reconnected.getDescriptor(), snf::protocol::encode_frame(equip_again));
+        const auto already_equipped = receive_frame(reconnected.getDescriptor());
+        assert(already_equipped.type == snf::protocol::MessageType::EquipSkillResult);
+        assert(already_equipped.request_id == equip_again.request_id);
+        assert(already_equipped.payload.size() == 5);
+        assert(already_equipped.payload[0] == static_cast<std::byte>(snf::server::EquipSkillStatus::AlreadyEquipped));
+        assert(read_u32(already_equipped.payload, 1) == snf::server::ARCANE_BOLT_SKILL_ID.value);
+
+        reconnected.init();
+        server.stop();
+    }
+
     void test_two_players_kill_a_boss_and_are_told_without_asking()
     {
         RunningServer server{snf::server::GameServerConfig{
@@ -1607,7 +1689,7 @@ namespace
             client.getDescriptor(),
             snf::protocol::encode_frame(snf::protocol::Frame{
                 .type = snf::protocol::MessageType::EnterZone,
-                .request_id = 331,
+                .request_id = 333,
                 .payload = std::move(enter_payload),
             })
         );
@@ -1742,7 +1824,7 @@ namespace
             client.getDescriptor(),
             snf::protocol::encode_frame(snf::protocol::Frame{
                 .type = snf::protocol::MessageType::EnterZone,
-                .request_id = 333,
+                .request_id = 331,
                 .payload = std::move(enter_payload),
             })
         );
@@ -2902,6 +2984,8 @@ int main()
         test_authenticates_one_session_and_allows_reconnect_after_passivation);
     run("test_reconnect_waits_while_the_previous_session_is_closing", test_reconnect_waits_while_the_previous_session_is_closing);
     run("test_live_purchase_is_memory_authoritative_and_flushes", test_live_purchase_is_memory_authoritative_and_flushes);
+    run("test_skill_purchase_and_equip_survive_disconnect_and_reconnect",
+        test_skill_purchase_and_equip_survive_disconnect_and_reconnect);
     run("test_two_players_kill_a_boss_and_are_told_without_asking", test_two_players_kill_a_boss_and_are_told_without_asking);
     run("test_arcane_bolt_spawn_move_hit_and_removal_are_observed_over_tcp",
         test_arcane_bolt_spawn_move_hit_and_removal_are_observed_over_tcp);
