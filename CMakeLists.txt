@@ -213,6 +213,19 @@ if(BUILD_TESTING)
 
     add_test(NAME snf_game_tests COMMAND snf_game_tests)
 
+    add_executable(snf_worker_tests
+        tests/worker_test_main.cpp
+        tests/worker_identity_test.cpp
+    )
+    target_include_directories(snf_worker_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    snf_configure_target(snf_worker_tests)
+
+    add_test(NAME snf_worker_tests COMMAND snf_worker_tests)
+
+    add_test(NAME snf_worker_layer
+             COMMAND ${CMAKE_COMMAND} -DWORKER_ROOTS=${CMAKE_SOURCE_DIR}/include/snf/worker:${CMAKE_SOURCE_DIR}/src/worker
+                     -P ${CMAKE_SOURCE_DIR}/cmake/check_worker_layer.cmake)
+
     add_test(NAME snf_game_layer
              COMMAND ${CMAKE_COMMAND} -DGAME_ROOTS=${CMAKE_SOURCE_DIR}/include/snf/game:${CMAKE_SOURCE_DIR}/src/game
                      -P ${CMAKE_SOURCE_DIR}/cmake/check_game_layer.cmake)
