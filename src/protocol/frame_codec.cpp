@@ -1,26 +1,11 @@
 #include "snf/protocol/frame_codec.hpp"
+#include "snf/protocol/payload_writer.hpp"
 
 #include <stdexcept>
 #include <utility>
 
 namespace
 {
-    constexpr std::uint32_t BYTE_MASK = 0xFFU;
-
-    void append_u16_big_endian(std::vector<std::byte>& bytes, std::uint16_t value)
-    {
-        bytes.push_back(static_cast<std::byte>((value >> 8U) & BYTE_MASK));
-        bytes.push_back(static_cast<std::byte>(value & BYTE_MASK));
-    }
-
-    void append_u32_big_endian(std::vector<std::byte>& bytes, std::uint32_t value)
-    {
-        bytes.push_back(static_cast<std::byte>((value >> 24U) & BYTE_MASK));
-        bytes.push_back(static_cast<std::byte>((value >> 16U) & BYTE_MASK));
-        bytes.push_back(static_cast<std::byte>((value >> 8U) & BYTE_MASK));
-        bytes.push_back(static_cast<std::byte>(value & BYTE_MASK));
-    }
-
     std::uint32_t read_u32_big_endian(std::span<const std::byte> bytes, std::size_t offset)
     {
         return (std::to_integer<std::uint32_t>(bytes[offset]) << 24U) | (std::to_integer<std::uint32_t>(bytes[offset + 1]) << 16U) |
@@ -91,9 +76,9 @@ namespace snf::protocol
         std::vector<std::byte> encoded;
         encoded.reserve(FRAME_LENGTH_FIELD_SIZE + body_size);
 
-        append_u32_big_endian(encoded, body_size);
-        append_u16_big_endian(encoded, static_cast<std::uint16_t>(frame.type));
-        append_u32_big_endian(encoded, frame.request_id);
+        append_u32(encoded, body_size);
+        append_u16(encoded, static_cast<std::uint16_t>(frame.type));
+        append_u32(encoded, frame.request_id);
         encoded.insert(encoded.end(), frame.payload.begin(), frame.payload.end());
 
         return encoded;

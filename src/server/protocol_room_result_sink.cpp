@@ -1,6 +1,7 @@
 #include "snf/server/protocol_room_result_sink.hpp"
 
 #include "snf/protocol/frame.hpp"
+#include "snf/protocol/payload_writer.hpp"
 #include "snf/server/outbound_action.hpp"
 
 #include <cstddef>
@@ -12,29 +13,12 @@
 
 namespace
 {
-    constexpr std::uint32_t BYTE_MASK = 0xFFU;
+    using snf::protocol::append_u16;
+    using snf::protocol::append_u32;
+    using snf::protocol::append_u64;
+
     constexpr std::size_t DIGEST_HEADER_SIZE = 8 + 1 + 2;
     constexpr std::size_t ENCODED_FRAME_OVERHEAD = snf::protocol::FRAME_LENGTH_FIELD_SIZE + snf::protocol::MIN_BODY_SIZE;
-
-    void append_u16(std::vector<std::byte>& bytes, const std::uint16_t value)
-    {
-        bytes.push_back(static_cast<std::byte>((value >> 8U) & BYTE_MASK));
-        bytes.push_back(static_cast<std::byte>(value & BYTE_MASK));
-    }
-
-    void append_u32(std::vector<std::byte>& bytes, const std::uint32_t value)
-    {
-        bytes.push_back(static_cast<std::byte>((value >> 24U) & BYTE_MASK));
-        bytes.push_back(static_cast<std::byte>((value >> 16U) & BYTE_MASK));
-        bytes.push_back(static_cast<std::byte>((value >> 8U) & BYTE_MASK));
-        bytes.push_back(static_cast<std::byte>(value & BYTE_MASK));
-    }
-
-    void append_u64(std::vector<std::byte>& bytes, const std::uint64_t value)
-    {
-        append_u32(bytes, static_cast<std::uint32_t>(value >> 32U));
-        append_u32(bytes, static_cast<std::uint32_t>(value));
-    }
 
     [[nodiscard]] constexpr std::size_t encoded_event_size(const snf::server::BattleEvent& event) noexcept
     {
@@ -259,21 +243,25 @@ namespace snf::server
             return;
         }
 
-        std::vector<std::byte> payload;
-        payload.reserve(1 + 1 + 8);
-        payload.push_back(static_cast<std::byte>(result.status));
-        payload.push_back(static_cast<std::byte>(result.phase));
-        append_u64(payload, command.room.value);
-
         static_cast<void>(send(
             command.reply->connection,
             snf::protocol::Frame{
                 .type =
                     command.reply->kind == RoomReplyKind::Joined ? snf::protocol::MessageType::RoomJoined : snf::protocol::MessageType::BattleStarted,
                 .request_id = command.reply->request_id,
-                .payload = std::move(payload),
+                .payload = encodeRoomStatusPayload(result.status, result.phase, command.room),
             }
         ));
+    }
+
+    std::vector<std::byte> ProtocolRoomResultSink::encodeRoomStatusPayload(const RoomCommandStatus status, const RoomPhase phase, const RoomId room)
+    {
+        std::vector<std::byte> payload;
+        payload.reserve(1 + 1 + 8);
+        payload.push_back(static_cast<std::byte>(status));
+        payload.push_back(static_cast<std::byte>(phase));
+        append_u64(payload, room.value);
+        return payload;
     }
 
     std::optional<std::size_t> ProtocolRoomResultSink::digestPayloadSize(const BattleDigest& digest) const noexcept
@@ -417,23 +405,47 @@ namespace snf::server
 
     bool ProtocolRoomResultSink::send(const snf::net::ConnectionId connection, snf::protocol::Frame frame)
     {
-        auto reservation = _outbound.tryReserve(connection, 1);
-        if (!reservation)
-        {
-            _outbound.reportAdmissionFailure(connection);
-            return false;
-        }
-        if (!_outbound.commit(
-                *reservation,
-                SendFrame{
-                    .connection = connection,
-                    .frame = std::move(frame),
-                }
-            ))
-        {
-            _outbound.reportAdmissionFailure(connection);
-            return false;
-        }
-        return true;
+        return send_one_frame(_outbound, connection, std::move(frame));
+    }
+
+    void ProtocolRoomResultSink::replyJoined(
+        const snf::net::ConnectionId connection,
+        const std::uint32_t request_id,
+        const RoomId room,
+        const RoomCommandStatus status,
+        const RoomPhase phase
+    )
+    {
+        static_cast<void>(send(
+            connection,
+            snf::protocol::Frame{
+                .type = snf::protocol::MessageType::RoomJoined,
+                .request_id = request_id,
+                .payload = encodeRoomStatusPayload(status, phase, room),
+            }
+        ));
+    }
+
+    void ProtocolRoomResultSink::replyReturnedToZone(const snf::net::ConnectionId connection, const ZoneId zone, const ZonePosition position)
+    {
+        std::vector<std::byte> payload;
+        payload.reserve(8 + 4 + 4);
+        append_u64(payload, zone.value);
+        append_u32(payload, static_cast<std::uint32_t>(position.x));
+        append_u32(payload, static_cast<std::uint32_t>(position.y));
+
+        static_cast<void>(send(
+            connection,
+            snf::protocol::Frame{
+                .type = snf::protocol::MessageType::ReturnedToZone,
+                .request_id = snf::protocol::UNSOLICITED_REQUEST_ID,
+                .payload = std::move(payload),
+            }
+        ));
+    }
+
+    void ProtocolRoomResultSink::reportAdmissionFailure(const snf::net::ConnectionId connection) noexcept
+    {
+        _outbound.reportAdmissionFailure(connection);
     }
 }

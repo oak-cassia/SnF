@@ -1,5 +1,7 @@
 #include "snf/server/protocol_response_mapper.hpp"
 
+#include "snf/protocol/payload_writer.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
@@ -10,16 +12,7 @@ namespace
 {
     template <typename> inline constexpr bool always_false_v = false;
 
-    constexpr std::uint64_t BYTE_MASK = 0xFFU;
-
-    template <typename Integer> void append_big_endian(std::vector<std::byte>& payload, Integer value)
-    {
-        for (std::size_t remaining = sizeof(Integer); remaining > 0; --remaining)
-        {
-            const std::size_t shift = (remaining - 1) * 8;
-            payload.push_back(static_cast<std::byte>((value >> shift) & BYTE_MASK));
-        }
-    }
+    using snf::protocol::append_big_endian;
 }
 
 namespace snf::server
@@ -92,6 +85,7 @@ namespace snf::server
                     static_assert(always_false_v<Response>, "Unhandled PlayerResponse alternative");
                 }
             },
-            response);
+            response
+        );
     }
 }

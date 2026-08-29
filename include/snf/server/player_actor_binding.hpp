@@ -10,7 +10,7 @@
 #include "snf/server/player_inbound_command.hpp"
 #include "snf/server/player_persistence_service.hpp"
 #include "snf/server/player_repository.hpp"
-#include "snf/server/player_response_sink.hpp"
+#include "snf/server/protocol_player_response_sink.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -45,7 +45,12 @@ namespace snf::server
     class PlayerActorBinding final : public snf::runtime::ActorBinding
     {
     public:
-        PlayerActorBinding(PlayerResponseSink& response_sink, OutboundSink& outbound, CommandLifecycleSink& lifecycle, PlayerActorBindingConfig config = {});
+        PlayerActorBinding(
+            ProtocolPlayerResponseSink& response_sink,
+            OutboundSink& outbound,
+            CommandLifecycleSink& lifecycle,
+            PlayerActorBindingConfig config = {}
+        );
 
         [[nodiscard]] snf::runtime::ActorKind kind() const noexcept override;
         [[nodiscard]] snf::runtime::ActorSubmission makeCommand(PlayerInboundCommand command) const;
@@ -54,10 +59,19 @@ namespace snf::server
 
     protected:
         [[nodiscard]] std::unique_ptr<snf::runtime::ActorState> activate(snf::runtime::EntityId entity) override;
-        [[nodiscard]] snf::runtime::ActorDispatchResult
-        dispatch(snf::runtime::ActorState& state, const snf::runtime::ActorSubmission& submission, snf::runtime::ActorContext& context, std::stop_token stop_token) override;
-        [[nodiscard]] snf::runtime::ActorDispatchResult resume(snf::runtime::ActorState& state, snf::runtime::ActorContext& context, std::stop_token stop_token) override;
-        [[nodiscard]] std::optional<snf::runtime::ActorSubmission> makeTell(snf::runtime::ActorKey target, snf::runtime::TellPayload payload) override;
+        [[nodiscard]] snf::runtime::ActorDispatchResult dispatch(
+            snf::runtime::ActorState& state,
+            const snf::runtime::ActorSubmission& submission,
+            snf::runtime::ActorContext& context,
+            std::stop_token stop_token
+        ) override;
+        [[nodiscard]] snf::runtime::ActorDispatchResult resume(
+            snf::runtime::ActorState& state,
+            snf::runtime::ActorContext& context,
+            std::stop_token stop_token
+        ) override;
+        [[nodiscard]] std::optional<snf::runtime::ActorSubmission> makeTell(snf::runtime::ActorKey target, snf::runtime::TellPayload payload)
+            override;
 
     private:
         struct PlayerActorState;
@@ -73,18 +87,29 @@ namespace snf::server
             GaveUp,
         };
 
-        [[nodiscard]] snf::runtime::ActorDispatchResult advance(PlayerActorState& state, snf::runtime::ActorContext& context, std::stop_token stop_token);
-        [[nodiscard]] snf::runtime::ActorDispatchResult applyResponses(PlayerActorState& state, OutboundReservation& reservation, std::stop_token stop_token);
+        [[nodiscard]] snf::runtime::ActorDispatchResult advance(
+            PlayerActorState& state,
+            snf::runtime::ActorContext& context,
+            std::stop_token stop_token
+        );
+        [[nodiscard]] snf::runtime::ActorDispatchResult applyResponses(
+            PlayerActorState& state,
+            OutboundReservation& reservation,
+            std::stop_token stop_token
+        );
         void runHandler(PlayerActorState& state, const PlayerCommand& command, snf::runtime::ActorContext& context);
-        [[nodiscard]] SnapshotPublishOutcome
-        publishDirtySnapshot(PlayerActorState& state, snf::runtime::ActorContext& context, bool retry_attempt) noexcept;
+        [[nodiscard]] SnapshotPublishOutcome publishDirtySnapshot(
+            PlayerActorState& state,
+            snf::runtime::ActorContext& context,
+            bool retry_attempt
+        ) noexcept;
         [[nodiscard]] bool tryPublishDirtySnapshot(PlayerActorState& state) noexcept;
         [[nodiscard]] bool tryScheduleSnapshotRetry(PlayerActorState& state, snf::runtime::ActorContext& context) noexcept;
         [[nodiscard]] static snf::runtime::ActorDispatchResult snapshotTerminalResult(const PlayerActorState& state) noexcept;
         [[nodiscard]] snf::runtime::ActorDispatchResult abandonResponses(PlayerActorState& state) noexcept;
         static void resetPendingCommand(PlayerActorState& state) noexcept;
 
-        PlayerResponseSink& _response_sink;
+        ProtocolPlayerResponseSink& _response_sink;
         OutboundSink& _outbound;
         CommandLifecycleSink& _lifecycle;
         snf::runtime::ActorKind _kind;

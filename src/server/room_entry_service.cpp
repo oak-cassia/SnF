@@ -1,51 +1,30 @@
 #include "snf/server/room_entry_service.hpp"
 
-#include "snf/protocol/frame.hpp"
-#include "snf/server/outbound_action.hpp"
-
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
 #include <utility>
-#include <vector>
-
-namespace
-{
-    constexpr std::uint32_t BYTE_MASK = 0xFFU;
-
-    void append_u32(std::vector<std::byte>& bytes, const std::uint32_t value)
-    {
-        bytes.push_back(static_cast<std::byte>((value >> 24U) & BYTE_MASK));
-        bytes.push_back(static_cast<std::byte>((value >> 16U) & BYTE_MASK));
-        bytes.push_back(static_cast<std::byte>((value >> 8U) & BYTE_MASK));
-        bytes.push_back(static_cast<std::byte>(value & BYTE_MASK));
-    }
-
-    void append_u64(std::vector<std::byte>& bytes, const std::uint64_t value)
-    {
-        append_u32(bytes, static_cast<std::uint32_t>(value >> 32U));
-        append_u32(bytes, static_cast<std::uint32_t>(value));
-    }
-}
 
 namespace snf::server
 {
-    RoomEntryService::RoomEntryService(RoutedCommandIngress& commands,
-                                       PlayerSessionDirectory& sessions,
-                                       RouteCoordinator& routes,
-                                       RoomTransitionChannel& room_transitions,
-                                       CommandLifecycleSink& lifecycle,
-                                       OutboundSink& outbound,
-                                       ProtocolZoneResultSink& zone_results,
-                                       const std::size_t max_completions_per_turn)
+    RoomEntryService::RoomEntryService(
+        RoutedCommandIngress& commands,
+        PlayerSessionDirectory& sessions,
+        RouteCoordinator& routes,
+        RoomTransitionChannel& room_transitions,
+        CommandLifecycleSink& lifecycle,
+        ProtocolRoomResultSink& room_results,
+        ProtocolZoneResultSink& zone_results,
+        const std::size_t max_completions_per_turn
+    )
         : _commands(commands)
         , _sessions(sessions)
         , _routes(routes)
         , _room_transitions(room_transitions)
         , _lifecycle(lifecycle)
-        , _outbound(outbound)
+        , _room_results(room_results)
         , _zone_results(zone_results)
         , _max_completions_per_turn(max_completions_per_turn)
     {
@@ -57,10 +36,12 @@ namespace snf::server
         _active_returns.reserve(room_transitions.capacity());
     }
 
-    FramePostResult RoomEntryService::tryStart(const snf::net::ConnectionId connection,
-                                               const std::uint32_t request_id,
-                                               const PlayerId player,
-                                               const RoomId room)
+    FramePostResult RoomEntryService::tryStart(
+        const snf::net::ConnectionId connection,
+        const std::uint32_t request_id,
+        const PlayerId player,
+        const RoomId room
+    )
     {
         if (_admission_closed)
         {
@@ -203,13 +184,25 @@ namespace snf::server
         return false;
     }
 
-    bool RoomEntryService::tryReplyZoneBlockedByRoom(const snf::net::ConnectionId connection, const std::uint32_t request_id, const ZoneReplyKind kind)
+    bool RoomEntryService::tryReplyZoneBlockedByRoom(
+        const snf::net::ConnectionId connection,
+        const std::uint32_t request_id,
+        const ZoneReplyKind kind
+    )
     {
         if (const auto entry = _routes.roomEntryFor(connection))
         {
             const CommandReleaseToken release{_lifecycle, connection};
             _zone_results.replyStatus(
-                connection, entry->source.player, entry->source.zone, entry->source.route_epoch, ZonePosition{}, request_id, kind, ZoneCommandStatus::TransitionInProgress);
+                connection,
+                entry->source.player,
+                entry->source.zone,
+                entry->source.route_epoch,
+                ZonePosition{},
+                request_id,
+                kind,
+                ZoneCommandStatus::TransitionInProgress
+            );
             ++_transition_busy_replies;
             return true;
         }
@@ -217,7 +210,9 @@ namespace snf::server
         if (const auto in_room = _routes.inRoomFor(connection))
         {
             const CommandReleaseToken release{_lifecycle, connection};
-            _zone_results.replyStatus(connection, in_room->player, in_room->return_zone, 0, in_room->return_position, request_id, kind, ZoneCommandStatus::InRoom);
+            _zone_results.replyStatus(
+                connection, in_room->player, in_room->return_zone, 0, in_room->return_position, request_id, kind, ZoneCommandStatus::InRoom
+            );
             ++_transition_busy_replies;
             return true;
         }
@@ -226,7 +221,15 @@ namespace snf::server
         {
             const CommandReleaseToken release{_lifecycle, connection};
             _zone_results.replyStatus(
-                connection, ret->player, ret->return_zone, ret->return_epoch, ret->return_position, request_id, kind, ZoneCommandStatus::TransitionInProgress);
+                connection,
+                ret->player,
+                ret->return_zone,
+                ret->return_epoch,
+                ret->return_position,
+                request_id,
+                kind,
+                ZoneCommandStatus::TransitionInProgress
+            );
             ++_transition_busy_replies;
             return true;
         }
@@ -284,7 +287,7 @@ namespace snf::server
         {
             static_cast<void>(_routes.abandonRoomReturn(connection, ret->id));
             _sessions.noteLocation(connection, std::nullopt);
-            _outbound.reportAdmissionFailure(connection);
+            _room_results.reportAdmissionFailure(connection);
             return;
         }
 
@@ -338,7 +341,7 @@ namespace snf::server
             _room_transitions.release(*ticket);
             _active_returns.erase(connection);
             _sessions.noteLocation(connection, std::nullopt);
-            _outbound.reportAdmissionFailure(connection);
+            _room_results.reportAdmissionFailure(connection);
             ++_return_failures;
         }
     }
@@ -409,7 +412,8 @@ namespace snf::server
             static_cast<void>(_routes.rollbackRoomEntryBeforeLeave(active.connection, active.entry_id));
             _room_transitions.release(active.ticket);
             replyRoomJoined(active.connection, active.request_id, active.room, completion.room_status, RoomPhase::Waiting);
-            _transition_nanoseconds.record(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - active.started_at));
+            _transition_nanoseconds.record(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - active.started_at)
+            );
             _active_entries.erase(active.connection);
             return;
         }
@@ -537,7 +541,7 @@ namespace snf::server
             static_cast<void>(_routes.abandonRoomReturn(active_return.connection, active_return.return_id));
             _room_transitions.release(active_return.ticket);
             _sessions.noteLocation(active_return.connection, std::nullopt);
-            _outbound.reportAdmissionFailure(active_return.connection);
+            _room_results.reportAdmissionFailure(active_return.connection);
             ++_return_failures;
             _active_returns.erase(active_return.connection);
             return;
@@ -548,7 +552,7 @@ namespace snf::server
         {
             _room_transitions.release(active_return.ticket);
             _sessions.noteLocation(active_return.connection, std::nullopt);
-            _outbound.reportAdmissionFailure(active_return.connection);
+            _room_results.reportAdmissionFailure(active_return.connection);
             ++_return_failures;
             _active_returns.erase(active_return.connection);
             return;
@@ -566,13 +570,18 @@ namespace snf::server
         }
         else
         {
-            replyReturnedToZone(active_return.connection, active_return.return_zone, pos);
+            _room_results.replyReturnedToZone(active_return.connection, active_return.return_zone, pos);
         }
 
         _active_returns.erase(active_return.connection);
     }
 
-    void RoomEntryService::failEntryBeforeSourceLeave(const snf::net::ConnectionId connection, const RoomId room, const std::uint32_t request_id, const RoomCommandStatus status)
+    void RoomEntryService::failEntryBeforeSourceLeave(
+        const snf::net::ConnectionId connection,
+        const RoomId room,
+        const std::uint32_t request_id,
+        const RoomCommandStatus status
+    )
     {
         const auto active = _active_entries.find(connection);
         if (active == _active_entries.end())
@@ -590,60 +599,15 @@ namespace snf::server
         _active_entries.erase(active);
     }
 
-    void RoomEntryService::replyRoomJoined(const snf::net::ConnectionId connection,
-                                           const std::uint32_t request_id,
-                                           const RoomId room,
-                                           const RoomCommandStatus status,
-                                           const RoomPhase phase)
+    void RoomEntryService::replyRoomJoined(
+        const snf::net::ConnectionId connection,
+        const std::uint32_t request_id,
+        const RoomId room,
+        const RoomCommandStatus status,
+        const RoomPhase phase
+    )
     {
-        std::vector<std::byte> payload;
-        payload.reserve(1 + 1 + 8);
-        payload.push_back(static_cast<std::byte>(static_cast<std::uint8_t>(status)));
-        payload.push_back(static_cast<std::byte>(static_cast<std::uint8_t>(phase)));
-        append_u64(payload, room.value);
-
-        static_cast<void>(sendFrame(connection,
-                                    snf::protocol::Frame{
-                                        .type = snf::protocol::MessageType::RoomJoined,
-                                        .request_id = request_id,
-                                        .payload = std::move(payload),
-                                    }));
-    }
-
-    void RoomEntryService::replyReturnedToZone(const snf::net::ConnectionId connection, const ZoneId zone, const ZonePosition position)
-    {
-        std::vector<std::byte> payload;
-        payload.reserve(8 + 4 + 4);
-        append_u64(payload, zone.value);
-        append_u32(payload, static_cast<std::uint32_t>(position.x));
-        append_u32(payload, static_cast<std::uint32_t>(position.y));
-
-        static_cast<void>(sendFrame(connection,
-                                    snf::protocol::Frame{
-                                        .type = snf::protocol::MessageType::ReturnedToZone,
-                                        .request_id = snf::protocol::UNSOLICITED_REQUEST_ID,
-                                        .payload = std::move(payload),
-                                    }));
-    }
-
-    bool RoomEntryService::sendFrame(const snf::net::ConnectionId connection, snf::protocol::Frame frame)
-    {
-        auto reservation = _outbound.tryReserve(connection, 1);
-        if (!reservation)
-        {
-            _outbound.reportAdmissionFailure(connection);
-            return false;
-        }
-        if (!_outbound.commit(*reservation,
-                              SendFrame{
-                                  .connection = connection,
-                                  .frame = std::move(frame),
-                              }))
-        {
-            _outbound.reportAdmissionFailure(connection);
-            return false;
-        }
-        return true;
+        _room_results.replyJoined(connection, request_id, room, status, phase);
     }
 
     void RoomEntryService::close() noexcept

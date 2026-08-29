@@ -2,6 +2,7 @@
 #include "snf/game/skill_id.hpp"
 #include "snf/server/outbound_channel.hpp"
 #include "snf/server/protocol_gateway.hpp"
+#include "snf/server/protocol_room_result_sink.hpp"
 
 #include <cassert>
 #include <deque>
@@ -68,9 +69,17 @@ namespace
             , room_transitions(config.max_room_entries, wake.getDescriptor())
             , outbound(snf::server::OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 4}, wake.getDescriptor())
             , zone_results(outbound)
+            , room_results(outbound, sessions)
             , handoffs(commands, sessions, routes, transitions, lifecycle, zone_results, config.max_zone_completions_per_turn)
             , room_entries(
-                  commands, sessions, routes, room_transitions, lifecycle, outbound, zone_results, config.max_room_entry_completions_per_turn
+                  commands,
+                  sessions,
+                  routes,
+                  room_transitions,
+                  lifecycle,
+                  room_results,
+                  zone_results,
+                  config.max_room_entry_completions_per_turn
               )
             , gateway(
                   commands,
@@ -93,6 +102,7 @@ namespace
         snf::server::RoomTransitionChannel room_transitions;
         snf::server::OutboundChannel outbound;
         snf::server::ProtocolZoneResultSink zone_results;
+        snf::server::ProtocolRoomResultSink room_results;
         snf::server::CountingCommandLifecycleSink lifecycle;
         snf::server::ZoneHandoffService handoffs;
         snf::server::RoomEntryService room_entries;
@@ -138,8 +148,12 @@ namespace
         append_u32(payload, static_cast<std::uint32_t>(value));
     }
 
-    snf::server::FrameEnvelope
-    make_enter_frame(const snf::net::ConnectionId connection, const std::uint64_t zone, const std::int32_t x, const std::int32_t y)
+    snf::server::FrameEnvelope make_enter_frame(
+        const snf::net::ConnectionId connection,
+        const std::uint64_t zone,
+        const std::int32_t x,
+        const std::int32_t y
+    )
     {
         std::vector<std::byte> payload;
         append_u64(payload, zone);
@@ -854,8 +868,7 @@ namespace
         };
     }
 
-    snf::server::FrameEnvelope
-    make_use_skill_frame(
+    snf::server::FrameEnvelope make_use_skill_frame(
         const snf::net::ConnectionId connection,
         const std::uint64_t room,
         const std::uint32_t skill_id,
@@ -878,7 +891,10 @@ namespace
     }
 
     snf::server::FrameEnvelope make_set_move_intent_frame(
-        const snf::net::ConnectionId connection, const std::uint64_t room, const std::uint8_t direction, const std::uint64_t sequence
+        const snf::net::ConnectionId connection,
+        const std::uint64_t room,
+        const std::uint8_t direction,
+        const std::uint64_t sequence
     )
     {
         std::vector<std::byte> payload;

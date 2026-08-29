@@ -4,12 +4,12 @@
 #include "snf/game/room_result.hpp"
 #include "snf/net/socket_options.hpp"
 #include "snf/net/system_error.hpp"
+#include "snf/protocol/payload_writer.hpp"
 
 #include <arpa/inet.h>
 #include <array>
 #include <cerrno>
 #include <cstddef>
-#include <cstdint>
 #include <netinet/in.h>
 #include <span>
 #include <stdexcept>
@@ -71,14 +71,7 @@ namespace
         return payload;
     }
 
-    template <typename Integer> void append_big_endian(std::vector<std::byte>& payload, const Integer value)
-    {
-        for (std::size_t remaining = sizeof(Integer); remaining > 0; --remaining)
-        {
-            const std::size_t shift = (remaining - 1) * 8;
-            payload.push_back(static_cast<std::byte>((static_cast<std::make_unsigned_t<Integer>>(value) >> shift) & 0xFFU));
-        }
-    }
+    using snf::protocol::append_big_endian;
 
     template <typename Integer> Integer read_big_endian(const std::vector<std::byte>& payload, const std::size_t offset)
     {
@@ -95,7 +88,10 @@ namespace
 namespace snf::load
 {
     ClientConnection::ClientConnection(
-        const std::string_view host, const std::uint16_t port, const std::chrono::milliseconds connect_timeout, const ClientWorkload workload
+        const std::string_view host,
+        const std::uint16_t port,
+        const std::chrono::milliseconds connect_timeout,
+        const ClientWorkload workload
     )
         : _socket(create_client_socket())
         , _connect_deadline(std::chrono::steady_clock::now() + connect_timeout)
@@ -573,7 +569,8 @@ namespace snf::load
             _outstanding_request->request_type == snf::protocol::MessageType::SetMoveIntent)
         {
             if (response.payload.size() != 2 ||
-                std::to_integer<std::uint8_t>(response.payload[0]) > static_cast<std::uint8_t>(snf::server::RoomCommandStatus::ProjectileCapacityExceeded) ||
+                std::to_integer<std::uint8_t>(response.payload[0]) >
+                    static_cast<std::uint8_t>(snf::server::RoomCommandStatus::ProjectileCapacityExceeded) ||
                 std::to_integer<std::uint8_t>(response.payload[1]) > static_cast<std::uint8_t>(snf::server::RoomPhase::Failed))
             {
                 return protocol_error("Battle acknowledgement fields are invalid");
@@ -614,7 +611,9 @@ namespace snf::load
     }
 
     std::optional<ClientError> ClientConnection::recordUnsolicitedFrame(
-        const snf::protocol::Frame& response, const std::chrono::steady_clock::time_point received_at, ReadResult& result
+        const snf::protocol::Frame& response,
+        const std::chrono::steady_clock::time_point received_at,
+        ReadResult& result
     )
     {
         ++result.unsolicited_frames;

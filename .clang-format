@@ -13,10 +13,13 @@ AllowShortFunctionsOnASingleLine: None
 AllowShortIfStatementsOnASingleLine: Never
 AllowShortLoopsOnASingleLine: false
 AllowShortLambdasOnASingleLine: None
+AllowAllParametersOfDeclarationOnNextLine: false
 BinPackArguments: false
 BinPackParameters: false
 BreakConstructorInitializers: BeforeComma
 PackConstructorInitializers: Never
+
+PenaltyReturnTypeOnItsOwnLine: 1000
 
 NamespaceIndentation: All
 FixNamespaceComments: false
