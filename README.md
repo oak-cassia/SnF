@@ -1,6 +1,10 @@
 # SnF - C++ 비동기 MORPG 서버
 
 > epoll 기반 네트워크, Actor 실행 모델과 MySQL 영속화 설계 및 구현
+>
+> **아키텍처 전환 안내 (2026-08-29):** 이 README의 구조와 코드 링크는 현재 구현을 설명합니다.
+> 앞으로 구현할 기준은 [Unified Worker Runtime 아키텍처](docs/unified-worker-runtime.md)이며,
+> 문서 분류는 [docs/README](docs/README.md)를 따릅니다.
 
 ---
 
@@ -16,7 +20,7 @@ SnF는 Linux에서 실행되는 C++20 기반 MORPG 서버입니다.
 
 ---
 
-## 2. 전체 아키텍처
+## 2. 현행 구현 아키텍처
 
 SnF는 네트워크 입출력, 게임 상태 변경, 데이터베이스 작업을 서로 다른 실행 경계로 나눕니다.
 요청은 네트워크 Reactor에서 해석한 뒤 대상 Actor로 전달하고, 처리 결과는 클라이언트 응답이나
