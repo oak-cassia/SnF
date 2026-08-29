@@ -92,6 +92,16 @@ find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(MySQL REQUIRED IMPORTED_TARGET mysqlclient)
 
+add_library(snf_worker STATIC
+    src/worker/wakeup.cpp
+    src/worker/poller.cpp
+    src/worker/inbox.cpp
+    src/worker/worker.cpp
+)
+target_include_directories(snf_worker PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(snf_worker PUBLIC snf_core Threads::Threads)
+snf_configure_target(snf_worker)
+
 add_library(snf_runtime STATIC
     src/runtime/runtime_completion.cpp
     src/runtime/actor_runtime.cpp
@@ -216,8 +226,12 @@ if(BUILD_TESTING)
     add_executable(snf_worker_tests
         tests/worker_test_main.cpp
         tests/worker_identity_test.cpp
+        tests/worker_poller_test.cpp
+        tests/worker_inbox_test.cpp
+        tests/worker_timer_queue_test.cpp
+        tests/worker_loop_test.cpp
     )
-    target_include_directories(snf_worker_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(snf_worker_tests PRIVATE snf_worker)
     snf_configure_target(snf_worker_tests)
 
     add_test(NAME snf_worker_tests COMMAND snf_worker_tests)
