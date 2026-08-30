@@ -98,11 +98,11 @@
 
 ### 6단계 — Cross-worker event와 Public Tell
 
-- [ ] 최종 public `Worker::tell()`을 추가하고 `WrongOwner` 분기를 remote delivery로 전환한다.
-- [ ] remote actor message, connection send/close와 실제 필요한 application completion을 concrete
+- [x] 최종 public `Worker::tell()`을 추가하고 `WrongOwner` 분기를 remote delivery로 전환한다.
+- [x] remote actor message, connection send/close와 실제 필요한 application completion을 concrete
   `WorkerEvent`로 정의한다.
-- [ ] MPSC queue를 count/byte bounded로 만들고 enqueue 실패를 caller에게 반환한다.
-- [ ] WorkerGroup producer quiescence와 shutdown barrier를 구현한다.
+- [x] MPSC queue를 count/byte bounded로 만들고 enqueue 실패를 caller에게 반환한다.
+- [x] WorkerGroup producer quiescence와 shutdown barrier를 구현한다.
 
 종료 조건: 다른 Worker가 owner object pointer를 보관하거나 queue 자리를 기다리지 않는다.
 
