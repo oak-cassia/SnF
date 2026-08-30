@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 namespace snf::worker
 {
@@ -18,6 +19,7 @@ namespace snf::worker
         std::size_t poll_registration_capacity{1025};
         std::size_t max_accepts_per_poll{64};
         std::size_t receive_chunk_bytes{16ull * 1024};
+        std::optional<int> client_send_buffer_size{};
     };
 
     struct WorkerNetworkMetrics
@@ -36,6 +38,8 @@ namespace snf::worker
         std::uint64_t hard_limit_sends{0};
         std::uint64_t read_budget_stops{0};
         std::uint64_t write_budget_stops{0};
+        std::uint64_t epollout_waits{0};
+        std::uint64_t epollout_resumes{0};
         std::uint64_t listener_pauses{0};
         std::uint64_t listener_resumes{0};
         std::uint64_t graceful_closes{0};
@@ -61,7 +65,7 @@ namespace snf::worker
                config.table.limits.close_drain_deadline >= std::chrono::milliseconds::zero() &&
                config.poll_registration_capacity > config.table.capacity &&
                config.poll_registration_capacity <= static_cast<std::size_t>(MAX_POLL_INDEX) + 1 && config.max_accepts_per_poll > 0 &&
-               config.receive_chunk_bytes > 0;
+               config.receive_chunk_bytes > 0 && (!config.client_send_buffer_size || *config.client_send_buffer_size > 0);
     }
 
     struct WorkerGroupConfig

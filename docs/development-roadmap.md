@@ -73,7 +73,6 @@
 - [x] read/decode/request translation 경계를 owner Worker의 `RequestSink`로 구현한다.
 - [x] local send는 write buffer에 직접 append하고 remote send/close는 WorkerInbox event로 전달한다.
 - [x] read/write/frame/table 상한과 slow-consumer close 경로를 검증한다.
-- [ ] 실제 game request translation과 legacy server의 신규 Worker 경로 전환을 완료한다.
 
 종료 조건: shared OutboundChannel 없이 partial I/O와 기존 protocol 통합 테스트를 통과한다.
 
@@ -110,6 +109,7 @@
 - [ ] Player/Zone/Room result를 `toEffects(context, result)` overload로 변환한다.
 - [ ] `SendFrame`, `CloseConnection`, `TellActor`, `ScheduleTimer`, `StopActor`의 ordered batch를 만든다.
 - [ ] effect type별 고정 failure semantics와 stop-batch 동작을 검증한다.
+- [ ] `RequestSink`에서 실제 game request translation과 Actor ingress를 연결한다.
 - [ ] Domain 코드에서 Worker, ActorTable, ConnectionTable과 send/tell 직접 호출을 제거한다.
 
 종료 조건: Worker가 typed domain result 의미를 알지 않고 별도 OutcomeHandler hierarchy가 없다.
@@ -147,7 +147,8 @@
 - [ ] Worker/Actor/Inbox/DB/Connection/Timer/Completion metric을 추가한다.
 - [ ] client I/O, hot Actor, 느린 DB와 slow consumer를 동시에 부하한다.
 - [ ] Debug, ASan·UBSan, TSan, TCP/MySQL integration과 shutdown race를 통과한다.
-- [ ] 신규 경로 100% 전환 뒤 ActorRuntime, Binding, shared Outbound와 legacy completion 코드를 제거한다.
+- [ ] production server의 connection/game request 경로를 신규 Worker로 100% 전환한다.
+- [ ] 전환 뒤 ActorRuntime, Binding, shared Outbound와 legacy completion 코드를 제거한다.
 - [ ] 루트 README를 목표 구조의 실제 코드 링크와 새 측정값으로 갱신한다.
 
 종료 조건: target architecture의 품질 게이트를 모두 통과하고 README가 더 이상 legacy 배너를 필요로 하지

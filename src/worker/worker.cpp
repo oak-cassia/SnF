@@ -411,6 +411,7 @@ namespace snf::worker
                 // batch. Clearing this bit before the requeue makes later
                 // duplicate EPOLLOUT events harmless.
                 slot->setWaitingEpollout(false);
+                ++_metrics.network.epollout_resumes;
                 updateConnectionInterest(*slot);
                 if (!slot->writeQueued() && !enqueueWrite(*slot))
                 {
@@ -644,6 +645,10 @@ namespace snf::worker
 
             snf::net::UniqueFileDescriptor client_socket{client_descriptor};
             snf::net::enable_tcp_no_delay(client_descriptor);
+            if (_network_config.client_send_buffer_size)
+            {
+                snf::net::set_socket_send_buffer_size(client_descriptor, *_network_config.client_send_buffer_size);
+            }
 
             auto connection_reservation = _connections->tryReserve(std::move(client_socket), _id);
             if (!connection_reservation)
@@ -842,6 +847,7 @@ namespace snf::worker
 
             if (would_block)
             {
+                ++_metrics.network.epollout_waits;
                 slot->setWaitingEpollout(true);
                 updateConnectionInterest(*slot);
             }

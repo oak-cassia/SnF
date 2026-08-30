@@ -12,10 +12,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <netinet/in.h>
+#include <stdexcept>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <thread>
@@ -33,7 +35,6 @@ namespace
     {
         Accept,
         RespondAndGracefulClose,
-        RespondOverflow,
         Invalid,
         Rejected,
     };
@@ -44,6 +45,7 @@ namespace
         std::condition_variable changed;
         std::vector<Frame> requests;
         std::vector<ConnectionRef> connections;
+        std::vector<ConnectionRef> closed_connections;
         std::vector<SendResult> send_results;
         std::vector<bool> close_results;
         std::vector<CloseReason> close_reasons;
@@ -77,7 +79,7 @@ namespace
             _worker = &worker;
         }
 
-        void setRequestCallback(std::function<void()> callback)
+        void setRequestCallback(std::function<void(ConnectionRef, const Frame&)> callback)
         {
             _request_callback = std::move(callback);
         }
@@ -93,10 +95,10 @@ namespace
 
             if (_request_callback)
             {
-                _request_callback();
+                _request_callback(connection, frame);
             }
 
-            if (_mode == SinkMode::RespondAndGracefulClose || _mode == SinkMode::RespondOverflow)
+            if (_mode == SinkMode::RespondAndGracefulClose)
             {
                 assert(_worker != nullptr);
                 Frame response{
@@ -105,8 +107,7 @@ namespace
                     .payload = std::vector<std::byte>{std::byte{0x42}},
                 };
                 const SendResult send_result = _worker->send(connection, std::move(response));
-                const bool close_result =
-                    _mode == SinkMode::RespondAndGracefulClose && _worker->closeConnection(connection, CloseReason::Application, true);
+                const bool close_result = _worker->closeConnection(connection, CloseReason::Application, true);
                 {
                     std::lock_guard lock{_state->mutex};
                     _state->send_results.push_back(send_result);
@@ -127,10 +128,11 @@ namespace
             return RequestPostResult::Accepted;
         }
 
-        void onConnectionClosed(ConnectionRef, CloseReason reason) override
+        void onConnectionClosed(ConnectionRef connection, CloseReason reason) override
         {
             {
                 std::lock_guard lock{_state->mutex};
+                _state->closed_connections.push_back(connection);
                 _state->close_reasons.push_back(reason);
             }
             _state->changed.notify_all();
@@ -140,7 +142,7 @@ namespace
         std::shared_ptr<SinkState> _state;
         SinkMode _mode;
         Worker* _worker;
-        std::function<void()> _request_callback;
+        std::function<void(ConnectionRef, const Frame&)> _request_callback;
     };
 
     [[nodiscard]] Frame pingFrame(const std::uint32_t request_id)
@@ -150,6 +152,25 @@ namespace
             .request_id = request_id,
             .payload = std::vector<std::byte>{std::byte{0x10}, std::byte{0x20}},
         };
+    }
+
+    [[nodiscard]] Frame pongFrame(const std::uint32_t request_id, const std::size_t payload_size = 1)
+    {
+        return Frame{
+            .type = MessageType::Pong,
+            .request_id = request_id,
+            .payload = std::vector<std::byte>(payload_size, std::byte{0x42}),
+        };
+    }
+
+    [[nodiscard]] std::size_t openFileDescriptorCount()
+    {
+        std::size_t count = 0;
+        for ([[maybe_unused]] const auto& entry : std::filesystem::directory_iterator{"/proc/self/fd"})
+        {
+            ++count;
+        }
+        return count;
     }
 
     [[nodiscard]] std::uint16_t portOf(const int descriptor)
@@ -166,12 +187,16 @@ namespace
         assert(::setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0);
     }
 
-    [[nodiscard]] snf::net::UniqueFileDescriptor connectClient(const std::uint16_t port)
+    [[nodiscard]] snf::net::UniqueFileDescriptor connectClient(const std::uint16_t port, const int receive_buffer_size = 0)
     {
         const int descriptor = ::socket(AF_INET, SOCK_STREAM, 0);
         assert(descriptor != -1);
         snf::net::UniqueFileDescriptor client{descriptor};
         setReceiveTimeout(descriptor);
+        if (receive_buffer_size > 0)
+        {
+            assert(::setsockopt(descriptor, SOL_SOCKET, SO_RCVBUF, &receive_buffer_size, sizeof(receive_buffer_size)) == 0);
+        }
 
         sockaddr_in address{};
         address.sin_family = AF_INET;
@@ -318,6 +343,86 @@ namespace
         assert(owner_worker.metrics().network.write_budget_stops >= 1);
     }
 
+    void test_eagain_waits_for_epollout_and_resumes_in_order()
+    {
+        constexpr std::size_t frame_count = 24;
+        constexpr std::size_t payload_size = 32ull * 1024;
+
+        auto state = std::make_shared<SinkState>();
+        TestRequestSink sink{state, SinkMode::Accept};
+        WorkerNetworkConfig network = testNetworkConfig(1);
+        network.client_send_buffer_size = 4096;
+        Worker worker(WorkerId{0}, 1, testBudgets(), WorkerInboxConfig{}, network, sink);
+        sink.setRequestCallback(
+            [&worker, state](const ConnectionRef connection, const Frame&)
+            {
+                std::vector<SendResult> results;
+                results.reserve(frame_count);
+                for (std::size_t index = 0; index < frame_count; ++index)
+                {
+                    results.push_back(worker.send(connection, pongFrame(1000 + static_cast<std::uint32_t>(index), payload_size), true));
+                }
+                const bool close_result = worker.closeConnection(connection, CloseReason::Application, true);
+                {
+                    std::lock_guard lock{state->mutex};
+                    state->send_results.insert(state->send_results.end(), results.begin(), results.end());
+                    state->close_results.push_back(close_result);
+                }
+                state->changed.notify_all();
+            }
+        );
+
+        auto listener = snf::net::create_tcp_listener(0);
+        const std::uint16_t port = portOf(listener.getDescriptor());
+        worker.attachListener(std::move(listener));
+
+        std::thread thread{[&worker]
+                           {
+                               worker.run();
+                           }};
+        auto client = connectClient(port, 4096);
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(pingFrame(99)));
+        assert(waitFor(
+            *state,
+            [](const SinkState& observed)
+            {
+                return observed.send_results.size() == frame_count && observed.close_results.size() == 1;
+            }
+        ));
+
+        // Let the deliberately tiny server send buffer and the unread client
+        // receive window force send() to return EAGAIN.
+        std::this_thread::sleep_for(100ms);
+
+        const std::size_t encoded_frame_size = snf::protocol::encode_frame(pongFrame(1000, payload_size)).size();
+        const auto encoded_responses = receiveExact(client.getDescriptor(), encoded_frame_size * frame_count);
+        snf::protocol::FrameDecoder decoder;
+        const auto decoded = decoder.append(encoded_responses);
+        assert(decoded.ok());
+        assert(decoded.frames.size() == frame_count);
+        for (std::size_t index = 0; index < frame_count; ++index)
+        {
+            assert(decoded.frames[index].request_id == 1000 + index);
+        }
+        assert(receivesEof(client.getDescriptor()));
+
+        worker.requestStop();
+        thread.join();
+
+        {
+            std::lock_guard lock{state->mutex};
+            for (const SendResult result : state->send_results)
+            {
+                assert(result == SendResult::Accepted);
+            }
+            assert(state->close_results.front());
+        }
+        assert(worker.metrics().network.epollout_waits >= 1);
+        assert(worker.metrics().network.epollout_resumes >= 1);
+        assert(worker.metrics().network.sent_frames == frame_count);
+        assert(worker.metrics().network.graceful_closes == 1);
+    }
+
     void test_decode_frame_budget_requeues_buffered_frames()
     {
         auto state = std::make_shared<SinkState>();
@@ -376,7 +481,7 @@ namespace
         auto remote_target_port = target_worker.bindInboxSource(WorkerId{1});
         source_worker.bindRemoteTarget(WorkerId{0}, std::move(remote_target_port));
         source_sink.setRequestCallback(
-            [&source_worker, target_state, source_state]
+            [&source_worker, target_state, source_state](ConnectionRef, const Frame&)
             {
                 ConnectionRef target_connection;
                 {
@@ -554,12 +659,23 @@ namespace
     void test_slow_consumer_hard_limit_closes_only_that_connection()
     {
         auto state = std::make_shared<SinkState>();
-        TestRequestSink sink{state, SinkMode::RespondOverflow};
-        WorkerNetworkConfig network = testNetworkConfig();
-        network.table.limits.write_soft_watermark_bytes = 5;
-        network.table.limits.write_hard_limit_bytes = 10;
+        TestRequestSink sink{state, SinkMode::Accept};
+        WorkerNetworkConfig network = testNetworkConfig(2);
+        network.table.limits.write_soft_watermark_bytes = 128;
+        network.table.limits.write_hard_limit_bytes = 256;
         Worker worker(WorkerId{0}, 1, testBudgets(), WorkerInboxConfig{}, network, sink);
-        sink.setWorker(worker);
+        sink.setRequestCallback(
+            [&worker, state](const ConnectionRef connection, const Frame& request)
+            {
+                const std::size_t response_size = request.request_id == 70 ? 512 : 1;
+                const SendResult result = worker.send(connection, pongFrame(request.request_id, response_size), true);
+                {
+                    std::lock_guard lock{state->mutex};
+                    state->send_results.push_back(result);
+                }
+                state->changed.notify_all();
+            }
+        );
         auto listener = snf::net::create_tcp_listener(0);
         const std::uint16_t port = portOf(listener.getDescriptor());
         worker.attachListener(std::move(listener));
@@ -568,8 +684,9 @@ namespace
                            {
                                worker.run();
                            }};
-        auto client = connectClient(port);
-        sendAll(client.getDescriptor(), snf::protocol::encode_frame(pingFrame(23)));
+        auto slow_client = connectClient(port);
+        auto healthy_client = connectClient(port);
+        sendAll(slow_client.getDescriptor(), snf::protocol::encode_frame(pingFrame(70)));
 
         assert(waitFor(
             *state,
@@ -578,18 +695,220 @@ namespace
                 return observed.requests.size() == 1 && observed.send_results.size() == 1 && observed.close_reasons.size() == 1;
             }
         ));
-        assert(receivesEof(client.getDescriptor()));
+        assert(receivesEof(slow_client.getDescriptor()));
+
+        sendAll(healthy_client.getDescriptor(), snf::protocol::encode_frame(pingFrame(71)));
+        assert(waitFor(
+            *state,
+            [](const SinkState& observed)
+            {
+                return observed.requests.size() == 2 && observed.send_results.size() == 2;
+            }
+        ));
+
+        const auto encoded_response = receiveExact(healthy_client.getDescriptor(), snf::protocol::encode_frame(pongFrame(71)).size());
+        snf::protocol::FrameDecoder decoder;
+        const auto decoded = decoder.append(encoded_response);
+        assert(decoded.ok());
+        assert(decoded.frames.size() == 1);
+        assert(decoded.frames.front() == pongFrame(71));
 
         worker.requestStop();
         thread.join();
 
         std::lock_guard lock{state->mutex};
-        assert(state->send_results.front() == SendResult::HardLimit);
-        assert(!state->close_results.front());
+        assert(state->send_results.size() == 2);
+        assert(state->send_results[0] == SendResult::HardLimit);
+        assert(state->send_results[1] == SendResult::Accepted);
         assert(state->close_reasons.front() == CloseReason::SlowConsumer);
+        assert(worker.metrics().network.accepted_connections == 2);
         assert(worker.metrics().network.hard_limit_sends == 1);
+        assert(worker.metrics().network.sent_frames == 1);
         assert(worker.metrics().network.immediate_closes == 1);
-        assert(worker.metrics().network.graceful_closes == 0);
+        assert(worker.metrics().network.graceful_closes == 1);
+    }
+
+    void test_repeated_connect_disconnect_reuses_generation_without_fd_leak()
+    {
+        constexpr std::size_t iteration_count = 128;
+
+        auto state = std::make_shared<SinkState>();
+        TestRequestSink sink{state, SinkMode::Accept};
+        Worker worker(WorkerId{0}, 1, testBudgets(), WorkerInboxConfig{}, testNetworkConfig(1), sink);
+        auto listener = snf::net::create_tcp_listener(0);
+        const std::uint16_t port = portOf(listener.getDescriptor());
+        worker.attachListener(std::move(listener));
+
+        std::thread thread{[&worker]
+                           {
+                               worker.run();
+                           }};
+        const std::size_t baseline_descriptor_count = openFileDescriptorCount();
+
+        for (std::size_t index = 0; index < iteration_count; ++index)
+        {
+            auto client = connectClient(port);
+            sendAll(client.getDescriptor(), snf::protocol::encode_frame(pingFrame(2000 + static_cast<std::uint32_t>(index))));
+            assert(waitFor(
+                *state,
+                [index](const SinkState& observed)
+                {
+                    return observed.requests.size() == index + 1;
+                }
+            ));
+            client.init();
+            assert(waitFor(
+                *state,
+                [index](const SinkState& observed)
+                {
+                    return observed.closed_connections.size() == index + 1;
+                }
+            ));
+        }
+
+        assert(openFileDescriptorCount() == baseline_descriptor_count);
+        worker.requestStop();
+        thread.join();
+
+        std::lock_guard lock{state->mutex};
+        assert(state->connections.size() == iteration_count);
+        assert(state->closed_connections.size() == iteration_count);
+        for (std::size_t index = 0; index < iteration_count; ++index)
+        {
+            assert(state->requests[index].request_id == 2000 + index);
+            assert(state->connections[index] == state->closed_connections[index]);
+            assert(state->connections[index].id == state->connections.front().id);
+            if (index != 0)
+            {
+                assert(state->connections[index - 1].generation.value < state->connections[index].generation.value);
+            }
+        }
+        assert(worker.connectionCount() == 0);
+        assert(worker.metrics().network.accepted_connections == iteration_count);
+        assert(worker.metrics().network.closed_connections == iteration_count);
+    }
+
+    void test_close_deadline_and_stale_timer_ignore_reused_slot()
+    {
+        constexpr std::size_t stalled_frame_count = 48;
+        constexpr std::size_t stalled_payload_size = 32ull * 1024;
+
+        auto state = std::make_shared<SinkState>();
+        TestRequestSink sink{state, SinkMode::Accept};
+        WorkerNetworkConfig network = testNetworkConfig(1);
+        network.client_send_buffer_size = 4096;
+        network.table.limits.write_soft_watermark_bytes = 1ull * 1024 * 1024;
+        network.table.limits.write_hard_limit_bytes = 2ull * 1024 * 1024;
+        network.table.limits.close_drain_deadline = 250ms;
+        Worker worker(WorkerId{0}, 1, testBudgets(), WorkerInboxConfig{}, network, sink);
+        sink.setRequestCallback(
+            [&worker, state](const ConnectionRef connection, const Frame& request)
+            {
+                std::vector<SendResult> results;
+                if (request.request_id == 82)
+                {
+                    results.reserve(stalled_frame_count);
+                    for (std::size_t index = 0; index < stalled_frame_count; ++index)
+                    {
+                        results.push_back(worker.send(connection, pongFrame(3000 + static_cast<std::uint32_t>(index), stalled_payload_size), true));
+                    }
+                }
+                else
+                {
+                    results.push_back(worker.send(connection, pongFrame(request.request_id), true));
+                }
+
+                const bool should_close = request.request_id == 80 || request.request_id == 82;
+                const bool close_result = should_close && worker.closeConnection(connection, CloseReason::Application, true);
+                {
+                    std::lock_guard lock{state->mutex};
+                    state->send_results.insert(state->send_results.end(), results.begin(), results.end());
+                    if (should_close)
+                    {
+                        state->close_results.push_back(close_result);
+                    }
+                }
+                state->changed.notify_all();
+            }
+        );
+
+        auto listener = snf::net::create_tcp_listener(0);
+        const std::uint16_t port = portOf(listener.getDescriptor());
+        worker.attachListener(std::move(listener));
+        std::thread thread{[&worker]
+                           {
+                               worker.run();
+                           }};
+
+        auto first_client = connectClient(port);
+        sendAll(first_client.getDescriptor(), snf::protocol::encode_frame(pingFrame(80)));
+        const auto first_response = receiveExact(first_client.getDescriptor(), snf::protocol::encode_frame(pongFrame(80)).size());
+        snf::protocol::FrameDecoder first_decoder;
+        const auto first_decoded = first_decoder.append(first_response);
+        assert(first_decoded.ok());
+        assert(first_decoded.frames.size() == 1);
+        assert(first_decoded.frames.front() == pongFrame(80));
+        assert(receivesEof(first_client.getDescriptor()));
+        assert(waitFor(
+            *state,
+            [](const SinkState& observed)
+            {
+                return observed.close_reasons.size() == 1;
+            }
+        ));
+
+        auto reused_client = connectClient(port, 4096);
+        sendAll(reused_client.getDescriptor(), snf::protocol::encode_frame(pingFrame(81)));
+        const auto reused_response = receiveExact(reused_client.getDescriptor(), snf::protocol::encode_frame(pongFrame(81)).size());
+        snf::protocol::FrameDecoder reused_decoder;
+        const auto reused_decoded = reused_decoder.append(reused_response);
+        assert(reused_decoded.ok());
+        assert(reused_decoded.frames.size() == 1);
+        assert(reused_decoded.frames.front() == pongFrame(81));
+
+        assert(waitFor(
+            *state,
+            [](const SinkState& observed)
+            {
+                return observed.connections.size() == 2;
+            }
+        ));
+        {
+            std::lock_guard lock{state->mutex};
+            assert(state->connections[0].id == state->connections[1].id);
+            assert(state->connections[0].generation != state->connections[1].generation);
+        }
+
+        std::this_thread::sleep_for(350ms);
+        sendAll(reused_client.getDescriptor(), snf::protocol::encode_frame(pingFrame(83)));
+        const auto post_deadline_response = receiveExact(reused_client.getDescriptor(), snf::protocol::encode_frame(pongFrame(83)).size());
+        snf::protocol::FrameDecoder post_deadline_decoder;
+        const auto post_deadline_decoded = post_deadline_decoder.append(post_deadline_response);
+        assert(post_deadline_decoded.ok());
+        assert(post_deadline_decoded.frames.size() == 1);
+        assert(post_deadline_decoded.frames.front() == pongFrame(83));
+
+        sendAll(reused_client.getDescriptor(), snf::protocol::encode_frame(pingFrame(82)));
+        assert(waitFor(
+            *state,
+            [](const SinkState& observed)
+            {
+                return observed.close_reasons.size() == 2;
+            },
+            3s
+        ));
+
+        worker.requestStop();
+        thread.join();
+
+        std::lock_guard lock{state->mutex};
+        assert(state->close_results.size() == 2);
+        assert(state->close_results[0]);
+        assert(state->close_results[1]);
+        assert(state->close_reasons[0] == CloseReason::Application);
+        assert(state->close_reasons[1] == CloseReason::Timeout);
+        assert(worker.metrics().network.close_deadline_expirations == 1);
+        assert(worker.metrics().network.epollout_waits >= 1);
     }
 
     void test_listener_pauses_until_both_capacity_tables_have_room()
@@ -661,16 +980,60 @@ namespace
         assert(group.worker(0).metrics().loop_iterations > 0);
         assert(group.worker(1).metrics().loop_iterations > 0);
     }
+
+    void test_group_bootstrap_rolls_back_listeners_when_sink_factory_throws()
+    {
+        auto port_reservation = snf::net::create_tcp_listener(0);
+        const std::uint16_t port = portOf(port_reservation.getDescriptor());
+        port_reservation.init();
+
+        auto state = std::make_shared<SinkState>();
+        WorkerGroupConfig config;
+        config.worker_count = 2;
+        config.max_workers = 2;
+        config.port = port;
+        config.budgets = testBudgets();
+        config.network = testNetworkConfig(2);
+
+        bool threw = false;
+        try
+        {
+            WorkerGroup group{
+                config,
+                [state](const WorkerId id) -> std::unique_ptr<RequestSink>
+                {
+                    if (id.value == 1)
+                    {
+                        throw std::runtime_error{"injected sink factory failure"};
+                    }
+                    return std::make_unique<TestRequestSink>(state, SinkMode::Accept);
+                },
+            };
+        }
+        catch (const std::runtime_error&)
+        {
+            threw = true;
+        }
+        assert(threw);
+
+        auto rebound_listener = snf::net::create_tcp_listener(port);
+        assert(rebound_listener.isValid());
+        assert(portOf(rebound_listener.getDescriptor()) == port);
+    }
 }
 
 int main()
 {
     test_worker_round_trip_and_graceful_write_drain();
+    test_eagain_waits_for_epollout_and_resumes_in_order();
     test_decode_frame_budget_requeues_buffered_frames();
     test_remote_critical_send_and_graceful_close_preserve_semantics();
     test_request_sink_terminal_results_are_not_retried();
     test_misrouted_network_events_are_not_sent_to_generic_handler();
     test_slow_consumer_hard_limit_closes_only_that_connection();
+    test_repeated_connect_disconnect_reuses_generation_without_fd_leak();
+    test_close_deadline_and_stale_timer_ignore_reused_slot();
     test_listener_pauses_until_both_capacity_tables_have_room();
     test_group_bootstrap_binds_each_worker_with_port_zero();
+    test_group_bootstrap_rolls_back_listeners_when_sink_factory_throws();
 }
