@@ -33,10 +33,8 @@ namespace
         {
         }
 
-        [[nodiscard]] std::optional<snf::worker::TimerReservation> tryReserve(
-            const std::uint64_t charged_bytes,
-            const std::uint64_t turn_id
-        ) noexcept override
+        [[nodiscard]] std::optional<snf::worker::TimerReservation> tryReserve(const std::uint64_t charged_bytes, const std::uint64_t turn_id) noexcept
+            override
         {
             if (should_fail || _reserved_bytes + charged_bytes > _capacity)
             {
@@ -82,7 +80,10 @@ namespace
         static_assert(snf::adapter::GameActorPayloadRegistry::isRegistered<snf::adapter::PingMessage>());
 
         auto envelope = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PingMessage{
-            .connection = snf::worker::ConnectionRef{.id = snf::worker::ConnectionId{1}, .generation = snf::worker::ConnectionGeneration{1}, .owner = snf::worker::WorkerId{0}},
+            .connection =
+                snf::worker::ConnectionRef{
+                    .id = snf::worker::ConnectionId{1}, .generation = snf::worker::ConnectionGeneration{1}, .owner = snf::worker::WorkerId{0}
+                },
             .request_id = 42,
             .payload = {std::byte{0x01}, std::byte{0x02}},
         });
@@ -125,7 +126,9 @@ namespace
             .now = std::chrono::steady_clock::now(),
         };
 
-        const snf::worker::ConnectionRef conn{.id = snf::worker::ConnectionId{5}, .generation = snf::worker::ConnectionGeneration{1}, .owner = snf::worker::WorkerId{0}};
+        const snf::worker::ConnectionRef conn{
+            .id = snf::worker::ConnectionId{5}, .generation = snf::worker::ConnectionGeneration{1}, .owner = snf::worker::WorkerId{0}
+        };
 
         auto envelope = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerCommandMessage{
             .connection = conn,
@@ -146,10 +149,11 @@ namespace
 
         // Test ExperienceGrant
         auto grant_envelope = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ExperienceGrantMessage{
-            .grant = snf::server::StreetExperienceGrant{
-                .player = snf::server::PlayerId{101},
-                .experience = 250,
-            },
+            .grant =
+                snf::server::StreetExperienceGrant{
+                    .player = snf::server::PlayerId{101},
+                    .experience = 250,
+                },
         });
         auto grant_result = player_actor.dispatch(std::move(grant_envelope), turn_ctx);
         assert(std::holds_alternative<snf::worker::CompletedTurn>(grant_result));
@@ -164,16 +168,19 @@ namespace
             .now = std::chrono::steady_clock::now(),
         };
 
-        const snf::worker::ConnectionRef conn{.id = snf::worker::ConnectionId{7}, .generation = snf::worker::ConnectionGeneration{1}, .owner = snf::worker::WorkerId{0}};
+        const snf::worker::ConnectionRef conn{
+            .id = snf::worker::ConnectionId{7}, .generation = snf::worker::ConnectionGeneration{1}, .owner = snf::worker::WorkerId{0}
+        };
 
         auto enter_envelope = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneCommandMessage{
             .connection = conn,
             .request_id = 12,
-            .command = snf::server::EnterZoneCommand{
-                .player = snf::server::PlayerId{101},
-                .route_epoch = 1,
-                .position = snf::server::ZonePosition{.x = 10, .y = 20},
-            },
+            .command =
+                snf::server::EnterZoneCommand{
+                    .player = snf::server::PlayerId{101},
+                    .route_epoch = 1,
+                    .position = snf::server::ZonePosition{.x = 10, .y = 20},
+                },
         });
 
         auto result = zone_actor.dispatch(std::move(enter_envelope), turn_ctx);
@@ -190,10 +197,11 @@ namespace
         auto leave_envelope = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneCommandMessage{
             .connection = conn,
             .request_id = 13,
-            .command = snf::server::LeaveZoneCommand{
-                .player = snf::server::PlayerId{101},
-                .route_epoch = 1,
-            },
+            .command =
+                snf::server::LeaveZoneCommand{
+                    .player = snf::server::PlayerId{101},
+                    .route_epoch = 1,
+                },
         });
 
         auto leave_result = zone_actor.dispatch(std::move(leave_envelope), turn_ctx);
@@ -213,17 +221,20 @@ namespace
             .now = std::chrono::steady_clock::now(),
         };
 
-        const snf::worker::ConnectionRef conn{.id = snf::worker::ConnectionId{3}, .generation = snf::worker::ConnectionGeneration{1}, .owner = snf::worker::WorkerId{0}};
+        const snf::worker::ConnectionRef conn{
+            .id = snf::worker::ConnectionId{3}, .generation = snf::worker::ConnectionGeneration{1}, .owner = snf::worker::WorkerId{0}
+        };
 
         // Join room first
         auto join_envelope = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::RoomCommandMessage{
             .connection = conn,
             .request_id = 1,
-            .command = snf::server::JoinRoom{
-                .player = snf::server::PlayerId{101},
-                .stats = snf::server::CombatStats{.attack = 10, .health = 100},
-                .equipped_skill_id = snf::server::SLASH_SKILL_ID,
-            },
+            .command =
+                snf::server::JoinRoom{
+                    .player = snf::server::PlayerId{101},
+                    .stats = snf::server::CombatStats{.attack = 10, .health = 100},
+                    .equipped_skill_id = snf::server::SLASH_SKILL_ID,
+                },
         });
 
         auto join_result = room_actor.dispatch(std::move(join_envelope), turn_ctx);
@@ -264,17 +275,20 @@ namespace
             .now = std::chrono::steady_clock::now(),
         };
 
-        const snf::worker::ConnectionRef conn{.id = snf::worker::ConnectionId{3}, .generation = snf::worker::ConnectionGeneration{1}, .owner = snf::worker::WorkerId{0}};
+        const snf::worker::ConnectionRef conn{
+            .id = snf::worker::ConnectionId{3}, .generation = snf::worker::ConnectionGeneration{1}, .owner = snf::worker::WorkerId{0}
+        };
 
         // Join room first
         auto join_envelope = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::RoomCommandMessage{
             .connection = conn,
             .request_id = 1,
-            .command = snf::server::JoinRoom{
-                .player = snf::server::PlayerId{101},
-                .stats = snf::server::CombatStats{.attack = 10, .health = 100},
-                .equipped_skill_id = snf::server::SLASH_SKILL_ID,
-            },
+            .command =
+                snf::server::JoinRoom{
+                    .player = snf::server::PlayerId{101},
+                    .stats = snf::server::CombatStats{.attack = 10, .health = 100},
+                    .equipped_skill_id = snf::server::SLASH_SKILL_ID,
+                },
         });
 
         auto join_result = room_actor.dispatch(std::move(join_envelope), turn_ctx);
@@ -309,7 +323,10 @@ namespace
         for (std::size_t i = 0; i < snf::worker::EffectBatch::MAX_EFFECTS; ++i)
         {
             assert(batch.tryPush(snf::worker::SendFrameEffect{
-                .connection = snf::worker::ConnectionRef{.id = snf::worker::ConnectionId{1}, .generation = snf::worker::ConnectionGeneration{1}, .owner = snf::worker::WorkerId{0}},
+                .connection =
+                    snf::worker::ConnectionRef{
+                        .id = snf::worker::ConnectionId{1}, .generation = snf::worker::ConnectionGeneration{1}, .owner = snf::worker::WorkerId{0}
+                    },
                 .frame = snf::protocol::Frame{},
                 .critical = false,
             }));
@@ -332,12 +349,7 @@ namespace
 
         snf::adapter::GameActorFactory factory;
         snf::worker::Worker worker(
-            snf::worker::WorkerId{0},
-            1,
-            snf::worker::WorkerBudgets::defaults(),
-            snf::worker::WorkerInboxConfig{},
-            actor_config,
-            factory
+            snf::worker::WorkerId{0}, 1, snf::worker::WorkerBudgets::defaults(), snf::worker::WorkerInboxConfig{}, actor_config, factory
         );
         factory.setTimerAdmission(worker);
 
@@ -347,16 +359,22 @@ namespace
         auto enter_envelope = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneCommandMessage{
             .connection = std::nullopt,
             .request_id = 1,
-            .command = snf::server::EnterZoneCommand{
-                .player = snf::server::PlayerId{101},
-                .route_epoch = 1,
-                .position = snf::server::ZonePosition{.x = 10, .y = 20},
-            },
+            .command =
+                snf::server::EnterZoneCommand{
+                    .player = snf::server::PlayerId{101},
+                    .route_epoch = 1,
+                    .position = snf::server::ZonePosition{.x = 10, .y = 20},
+                },
         });
 
         assert(worker.tryDeliverLocal(key, std::move(enter_envelope)) == snf::worker::DeliveryResult::Accepted);
 
-        std::thread th([&]() { worker.run(); });
+        std::thread th(
+            [&]()
+            {
+                worker.run();
+            }
+        );
         std::this_thread::sleep_for(150ms);
         worker.requestStop();
         th.join();
@@ -380,12 +398,7 @@ namespace
 
         snf::adapter::GameActorFactory factory;
         snf::worker::Worker worker(
-            snf::worker::WorkerId{0},
-            1,
-            snf::worker::WorkerBudgets::defaults(),
-            snf::worker::WorkerInboxConfig{},
-            actor_config,
-            factory
+            snf::worker::WorkerId{0}, 1, snf::worker::WorkerBudgets::defaults(), snf::worker::WorkerInboxConfig{}, actor_config, factory
         );
         factory.setTimerAdmission(worker);
 
@@ -394,16 +407,22 @@ namespace
         auto enter_envelope = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneCommandMessage{
             .connection = std::nullopt,
             .request_id = 1,
-            .command = snf::server::EnterZoneCommand{
-                .player = snf::server::PlayerId{101},
-                .route_epoch = 1,
-                .position = snf::server::ZonePosition{.x = 10, .y = 20},
-            },
+            .command =
+                snf::server::EnterZoneCommand{
+                    .player = snf::server::PlayerId{101},
+                    .route_epoch = 1,
+                    .position = snf::server::ZonePosition{.x = 10, .y = 20},
+                },
         });
 
         assert(worker.tryDeliverLocal(key, std::move(enter_envelope)) == snf::worker::DeliveryResult::Accepted);
 
-        std::thread th([&]() { worker.run(); });
+        std::thread th(
+            [&]()
+            {
+                worker.run();
+            }
+        );
         std::this_thread::sleep_for(20ms);
         worker.requestStop();
         th.join();

@@ -13,8 +13,7 @@
 
 namespace snf::worker
 {
-    template <typename T>
-    struct ActorPayloadTraits;
+    template <typename T> struct ActorPayloadTraits;
 
     class ActorPayloadConcept
     {
@@ -27,8 +26,7 @@ namespace snf::worker
         [[nodiscard]] virtual const void* rawPointer() const noexcept = 0;
     };
 
-    template <typename T>
-    class ActorPayloadModel final : public ActorPayloadConcept
+    template <typename T> class ActorPayloadModel final : public ActorPayloadConcept
     {
     public:
         explicit ActorPayloadModel(T&& val, const std::uint32_t tag, const std::uint64_t charge) noexcept(std::is_nothrow_move_constructible_v<T>)
@@ -106,19 +104,16 @@ namespace snf::worker
             return _concept ? _concept->chargedBytes() : 0;
         }
 
-        template <typename T>
-        [[nodiscard]] bool is() const noexcept
+        template <typename T> [[nodiscard]] bool is() const noexcept
         {
             if (!_concept)
             {
                 return false;
             }
-            return _concept->tag() == ActorPayloadTraits<std::decay_t<T>>::TAG &&
-                   _concept->typeInfo() == typeid(std::decay_t<T>);
+            return _concept->tag() == ActorPayloadTraits<std::decay_t<T>>::TAG && _concept->typeInfo() == typeid(std::decay_t<T>);
         }
 
-        template <typename T>
-        [[nodiscard]] const T& get() const
+        template <typename T> [[nodiscard]] const T& get() const
         {
             if (!is<T>())
             {
@@ -127,8 +122,7 @@ namespace snf::worker
             return *static_cast<const T*>(_concept->rawPointer());
         }
 
-        template <typename T>
-        [[nodiscard]] T& get()
+        template <typename T> [[nodiscard]] T& get()
         {
             if (!is<T>())
             {
@@ -137,8 +131,7 @@ namespace snf::worker
             return *static_cast<T*>(_concept->rawPointer());
         }
 
-        template <typename T>
-        [[nodiscard]] T take()
+        template <typename T> [[nodiscard]] T take()
         {
             if (!is<T>())
             {
@@ -156,8 +149,7 @@ namespace snf::worker
         }
 
     private:
-        template <typename... RegisteredTypes>
-        friend class ActorPayloadRegistry;
+        template <typename... RegisteredTypes> friend class ActorPayloadRegistry;
 
         explicit ActorEnvelope(std::unique_ptr<ActorPayloadConcept> concept_ptr) noexcept
             : _concept(std::move(concept_ptr))
@@ -171,8 +163,7 @@ namespace snf::worker
     static_assert(!std::is_copy_constructible_v<ActorEnvelope>);
     static_assert(!std::is_copy_assignable_v<ActorEnvelope>);
 
-    template <typename... Ts>
-    class ActorPayloadRegistry final
+    template <typename... Ts> class ActorPayloadRegistry final
     {
     private:
         static consteval bool hasUniqueTags()
@@ -206,14 +197,12 @@ namespace snf::worker
         static_assert(hasUniqueTags(), "ActorPayloadRegistry: TAG values must be non-zero and unique!");
 
     public:
-        template <typename T>
-        static constexpr bool isRegistered()
+        template <typename T> static constexpr bool isRegistered()
         {
             return (std::is_same_v<std::decay_t<T>, Ts> || ...);
         }
 
-        template <typename T>
-        [[nodiscard]] static ActorEnvelope create(T&& payload)
+        template <typename T> [[nodiscard]] static ActorEnvelope create(T&& payload)
         {
             using DecayedT = std::decay_t<T>;
             static_assert(isRegistered<DecayedT>(), "Payload type T is not registered in this ActorPayloadRegistry!");

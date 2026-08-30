@@ -159,12 +159,7 @@ namespace snf::worker
         std::optional<TimerReservation> reservation{std::nullopt};
     };
 
-    using Effect = std::variant<
-        SendFrameEffect,
-        CloseConnectionEffect,
-        TellActorEffect,
-        StopActorEffect,
-        ScheduleTimerEffect>;
+    using Effect = std::variant<SendFrameEffect, CloseConnectionEffect, TellActorEffect, StopActorEffect, ScheduleTimerEffect>;
 
     class EffectBatch final
     {
@@ -548,16 +543,11 @@ namespace snf::worker
 
     [[nodiscard]] inline bool isValid(const WorkerActorConfig& config) noexcept
     {
-        return config.actor_table_capacity > 0 &&
-               config.max_mailbox_messages_per_actor > 0 &&
-               config.max_mailbox_bytes_per_actor > 0 &&
+        return config.actor_table_capacity > 0 && config.max_mailbox_messages_per_actor > 0 && config.max_mailbox_bytes_per_actor > 0 &&
                config.max_mailbox_messages_total >= config.max_mailbox_messages_per_actor &&
-               config.max_mailbox_bytes_total >= config.max_mailbox_bytes_per_actor &&
-               config.max_turns_per_actor_slice > 0 &&
-               config.worker_shutdown_timeout >= std::chrono::milliseconds::zero() &&
-               config.await_timeout > std::chrono::milliseconds::zero() &&
-               config.max_concurrent_loading > 0 &&
-               config.max_application_timer_bytes_total > 0;
+               config.max_mailbox_bytes_total >= config.max_mailbox_bytes_per_actor && config.max_turns_per_actor_slice > 0 &&
+               config.worker_shutdown_timeout >= std::chrono::milliseconds::zero() && config.await_timeout > std::chrono::milliseconds::zero() &&
+               config.max_concurrent_loading > 0 && config.max_application_timer_bytes_total > 0;
     }
 
     struct WorkerActorMetrics

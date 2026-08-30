@@ -56,15 +56,9 @@ namespace snf::adapter
         std::vector<RoomAudienceRoute> audience_routes{};
     };
 
-    [[nodiscard]] snf::worker::EffectBatch toEffects(
-        const PlayerTurnContext& context,
-        const snf::server::PlayerResult& result
-    );
+    [[nodiscard]] snf::worker::EffectBatch toEffects(const PlayerTurnContext& context, const snf::server::PlayerResult& result);
 
-    [[nodiscard]] snf::worker::EffectBatch toEffects(
-        const ZoneTurnContext& context,
-        const snf::server::ZoneResult& result
-    );
+    [[nodiscard]] snf::worker::EffectBatch toEffects(const ZoneTurnContext& context, const snf::server::ZoneResult& result);
 
     [[nodiscard]] snf::worker::EffectBatch toEffects(
         const RoomTurnContext& context,

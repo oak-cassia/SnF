@@ -190,10 +190,7 @@ namespace
 
 namespace snf::adapter
 {
-    snf::protocol::Frame encodePlayerResponse(
-        const snf::server::PlayerResponse& response,
-        const std::uint32_t request_id
-    )
+    snf::protocol::Frame encodePlayerResponse(const snf::server::PlayerResponse& response, const std::uint32_t request_id)
     {
         return std::visit(
             [request_id](const auto& value) -> snf::protocol::Frame

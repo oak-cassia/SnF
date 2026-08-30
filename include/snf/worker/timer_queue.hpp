@@ -291,11 +291,7 @@ namespace snf::worker
             std::push_heap(_heap.begin(), _heap.end(), std::greater<Entry>{});
         }
 
-        [[nodiscard]] bool tryScheduleApplicationTimer(
-            const TimePoint deadline,
-            const ActivationRef target,
-            ActorEnvelope message
-        )
+        [[nodiscard]] bool tryScheduleApplicationTimer(const TimePoint deadline, const ActivationRef target, ActorEnvelope message)
         {
             const std::uint64_t charge = message.chargedBytes();
             if (_heap.size() + _reserved_entries >= CAPACITY)
@@ -375,8 +371,7 @@ namespace snf::worker
             return _heap.size();
         }
 
-        template <class Handler>
-        [[nodiscard]] ExpireResult expire(const TimePoint now, const CountTimeBudget& budget, Handler&& handler)
+        template <class Handler> [[nodiscard]] ExpireResult expire(const TimePoint now, const CountTimeBudget& budget, Handler&& handler)
         {
             ExpireResult result{};
             const auto start_time = std::chrono::steady_clock::now();

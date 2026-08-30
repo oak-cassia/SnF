@@ -71,8 +71,7 @@ namespace snf::adapter
 
 namespace snf::worker
 {
-    template <>
-    struct ActorPayloadTraits<snf::adapter::PlayerCommandMessage>
+    template <> struct ActorPayloadTraits<snf::adapter::PlayerCommandMessage>
     {
         static constexpr std::uint32_t TAG = 1;
         static std::uint64_t calculateCharge(const snf::adapter::PlayerCommandMessage& msg) noexcept
@@ -86,8 +85,7 @@ namespace snf::worker
         }
     };
 
-    template <>
-    struct ActorPayloadTraits<snf::adapter::ExperienceGrantMessage>
+    template <> struct ActorPayloadTraits<snf::adapter::ExperienceGrantMessage>
     {
         static constexpr std::uint32_t TAG = 2;
         static std::uint64_t calculateCharge(const snf::adapter::ExperienceGrantMessage&) noexcept
@@ -96,8 +94,7 @@ namespace snf::worker
         }
     };
 
-    template <>
-    struct ActorPayloadTraits<snf::adapter::ZoneCommandMessage>
+    template <> struct ActorPayloadTraits<snf::adapter::ZoneCommandMessage>
     {
         static constexpr std::uint32_t TAG = 3;
         static std::uint64_t calculateCharge(const snf::adapter::ZoneCommandMessage&) noexcept
@@ -106,8 +103,7 @@ namespace snf::worker
         }
     };
 
-    template <>
-    struct ActorPayloadTraits<snf::adapter::ZoneTickMessage>
+    template <> struct ActorPayloadTraits<snf::adapter::ZoneTickMessage>
     {
         static constexpr std::uint32_t TAG = 4;
         static std::uint64_t calculateCharge(const snf::adapter::ZoneTickMessage&) noexcept
@@ -116,8 +112,7 @@ namespace snf::worker
         }
     };
 
-    template <>
-    struct ActorPayloadTraits<snf::adapter::RoomCommandMessage>
+    template <> struct ActorPayloadTraits<snf::adapter::RoomCommandMessage>
     {
         static constexpr std::uint32_t TAG = 5;
         static std::uint64_t calculateCharge(const snf::adapter::RoomCommandMessage&) noexcept
@@ -126,8 +121,7 @@ namespace snf::worker
         }
     };
 
-    template <>
-    struct ActorPayloadTraits<snf::adapter::RoomDeadlineMessage>
+    template <> struct ActorPayloadTraits<snf::adapter::RoomDeadlineMessage>
     {
         static constexpr std::uint32_t TAG = 6;
         static std::uint64_t calculateCharge(const snf::adapter::RoomDeadlineMessage&) noexcept
@@ -136,8 +130,7 @@ namespace snf::worker
         }
     };
 
-    template <>
-    struct ActorPayloadTraits<snf::adapter::RoomTickMessage>
+    template <> struct ActorPayloadTraits<snf::adapter::RoomTickMessage>
     {
         static constexpr std::uint32_t TAG = 7;
         static std::uint64_t calculateCharge(const snf::adapter::RoomTickMessage&) noexcept
@@ -146,8 +139,7 @@ namespace snf::worker
         }
     };
 
-    template <>
-    struct ActorPayloadTraits<snf::adapter::PingMessage>
+    template <> struct ActorPayloadTraits<snf::adapter::PingMessage>
     {
         static constexpr std::uint32_t TAG = 8;
         static std::uint64_t calculateCharge(const snf::adapter::PingMessage& msg) noexcept
@@ -167,6 +159,5 @@ namespace snf::adapter
         RoomCommandMessage,
         RoomDeadlineMessage,
         RoomTickMessage,
-        PingMessage
-    >;
+        PingMessage>;
 }

@@ -34,11 +34,7 @@ namespace
         return std::chrono::steady_clock::now() - started_at >= maximum_duration;
     }
 
-    [[nodiscard]] bool exceedsByteLimit(
-        const std::uint64_t current,
-        const std::uint64_t addition,
-        const std::uint64_t limit
-    ) noexcept
+    [[nodiscard]] bool exceedsByteLimit(const std::uint64_t current, const std::uint64_t addition, const std::uint64_t limit) noexcept
     {
         return addition > limit || current > limit - addition;
     }
@@ -354,10 +350,11 @@ namespace snf::worker
         }
 
         WorkerEnvelope worker_envelope{
-            .event = RemoteActorMessage{
-                .target = key,
-                .message = std::move(envelope),
-            },
+            .event =
+                RemoteActorMessage{
+                    .target = key,
+                    .message = std::move(envelope),
+                },
             .charged_bytes = static_cast<std::uint32_t>(charge),
         };
 
@@ -460,8 +457,7 @@ namespace snf::worker
             return DeliveryResult::ActorTableFull;
         }
 
-        if (charge > _actor_config.max_mailbox_bytes_per_actor ||
-            _total_mailbox_messages >= _actor_config.max_mailbox_messages_total ||
+        if (charge > _actor_config.max_mailbox_bytes_per_actor || _total_mailbox_messages >= _actor_config.max_mailbox_messages_total ||
             exceedsByteLimit(_total_mailbox_bytes, charge, _actor_config.max_mailbox_bytes_total))
         {
             return DeliveryResult::MailboxFull;
@@ -594,8 +590,7 @@ namespace snf::worker
     bool Worker::hasRunnableWork() const noexcept
     {
         return _inbox_has_more || _timers_have_due || (_read_work_queue != nullptr && !_read_work_queue->empty()) ||
-               (_write_work_queue != nullptr && !_write_work_queue->empty()) ||
-               (_ready_queue != nullptr && !_ready_queue->empty());
+               (_write_work_queue != nullptr && !_write_work_queue->empty()) || (_ready_queue != nullptr && !_ready_queue->empty());
     }
 
     std::optional<std::chrono::milliseconds> Worker::pollTimeout() const
@@ -1075,8 +1070,7 @@ namespace snf::worker
                 // Worker is terminating, and re-queueing a faulted actor would hide the fault.
                 const ActorTaskStatus status = task.resume(outcome);
 
-                const auto slice_duration =
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - slice_started_at);
+                const auto slice_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - slice_started_at);
                 _metrics.actor.total_slice_duration_ns += static_cast<std::uint64_t>(slice_duration.count());
                 if (slice_duration > _metrics.actor.max_slice_duration)
                 {
@@ -1271,8 +1265,7 @@ namespace snf::worker
                 }
             }
 
-            const auto slice_duration =
-                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - slice_started_at);
+            const auto slice_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - slice_started_at);
             _metrics.actor.total_slice_duration_ns += static_cast<std::uint64_t>(slice_duration.count());
             if (slice_duration > _metrics.actor.max_slice_duration)
             {
@@ -1399,12 +1392,7 @@ namespace snf::worker
                             res._admission = nullptr;
                             res._charged_bytes = 0;
                             res._turn_id = 0;
-                            _timers.commitReservedApplicationTimer(
-                                concrete_effect.deadline,
-                                target,
-                                std::move(concrete_effect.message),
-                                charge
-                            );
+                            _timers.commitReservedApplicationTimer(concrete_effect.deadline, target, std::move(concrete_effect.message), charge);
                             ++_metrics.actor.application_timers_scheduled;
                         }
                         else
@@ -1415,10 +1403,7 @@ namespace snf::worker
                                 halt_batch = true;
                                 return;
                             }
-                            if (!_timers.tryScheduleApplicationTimer(
-                                    concrete_effect.deadline,
-                                    target,
-                                    std::move(concrete_effect.message)))
+                            if (!_timers.tryScheduleApplicationTimer(concrete_effect.deadline, target, std::move(concrete_effect.message)))
                             {
                                 ++_metrics.actor.timer_schedule_failures;
                                 halt_batch = true;
@@ -1511,8 +1496,7 @@ namespace snf::worker
         // Same admission arithmetic as tryDeliverLocalInternal(): the helper keeps the byte
         // comparison from wrapping, so both entry points enforce the cap identically.
         const std::uint64_t charge = first_message.chargedBytes();
-        if (charge > _actor_config.max_mailbox_bytes_per_actor ||
-            _total_mailbox_messages >= _actor_config.max_mailbox_messages_total ||
+        if (charge > _actor_config.max_mailbox_bytes_per_actor || _total_mailbox_messages >= _actor_config.max_mailbox_messages_total ||
             exceedsByteLimit(_total_mailbox_bytes, charge, _actor_config.max_mailbox_bytes_total))
         {
             return DeliveryResult::MailboxFull;
@@ -1988,8 +1972,7 @@ namespace snf::worker
             if (slot->mailbox().size() >= _actor_config.max_mailbox_messages_per_actor ||
                 slot->mailbox().chargedBytes() > _actor_config.max_mailbox_bytes_per_actor ||
                 charge > _actor_config.max_mailbox_bytes_per_actor - slot->mailbox().chargedBytes() ||
-                _total_mailbox_messages >= _actor_config.max_mailbox_messages_total ||
-                _total_mailbox_bytes > _actor_config.max_mailbox_bytes_total ||
+                _total_mailbox_messages >= _actor_config.max_mailbox_messages_total || _total_mailbox_bytes > _actor_config.max_mailbox_bytes_total ||
                 charge > _actor_config.max_mailbox_bytes_total - _total_mailbox_bytes)
             {
                 ++_metrics.actor.application_timer_delivery_failures;
@@ -2116,11 +2099,7 @@ namespace snf::worker
         maybeResumeListener();
     }
 
-    bool Worker::beginGracefulClose(
-        const ConnectionHandle handle,
-        const CloseReason reason,
-        const std::optional<TimePoint> max_deadline
-    )
+    bool Worker::beginGracefulClose(const ConnectionHandle handle, const CloseReason reason, const std::optional<TimePoint> max_deadline)
     {
         ConnectionSlot* slot = _connections->find(handle);
         if (slot == nullptr)
@@ -2211,8 +2190,8 @@ namespace snf::worker
     void Worker::runUnifiedShutdown()
     {
         const auto shutdown_timeout = (_actors != nullptr)
-            ? _actor_config.worker_shutdown_timeout
-            : (networkEnabled() ? _network_config.table.limits.close_drain_deadline : std::chrono::seconds(2));
+                                          ? _actor_config.worker_shutdown_timeout
+                                          : (networkEnabled() ? _network_config.table.limits.close_drain_deadline : std::chrono::seconds(2));
         const auto shutdown_deadline = std::chrono::steady_clock::now() + shutdown_timeout;
 
         beginShutdownPhaseA();
@@ -2295,9 +2274,8 @@ namespace snf::worker
                 ++_metrics.shutdown_quiescence_rounds;
                 const auto now = std::chrono::steady_clock::now();
                 const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
-                const auto regular_timeout = (first_iteration || hasRunnableWork())
-                    ? std::chrono::milliseconds(0)
-                    : pollTimeout().value_or(remaining);
+                const auto regular_timeout =
+                    (first_iteration || hasRunnableWork()) ? std::chrono::milliseconds(0) : pollTimeout().value_or(remaining);
                 const auto timeout = std::min(regular_timeout, remaining);
                 const auto events = _poller.wait(timeout);
 
@@ -2360,7 +2338,11 @@ namespace snf::worker
         }
         else
         {
-            enum class ShutdownBState { Active, Waiting };
+            enum class ShutdownBState
+            {
+                Active,
+                Waiting
+            };
             ShutdownBState state = ShutdownBState::Active;
             bool logical_cancel_performed = false;
 
@@ -2382,10 +2364,7 @@ namespace snf::worker
                     runReadyActors(_budgets.actors);
                     flushWrites(_budgets.writes);
 
-                    const bool runnable_work =
-                        (_ready_queue != nullptr && !_ready_queue->empty()) ||
-                        (!_inbox.isEmpty()) ||
-                        _inbox_has_more;
+                    const bool runnable_work = (_ready_queue != nullptr && !_ready_queue->empty()) || (!_inbox.isEmpty()) || _inbox_has_more;
 
                     if (runnable_work)
                     {

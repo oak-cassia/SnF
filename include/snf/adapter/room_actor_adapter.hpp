@@ -37,10 +37,7 @@ namespace snf::adapter
             _timer_admission = timer_admission;
         }
 
-        [[nodiscard]] snf::worker::TurnResult dispatch(
-            snf::worker::ActorEnvelope&& envelope,
-            const snf::worker::ActorTurnContext& context
-        ) override;
+        [[nodiscard]] snf::worker::TurnResult dispatch(snf::worker::ActorEnvelope&& envelope, const snf::worker::ActorTurnContext& context) override;
 
     private:
         snf::server::Room _room;

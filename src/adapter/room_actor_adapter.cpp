@@ -99,7 +99,6 @@ namespace snf::adapter
                 .now = context.now,
                 .audience_routes = std::move(audience_routes),
             };
-
             const auto result = _room.handle(snf::server::BattleDeadline{}, context.now);
             auto effects = toEffects(turn_ctx, result);
             return snf::worker::CompletedTurn{.effects = std::move(effects)};
@@ -125,7 +124,6 @@ namespace snf::adapter
                 .now = context.now,
                 .audience_routes = std::move(audience_routes),
             };
-
             const auto result = _room.handle(snf::server::RoomSimulationTick{}, context.now);
             auto effects = toEffects(turn_ctx, result);
             return snf::worker::CompletedTurn{.effects = std::move(effects)};

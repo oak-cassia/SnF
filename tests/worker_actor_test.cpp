@@ -180,14 +180,13 @@ namespace
 
 namespace snf::worker
 {
-    template <>
-    struct ActorPayloadTraits<TestPingPayload>
+    template <> struct ActorPayloadTraits<TestPingPayload>
     {
         static constexpr std::uint32_t TAG = 1;
         static std::uint64_t calculateCharge(const TestPingPayload& p) noexcept
         {
-            const auto frame_bytes = static_cast<std::uint64_t>(p.frame.payload.size()) +
-                                     snf::protocol::FRAME_LENGTH_FIELD_SIZE + snf::protocol::MIN_BODY_SIZE;
+            const auto frame_bytes =
+                static_cast<std::uint64_t>(p.frame.payload.size()) + snf::protocol::FRAME_LENGTH_FIELD_SIZE + snf::protocol::MIN_BODY_SIZE;
             return std::max<std::uint64_t>(p.explicit_charge, frame_bytes);
         }
     };
@@ -197,7 +196,11 @@ namespace
 {
     using TestActorPayloadRegistry = snf::worker::ActorPayloadRegistry<TestPingPayload>;
 
-    [[nodiscard]] ActorEnvelope makeEnvelope(const std::size_t payload_size = 16, const MessageType type = MessageType::Ping, const std::uint32_t req_id = 1)
+    [[nodiscard]] ActorEnvelope makeEnvelope(
+        const std::size_t payload_size = 16,
+        const MessageType type = MessageType::Ping,
+        const std::uint32_t req_id = 1
+    )
     {
         return TestActorPayloadRegistry::create(TestPingPayload{
             .connection = std::nullopt,
@@ -634,7 +637,12 @@ namespace
         assert(worker.totalMailboxMessages() == 1);
 
         // Run worker loop iteration to process actor turn
-        std::thread th([&]() { worker.run(); });
+        std::thread th(
+            [&]()
+            {
+                worker.run();
+            }
+        );
         std::this_thread::sleep_for(20ms);
         worker.requestStop();
         th.join();
@@ -727,7 +735,12 @@ namespace
         }
         assert(worker.totalMailboxMessages() == 35);
 
-        std::thread th([&]() { worker.run(); });
+        std::thread th(
+            [&]()
+            {
+                worker.run();
+            }
+        );
         std::this_thread::sleep_for(30ms);
         worker.requestStop();
         th.join();
@@ -781,7 +794,12 @@ namespace
         // Enqueue 1 message to cold_key
         assert(worker.tryDeliverLocal(cold_key, makeEnvelope(16)) == DeliveryResult::Accepted);
 
-        std::thread th([&]() { worker.run(); });
+        std::thread th(
+            [&]()
+            {
+                worker.run();
+            }
+        );
         std::this_thread::sleep_for(40ms);
         worker.requestStop();
         th.join();
@@ -823,7 +841,12 @@ namespace
         assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
 
         // When loop runs, all 3 messages are processed in 1 slice
-        std::thread th([&]() { worker.run(); });
+        std::thread th(
+            [&]()
+            {
+                worker.run();
+            }
+        );
         std::this_thread::sleep_for(20ms);
         worker.requestStop();
         th.join();
@@ -884,7 +907,12 @@ namespace
 
         assert(worker.tryDeliverLocal(key, makeEnvelope(16, MessageType::Ping, 1)) == DeliveryResult::Accepted);
 
-        std::thread th([&]() { worker.run(); });
+        std::thread th(
+            [&]()
+            {
+                worker.run();
+            }
+        );
         std::this_thread::sleep_for(30ms);
         worker.requestStop();
         th.join();
@@ -978,7 +1006,12 @@ namespace
 
         assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
 
-        std::thread th([&]() { worker.run(); });
+        std::thread th(
+            [&]()
+            {
+                worker.run();
+            }
+        );
         std::this_thread::sleep_for(30ms);
         worker.requestStop();
         th.join();
@@ -1076,7 +1109,12 @@ namespace
 
         assert(worker.tryDeliverLocal(key1, makeEnvelope(16)) == DeliveryResult::Accepted);
 
-        std::thread th([&]() { worker.run(); });
+        std::thread th(
+            [&]()
+            {
+                worker.run();
+            }
+        );
         std::this_thread::sleep_for(30ms);
         worker.requestStop();
         th.join();
@@ -1107,7 +1145,12 @@ namespace
         Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, actor_config, factory);
 
         const auto start = Clock::now();
-        std::thread th([&]() { worker.run(); });
+        std::thread th(
+            [&]()
+            {
+                worker.run();
+            }
+        );
 
         std::this_thread::sleep_for(10ms);
         worker.requestStop();
@@ -1253,7 +1296,12 @@ namespace
             assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
         }
 
-        std::thread th([&]() { worker.run(); });
+        std::thread th(
+            [&]()
+            {
+                worker.run();
+            }
+        );
         std::this_thread::sleep_for(30ms);
         worker.requestStop();
         th.join();
@@ -1305,7 +1353,12 @@ namespace
             assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
         }
 
-        std::thread th([&]() { worker.run(); });
+        std::thread th(
+            [&]()
+            {
+                worker.run();
+            }
+        );
         std::this_thread::sleep_for(50ms);
         worker.requestStop();
         th.join();
@@ -1382,7 +1435,12 @@ namespace
 
         assert(worker.tryDeliverLocal(key1, makeEnvelope(16)) == DeliveryResult::Accepted);
 
-        std::thread th([&]() { worker.run(); });
+        std::thread th(
+            [&]()
+            {
+                worker.run();
+            }
+        );
         std::this_thread::sleep_for(30ms);
         worker.requestStop();
         th.join();
@@ -1418,11 +1476,12 @@ namespace
 
         // Push remote close event into Worker 0 inbox before run()
         WorkerEnvelope env{
-            .event = RemoteConnectionClose{
-                .connection = ConnectionRef{ConnectionId{1}, ConnectionGeneration{1}, WorkerId{0}},
-                .reason = CloseReason::Shutdown,
-                .graceful = false,
-            },
+            .event =
+                RemoteConnectionClose{
+                    .connection = ConnectionRef{ConnectionId{1}, ConnectionGeneration{1}, WorkerId{0}},
+                    .reason = CloseReason::Shutdown,
+                    .graceful = false,
+                },
             .charged_bytes = static_cast<std::uint32_t>(sizeof(RemoteConnectionClose)),
         };
         assert(port.tryPush(std::move(env)) == InboxPushResult::Accepted);
@@ -1506,7 +1565,12 @@ namespace
         assert(worker.actorCount() == ACTOR_COUNT);
         assert(worker.totalMailboxMessages() == ACTOR_COUNT);
 
-        std::thread th([&]() { worker.run(); });
+        std::thread th(
+            [&]()
+            {
+                worker.run();
+            }
+        );
         std::this_thread::sleep_for(150ms);
         worker.requestStop();
         th.join();
@@ -1520,16 +1584,15 @@ namespace
     // 5A — Suspended Turn & BlockedTask Tests
     // =========================================================================
 
-    ActorTask makeOneShotSuspendingTask(
-        std::atomic<int>& step,
-        std::atomic<int>& destruct_count,
-        const bool throw_on_resume = false
-    )
+    ActorTask makeOneShotSuspendingTask(std::atomic<int>& step, std::atomic<int>& destruct_count, const bool throw_on_resume = false)
     {
         struct DestructTracker
         {
             std::atomic<int>& count;
-            ~DestructTracker() { ++count; }
+            ~DestructTracker()
+            {
+                ++count;
+            }
         } tracker{destruct_count};
 
         step = 1;
@@ -1545,9 +1608,7 @@ namespace
         co_return CompletedTurn{.effects = EffectBatch{}};
     }
 
-    ActorTask makeTwoShotSuspendingTask(
-        std::atomic<int>& step
-    )
+    ActorTask makeTwoShotSuspendingTask(std::atomic<int>& step)
     {
         step = 1;
         const auto outcome1 = co_await SyntheticAwait{};
@@ -2467,14 +2528,12 @@ namespace
         FunctionalActorFactory factory(
             [](ActorKey) -> ActorConstructionResult
             {
-                return ActorConstructionResult::ready(
-                    std::make_unique<FunctionalActor>(
-                        [](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
-                        {
-                            return CompletedTurn{.effects = EffectBatch{}};
-                        }
-                    )
-                );
+                return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(
+                    [](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
+                    {
+                        return CompletedTurn{.effects = EffectBatch{}};
+                    }
+                ));
             }
         );
 
@@ -2515,14 +2574,12 @@ namespace
         FunctionalActorFactory factory(
             [](ActorKey) -> ActorConstructionResult
             {
-                return ActorConstructionResult::ready(
-                    std::make_unique<FunctionalActor>(
-                        [](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
-                        {
-                            return CompletedTurn{.effects = EffectBatch{}};
-                        }
-                    )
-                );
+                return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(
+                    [](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
+                    {
+                        return CompletedTurn{.effects = EffectBatch{}};
+                    }
+                ));
             }
         );
 
@@ -2574,14 +2631,12 @@ namespace
         FunctionalActorFactory factory(
             [](ActorKey) -> ActorConstructionResult
             {
-                return ActorConstructionResult::ready(
-                    std::make_unique<FunctionalActor>(
-                        [](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
-                        {
-                            return CompletedTurn{.effects = EffectBatch{}};
-                        }
-                    )
-                );
+                return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(
+                    [](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
+                    {
+                        return CompletedTurn{.effects = EffectBatch{}};
+                    }
+                ));
             }
         );
 
@@ -2754,14 +2809,12 @@ namespace
         FunctionalActorFactory factory(
             [](ActorKey) -> ActorConstructionResult
             {
-                return ActorConstructionResult::ready(
-                    std::make_unique<FunctionalActor>(
-                        [](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
-                        {
-                            return CompletedTurn{.effects = EffectBatch{}};
-                        }
-                    )
-                );
+                return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(
+                    [](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
+                    {
+                        return CompletedTurn{.effects = EffectBatch{}};
+                    }
+                ));
             }
         );
 
@@ -3055,9 +3108,7 @@ namespace
                         step.store(2);
                         EffectBatch effects;
                         effects.push(StopActorEffect{});
-                        co_return CompletedTurn{
-                            .effects = std::move(effects)
-                        };
+                        co_return CompletedTurn{.effects = std::move(effects)};
                     }
                 );
                 return ActorConstructionResult::ready(std::move(actor));
@@ -3116,9 +3167,7 @@ namespace
                         step.store(2);
                         EffectBatch effects;
                         effects.push(StopActorEffect{});
-                        co_return CompletedTurn{
-                            .effects = std::move(effects)
-                        };
+                        co_return CompletedTurn{.effects = std::move(effects)};
                     }
                 );
                 return ActorConstructionResult::ready(std::move(actor));
@@ -3377,8 +3426,18 @@ namespace
             .max_workers = 32,
         };
 
-        FunctionalActorFactory factory0([](ActorKey) -> ActorConstructionResult { return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(nullptr)); });
-        FunctionalActorFactory factory1([](ActorKey) -> ActorConstructionResult { return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(nullptr)); });
+        FunctionalActorFactory factory0(
+            [](ActorKey) -> ActorConstructionResult
+            {
+                return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(nullptr));
+            }
+        );
+        FunctionalActorFactory factory1(
+            [](ActorKey) -> ActorConstructionResult
+            {
+                return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(nullptr));
+            }
+        );
 
         Worker w0(WorkerId{0}, 2, WorkerBudgets::defaults(), small_inbox, config, factory0);
         Worker w1(WorkerId{1}, 2, WorkerBudgets::defaults(), small_inbox, config, factory1);
@@ -3504,17 +3563,24 @@ namespace
             ++k1.entity;
         }
 
-        assert(port.tryPush(WorkerEnvelope{
-            .event = RemoteActorMessage{.target = k1, .message = makeEnvelope(16)},
-            .charged_bytes = 64,
-        }) == InboxPushResult::Accepted);
+        assert(
+            port.tryPush(WorkerEnvelope{
+                .event = RemoteActorMessage{.target = k1, .message = makeEnvelope(16)},
+                .charged_bytes = 64,
+            }) == InboxPushResult::Accepted
+        );
 
         WorkerActorTestAccess::drainInbox(w_no_actor, WorkerBudgets::defaults().inbox);
         assert(w_no_actor.metrics().actor.remote_tells_received == 1);
         assert(w_no_actor.metrics().actor.remote_tell_delivery_failures == 1);
         assert(w_no_actor.metrics().actor.actor_events_without_runtime == 1);
 
-        FunctionalActorFactory factory([](ActorKey) -> ActorConstructionResult { return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(nullptr)); });
+        FunctionalActorFactory factory(
+            [](ActorKey) -> ActorConstructionResult
+            {
+                return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(nullptr));
+            }
+        );
         Worker w1(WorkerId{1}, 2, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
         auto port1 = w1.bindInboxSource(WorkerId{0});
 
@@ -3524,10 +3590,12 @@ namespace
             ++k0.entity;
         }
 
-        assert(port1.tryPush(WorkerEnvelope{
-            .event = RemoteActorMessage{.target = k0, .message = makeEnvelope(16)},
-            .charged_bytes = 64,
-        }) == InboxPushResult::Accepted);
+        assert(
+            port1.tryPush(WorkerEnvelope{
+                .event = RemoteActorMessage{.target = k0, .message = makeEnvelope(16)},
+                .charged_bytes = 64,
+            }) == InboxPushResult::Accepted
+        );
 
         WorkerActorTestAccess::drainInbox(w1, WorkerBudgets::defaults().inbox);
         assert(w1.metrics().actor.remote_tells_received == 1);
@@ -3550,7 +3618,12 @@ namespace
             .max_concurrent_loading = 10,
         };
 
-        FunctionalActorFactory factory([](ActorKey) -> ActorConstructionResult { return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(nullptr)); });
+        FunctionalActorFactory factory(
+            [](ActorKey) -> ActorConstructionResult
+            {
+                return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(nullptr));
+            }
+        );
         Worker w0(WorkerId{0}, 2, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
 
         ActorKey k1{.kind = ActorKind::Player, .entity = 1};
@@ -3568,7 +3641,12 @@ namespace
         assert(w0.tell(k1, makeEnvelope(16)) == DeliveryResult::Closed);
         assert(w0.metrics().actor.remote_tell_rejections == 1);
 
-        FunctionalActorFactory factory1([](ActorKey) -> ActorConstructionResult { return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(nullptr)); });
+        FunctionalActorFactory factory1(
+            [](ActorKey) -> ActorConstructionResult
+            {
+                return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(nullptr));
+            }
+        );
         Worker w1(WorkerId{1}, 2, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory1);
         w0.bindRemoteTarget(WorkerId{1}, w1.bindInboxSource(WorkerId{0}));
         WorkerActorTestAccess::closeInbox(w1);
@@ -3583,14 +3661,7 @@ namespace
     void test_shutdown_phase_a_rejects_stale_readable_events()
     {
         CountingRequestSink sink;
-        Worker worker(
-            WorkerId{0},
-            1,
-            WorkerBudgets::defaults(),
-            WorkerInboxConfig{},
-            WorkerNetworkConfig{},
-            sink
-        );
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, WorkerNetworkConfig{}, sink);
 
         auto sockets = makeSocketPair();
         const PollEvent stale_readable = WorkerActorTestAccess::installReadableConnection(worker, std::move(sockets.left));
@@ -3599,11 +3670,7 @@ namespace
         assert(sent == static_cast<ssize_t>(encoded.size()));
 
         WorkerActorTestAccess::beginShutdownPhaseA(worker);
-        WorkerActorTestAccess::processPollEvents(
-            worker,
-            std::span<const PollEvent>{&stale_readable, 1},
-            WorkerBudgets::defaults().poll
-        );
+        WorkerActorTestAccess::processPollEvents(worker, std::span<const PollEvent>{&stale_readable, 1}, WorkerBudgets::defaults().poll);
 
         assert(sink.posts.load() == 0);
         assert(WorkerActorTestAccess::readWorkQueueEmpty(worker));

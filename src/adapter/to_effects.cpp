@@ -24,11 +24,12 @@ namespace snf::adapter
                 .message = GameActorPayloadRegistry::create(RoomCommandMessage{
                     .connection = context.connection,
                     .request_id = context.request_id,
-                    .command = snf::server::JoinRoom{
-                        .player = context.player_id.value_or(snf::server::PlayerId{}),
-                        .stats = result.room_join->stats,
-                        .equipped_skill_id = result.room_join->equipped_skill_id,
-                    },
+                    .command =
+                        snf::server::JoinRoom{
+                            .player = context.player_id.value_or(snf::server::PlayerId{}),
+                            .stats = result.room_join->stats,
+                            .equipped_skill_id = result.room_join->equipped_skill_id,
+                        },
                 }),
             });
         }
@@ -48,10 +49,7 @@ namespace snf::adapter
         return batch;
     }
 
-    snf::worker::EffectBatch toEffects(
-        const ZoneTurnContext& context,
-        const snf::server::ZoneResult& result
-    )
+    snf::worker::EffectBatch toEffects(const ZoneTurnContext& context, const snf::server::ZoneResult& result)
     {
         snf::worker::EffectBatch batch;
 
