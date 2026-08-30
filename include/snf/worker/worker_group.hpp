@@ -17,8 +17,13 @@ namespace snf::worker
     {
     public:
         using RequestSinkFactory = std::function<std::unique_ptr<RequestSink>(WorkerId)>;
+        using ActorFactoryFactory = std::function<std::unique_ptr<ActorFactory>(WorkerId)>;
 
-        explicit WorkerGroup(const WorkerGroupConfig& config, RequestSinkFactory request_sink_factory = {});
+        explicit WorkerGroup(
+            const WorkerGroupConfig& config,
+            RequestSinkFactory request_sink_factory = {},
+            ActorFactoryFactory actor_factory_factory = {}
+        );
         ~WorkerGroup();
 
         WorkerGroup(const WorkerGroup&) = delete;
@@ -46,6 +51,7 @@ namespace snf::worker
         WorkerGroupConfig _config;
         std::uint16_t _port{0};
         std::vector<std::unique_ptr<RequestSink>> _sinks;
+        std::vector<std::unique_ptr<ActorFactory>> _actor_factories;
         std::vector<std::unique_ptr<Worker>> _workers;
         std::vector<std::thread> _threads;
         mutable std::mutex _failure_mutex;

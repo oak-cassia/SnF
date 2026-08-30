@@ -28,7 +28,11 @@ namespace
 
 namespace snf::worker
 {
-    WorkerGroup::WorkerGroup(const WorkerGroupConfig& config, RequestSinkFactory request_sink_factory)
+    WorkerGroup::WorkerGroup(
+        const WorkerGroupConfig& config,
+        RequestSinkFactory request_sink_factory,
+        ActorFactoryFactory actor_factory_factory
+    )
         : _config(config)
     {
         if (!isValid(config))
@@ -48,6 +52,10 @@ namespace snf::worker
         }
 
         _sinks.reserve(config.worker_count);
+        if (actor_factory_factory)
+        {
+            _actor_factories.reserve(config.worker_count);
+        }
         _workers.reserve(config.worker_count);
         for (std::uint16_t index = 0; index < config.worker_count; ++index)
         {
@@ -67,6 +75,18 @@ namespace snf::worker
 
             auto worker = std::make_unique<Worker>(WorkerId{index}, config.worker_count, config.budgets, config.inbox, config.network, *sink);
             worker->attachListener(std::move(listeners[index]));
+
+            if (actor_factory_factory && config.actor)
+            {
+                auto factory = actor_factory_factory(WorkerId{index});
+                if (!factory)
+                {
+                    throw std::invalid_argument{"WorkerGroup actor factory returned nothing"};
+                }
+                worker->configureActors(*config.actor, *factory);
+                _actor_factories.push_back(std::move(factory));
+            }
+
             _sinks.push_back(std::move(sink));
             _workers.push_back(std::move(worker));
         }

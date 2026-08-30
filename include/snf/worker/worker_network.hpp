@@ -1,5 +1,6 @@
 #pragma once
 
+#include "snf/worker/actor.hpp"
 #include "snf/worker/budget.hpp"
 #include "snf/worker/connection.hpp"
 #include "snf/worker/connection_table.hpp"
@@ -76,12 +77,13 @@ namespace snf::worker
         WorkerBudgets budgets{WorkerBudgets::defaults()};
         WorkerInboxConfig inbox{};
         WorkerNetworkConfig network{};
+        std::optional<WorkerActorConfig> actor{};
     };
 
     [[nodiscard]] inline bool isValid(const WorkerGroupConfig& config) noexcept
     {
         return config.worker_count > 0 && config.max_workers > 0 && config.worker_count <= config.max_workers && config.inbox.max_workers > 0 &&
                config.worker_count <= config.inbox.max_workers && config.inbox.max_bytes_per_worker > 0 && isValid(config.budgets) &&
-               isValid(config.network);
+               isValid(config.network) && (!config.actor || isValid(*config.actor));
     }
 }

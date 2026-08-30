@@ -64,6 +64,34 @@ namespace snf::worker
         configureNetwork(network_config, request_sink);
     }
 
+    Worker::Worker(
+        const WorkerId id,
+        const std::uint16_t worker_count,
+        const WorkerBudgets budgets,
+        const WorkerInboxConfig inbox_config,
+        const WorkerActorConfig actor_config,
+        ActorFactory& actor_factory
+    )
+        : Worker(id, worker_count, budgets, inbox_config)
+    {
+        configureActors(actor_config, actor_factory);
+    }
+
+    Worker::Worker(
+        const WorkerId id,
+        const std::uint16_t worker_count,
+        const WorkerBudgets budgets,
+        const WorkerInboxConfig inbox_config,
+        const WorkerNetworkConfig network_config,
+        RequestSink& request_sink,
+        const WorkerActorConfig actor_config,
+        ActorFactory& actor_factory
+    )
+        : Worker(id, worker_count, budgets, inbox_config, network_config, request_sink)
+    {
+        configureActors(actor_config, actor_factory);
+    }
+
     void Worker::run()
     {
         bindOwnerThread();
@@ -81,42 +109,7 @@ namespace snf::worker
             flushWrites(_budgets.writes);
         }
 
-        if (networkEnabled())
-        {
-            runNetworkShutdown();
-        }
-
-        // stop 이후: inbox.close() 뒤 남은 accepted event와 만료된 timer를
-        // hard deadline(초기값 2s)까지 정리하고 반환
-        _inbox.close();
-        const auto shutdown_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-
-        while (std::chrono::steady_clock::now() < shutdown_deadline)
-        {
-            const auto drain_res = _inbox.drain(
-                _budgets.inbox,
-                [this](WorkerEvent&& ev)
-                {
-                    onEvent(std::move(ev));
-                }
-            );
-            _metrics.shutdown_inbox_events += drain_res.processed;
-
-            const auto expire_res = _timers.expire(
-                std::chrono::steady_clock::now(),
-                _budgets.timers,
-                [this](TimerPayload&& payload)
-                {
-                    onTimer(std::move(payload));
-                }
-            );
-            _metrics.shutdown_timers_fired += expire_res.expired;
-
-            if (!drain_res.has_more && !expire_res.due_items_remain)
-            {
-                break;
-            }
-        }
+        runUnifiedShutdown();
     }
 
     void Worker::requestStop() noexcept
@@ -144,6 +137,24 @@ namespace snf::worker
         _connection_registrations.resize(config.table.capacity);
         _network_config = config;
         _request_sink = &request_sink;
+    }
+
+    void Worker::configureActors(const WorkerActorConfig& config, ActorFactory& factory)
+    {
+        assertOwnerThread();
+        if (_actors != nullptr)
+        {
+            throw std::logic_error{"Worker actors can only be configured once"};
+        }
+        if (!isValid(config))
+        {
+            throw std::invalid_argument{"Invalid worker actor configuration"};
+        }
+
+        _actors = std::make_unique<ActorTable>(config.actor_table_capacity);
+        _ready_queue = std::make_unique<ReadyActorQueue>(config.actor_table_capacity);
+        _actor_factory = &factory;
+        _actor_config = config;
     }
 
     void Worker::attachListener(snf::net::UniqueFileDescriptor listener)
@@ -257,6 +268,130 @@ namespace snf::worker
         return graceful ? beginGracefulClose(handle, reason) : (forceClose(handle, reason), true);
     }
 
+    DeliveryResult Worker::tryDeliverLocal(const ActorKey key, ActorEnvelope envelope)
+    {
+        assertOwnerThread();
+        if (_shutting_down || _stop_requested.load(std::memory_order_acquire) || !actorsConfigured())
+        {
+            return DeliveryResult::Closed;
+        }
+        return tryDeliverLocalInternal(key, std::move(envelope));
+    }
+
+    DeliveryResult Worker::tryDeliverLocalInternal(const ActorKey key, ActorEnvelope envelope)
+    {
+        assertOwnerThread();
+        if (!actorsConfigured())
+        {
+            return DeliveryResult::Closed;
+        }
+
+        if (ownerOf(key, _worker_count, _actor_config.placement_seed) != _id)
+        {
+            ++_metrics.actor.wrong_owner_tells;
+            return DeliveryResult::WrongOwner;
+        }
+
+        ActorSlot* slot = _actors->find(key);
+        if (slot != nullptr)
+        {
+            if (slot->state() == ActorState::Stopping)
+            {
+                return DeliveryResult::Stopping;
+            }
+
+            if (slot->mailbox().size() + 1 > _actor_config.max_mailbox_messages_per_actor ||
+                slot->mailbox().chargedBytes() + envelope.charged_bytes > _actor_config.max_mailbox_bytes_per_actor ||
+                _total_mailbox_messages + 1 > _actor_config.max_mailbox_messages_total ||
+                _total_mailbox_bytes + envelope.charged_bytes > _actor_config.max_mailbox_bytes_total)
+            {
+                return DeliveryResult::MailboxFull;
+            }
+
+            _total_mailbox_messages += 1;
+            _total_mailbox_bytes += envelope.charged_bytes;
+
+            const bool was_idle = (slot->state() == ActorState::Idle);
+            slot->mailbox().push(std::move(envelope));
+
+            if (was_idle)
+            {
+                slot->setState(ActorState::Queued);
+                _ready_queue->push(slot->handle());
+            }
+            return DeliveryResult::Accepted;
+        }
+
+        // Missing actor immediate synchronous activation
+        if (!_actors->hasCapacity())
+        {
+            return DeliveryResult::ActorTableFull;
+        }
+
+        if (1 > _actor_config.max_mailbox_messages_per_actor ||
+            envelope.charged_bytes > _actor_config.max_mailbox_bytes_per_actor ||
+            _total_mailbox_messages + 1 > _actor_config.max_mailbox_messages_total ||
+            _total_mailbox_bytes + envelope.charged_bytes > _actor_config.max_mailbox_bytes_total)
+        {
+            return DeliveryResult::MailboxFull;
+        }
+
+        auto reservation = _actors->tryReserve(key);
+        if (!reservation)
+        {
+            return DeliveryResult::ActorTableFull;
+        }
+
+        const std::uint32_t charge = envelope.charged_bytes;
+        _total_mailbox_messages += 1;
+        _total_mailbox_bytes += charge;
+
+        struct AccountingRollbackGuard
+        {
+            Worker* worker;
+            std::uint32_t charge;
+            bool armed{true};
+
+            ~AccountingRollbackGuard()
+            {
+                if (armed && worker != nullptr)
+                {
+                    worker->_total_mailbox_messages -= 1;
+                    worker->_total_mailbox_bytes -= charge;
+                }
+            }
+        } guard{this, charge, true};
+
+        ActorConstructionResult construction_result;
+        try
+        {
+            construction_result = _actor_factory->construct(key);
+        }
+        catch (...)
+        {
+            reservation->rollback();
+            throw;
+        }
+
+        if (construction_result.isRejected())
+        {
+            ++_metrics.actor.construction_rejections;
+            reservation->rollback();
+            return DeliveryResult::ConstructionRejected;
+        }
+
+        guard.armed = false;
+        ActorSlot& reserved_slot = reservation->slot();
+        reserved_slot.setInstance(std::move(construction_result.instance));
+        reserved_slot.mailbox().push(std::move(envelope));
+        reserved_slot.setState(ActorState::Queued);
+
+        const ActorHandle handle = reservation->handle();
+        reservation->commit();
+        _ready_queue->push(handle);
+        return DeliveryResult::Accepted;
+    }
+
     bool Worker::networkEnabled() const noexcept
     {
         return _connections != nullptr;
@@ -270,6 +405,26 @@ namespace snf::worker
     bool Worker::listenerPaused() const noexcept
     {
         return _listener_paused;
+    }
+
+    bool Worker::actorsConfigured() const noexcept
+    {
+        return _actors != nullptr;
+    }
+
+    std::size_t Worker::actorCount() const noexcept
+    {
+        return _actors == nullptr ? 0 : _actors->activeCount();
+    }
+
+    std::size_t Worker::totalMailboxMessages() const noexcept
+    {
+        return _total_mailbox_messages;
+    }
+
+    std::uint64_t Worker::totalMailboxBytes() const noexcept
+    {
+        return _total_mailbox_bytes;
     }
 
     WorkerInboxPort Worker::bindInboxSource(const WorkerId source) noexcept
@@ -318,7 +473,8 @@ namespace snf::worker
     bool Worker::hasRunnableWork() const noexcept
     {
         return _inbox_has_more || _timers_have_due || (_read_work_queue != nullptr && !_read_work_queue->empty()) ||
-               (_write_work_queue != nullptr && !_write_work_queue->empty());
+               (_write_work_queue != nullptr && !_write_work_queue->empty()) ||
+               (_ready_queue != nullptr && !_ready_queue->empty());
     }
 
     std::optional<std::chrono::milliseconds> Worker::pollTimeout() const
@@ -335,7 +491,6 @@ namespace snf::worker
             return std::chrono::milliseconds(0);
         }
 
-        // duration_cast 는 0 으로 절단되어 1ms 미만 deadline 에서 timeout 0 인 바쁜 대기를 만든다.
         const auto diff = std::chrono::ceil<std::chrono::milliseconds>(*next_deadline - now);
         return std::min(diff, _budgets.max_poll_timeout);
     }
@@ -397,8 +552,6 @@ namespace snf::worker
                 continue;
             }
 
-            // EPOLLERR and peer hangup are immediate-close paths. In
-            // particular, they never enter the graceful write-drain state.
             if (event.error || event.hangup)
             {
                 forceClose(handle, event.fatal_error ? CloseReason::IoError : CloseReason::PeerClosed);
@@ -407,9 +560,6 @@ namespace snf::worker
 
             if (event.writable && slot->waitingEpollout())
             {
-                // A level-triggered socket can appear more than once in a
-                // batch. Clearing this bit before the requeue makes later
-                // duplicate EPOLLOUT events harmless.
                 slot->setWaitingEpollout(false);
                 ++_metrics.network.epollout_resumes;
                 updateConnectionInterest(*slot);
@@ -737,10 +887,171 @@ namespace snf::worker
         }
     }
 
-    void Worker::runReadyActors(const CountTimeBudget&)
+    void Worker::runReadyActors(const CountTimeBudget& budget)
     {
-        // Actor table and ready queue are introduced by the next vertical
-        // slice. Network I/O does not run actor code inline.
+        assertOwnerThread();
+        if (!actorsConfigured() || _ready_queue->empty())
+        {
+            return;
+        }
+
+        const auto phase_started_at = std::chrono::steady_clock::now();
+        std::size_t turns_executed = 0;
+        bool phase_budget_exhausted = false;
+
+        while (!_ready_queue->empty())
+        {
+            if (turns_executed >= budget.max_count || budgetExpired(phase_started_at, budget.max_duration))
+            {
+                phase_budget_exhausted = true;
+                break;
+            }
+
+            const ActorHandle handle = _ready_queue->pop();
+            ActorSlot* slot = _actors->find(handle);
+            if (slot == nullptr || slot->incarnation() != handle.incarnation)
+            {
+                ++_metrics.actor.stale_ready_handles;
+                continue;
+            }
+
+            if (slot->state() != ActorState::Queued)
+            {
+                continue;
+            }
+
+            slot->setState(ActorState::Running);
+
+            const std::size_t remaining_phase_turns = budget.max_count - turns_executed;
+            const std::size_t slice_limit = std::min(_actor_config.max_turns_per_actor_slice, remaining_phase_turns);
+
+            std::size_t slice_turns = 0;
+            bool stopped = false;
+            const auto slice_started_at = std::chrono::steady_clock::now();
+
+            while (slice_turns < slice_limit && !slot->mailbox().empty())
+            {
+                if (budgetExpired(phase_started_at, budget.max_duration))
+                {
+                    phase_budget_exhausted = true;
+                    break;
+                }
+
+                ActorEnvelope envelope = slot->mailbox().pop();
+                _total_mailbox_messages -= 1;
+                _total_mailbox_bytes -= envelope.charged_bytes;
+
+                const ActorTurnContext context{
+                    .activation = slot->activationRef(),
+                    .now = std::chrono::steady_clock::now(),
+                };
+
+                TurnResult result = slot->instance()->dispatch(std::move(envelope), context);
+                ++turns_executed;
+                ++slice_turns;
+                ++_metrics.actor.actor_turns;
+
+                auto& completed = std::get<CompletedTurn>(result);
+                if (completed.effects.size() > EffectBatch::MAX_EFFECTS)
+                {
+                    throw std::logic_error{"EffectBatch capacity exceeded maximum limit of 64"};
+                }
+
+                for (auto& effect : completed.effects.mutableEffects())
+                {
+                    applyEffect(*slot, std::move(effect), stopped);
+                }
+
+                if (stopped)
+                {
+                    break;
+                }
+            }
+
+            const auto slice_duration =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - slice_started_at);
+            _metrics.actor.total_slice_duration_ns += static_cast<std::uint64_t>(slice_duration.count());
+            if (slice_duration > _metrics.actor.max_slice_duration)
+            {
+                _metrics.actor.max_slice_duration = slice_duration;
+            }
+
+            if (stopped)
+            {
+                const std::size_t rem_msgs = slot->mailbox().size();
+                const std::uint64_t rem_bytes = slot->mailbox().chargedBytes();
+                _total_mailbox_messages -= rem_msgs;
+                _total_mailbox_bytes -= rem_bytes;
+                _metrics.actor.discarded_mailbox_messages += rem_msgs;
+                _metrics.actor.discarded_mailbox_bytes += rem_bytes;
+                slot->mailbox().clear();
+
+                static_cast<void>(_actors->release(handle));
+                ++_metrics.actor.stopped_actors;
+            }
+            else
+            {
+                if (!slot->mailbox().empty())
+                {
+                    slot->setState(ActorState::Queued);
+                    _ready_queue->push(slot->handle());
+                }
+                else
+                {
+                    slot->setState(ActorState::Idle);
+                }
+            }
+
+            if (phase_budget_exhausted)
+            {
+                break;
+            }
+        }
+
+        if (phase_budget_exhausted)
+        {
+            ++_metrics.actor.budget_stops;
+        }
+    }
+
+    void Worker::applyEffect(ActorSlot& current_slot, Effect&& effect, bool& stopped)
+    {
+        std::visit(
+            [this, &current_slot, &stopped](auto&& concrete_effect)
+            {
+                using T = std::decay_t<decltype(concrete_effect)>;
+                if constexpr (std::is_same_v<T, SendFrameEffect>)
+                {
+                    const SendResult result = send(concrete_effect.connection, std::move(concrete_effect.frame), concrete_effect.critical);
+                    if (result != SendResult::Accepted)
+                    {
+                        ++_metrics.actor.effect_send_failures;
+                    }
+                }
+                else if constexpr (std::is_same_v<T, CloseConnectionEffect>)
+                {
+                    const bool closed = closeConnection(concrete_effect.connection, concrete_effect.reason, concrete_effect.graceful);
+                    if (!closed)
+                    {
+                        ++_metrics.actor.effect_close_failures;
+                    }
+                }
+                else if constexpr (std::is_same_v<T, TellActorEffect>)
+                {
+                    const DeliveryResult result = tryDeliverLocalInternal(concrete_effect.target, std::move(concrete_effect.message));
+                    if (result != DeliveryResult::Accepted)
+                    {
+                        ++_metrics.actor.effect_tell_failures;
+                    }
+                }
+                else if constexpr (std::is_same_v<T, StopActorEffect>)
+                {
+                    current_slot.setState(ActorState::Stopping);
+                    stopped = true;
+                }
+            },
+            effect
+        );
     }
 
     void Worker::flushWrites(const ByteTimeBudget& budget)
@@ -941,9 +1252,6 @@ namespace snf::worker
 
     SendResult Worker::sendLocal(const ConnectionRef connection, snf::protocol::Frame&& frame, const bool critical)
     {
-        // Take ownership before any lookup or encoding can fail. This keeps
-        // Worker::send's consume-on-failure contract true even for rejected
-        // stale handles and allocation exceptions in the encoder.
         snf::protocol::Frame owned_frame = std::move(frame);
         const ConnectionHandle handle{.id = connection.id, .generation = connection.generation};
         ConnectionSlot* slot = _connections->find(handle);
@@ -1044,7 +1352,11 @@ namespace snf::worker
         maybeResumeListener();
     }
 
-    bool Worker::beginGracefulClose(const ConnectionHandle handle, const CloseReason reason)
+    bool Worker::beginGracefulClose(
+        const ConnectionHandle handle,
+        const CloseReason reason,
+        const std::optional<TimePoint> max_deadline
+    )
     {
         ConnectionSlot* slot = _connections->find(handle);
         if (slot == nullptr)
@@ -1056,7 +1368,8 @@ namespace snf::worker
             return true;
         }
 
-        const auto deadline = std::chrono::steady_clock::now() + _network_config.table.limits.close_drain_deadline;
+        const auto standard_deadline = std::chrono::steady_clock::now() + _network_config.table.limits.close_drain_deadline;
+        const auto deadline = max_deadline ? std::min(standard_deadline, *max_deadline) : standard_deadline;
         slot->beginClosing(deadline, reason);
         ++_metrics.network.graceful_closes;
         updateConnectionInterest(*slot);
@@ -1131,13 +1444,22 @@ namespace snf::worker
         throw std::logic_error{message};
     }
 
-    void Worker::beginNetworkShutdown()
+    void Worker::runUnifiedShutdown()
     {
-        if (!networkEnabled() || _network_stopping)
-        {
-            return;
-        }
-        _network_stopping = true;
+        const auto shutdown_timeout = (_actors != nullptr)
+            ? _actor_config.worker_shutdown_timeout
+            : (networkEnabled() ? _network_config.table.limits.close_drain_deadline : std::chrono::seconds(2));
+        const auto shutdown_deadline = std::chrono::steady_clock::now() + shutdown_timeout;
+
+        beginShutdownPhaseA();
+        runShutdownPhaseB(shutdown_deadline);
+        runShutdownPhaseC(shutdown_deadline);
+        runShutdownPhaseD(shutdown_deadline);
+    }
+
+    void Worker::beginShutdownPhaseA()
+    {
+        _shutting_down = true;
 
         if (_listener_registration)
         {
@@ -1156,22 +1478,44 @@ namespace snf::worker
             _listener.init();
         }
 
-        const auto handles = _connections->activeHandles();
-        for (const ConnectionHandle handle : handles)
+        if (networkEnabled())
         {
-            static_cast<void>(beginGracefulClose(handle, CloseReason::Shutdown));
+            const auto handles = _connections->activeHandles();
+            for (const ConnectionHandle handle : handles)
+            {
+                const ConnectionSlot* slot = _connections->find(handle);
+                if (slot == nullptr)
+                {
+                    continue;
+                }
+                const auto registration = registrationFor(handle);
+                if (registration)
+                {
+                    try
+                    {
+                        _poller.modify(slot->descriptor(), registration->token, PollInterest{.read = false, .write = slot->waitingEpollout()});
+                    }
+                    catch (...)
+                    {
+                    }
+                }
+            }
         }
     }
 
-    void Worker::runNetworkShutdown()
+    void Worker::runShutdownPhaseB(const TimePoint deadline)
     {
-        beginNetworkShutdown();
-        const auto shutdown_deadline = std::chrono::steady_clock::now() + _network_config.table.limits.close_drain_deadline;
-
-        while (_connections->activeCount() != 0 && std::chrono::steady_clock::now() < shutdown_deadline)
+        while (std::chrono::steady_clock::now() < deadline)
         {
+            const bool actor_quiescent =
+                (_ready_queue == nullptr || _ready_queue->empty()) && (_total_mailbox_messages == 0) && !_inbox_has_more;
+            if (actor_quiescent)
+            {
+                break;
+            }
+
             const auto now = std::chrono::steady_clock::now();
-            const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(shutdown_deadline - now);
+            const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
             const auto regular_timeout = hasRunnableWork() ? std::chrono::milliseconds(0) : pollTimeout().value_or(remaining);
             const auto timeout = std::min(regular_timeout, remaining);
             const auto events = _poller.wait(timeout);
@@ -1183,10 +1527,118 @@ namespace snf::worker
             flushWrites(_budgets.writes);
         }
 
+        if (_actors != nullptr)
+        {
+            const auto handles = _actors->activeHandles();
+            for (const auto handle : handles)
+            {
+                ActorSlot* slot = _actors->find(handle);
+                if (slot != nullptr && (slot->state() == ActorState::Idle || slot->state() == ActorState::Queued))
+                {
+                    slot->setState(ActorState::Stopping);
+                    const std::size_t rem_msgs = slot->mailbox().size();
+                    const std::uint64_t rem_bytes = slot->mailbox().chargedBytes();
+                    _total_mailbox_messages -= rem_msgs;
+                    _total_mailbox_bytes -= rem_bytes;
+                    _metrics.actor.discarded_mailbox_messages += rem_msgs;
+                    _metrics.actor.discarded_mailbox_bytes += rem_bytes;
+                    slot->mailbox().clear();
+                    static_cast<void>(_actors->release(handle));
+                    ++_metrics.actor.stopped_actors;
+                }
+            }
+        }
+    }
+
+    void Worker::runShutdownPhaseC(const TimePoint deadline)
+    {
+        if (!networkEnabled() || _connections->activeCount() == 0)
+        {
+            return;
+        }
+
+        _network_stopping = true;
         const auto handles = _connections->activeHandles();
         for (const ConnectionHandle handle : handles)
         {
-            forceClose(handle, CloseReason::Timeout);
+            static_cast<void>(beginGracefulClose(handle, CloseReason::Shutdown, deadline));
+        }
+
+        while (_connections->activeCount() != 0 && std::chrono::steady_clock::now() < deadline)
+        {
+            const auto now = std::chrono::steady_clock::now();
+            const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
+            const auto regular_timeout = hasRunnableWork() ? std::chrono::milliseconds(0) : pollTimeout().value_or(remaining);
+            const auto timeout = std::min(regular_timeout, remaining);
+            const auto events = _poller.wait(timeout);
+
+            processPollEvents(events, _budgets.poll);
+            drainInbox(_budgets.inbox);
+            expireTimers(std::chrono::steady_clock::now(), _budgets.timers);
+            flushWrites(_budgets.writes);
+        }
+    }
+
+    void Worker::runShutdownPhaseD(const TimePoint deadline)
+    {
+        if (networkEnabled())
+        {
+            const auto handles = _connections->activeHandles();
+            for (const ConnectionHandle handle : handles)
+            {
+                forceClose(handle, CloseReason::Timeout);
+            }
+        }
+
+        if (_actors != nullptr)
+        {
+            const auto handles = _actors->activeHandles();
+            for (const auto handle : handles)
+            {
+                ActorSlot* slot = _actors->find(handle);
+                if (slot != nullptr)
+                {
+                    const std::size_t rem_msgs = slot->mailbox().size();
+                    const std::uint64_t rem_bytes = slot->mailbox().chargedBytes();
+                    _total_mailbox_messages -= rem_msgs;
+                    _total_mailbox_bytes -= rem_bytes;
+                    _metrics.actor.discarded_mailbox_messages += rem_msgs;
+                    _metrics.actor.discarded_mailbox_bytes += rem_bytes;
+                    slot->mailbox().clear();
+                    static_cast<void>(_actors->release(handle));
+                    ++_metrics.actor.stopped_actors;
+                }
+            }
+            _ready_queue->clear();
+        }
+
+        _inbox.close();
+
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            const auto drain_res = _inbox.drain(
+                _budgets.inbox,
+                [this](WorkerEvent&& ev)
+                {
+                    onEvent(std::move(ev));
+                }
+            );
+            _metrics.shutdown_inbox_events += drain_res.processed;
+
+            const auto expire_res = _timers.expire(
+                std::chrono::steady_clock::now(),
+                _budgets.timers,
+                [this](TimerPayload&& payload)
+                {
+                    onTimer(std::move(payload));
+                }
+            );
+            _metrics.shutdown_timers_fired += expire_res.expired;
+
+            if (!drain_res.has_more && !expire_res.due_items_remain)
+            {
+                break;
+            }
         }
     }
 

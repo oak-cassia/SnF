@@ -1,5 +1,7 @@
 #pragma once
 
+#include "snf/worker/actor.hpp"
+#include "snf/worker/actor_table.hpp"
 #include "snf/worker/budget.hpp"
 #include "snf/worker/connection_table.hpp"
 #include "snf/worker/connection_work_queue.hpp"
@@ -40,6 +42,7 @@ namespace snf::worker
         std::uint64_t shutdown_timers_fired{0};
 
         WorkerNetworkMetrics network{};
+        WorkerActorMetrics actor{};
     };
 
     class Worker final
@@ -58,6 +61,24 @@ namespace snf::worker
             WorkerNetworkConfig network_config,
             RequestSink& request_sink
         );
+        Worker(
+            WorkerId id,
+            std::uint16_t worker_count,
+            WorkerBudgets budgets,
+            WorkerInboxConfig inbox_config,
+            WorkerActorConfig actor_config,
+            ActorFactory& actor_factory
+        );
+        Worker(
+            WorkerId id,
+            std::uint16_t worker_count,
+            WorkerBudgets budgets,
+            WorkerInboxConfig inbox_config,
+            WorkerNetworkConfig network_config,
+            RequestSink& request_sink,
+            WorkerActorConfig actor_config,
+            ActorFactory& actor_factory
+        );
 
         Worker(const Worker&) = delete;
         Worker& operator=(const Worker&) = delete;
@@ -71,6 +92,8 @@ namespace snf::worker
         void attachListener(snf::net::UniqueFileDescriptor listener);
         void bindRemoteTarget(WorkerId target, WorkerInboxPort port);
 
+        void configureActors(const WorkerActorConfig& config, ActorFactory& factory);
+
         // owner Worker thread 전용. The rvalue Frame is consumed by this
         // call, including terminal failures; no result payload is returned.
         // A remote target is converted to a RemoteConnectionSend in the
@@ -78,9 +101,18 @@ namespace snf::worker
         [[nodiscard]] SendResult send(ConnectionRef connection, snf::protocol::Frame&& frame, bool critical = false);
         [[nodiscard]] bool closeConnection(ConnectionRef connection, CloseReason reason, bool graceful = true);
 
+        // Transitional local implementation primitive used by RequestSink and TellActorEffect.
+        // Owner thread only.
+        [[nodiscard]] DeliveryResult tryDeliverLocal(ActorKey key, ActorEnvelope envelope);
+
         [[nodiscard]] bool networkEnabled() const noexcept;
         [[nodiscard]] std::size_t connectionCount() const noexcept;
         [[nodiscard]] bool listenerPaused() const noexcept;
+
+        [[nodiscard]] bool actorsConfigured() const noexcept;
+        [[nodiscard]] std::size_t actorCount() const noexcept;
+        [[nodiscard]] std::size_t totalMailboxMessages() const noexcept;
+        [[nodiscard]] std::uint64_t totalMailboxBytes() const noexcept;
 
         // startup 전용 — Worker thread 시작 전에만 호출한다.
         [[nodiscard]] WorkerInboxPort bindInboxSource(WorkerId source) noexcept;
@@ -120,8 +152,8 @@ namespace snf::worker
         );
         void drainInbox(const InboxBudget& budget);
         void expireTimers(TimePoint now, const CountTimeBudget& budget);
-        void runReadyActors(const CountTimeBudget& budget); // 4단계까지 no-op
-        void flushWrites(const ByteTimeBudget& budget);     // 3단계까지 no-op
+        void runReadyActors(const CountTimeBudget& budget);
+        void flushWrites(const ByteTimeBudget& budget);
 
         void onEvent(WorkerEvent&& event);
         void onTimer(TimerPayload&& payload);
@@ -131,15 +163,22 @@ namespace snf::worker
         [[nodiscard]] bool enqueueWrite(ConnectionSlot& slot);
         void updateConnectionInterest(const ConnectionSlot& slot);
         void forceClose(ConnectionHandle handle, CloseReason reason);
-        [[nodiscard]] bool beginGracefulClose(ConnectionHandle handle, CloseReason reason);
+        [[nodiscard]] bool beginGracefulClose(ConnectionHandle handle, CloseReason reason, std::optional<TimePoint> max_deadline = std::nullopt);
         void maybeResumeListener();
         void pauseListener();
         [[noreturn]] void networkInvariantViolation(const char* message);
-        void beginNetworkShutdown();
-        void runNetworkShutdown();
         void releaseConnectionRegistration(ConnectionHandle handle) noexcept;
         [[nodiscard]] std::optional<PollRegistrationView> registrationFor(ConnectionHandle handle) const noexcept;
         [[nodiscard]] bool isCurrent(ConnectionHandle handle) const noexcept;
+
+        [[nodiscard]] DeliveryResult tryDeliverLocalInternal(ActorKey key, ActorEnvelope envelope);
+        void applyEffect(ActorSlot& current_slot, Effect&& effect, bool& stopped);
+
+        void runUnifiedShutdown();
+        void beginShutdownPhaseA();
+        void runShutdownPhaseB(TimePoint deadline);
+        void runShutdownPhaseC(TimePoint deadline);
+        void runShutdownPhaseD(TimePoint deadline);
 
         WorkerId _id;
         std::uint16_t _worker_count;
@@ -169,5 +208,13 @@ namespace snf::worker
         WorkerNetworkConfig _network_config{};
         bool _listener_paused{false};
         bool _network_stopping{false};
+
+        std::unique_ptr<ActorTable> _actors;
+        std::unique_ptr<ReadyActorQueue> _ready_queue;
+        ActorFactory* _actor_factory{nullptr};
+        WorkerActorConfig _actor_config{};
+        std::size_t _total_mailbox_messages{0};
+        std::uint64_t _total_mailbox_bytes{0};
+        bool _shutting_down{false};
     };
 }
