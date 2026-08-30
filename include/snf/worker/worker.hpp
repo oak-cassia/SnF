@@ -184,6 +184,10 @@ namespace snf::worker
 
         [[nodiscard]] DeliveryResult tryDeliverLocalInternal(ActorKey key, ActorEnvelope envelope);
         void applyEffect(ActorSlot& current_slot, Effect&& effect, bool& stopped);
+        // Completion source for the Step 5 synthetic scaffold. The source owns the stale metric
+        // decision so tryMarkSyntheticCommandReady() stays metric-free and 5C's timer path can
+        // raise stale_await_timeouts instead. Step 8's completeDb() takes over this role.
+        bool completeSyntheticCommand(AwaitKey key, SyntheticAwaitOutcome outcome);
         [[nodiscard]] bool tryMarkSyntheticCommandReady(AwaitKey key, SyntheticAwaitOutcome outcome);
         void removeActor(ActorHandle handle, ActorRemovalReason reason);
         MailboxUsage discardMailbox(ActorSlot& slot);

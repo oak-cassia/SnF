@@ -32,6 +32,11 @@ namespace snf::worker
             return worker.tryMarkSyntheticCommandReady(key, outcome);
         }
 
+        static bool completeSyntheticCommand(Worker& worker, const AwaitKey key, const SyntheticAwaitOutcome outcome)
+        {
+            return worker.completeSyntheticCommand(key, outcome);
+        }
+
         static const std::optional<BlockedTask>& blocked(Worker& worker, const ActorKey key)
         {
             auto* slot = worker._actors->find(key);
@@ -1436,6 +1441,89 @@ namespace
         TaskFactory _factory;
     };
 
+    // Records the order in which the coroutine frame and the ActorInstance are destroyed.
+    // A frame may reference the instance it ran on, so the frame must go first.
+    struct TeardownOrder
+    {
+        std::atomic<int> next{1};
+        std::atomic<int> frame{0};
+        std::atomic<int> instance{0};
+    };
+
+    // Passed by value into the coroutine, so the frame copy is destroyed with the frame itself
+    // rather than when the coroutine body returns. Moves null out the source so it counts once.
+    class FrameDestructProbe final
+    {
+    public:
+        explicit FrameDestructProbe(TeardownOrder& order) noexcept
+            : _order(&order)
+        {
+        }
+
+        FrameDestructProbe(FrameDestructProbe&& other) noexcept
+            : _order(std::exchange(other._order, nullptr))
+        {
+        }
+
+        FrameDestructProbe(const FrameDestructProbe&) = delete;
+        FrameDestructProbe& operator=(const FrameDestructProbe&) = delete;
+        FrameDestructProbe& operator=(FrameDestructProbe&&) = delete;
+
+        ~FrameDestructProbe()
+        {
+            if (_order != nullptr)
+            {
+                _order->frame.store(_order->next.fetch_add(1));
+            }
+        }
+
+    private:
+        TeardownOrder* _order;
+    };
+
+    ActorTask makeSuspendingStopTask(std::atomic<int>& step, FrameDestructProbe probe)
+    {
+        static_cast<void>(probe);
+
+        step = 1;
+        static_cast<void>(co_await SyntheticAwait{});
+        step = 2;
+
+        EffectBatch effects;
+        effects.push(StopActorEffect{});
+        co_return CompletedTurn{.effects = std::move(effects)};
+    }
+
+    class StoppingSuspendingActor final : public ActorInstance
+    {
+    public:
+        StoppingSuspendingActor(std::atomic<int>& step, TeardownOrder& order) noexcept
+            : _step(step)
+            , _order(order)
+        {
+        }
+
+        ~StoppingSuspendingActor() override
+        {
+            _order.instance.store(_order.next.fetch_add(1));
+        }
+
+        TurnResult dispatch(ActorEnvelope&&, const ActorTurnContext&) override
+        {
+            ActorTask task = makeSuspendingStopTask(_step, FrameDestructProbe{_order});
+            const auto status = task.resume();
+            if (status == ActorTaskStatus::Suspended)
+            {
+                return SuspendedTurn{std::move(task)};
+            }
+            return task.takeCompleted();
+        }
+
+    private:
+        std::atomic<int>& _step;
+        TeardownOrder& _order;
+    };
+
     void test_suspended_actor_does_not_dispatch_next_mailbox_command()
     {
         WorkerActorConfig config{
@@ -1582,10 +1670,16 @@ namespace
         const AwaitKey await_key = std::get<SyntheticSuspendedCommand>(*blocked).key;
 
         // First completion succeeds
-        assert(WorkerActorTestAccess::tryMarkSyntheticCommandReady(worker, await_key, SyntheticAwaitOutcome::Completed));
+        assert(WorkerActorTestAccess::completeSyntheticCommand(worker, await_key, SyntheticAwaitOutcome::Completed));
+        assert(worker.metrics().actor.stale_completions == 0);
 
-        // Second completion with same key is dropped
+        // Second completion with the same key is dropped and counted by the completion source
+        assert(!WorkerActorTestAccess::completeSyntheticCommand(worker, await_key, SyntheticAwaitOutcome::Completed));
+        assert(worker.metrics().actor.stale_completions == 1);
+
+        // The matcher itself stays metric-free so each source can raise its own stale counter
         assert(!WorkerActorTestAccess::tryMarkSyntheticCommandReady(worker, await_key, SyntheticAwaitOutcome::Completed));
+        assert(worker.metrics().actor.stale_completions == 1);
     }
 
     void test_stale_operation_id_and_incarnation_completion_dropped()
@@ -1631,14 +1725,17 @@ namespace
 
         // Stale operation id -> rejected
         const AwaitKey bad_op{real_key.actor, real_key.incarnation, OperationId{999}};
-        assert(!WorkerActorTestAccess::tryMarkSyntheticCommandReady(worker, bad_op, SyntheticAwaitOutcome::Completed));
+        assert(!WorkerActorTestAccess::completeSyntheticCommand(worker, bad_op, SyntheticAwaitOutcome::Completed));
+        assert(worker.metrics().actor.stale_completions == 1);
 
         // Stale incarnation -> rejected
         const AwaitKey bad_inc{real_key.actor, ActorIncarnation{999}, real_key.operation};
-        assert(!WorkerActorTestAccess::tryMarkSyntheticCommandReady(worker, bad_inc, SyntheticAwaitOutcome::Completed));
+        assert(!WorkerActorTestAccess::completeSyntheticCommand(worker, bad_inc, SyntheticAwaitOutcome::Completed));
+        assert(worker.metrics().actor.stale_completions == 2);
 
-        // Real key succeeds
-        assert(WorkerActorTestAccess::tryMarkSyntheticCommandReady(worker, real_key, SyntheticAwaitOutcome::Completed));
+        // Real key succeeds and leaves the stale counter alone
+        assert(WorkerActorTestAccess::completeSyntheticCommand(worker, real_key, SyntheticAwaitOutcome::Completed));
+        assert(worker.metrics().actor.stale_completions == 2);
     }
 
     void test_resume_only_occurs_via_ready_queue()
@@ -1858,6 +1955,60 @@ namespace
         assert(caught);
     }
 
+    void test_resumed_stop_effect_destroys_frame_before_actor_instance()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+        };
+
+        std::atomic<int> step{0};
+        TeardownOrder order;
+
+        FunctionalActorFactory factory(
+            [&step, &order](ActorKey) -> ActorConstructionResult
+            {
+                return ActorConstructionResult::ready(std::make_unique<StoppingSuspendingActor>(step, order));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(step.load() == 1);
+        assert(worker.actorCount() == 1);
+
+        // Queued mail must be returned to the Worker accounting when the actor is removed.
+        assert(worker.tryDeliverLocal(key, makeEnvelope(24)) == DeliveryResult::Accepted);
+        assert(worker.totalMailboxMessages() == 1);
+
+        const AwaitKey await_key = std::get<SyntheticSuspendedCommand>(*WorkerActorTestAccess::blocked(worker, key)).key;
+        assert(WorkerActorTestAccess::completeSyntheticCommand(worker, await_key, SyntheticAwaitOutcome::Completed));
+
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+
+        assert(step.load() == 2);
+        assert(worker.actorCount() == 0);
+        assert(worker.totalMailboxMessages() == 0);
+        assert(worker.totalMailboxBytes() == 0);
+        assert(worker.metrics().actor.stopped_actors == 1);
+
+        // The resumed turn stopped the actor: the coroutine frame must be gone before the
+        // ActorInstance it ran on is destroyed.
+        assert(order.frame.load() != 0);
+        assert(order.instance.load() != 0);
+        assert(order.frame.load() < order.instance.load());
+    }
+
     void test_suspended_actor_removed_resets_mailbox_accounting()
     {
         WorkerActorConfig config{
@@ -1954,4 +2105,5 @@ void run_worker_actor_tests()
     test_coroutine_frame_destroyed_exactly_once();
     test_exception_in_coroutine_rethrows_at_resume_boundary();
     test_suspended_actor_removed_resets_mailbox_accounting();
+    test_resumed_stop_effect_destroys_frame_before_actor_instance();
 }

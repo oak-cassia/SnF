@@ -920,7 +920,10 @@ namespace snf::worker
                 auto& suspended_cmd = std::get<SyntheticSuspendedCommand>(*slot->blocked());
                 if (!suspended_cmd.completion.has_value())
                 {
-                    continue;
+                    // Queued always implies a ready completion: tryMarkSyntheticCommandReady() is the
+                    // only path that queues a blocked actor, and it stores the completion first.
+                    // Skipping here would consume the ready-queue entry and strand the actor in Queued.
+                    throw std::logic_error{"Queued actor is blocked without a ready completion"};
                 }
 
                 // 1. Move SyntheticSuspendedCommand to local
@@ -940,6 +943,9 @@ namespace snf::worker
                 ++_metrics.actor.actor_turns;
                 ++_metrics.actor.resumed_turns;
 
+                // A throwing continuation propagates out of the Worker loop, matching step 4's
+                // dispatch policy. The slot is deliberately left Running and unreferenced: the
+                // Worker is terminating, and re-queueing a faulted actor would hide the fault.
                 const ActorTaskStatus status = task.resume(outcome);
 
                 const auto slice_duration =
@@ -971,6 +977,12 @@ namespace snf::worker
                 else
                 {
                     CompletedTurn completed = task.takeCompleted();
+
+                    // Destroy the coroutine frame before applying effects. A StopActorEffect removes
+                    // the ActorInstance, and a frame may still reference the instance it ran on, so
+                    // the frame must never outlive it.
+                    task = ActorTask{};
+
                     if (completed.effects.size() > EffectBatch::MAX_EFFECTS)
                     {
                         throw std::logic_error{"EffectBatch capacity exceeded maximum limit of 64"};
@@ -1159,6 +1171,16 @@ namespace snf::worker
             },
             effect
         );
+    }
+
+    bool Worker::completeSyntheticCommand(const AwaitKey key, const SyntheticAwaitOutcome outcome)
+    {
+        if (tryMarkSyntheticCommandReady(key, outcome))
+        {
+            return true;
+        }
+        ++_metrics.actor.stale_completions;
+        return false;
     }
 
     bool Worker::tryMarkSyntheticCommandReady(const AwaitKey key, const SyntheticAwaitOutcome outcome)
