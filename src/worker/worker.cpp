@@ -411,6 +411,11 @@ namespace snf::worker
         return _actors == nullptr ? 0 : _actors->activeCount();
     }
 
+    std::size_t Worker::loadingCount() const noexcept
+    {
+        return _loading_count;
+    }
+
     std::size_t Worker::totalMailboxMessages() const noexcept
     {
         return _total_mailbox_messages;
@@ -1224,6 +1229,136 @@ namespace snf::worker
         return true;
     }
 
+    bool Worker::beginActivationLoad(const ActorKey key, ActorEnvelope&& first_message)
+    {
+        assertOwnerThread();
+        if (!actorsConfigured())
+        {
+            return false;
+        }
+
+        if (!_actors->hasCapacity())
+        {
+            return false;
+        }
+
+        if (_loading_count >= _actor_config.max_concurrent_loading)
+        {
+            ++_metrics.actor.loading_limit_rejections;
+            return false;
+        }
+
+        if (1 > _actor_config.max_mailbox_messages_per_actor ||
+            first_message.chargedBytes() > _actor_config.max_mailbox_bytes_per_actor ||
+            _total_mailbox_messages + 1 > _actor_config.max_mailbox_messages_total ||
+            _total_mailbox_bytes + first_message.chargedBytes() > _actor_config.max_mailbox_bytes_total)
+        {
+            return false;
+        }
+
+        auto reservation = _actors->tryReserve(key);
+        if (!reservation.has_value())
+        {
+            return false;
+        }
+
+        ActorSlot& slot = reservation->slot();
+        slot.setInstance(nullptr);
+        slot.setState(ActorState::Loading);
+
+        const OperationId op = _operation_ids.next();
+        const AwaitKey await_key{
+            .actor = key,
+            .incarnation = slot.incarnation(),
+            .operation = op,
+        };
+        const auto deadline = std::chrono::steady_clock::now() + _actor_config.await_timeout;
+        slot.setBlocked(ActivationLoad{
+            .key = await_key,
+            .deadline = deadline,
+        });
+
+        const std::uint64_t charge = first_message.chargedBytes();
+        _total_mailbox_messages += 1;
+        _total_mailbox_bytes += charge;
+        slot.mailbox().push(std::move(first_message));
+
+        reservation->commit();
+        ++_loading_count;
+        ++_metrics.actor.activation_loads_started;
+        return true;
+    }
+
+    void Worker::completeSyntheticActivation(const AwaitKey key, const SyntheticActivationOutcome outcome)
+    {
+        assertOwnerThread();
+        if (!actorsConfigured())
+        {
+            return;
+        }
+
+        ActorSlot* slot = _actors->find(key.actor);
+        if (slot == nullptr || slot->state() != ActorState::Loading || !slot->hasBlocked())
+        {
+            ++_metrics.actor.stale_activation_completions;
+            return;
+        }
+
+        if (!std::holds_alternative<ActivationLoad>(*slot->blocked()))
+        {
+            ++_metrics.actor.stale_activation_completions;
+            return;
+        }
+
+        const auto& load = std::get<ActivationLoad>(*slot->blocked());
+        if (!acceptsCompletion(key, load.key))
+        {
+            ++_metrics.actor.stale_activation_completions;
+            return;
+        }
+
+        if (outcome == SyntheticActivationOutcome::Ready)
+        {
+            ActorConstructionResult result = _actor_factory->construct(key.actor);
+            if (result.isReady())
+            {
+                slot->setInstance(std::move(result.instance));
+                slot->clearBlocked();
+                assert(_loading_count > 0);
+                --_loading_count;
+
+                if (slot->mailbox().empty())
+                {
+                    slot->setState(ActorState::Idle);
+                }
+                else
+                {
+                    slot->setState(ActorState::Queued);
+                    _ready_queue->push(slot->handle());
+                }
+            }
+            else
+            {
+                ++_metrics.actor.activation_load_failures;
+                removeActor(slot->handle(), ActorRemovalReason::ActivationRejected);
+            }
+        }
+        else
+        {
+            ++_metrics.actor.activation_load_failures;
+            ActorRemovalReason reason = ActorRemovalReason::ActivationRejected;
+            if (outcome == SyntheticActivationOutcome::TimedOut)
+            {
+                reason = ActorRemovalReason::ActivationTimedOut;
+            }
+            else if (outcome == SyntheticActivationOutcome::Cancelled)
+            {
+                reason = ActorRemovalReason::ActivationCancelled;
+            }
+            removeActor(slot->handle(), reason);
+        }
+    }
+
     MailboxUsage Worker::discardMailbox(ActorSlot& slot)
     {
         const MailboxUsage usage = slot.mailboxUsage();
@@ -1247,18 +1382,22 @@ namespace snf::worker
             return;
         }
 
-        // 1. slot.clearBlocked() (coroutine frame destroyed first)
+        if (slot->state() == ActorState::Loading)
+        {
+            assert(_loading_count > 0);
+            --_loading_count;
+        }
+
+        // 1. slot.clearBlocked() (coroutine frame / activation load destroyed first)
         slot->clearBlocked();
 
         // 2. discardMailbox(slot)
         static_cast<void>(discardMailbox(*slot));
 
-        // 3. state == Loading: decrement loading count (for 5B)
-
-        // 4. slot.setInstance(nullptr)
+        // 3. slot.setInstance(nullptr)
         slot->setInstance(nullptr);
 
-        // 5. release
+        // 4. release
         static_cast<void>(_actors->release(handle));
 
         if (reason == ActorRemovalReason::Stopped || reason == ActorRemovalReason::ShutdownForced)

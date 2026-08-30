@@ -122,6 +122,7 @@ namespace snf::worker
 
         [[nodiscard]] bool actorsConfigured() const noexcept;
         [[nodiscard]] std::size_t actorCount() const noexcept;
+        [[nodiscard]] std::size_t loadingCount() const noexcept;
         [[nodiscard]] std::size_t totalMailboxMessages() const noexcept;
         [[nodiscard]] std::uint64_t totalMailboxBytes() const noexcept;
 
@@ -189,6 +190,8 @@ namespace snf::worker
         // raise stale_await_timeouts instead. Step 8's completeDb() takes over this role.
         bool completeSyntheticCommand(AwaitKey key, SyntheticAwaitOutcome outcome);
         [[nodiscard]] bool tryMarkSyntheticCommandReady(AwaitKey key, SyntheticAwaitOutcome outcome);
+        [[nodiscard]] bool beginActivationLoad(ActorKey key, ActorEnvelope&& first_message);
+        void completeSyntheticActivation(AwaitKey key, SyntheticActivationOutcome outcome);
         void removeActor(ActorHandle handle, ActorRemovalReason reason);
         MailboxUsage discardMailbox(ActorSlot& slot);
 
@@ -236,6 +239,7 @@ namespace snf::worker
         OperationIdSource _operation_ids{};
         std::size_t _total_mailbox_messages{0};
         std::uint64_t _total_mailbox_bytes{0};
+        std::size_t _loading_count{0};
         bool _shutting_down{false};
     };
 }

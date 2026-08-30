@@ -37,11 +37,26 @@ namespace snf::worker
             return worker.completeSyntheticCommand(key, outcome);
         }
 
+        static bool beginActivationLoad(Worker& worker, const ActorKey key, ActorEnvelope&& first_message)
+        {
+            return worker.beginActivationLoad(key, std::move(first_message));
+        }
+
+        static void completeSyntheticActivation(Worker& worker, const AwaitKey key, const SyntheticActivationOutcome outcome)
+        {
+            worker.completeSyntheticActivation(key, outcome);
+        }
+
         static const std::optional<BlockedTask>& blocked(Worker& worker, const ActorKey key)
         {
             auto* slot = worker._actors->find(key);
             assert(slot != nullptr);
             return slot->blocked();
+        }
+
+        static ActorSlot* slot(Worker& worker, const ActorKey key)
+        {
+            return worker._actors->find(key);
         }
 
         static ActorHandle handle(Worker& worker, const ActorKey key)
@@ -2058,6 +2073,380 @@ namespace
         assert(worker.totalMailboxBytes() == 0);
         assert(destructs.load() == 1); // coroutine frame cleanly destroyed during removeActor
     }
+
+    // =========================================================================
+    // 5B — Loading Foundation Tests
+    // =========================================================================
+
+    void test_loading_actor_does_not_dispatch_messages_and_enqueues_to_mailbox()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+            .max_concurrent_loading = 10,
+        };
+
+        std::atomic<std::size_t> turns{0};
+        FunctionalActorFactory factory(
+            [&turns](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<FunctionalActor>(
+                    [&turns](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
+                    {
+                        turns.fetch_add(1, std::memory_order_relaxed);
+                        return CompletedTurn{.effects = EffectBatch{}};
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        // 1. Begin activation load
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, key, makeEnvelope(16)));
+        assert(worker.loadingCount() == 1);
+        assert(worker.actorCount() == 1);
+        assert(worker.totalMailboxMessages() == 1);
+        assert(WorkerActorTestAccess::slot(worker, key)->state() == ActorState::Loading);
+        assert(worker.metrics().actor.activation_loads_started == 1);
+
+        // 2. Deliver second message -> enqueued to mailbox only
+        assert(worker.tryDeliverLocal(key, makeEnvelope(20)) == DeliveryResult::Accepted);
+        assert(worker.totalMailboxMessages() == 2);
+        assert(worker.loadingCount() == 1);
+
+        // 3. Run ready actors -> loading actor does NOT run any turns
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(turns.load() == 0);
+        assert(worker.metrics().actor.actor_turns == 0);
+        assert(worker.totalMailboxMessages() == 2);
+        assert(WorkerActorTestAccess::slot(worker, key)->state() == ActorState::Loading);
+    }
+
+    void test_activation_success_transitions_to_idle_or_queued_based_on_mailbox()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+            .max_concurrent_loading = 10,
+        };
+
+        std::atomic<std::size_t> turns{0};
+        FunctionalActorFactory factory(
+            [&turns](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<FunctionalActor>(
+                    [&turns](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
+                    {
+                        turns.fetch_add(1, std::memory_order_relaxed);
+                        return CompletedTurn{.effects = EffectBatch{}};
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+
+        // Case A: Non-empty mailbox -> transitions to Queued and pushes to ready queue
+        const ActorKey key1{.kind = ActorKind::Player, .entity = 1};
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, key1, makeEnvelope(16)));
+        assert(worker.loadingCount() == 1);
+
+        const AwaitKey await_key1 = std::get<ActivationLoad>(*WorkerActorTestAccess::blocked(worker, key1)).key;
+        WorkerActorTestAccess::completeSyntheticActivation(worker, await_key1, SyntheticActivationOutcome::Ready);
+
+        assert(worker.loadingCount() == 0);
+        assert(WorkerActorTestAccess::slot(worker, key1)->state() == ActorState::Queued);
+
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(turns.load() == 1);
+        assert(WorkerActorTestAccess::slot(worker, key1)->state() == ActorState::Idle);
+
+        // Case B: Empty mailbox -> transitions directly to Idle
+        const ActorKey key2{.kind = ActorKind::Player, .entity = 2};
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, key2, makeEnvelope(16)));
+        assert(worker.loadingCount() == 1);
+
+        // Discard mailbox before activation completion to simulate empty mailbox
+        WorkerActorTestAccess::slot(worker, key2)->clearMailbox();
+
+        const AwaitKey await_key2 = std::get<ActivationLoad>(*WorkerActorTestAccess::blocked(worker, key2)).key;
+        WorkerActorTestAccess::completeSyntheticActivation(worker, await_key2, SyntheticActivationOutcome::Ready);
+
+        assert(worker.loadingCount() == 0);
+        assert(WorkerActorTestAccess::slot(worker, key2)->state() == ActorState::Idle);
+
+        // Running ready queue does not run turns for Idle actor
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(turns.load() == 1);
+    }
+
+    void test_activation_failure_discards_mailbox_releases_slot_and_resets_accounting()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+            .max_concurrent_loading = 10,
+        };
+
+        bool factory_reject = false;
+        FunctionalActorFactory factory(
+            [&factory_reject](ActorKey) -> ActorConstructionResult
+            {
+                if (factory_reject)
+                {
+                    return ActorConstructionResult::rejected();
+                }
+                auto actor = std::make_unique<FunctionalActor>(
+                    [](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
+                    {
+                        return CompletedTurn{.effects = EffectBatch{}};
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+
+        // 1. Rejected outcome
+        const ActorKey key1{.kind = ActorKind::Player, .entity = 1};
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, key1, makeEnvelope(16)));
+        assert(worker.tryDeliverLocal(key1, makeEnvelope(20)) == DeliveryResult::Accepted);
+        assert(worker.loadingCount() == 1);
+        assert(worker.totalMailboxMessages() == 2);
+
+        const AwaitKey await_key1 = std::get<ActivationLoad>(*WorkerActorTestAccess::blocked(worker, key1)).key;
+        WorkerActorTestAccess::completeSyntheticActivation(worker, await_key1, SyntheticActivationOutcome::Rejected);
+
+        assert(worker.loadingCount() == 0);
+        assert(worker.actorCount() == 0);
+        assert(worker.totalMailboxMessages() == 0);
+        assert(worker.totalMailboxBytes() == 0);
+        assert(worker.metrics().actor.activation_load_failures == 1);
+
+        // 2. TimedOut outcome
+        const ActorKey key2{.kind = ActorKind::Player, .entity = 2};
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, key2, makeEnvelope(16)));
+        const AwaitKey await_key2 = std::get<ActivationLoad>(*WorkerActorTestAccess::blocked(worker, key2)).key;
+        WorkerActorTestAccess::completeSyntheticActivation(worker, await_key2, SyntheticActivationOutcome::TimedOut);
+
+        assert(worker.loadingCount() == 0);
+        assert(worker.actorCount() == 0);
+        assert(worker.totalMailboxMessages() == 0);
+        assert(worker.metrics().actor.activation_load_failures == 2);
+
+        // 3. Cancelled outcome
+        const ActorKey key3{.kind = ActorKind::Player, .entity = 3};
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, key3, makeEnvelope(16)));
+        const AwaitKey await_key3 = std::get<ActivationLoad>(*WorkerActorTestAccess::blocked(worker, key3)).key;
+        WorkerActorTestAccess::completeSyntheticActivation(worker, await_key3, SyntheticActivationOutcome::Cancelled);
+
+        assert(worker.loadingCount() == 0);
+        assert(worker.actorCount() == 0);
+        assert(worker.totalMailboxMessages() == 0);
+        assert(worker.metrics().actor.activation_load_failures == 3);
+
+        // 4. construct() returns Rejected when outcome is Ready
+        factory_reject = true;
+        const ActorKey key4{.kind = ActorKind::Player, .entity = 4};
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, key4, makeEnvelope(16)));
+        const AwaitKey await_key4 = std::get<ActivationLoad>(*WorkerActorTestAccess::blocked(worker, key4)).key;
+        WorkerActorTestAccess::completeSyntheticActivation(worker, await_key4, SyntheticActivationOutcome::Ready);
+
+        assert(worker.loadingCount() == 0);
+        assert(worker.actorCount() == 0);
+        assert(worker.totalMailboxMessages() == 0);
+        assert(worker.metrics().actor.activation_load_failures == 4);
+    }
+
+    void test_concurrent_loading_cap_exceeded_returns_false_and_increments_metric()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+            .max_concurrent_loading = 2,
+        };
+
+        FunctionalActorFactory factory(
+            [](ActorKey) -> ActorConstructionResult
+            {
+                return ActorConstructionResult::ready(
+                    std::make_unique<FunctionalActor>(
+                        [](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
+                        {
+                            return CompletedTurn{.effects = EffectBatch{}};
+                        }
+                    )
+                );
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+
+        const ActorKey key1{.kind = ActorKind::Player, .entity = 1};
+        const ActorKey key2{.kind = ActorKind::Player, .entity = 2};
+        const ActorKey key3{.kind = ActorKind::Player, .entity = 3};
+
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, key1, makeEnvelope(16)));
+        assert(worker.loadingCount() == 1);
+
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, key2, makeEnvelope(16)));
+        assert(worker.loadingCount() == 2);
+
+        // 3rd concurrent loading exceeds cap of 2 -> rejected
+        assert(!WorkerActorTestAccess::beginActivationLoad(worker, key3, makeEnvelope(16)));
+        assert(worker.loadingCount() == 2);
+        assert(worker.actorCount() == 2);
+        assert(worker.metrics().actor.loading_limit_rejections == 1);
+    }
+
+    void test_loading_stale_and_duplicate_completions_dropped()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+            .max_concurrent_loading = 10,
+        };
+
+        FunctionalActorFactory factory(
+            [](ActorKey) -> ActorConstructionResult
+            {
+                return ActorConstructionResult::ready(
+                    std::make_unique<FunctionalActor>(
+                        [](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
+                        {
+                            return CompletedTurn{.effects = EffectBatch{}};
+                        }
+                    )
+                );
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, key, makeEnvelope(16)));
+        const AwaitKey real_key = std::get<ActivationLoad>(*WorkerActorTestAccess::blocked(worker, key)).key;
+
+        // 1. Stale operation id -> dropped
+        const AwaitKey bad_op{real_key.actor, real_key.incarnation, OperationId{999}};
+        WorkerActorTestAccess::completeSyntheticActivation(worker, bad_op, SyntheticActivationOutcome::Ready);
+        assert(worker.metrics().actor.stale_activation_completions == 1);
+        assert(worker.loadingCount() == 1);
+        assert(WorkerActorTestAccess::slot(worker, key)->state() == ActorState::Loading);
+
+        // 2. Stale incarnation -> dropped
+        const AwaitKey bad_inc{real_key.actor, ActorIncarnation{999}, real_key.operation};
+        WorkerActorTestAccess::completeSyntheticActivation(worker, bad_inc, SyntheticActivationOutcome::Ready);
+        assert(worker.metrics().actor.stale_activation_completions == 2);
+        assert(worker.loadingCount() == 1);
+        assert(WorkerActorTestAccess::slot(worker, key)->state() == ActorState::Loading);
+
+        // 3. Valid completion -> succeeds
+        WorkerActorTestAccess::completeSyntheticActivation(worker, real_key, SyntheticActivationOutcome::Ready);
+        assert(worker.loadingCount() == 0);
+        assert(WorkerActorTestAccess::slot(worker, key)->state() == ActorState::Queued);
+
+        // 4. Duplicate completion with old key -> dropped
+        WorkerActorTestAccess::completeSyntheticActivation(worker, real_key, SyntheticActivationOutcome::Ready);
+        assert(worker.metrics().actor.stale_activation_completions == 3);
+    }
+
+    void test_loading_count_invariant_across_all_lifecycle_paths()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 10,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 50ms,
+            .await_timeout = 2000ms,
+            .max_concurrent_loading = 10,
+        };
+
+        FunctionalActorFactory factory(
+            [](ActorKey) -> ActorConstructionResult
+            {
+                return ActorConstructionResult::ready(
+                    std::make_unique<FunctionalActor>(
+                        [](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
+                        {
+                            return CompletedTurn{.effects = EffectBatch{}};
+                        }
+                    )
+                );
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+
+        const ActorKey k1{.kind = ActorKind::Player, .entity = 1};
+        const ActorKey k2{.kind = ActorKind::Player, .entity = 2};
+        const ActorKey k3{.kind = ActorKind::Player, .entity = 3};
+
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, k1, makeEnvelope(16)));
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, k2, makeEnvelope(16)));
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, k3, makeEnvelope(16)));
+        assert(worker.loadingCount() == 3);
+
+        // 1 completes Ready -> loadingCount becomes 2
+        const AwaitKey await_k1 = std::get<ActivationLoad>(*WorkerActorTestAccess::blocked(worker, k1)).key;
+        WorkerActorTestAccess::completeSyntheticActivation(worker, await_k1, SyntheticActivationOutcome::Ready);
+        assert(worker.loadingCount() == 2);
+
+        // 2 fails TimedOut -> loadingCount becomes 1
+        const AwaitKey await_k2 = std::get<ActivationLoad>(*WorkerActorTestAccess::blocked(worker, k2)).key;
+        WorkerActorTestAccess::completeSyntheticActivation(worker, await_k2, SyntheticActivationOutcome::TimedOut);
+        assert(worker.loadingCount() == 1);
+
+        // 3 is removed directly via shutdown -> loadingCount becomes 0
+        worker.requestStop();
+        worker.run();
+        assert(worker.loadingCount() == 0);
+        assert(worker.actorCount() == 0);
+    }
 }
 
 void run_worker_actor_tests()
@@ -2106,4 +2495,12 @@ void run_worker_actor_tests()
     test_exception_in_coroutine_rethrows_at_resume_boundary();
     test_suspended_actor_removed_resets_mailbox_accounting();
     test_resumed_stop_effect_destroys_frame_before_actor_instance();
+
+    // 5B Tests
+    test_loading_actor_does_not_dispatch_messages_and_enqueues_to_mailbox();
+    test_activation_success_transitions_to_idle_or_queued_based_on_mailbox();
+    test_activation_failure_discards_mailbox_releases_slot_and_resets_accounting();
+    test_concurrent_loading_cap_exceeded_returns_false_and_increments_metric();
+    test_loading_stale_and_duplicate_completions_dropped();
+    test_loading_count_invariant_across_all_lifecycle_paths();
 }

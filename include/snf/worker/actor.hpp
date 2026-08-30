@@ -31,7 +31,8 @@ namespace snf::worker
         Queued = 1,
         Running = 2,
         Suspended = 3,
-        Stopping = 4,
+        Loading = 4,
+        Stopping = 5,
     };
 
     enum class DeliveryResult : std::uint8_t
@@ -43,6 +44,7 @@ namespace snf::worker
         ConstructionRejected = 4,
         Stopping = 5,
         Closed = 6,
+        ActivationLimit = 7,
     };
 
     struct ActorHandle
@@ -477,7 +479,21 @@ namespace snf::worker
         std::optional<SyntheticAwaitOutcome> completion{std::nullopt};
     };
 
-    using BlockedTask = std::variant<SyntheticSuspendedCommand>;
+    struct ActivationLoad
+    {
+        AwaitKey key;
+        TimePoint deadline;
+    };
+
+    enum class SyntheticActivationOutcome : std::uint8_t
+    {
+        Ready,
+        Rejected,
+        TimedOut,
+        Cancelled,
+    };
+
+    using BlockedTask = std::variant<SyntheticSuspendedCommand, ActivationLoad>;
 
     class ActorInstance
     {
@@ -546,6 +562,7 @@ namespace snf::worker
         std::uint64_t placement_seed{0};
         std::chrono::milliseconds worker_shutdown_timeout{2000};
         std::chrono::milliseconds await_timeout{2000};
+        std::size_t max_concurrent_loading{1024};
     };
 
     [[nodiscard]] inline bool isValid(const WorkerActorConfig& config) noexcept
@@ -557,7 +574,8 @@ namespace snf::worker
                config.max_mailbox_bytes_total >= config.max_mailbox_bytes_per_actor &&
                config.max_turns_per_actor_slice > 0 &&
                config.worker_shutdown_timeout >= std::chrono::milliseconds::zero() &&
-               config.await_timeout > std::chrono::milliseconds::zero();
+               config.await_timeout > std::chrono::milliseconds::zero() &&
+               config.max_concurrent_loading > 0;
     }
 
     struct WorkerActorMetrics
@@ -576,6 +594,10 @@ namespace snf::worker
         std::uint64_t effect_tell_failures{0};
         std::uint64_t wrong_owner_tells{0};
         std::uint64_t construction_rejections{0};
+        std::uint64_t activation_loads_started{0};
+        std::uint64_t activation_load_failures{0};
+        std::uint64_t loading_limit_rejections{0};
+        std::uint64_t stale_activation_completions{0};
         std::uint64_t total_slice_duration_ns{0};
         std::chrono::nanoseconds max_slice_duration{0};
     };
