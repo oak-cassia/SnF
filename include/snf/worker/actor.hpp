@@ -2,6 +2,7 @@
 
 #include "snf/protocol/frame.hpp"
 #include "snf/worker/actor_envelope.hpp"
+#include "snf/worker/db_client.hpp"
 #include "snf/worker/connection.hpp"
 #include "snf/worker/identity.hpp"
 #include "snf/worker/timer_queue.hpp"
@@ -484,6 +485,9 @@ namespace snf::worker
         {
             Ready,
             Rejected,
+            // The actor cannot exist until its persistent state has been read. From
+            // Stage 8 the factory decides this, not just how to build the object.
+            NeedsLoad,
         };
 
         Status status{Status::Rejected};
@@ -509,6 +513,14 @@ namespace snf::worker
             };
         }
 
+        [[nodiscard]] static ActorConstructionResult needsLoad() noexcept
+        {
+            return ActorConstructionResult{
+                .status = Status::NeedsLoad,
+                .instance = nullptr,
+            };
+        }
+
         [[nodiscard]] bool isReady() const noexcept
         {
             return status == Status::Ready && instance != nullptr;
@@ -518,6 +530,11 @@ namespace snf::worker
         {
             return status == Status::Rejected;
         }
+
+        [[nodiscard]] bool needsActivationLoad() const noexcept
+        {
+            return status == Status::NeedsLoad;
+        }
     };
 
     class ActorFactory
@@ -525,6 +542,13 @@ namespace snf::worker
     public:
         virtual ~ActorFactory() = default;
         [[nodiscard]] virtual ActorConstructionResult construct(ActorKey key) = 0;
+
+        // Called once an activation load has completed. Only reached for a key whose
+        // construct() asked for a load, so the default refuses.
+        [[nodiscard]] virtual ActorConstructionResult constructLoaded(ActorKey, const LoadPlayerResult&)
+        {
+            return ActorConstructionResult::rejected();
+        }
     };
 
     struct WorkerActorConfig

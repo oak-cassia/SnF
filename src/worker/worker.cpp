@@ -573,6 +573,14 @@ namespace snf::worker
             reservation->rollback();
             return DeliveryResult::ConstructionRejected;
         }
+        if (construction_result.needsActivationLoad())
+        {
+            // Release this reservation first: beginActivationLoad() takes its own,
+            // together with the await timeout slot it needs.
+            reservation->rollback();
+            reservation.reset();
+            return beginActivationLoad(key, std::move(envelope));
+        }
         if (!construction_result.isReady())
         {
             throw std::logic_error{"Actor factory returned an invalid Ready result"};
@@ -1534,13 +1542,81 @@ namespace snf::worker
     void Worker::completeDb(const AwaitKey key, DbResult result)
     {
         assertOwnerThread();
-        static_cast<void>(result);
+        if (!actorsConfigured())
+        {
+            ++_metrics.actor.stale_activation_completions;
+            return;
+        }
 
-        // Stage 8C routes this to ActivationLoad and Stage 8E to SuspendedDbCommand.
-        // Until then nothing submits DB work through the worker, so every completion
-        // that reaches here is by definition unmatched.
-        static_cast<void>(key);
-        ++_metrics.actor.stale_completions;
+        ActorSlot* slot = _actors->find(key.actor);
+        if (slot == nullptr || slot->state() != ActorState::Loading || !slot->hasBlocked())
+        {
+            ++_metrics.actor.stale_activation_completions;
+            return;
+        }
+        if (!std::holds_alternative<ActivationLoad>(*slot->blocked()))
+        {
+            // Stage 8E adds the SuspendedDbCommand branch. Anything else is stale.
+            ++_metrics.actor.stale_activation_completions;
+            return;
+        }
+
+        const auto& load = std::get<ActivationLoad>(*slot->blocked());
+        // A completion for a previous incarnation or a previous operation on this
+        // actor must not touch the current one.
+        if (!acceptsCompletion(key, load.key))
+        {
+            ++_metrics.actor.stale_activation_completions;
+            return;
+        }
+
+        const auto* loaded = std::get_if<LoadPlayerResult>(&result);
+        if (loaded == nullptr)
+        {
+            const auto& failure = std::get<DbFailure>(result);
+            ++_metrics.actor.activation_load_failures;
+            removeActor(
+                slot->handle(),
+                failure.kind == DbFailureKind::TimedOut ? ActorRemovalReason::ActivationTimedOut : ActorRemovalReason::ActivationRejected
+            );
+            return;
+        }
+
+        ActorConstructionResult construction;
+        try
+        {
+            construction = _actor_factory->constructLoaded(key.actor, *loaded);
+        }
+        catch (...)
+        {
+            ++_metrics.actor.activation_load_failures;
+            removeActor(slot->handle(), ActorRemovalReason::ActivationRejected);
+            throw;
+        }
+
+        if (!construction.isReady())
+        {
+            ++_metrics.actor.activation_load_failures;
+            removeActor(slot->handle(), ActorRemovalReason::ActivationRejected);
+            return;
+        }
+
+        slot->setInstance(std::move(construction.instance));
+        slot->clearBlocked();
+        assert(_loading_count > 0);
+        --_loading_count;
+
+        if (slot->mailbox().empty())
+        {
+            slot->setState(ActorState::Idle);
+        }
+        else
+        {
+            // The message that triggered the activation is waiting, so the actor
+            // becomes runnable rather than idle.
+            slot->setState(ActorState::Queued);
+            _ready_queue->push(slot->handle());
+        }
     }
 
     bool Worker::completeSyntheticCommand(const AwaitKey key, const SyntheticAwaitOutcome outcome)
@@ -1646,6 +1722,26 @@ namespace snf::worker
             .operation = _operation_ids.next(),
         };
         const auto deadline = std::chrono::steady_clock::now() + _actor_config.await_timeout;
+
+        // The blocked state is canonical, so it is only created once something is
+        // actually being waited on. Without a database the caller drives completion
+        // itself, which is the Stage 5 scaffold the actor tests still use.
+        if (_db != nullptr && key.kind == ActorKind::Player)
+        {
+            const auto submitted = _db->tryStart(await_key, LoadPlayerRequest{.player_id = key.entity}, deadline);
+            if (submitted.status == DbSubmitStatus::Rejected)
+            {
+                _timers.releaseReservation();
+                ++_metrics.actor.loading_limit_rejections;
+                return DeliveryResult::ActivationLimit;
+            }
+            if (submitted.status != DbSubmitStatus::Pending)
+            {
+                _timers.releaseReservation();
+                throw std::logic_error{"No LoadPlayer shape can complete inline"};
+            }
+        }
+
         slot.setBlocked(ActivationLoad{
             .key = await_key,
             .deadline = deadline,

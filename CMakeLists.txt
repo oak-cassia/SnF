@@ -322,7 +322,7 @@ if(BUILD_TESTING)
     )
     target_link_libraries(snf_worker_db_client_tests
         PRIVATE
-            snf_worker
+            snf_worker_game_runtime
             PkgConfig::MySQL
             Threads::Threads
     )

@@ -44,6 +44,16 @@ namespace
         return error == std::errc{} && end == text + length;
     }
 
+    [[nodiscard]] bool parseSigned(const char* const text, const unsigned long length, std::int64_t& out) noexcept
+    {
+        if (text == nullptr)
+        {
+            return false;
+        }
+        const auto [end, error] = std::from_chars(text, text + length, out);
+        return error == std::errc{} && end == text + length;
+    }
+
     [[nodiscard]] unsigned int sslModeValue(const snf::worker::DbSslMode mode) noexcept
     {
         switch (mode)
@@ -554,12 +564,29 @@ namespace snf::worker
                 return false;
             }
 
+            // Columns 2 and 3 are signed INT; the rest are BIGINT UNSIGNED.
+            constexpr unsigned int POSITION_X_COLUMN = 2;
+            constexpr unsigned int POSITION_Y_COLUMN = 3;
+
             std::uint64_t values[PLAYER_ROW_COLUMNS] = {};
+            std::int64_t positions[2] = {};
             bool present[PLAYER_ROW_COLUMNS] = {};
             for (unsigned int column = 0; column < columns; ++column)
             {
                 present[column] = row[column] != nullptr;
-                if (present[column] && !parseUnsigned(row[column], lengths[column], values[column]))
+                if (!present[column])
+                {
+                    continue;
+                }
+                if (column == POSITION_X_COLUMN || column == POSITION_Y_COLUMN)
+                {
+                    if (!parseSigned(row[column], lengths[column], positions[column - POSITION_X_COLUMN]))
+                    {
+                        return false;
+                    }
+                    continue;
+                }
+                if (!parseUnsigned(row[column], lengths[column], values[column]))
                 {
                     return false;
                 }
@@ -575,7 +602,8 @@ namespace snf::worker
             {
                 return false;
             }
-            if (values[2] > std::numeric_limits<std::uint32_t>::max() || values[3] > std::numeric_limits<std::uint32_t>::max() ||
+            if (positions[0] < std::numeric_limits<std::int32_t>::min() || positions[0] > std::numeric_limits<std::int32_t>::max() ||
+                positions[1] < std::numeric_limits<std::int32_t>::min() || positions[1] > std::numeric_limits<std::int32_t>::max() ||
                 values[7] > std::numeric_limits<std::uint32_t>::max())
             {
                 return false;
@@ -587,8 +615,8 @@ namespace snf::worker
                 .handled_command_count = values[0],
                 .has_location = has_location,
                 .zone_id = has_location ? values[1] : 0,
-                .position_x = has_location ? static_cast<std::uint32_t>(values[2]) : 0,
-                .position_y = has_location ? static_cast<std::uint32_t>(values[3]) : 0,
+                .position_x = has_location ? static_cast<std::int32_t>(positions[0]) : 0,
+                .position_y = has_location ? static_cast<std::int32_t>(positions[1]) : 0,
                 .currency_balance = values[4],
                 .purchased_item_count = values[5],
                 .street_experience = values[6],

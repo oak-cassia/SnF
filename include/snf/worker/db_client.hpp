@@ -98,8 +98,10 @@ namespace snf::worker
         std::uint64_t handled_command_count{0};
         bool has_location{false};
         std::uint64_t zone_id{0};
-        std::uint32_t position_x{0};
-        std::uint32_t position_y{0};
+        // Signed, matching the INT columns and ZonePosition. Parsing these as
+        // unsigned would reject a negative coordinate the legacy path accepts.
+        std::int32_t position_x{0};
+        std::int32_t position_y{0};
         std::uint64_t currency_balance{0};
         std::uint64_t purchased_item_count{0};
         std::uint64_t street_experience{0};

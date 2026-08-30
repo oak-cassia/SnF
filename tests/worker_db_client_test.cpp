@@ -6,7 +6,12 @@
 //   --mysql  LoadPlayer end to end, and the in-flight timeout that poisons a
 //            connection. Skips with 77 when SNF_MYSQL_TEST_HOST is unset.
 
+#include "snf/adapter/game_actor_factory.hpp"
+#include "snf/adapter/game_payloads.hpp"
+#include "snf/adapter/game_request_sink.hpp"
+#include "snf/adapter/player_actor_adapter.hpp"
 #include "snf/net/tcp_listener.hpp"
+#include "snf/protocol/frame_codec.hpp"
 #include "snf/worker/db_client.hpp"
 #include "snf/worker/poller.hpp"
 #include "snf/worker/worker.hpp"
@@ -482,6 +487,148 @@ namespace
         assert(worker.dbMetrics().connections_poisoned == 0);
     }
 
+    // The Stage 8 vertical slice, end to end over a real socket:
+    //   ping arrives for a player that has no actor
+    //   -> Loading, LoadPlayer submitted
+    //   -> the worker keeps running while the query is outstanding
+    //   -> completeDb builds the actor from the load result
+    //   -> Loading becomes Queued and the original ping is processed
+    //   -> pong comes back on the socket
+    void test_player_activation_loads_from_the_database(const MySqlTestConfig& config)
+    {
+        prepareSchema(config);
+
+        snf::worker::WorkerActorConfig actor_config{};
+        actor_config.actor_table_capacity = 16;
+        actor_config.max_mailbox_messages_per_actor = 8;
+        actor_config.max_mailbox_bytes_per_actor = 64 * 1024;
+        actor_config.max_mailbox_messages_total = 64;
+        actor_config.max_mailbox_bytes_total = 256 * 1024;
+        actor_config.max_turns_per_actor_slice = 8;
+        actor_config.await_timeout = 5s;
+        actor_config.max_concurrent_loading = 4;
+
+        snf::worker::WorkerNetworkConfig network_config{};
+        network_config.table.capacity = 8;
+        network_config.poll_registration_capacity = 9;
+        network_config.max_accepts_per_poll = 8;
+        network_config.receive_chunk_bytes = 1024;
+
+        snf::adapter::GameActorFactory factory;
+        snf::adapter::GameRequestSink request_sink;
+        // With a database attached the factory stops building players eagerly.
+        factory.setPlayerLoadEnabled(true);
+
+        snf::worker::Worker worker(
+            snf::worker::WorkerId{0},
+            1,
+            snf::worker::WorkerBudgets::defaults(),
+            snf::worker::WorkerInboxConfig{},
+            network_config,
+            request_sink,
+            actor_config,
+            factory
+        );
+        worker.configureDb(liveConfig(config));
+        factory.setTimerAdmission(worker);
+        request_sink.setWorker(worker);
+
+        auto listener = snf::net::create_tcp_listener(0);
+        const std::uint16_t port = snf::test::portOf(listener.getDescriptor());
+        worker.attachListener(std::move(listener));
+
+        std::thread runner(
+            [&worker]()
+            {
+                worker.run();
+            }
+        );
+
+        const snf::protocol::Frame ping_frame{
+            .type = snf::protocol::MessageType::Ping,
+            .request_id = 4321,
+            .payload = {std::byte{0xBE}, std::byte{0xEF}},
+        };
+        const snf::protocol::Frame expected_pong{
+            .type = snf::protocol::MessageType::Pong,
+            .request_id = ping_frame.request_id,
+            .payload = ping_frame.payload,
+        };
+
+        auto client = snf::test::connectClient(port);
+        snf::test::sendAll(client.getDescriptor(), snf::protocol::encode_frame(ping_frame));
+
+        // The pong only comes back if the activation load completed and the actor
+        // then processed the message that triggered it.
+        const auto encoded = snf::test::receiveExact(client.getDescriptor(), snf::protocol::encode_frame(expected_pong).size());
+        snf::protocol::FrameDecoder decoder;
+        const auto decoded = decoder.append(encoded);
+        assert(decoded.ok());
+        assert(decoded.frames.size() == 1);
+        assert(decoded.frames.front() == expected_pong);
+
+        worker.requestStop();
+        runner.join();
+
+        assert(worker.dbMetrics().operations_completed >= 1);
+        assert(worker.dbMetrics().connections_poisoned == 0);
+        assert(worker.metrics().actor.activation_loads_started >= 1);
+        assert(worker.metrics().actor.activation_load_failures == 0);
+        assert(worker.metrics().actor.stale_activation_completions == 0);
+        assert(worker.metrics().network.sent_frames == 1);
+    }
+
+    // The row-to-domain mapping, without a database in the way.
+    void test_loaded_row_becomes_player_state()
+    {
+        snf::adapter::GameActorFactory factory;
+        const snf::worker::LoadPlayerResult loaded{
+            .found = true,
+            .row =
+                snf::worker::LoadedPlayerRow{
+                    .player_id = 77,
+                    .handled_command_count = 9,
+                    .has_location = true,
+                    .zone_id = 5,
+                    .position_x = -12,
+                    .position_y = 34,
+                    .currency_balance = 250,
+                    .purchased_item_count = 4,
+                    .street_experience = 880,
+                    .equipped_skill_id = 2,
+                },
+            .owned_skill_ids = {1, 2},
+        };
+
+        auto result = factory.constructLoaded(snf::worker::ActorKey{.kind = snf::worker::ActorKind::Player, .entity = 77}, loaded);
+        assert(result.isReady());
+
+        const auto* adapter = dynamic_cast<const snf::adapter::PlayerActorAdapter*>(result.instance.get());
+        assert(adapter != nullptr);
+        const auto& state = adapter->player().state();
+        assert(state.identity().has_value());
+        assert(state.identity()->value == 77);
+        assert(state.handledCommandCount() == 9);
+        assert(state.currencyBalance() == 250);
+        assert(state.streetExperience() == 880);
+        assert(state.lastLocation().has_value());
+        assert(state.lastLocation()->zone.value == 5);
+        // A negative coordinate survives the round trip; the column is a signed INT.
+        assert(state.lastLocation()->position.x == -12);
+        assert(state.lastLocation()->position.y == 34);
+        assert(state.getSkillLoadout().getEquippedSkillId().value == 2);
+
+        // A missing row is a new player rather than a failure.
+        const auto fresh = factory.constructLoaded(
+            snf::worker::ActorKey{.kind = snf::worker::ActorKind::Player, .entity = 78}, snf::worker::LoadPlayerResult{.found = false}
+        );
+        assert(fresh.isReady());
+
+        // Only players take the activation-load path.
+        const auto rejected = factory.constructLoaded(snf::worker::ActorKey{.kind = snf::worker::ActorKind::Zone, .entity = 1}, loaded);
+        assert(rejected.isRejected());
+    }
+
     void test_in_flight_timeout_poisons_the_connection(const MySqlTestConfig& config)
     {
         prepareSchema(config);
@@ -551,6 +698,8 @@ int main(const int argc, const char* const* const argv)
         std::cout << "  - test_shutdown_drains_the_queue PASSED" << std::endl;
         test_worker_loop_survives_an_unreachable_database();
         std::cout << "  - test_worker_loop_survives_an_unreachable_database PASSED" << std::endl;
+        test_loaded_row_becomes_player_state();
+        std::cout << "  - test_loaded_row_becomes_player_state PASSED" << std::endl;
     }
     else if (mode == "--mysql")
     {
@@ -569,6 +718,8 @@ int main(const int argc, const char* const* const argv)
             std::cout << "  - test_worker_connects_through_its_own_poller PASSED" << std::endl;
             test_in_flight_timeout_poisons_the_connection(*config);
             std::cout << "  - test_in_flight_timeout_poisons_the_connection PASSED" << std::endl;
+            test_player_activation_loads_from_the_database(*config);
+            std::cout << "  - test_player_activation_loads_from_the_database PASSED" << std::endl;
         }
     }
     else
