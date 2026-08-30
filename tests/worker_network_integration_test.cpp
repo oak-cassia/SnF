@@ -1020,6 +1020,157 @@ namespace
         assert(rebound_listener.isValid());
         assert(portOf(rebound_listener.getDescriptor()) == port);
     }
+
+    // =========================================================================
+    // Vertical Slice: TCP Request -> Actor -> Domain Result -> toEffects -> Pong -> Close
+    // =========================================================================
+
+    struct SyntheticPlayerCommand
+    {
+        ConnectionRef connection;
+        std::uint32_t request_id;
+    };
+
+    enum class SyntheticDomainStatus
+    {
+        Success,
+    };
+
+    struct SyntheticPlayerResult
+    {
+        ConnectionRef connection;
+        std::uint32_t request_id;
+        SyntheticDomainStatus status;
+    };
+
+    [[nodiscard]] EffectBatch toEffects(const SyntheticPlayerResult& result)
+    {
+        EffectBatch batch;
+        batch.push(SendFrameEffect{
+            .connection = result.connection,
+            .frame = pongFrame(result.request_id),
+            .critical = false,
+        });
+        batch.push(CloseConnectionEffect{
+            .connection = result.connection,
+            .reason = CloseReason::Application,
+            .graceful = true,
+        });
+        return batch;
+    }
+
+    class SyntheticPlayerActor final : public ActorInstance
+    {
+    public:
+        TurnResult dispatch(ActorEnvelope&& envelope, const ActorTurnContext&) override
+        {
+            assert(envelope.connection.has_value());
+            const SyntheticPlayerCommand command{
+                .connection = *envelope.connection,
+                .request_id = envelope.frame.request_id,
+            };
+
+            const SyntheticPlayerResult domain_result{
+                .connection = command.connection,
+                .request_id = command.request_id,
+                .status = SyntheticDomainStatus::Success,
+            };
+
+            EffectBatch effects = toEffects(domain_result);
+            return CompletedTurn{.effects = std::move(effects)};
+        }
+    };
+
+    class ActorForwardingSink final : public RequestSink
+    {
+    public:
+        void setWorker(Worker& worker) noexcept
+        {
+            _worker = &worker;
+        }
+
+        [[nodiscard]] RequestPostResult tryPost(ConnectionRef connection, Frame&& frame) override
+        {
+            assert(_worker != nullptr);
+            const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+            const DeliveryResult delivery =
+                _worker->tryDeliverLocal(key, ActorEnvelope::fromFrame(connection, std::move(frame)));
+            return delivery == DeliveryResult::Accepted ? RequestPostResult::Accepted : RequestPostResult::Rejected;
+        }
+
+    private:
+        Worker* _worker{nullptr};
+    };
+
+    class SyntheticActorFactory final : public ActorFactory
+    {
+    public:
+        ActorConstructionResult construct(const ActorKey) override
+        {
+            return ActorConstructionResult::ready(std::make_unique<SyntheticPlayerActor>());
+        }
+    };
+
+    void test_tcp_request_to_actor_vertical_slice_pong_graceful_close()
+    {
+        for (int iteration = 0; iteration < 20; ++iteration)
+        {
+            auto listener = snf::net::create_tcp_listener(0);
+            const std::uint16_t port = portOf(listener.getDescriptor());
+
+            ActorForwardingSink sink;
+            SyntheticActorFactory factory;
+
+            WorkerActorConfig actor_config{
+                .actor_table_capacity = 10,
+                .max_mailbox_messages_per_actor = 100,
+                .max_mailbox_bytes_per_actor = 1024 * 1024,
+                .max_mailbox_messages_total = 100,
+                .max_mailbox_bytes_total = 1024 * 1024,
+                .max_turns_per_actor_slice = 30,
+                .placement_seed = 0,
+                .worker_shutdown_timeout = 2000ms,
+            };
+
+            Worker worker(
+                WorkerId{0},
+                1,
+                testBudgets(),
+                WorkerInboxConfig{},
+                testNetworkConfig(1),
+                sink,
+                actor_config,
+                factory
+            );
+            sink.setWorker(worker);
+            worker.attachListener(std::move(listener));
+
+            std::thread worker_thread([&]() { worker.run(); });
+
+            auto client = connectClient(port);
+            sendAll(client.getDescriptor(), snf::protocol::encode_frame(pingFrame(42)));
+
+            const Frame expected_pong = pongFrame(42);
+            const auto encoded_pong = snf::protocol::encode_frame(expected_pong);
+            const auto received_bytes = receiveExact(client.getDescriptor(), encoded_pong.size());
+
+            snf::protocol::FrameDecoder decoder;
+            const auto decoded = decoder.append(received_bytes);
+            assert(decoded.ok());
+            assert(decoded.frames.size() == 1);
+            assert(decoded.frames.front() == expected_pong);
+
+            // Expect EOF due to graceful close from Actor effect
+            assert(receivesEof(client.getDescriptor()));
+
+            worker.requestStop();
+            worker_thread.join();
+
+            assert(worker.metrics().actor.actor_turns >= 1);
+            assert(worker.metrics().network.sent_frames >= 1);
+            assert(worker.metrics().network.closed_connections >= 1);
+        }
+    }
 }
 
 int main()
@@ -1036,4 +1187,5 @@ int main()
     test_listener_pauses_until_both_capacity_tables_have_room();
     test_group_bootstrap_binds_each_worker_with_port_zero();
     test_group_bootstrap_rolls_back_listeners_when_sink_factory_throws();
+    test_tcp_request_to_actor_vertical_slice_pong_graceful_close();
 }

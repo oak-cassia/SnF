@@ -4,6 +4,7 @@ void run_worker_inbox_tests();
 void run_worker_timer_queue_tests();
 void run_worker_loop_tests();
 void run_worker_connection_tests();
+void run_worker_actor_tests();
 
 int main()
 {
@@ -13,4 +14,5 @@ int main()
     run_worker_timer_queue_tests();
     run_worker_loop_tests();
     run_worker_connection_tests();
+    run_worker_actor_tests();
 }
