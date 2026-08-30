@@ -11,6 +11,7 @@ namespace snf::worker
         Wakeup = 1,
         ClientConnection = 2,
         DbConnection = 3,
+        Listener = 4,
     };
 
     inline constexpr std::uint32_t MAX_POLL_INDEX = 0xFFFFFFu;        // 16,777,215 (24 bits)

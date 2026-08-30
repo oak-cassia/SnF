@@ -1,0 +1,55 @@
+#pragma once
+
+#include "snf/worker/worker.hpp"
+
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <vector>
+
+namespace snf::worker
+{
+    class WorkerGroup final
+    {
+    public:
+        using RequestSinkFactory = std::function<std::unique_ptr<RequestSink>(WorkerId)>;
+
+        explicit WorkerGroup(const WorkerGroupConfig& config, RequestSinkFactory request_sink_factory = {});
+        ~WorkerGroup();
+
+        WorkerGroup(const WorkerGroup&) = delete;
+        WorkerGroup& operator=(const WorkerGroup&) = delete;
+
+        // start() only starts already validated and fully wired resources.
+        // If a thread cannot be started, the threads started so far are
+        // stopped and joined before the exception is rethrown.
+        void start();
+        void join();
+        void run();
+        void requestStop() noexcept;
+
+        [[nodiscard]] std::uint16_t port() const noexcept;
+        [[nodiscard]] std::uint16_t workerCount() const noexcept;
+        [[nodiscard]] Worker& worker(std::size_t index) noexcept;
+        [[nodiscard]] const Worker& worker(std::size_t index) const noexcept;
+        [[nodiscard]] bool isRunning() const noexcept;
+
+    private:
+        void workerMain(std::size_t index) noexcept;
+        void stopAndJoinStartedThreads() noexcept;
+
+        WorkerGroupConfig _config;
+        std::uint16_t _port{0};
+        std::vector<std::unique_ptr<RequestSink>> _sinks;
+        std::vector<std::unique_ptr<Worker>> _workers;
+        std::vector<std::thread> _threads;
+        mutable std::mutex _failure_mutex;
+        std::exception_ptr _failure;
+        bool _started{false};
+        bool _started_once{false};
+    };
+}

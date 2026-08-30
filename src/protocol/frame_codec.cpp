@@ -169,6 +169,17 @@ namespace snf::protocol
         return result;
     }
 
+    std::size_t FrameDecoder::bufferedByteCount() const noexcept
+    {
+        return _buffer.size() - _read_offset;
+    }
+
+    void FrameDecoder::reset() noexcept
+    {
+        _buffer.clear();
+        _read_offset = 0;
+    }
+
     void FrameDecoder::compactConsumedPrefix()
     {
         if (_read_offset == 0)
@@ -189,8 +200,7 @@ namespace snf::protocol
 
     DecodeNextResult FrameDecoder::fail(DecodeError error)
     {
-        _buffer.clear();
-        _read_offset = 0;
+        reset();
         return DecodeNextResult{.frame = std::nullopt, .error = error};
     }
 }

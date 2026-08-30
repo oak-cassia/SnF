@@ -2,12 +2,18 @@
 #include "snf/net/system_error.hpp"
 
 #include <cerrno>
+#include <limits>
+#include <stdexcept>
 #include <sys/epoll.h>
 
 namespace snf::worker
 {
     Poller::Poller(const std::size_t max_events_per_wait)
     {
+        if (max_events_per_wait == 0 || max_events_per_wait > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+        {
+            throw std::invalid_argument{"Invalid poll event capacity"};
+        }
         const int epoll_fd = ::epoll_create1(EPOLL_CLOEXEC);
         if (epoll_fd == -1)
         {
@@ -87,6 +93,8 @@ namespace snf::worker
                 .readable = (ev.events & EPOLLIN) != 0,
                 .writable = (ev.events & EPOLLOUT) != 0,
                 .error = (ev.events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) != 0,
+                .hangup = (ev.events & (EPOLLHUP | EPOLLRDHUP)) != 0,
+                .fatal_error = (ev.events & EPOLLERR) != 0,
             };
             _events.push_back(event);
         }

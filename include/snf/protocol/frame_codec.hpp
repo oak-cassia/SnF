@@ -52,6 +52,12 @@ namespace snf::protocol
         [[nodiscard]] DecodeNextResult tryDecodeNext();
         [[nodiscard]] DecodeResult append(std::span<const std::byte> bytes);
 
+        // The count excludes bytes already consumed by tryDecodeNext(). It is
+        // a logical count; the decoder does not reserve the maximum read
+        // buffer size for every connection.
+        [[nodiscard]] std::size_t bufferedByteCount() const noexcept;
+        void reset() noexcept;
+
     private:
         void compactConsumedPrefix();
         [[nodiscard]] DecodeNextResult fail(DecodeError error);

@@ -5,6 +5,11 @@
 > 적용 범위: C++ 게임 서버의 connection I/O, Actor 실행, timer, 비동기 DB, effect 적용과 lifecycle
 > 주의: 이 문서는 목표 구조를 설명한다. 현재 코드 구조는 전환이 끝날 때까지 다를 수 있다.
 
+현재 구현에는 이 문서의 첫 번째 독립 vertical slice가 포함되어 있다. `snf::worker::WorkerGroup`이
+`SO_REUSEPORT` listener와 Worker를 bootstrap하고, Worker는 bounded accept/read/decode/write,
+generation 검증, remote connection event와 close lifecycle을 소유한다. Actor·DB·Effect phase는
+아직 다음 전환 단계의 대상이다.
+
 설계의 중심 문장은 다음과 같다.
 
 > 하나의 mutable state에는 하나의 owner Worker만 존재한다. owner가 다르면 message로 전달하고,
@@ -159,6 +164,10 @@ Native DB completion은 같은 Worker의 poll phase에서 발생하므로 inbox�
 `Worker::completeDb()`로 들어온다. Blocking adapter job은 submit 시 completion slot까지 예약해
 accepted completion이 queue full로 유실되지 않게 한다.
 
+현재 connection vertical slice에서 실제 concrete event는 `RemoteConnectionSend`와
+`RemoteConnectionClose`이며, 두 event 모두 full `ConnectionRef`를 운반한다. 대상 Worker는 inbox에서
+event를 한 번 소비한 뒤 generation을 검증하고 owner-local `ConnectionSlot`에 적용한다.
+
 ```cpp
 struct ActivationLoad {
     AwaitKey key;
@@ -234,7 +243,7 @@ DB socket readiness는 1번, blocking adapter completion은 2번, awaited timeou
 
 | Phase | 초기 상한 |
 | --- | ---: |
-| Poll event | 1,024 events 또는 4 MiB 또는 500 μs |
+| Poll/read | 1,024 events, 1,024 decoded frames, 4 MiB 또는 500 μs |
 | WorkerInbox | 4,096 events 또는 250 μs |
 | Timer expiry | 2,048 entries 또는 250 μs |
 | Actor turns | 1,024 turns 또는 1 ms |
@@ -320,6 +329,25 @@ remote send
 -> owner가 검증 후 writeBuffer에 append
 ```
 
+`ConnectionTable`과 `PollRegistrationTable`은 서로 독립적인 bounded table이다. `accept4` 이후에는
+connection reservation, poll-registration reservation, `epoll_ctl(ADD)`를 모두 성공시킨 뒤 commit한다.
+중간 실패는 RAII rollback으로 socket, registration과 connection slot을 함께 반환한다. 두 table 중
+하나라도 여유가 없으면 listener의 read interest를 끄고, 둘 다 여유가 생긴 뒤에만 다시 켠다.
+
+Read와 write work queue에는 pointer나 descriptor가 아니라 `{ConnectionId, ConnectionGeneration}`만
+저장한다. queue item을 꺼낼 때 full 64-bit generation을 다시 조회하므로 slot이 닫힌 뒤 재사용되어도
+stale work가 새 connection에 적용되지 않는다. connection당 `read_queued`, `write_queued` bit가
+중복 등록을 막는다.
+
+Write queue는 encoded bytes를 보관한다. 새 frame은 `!write_queued && !waiting_epollout`일 때만
+queue에 넣고, `send()`가 EAGAIN이면 queue item을 제거한 뒤 `waiting_epollout`과 EPOLLOUT만 남긴다.
+EPOLLOUT event는 full generation을 확인하고 EPOLLOUT를 끈 뒤 한 번만 다시 queue에 넣는다. 같은
+poll batch의 중복 writable event는 이미 지워진 `waiting_epollout` bit로 무시한다.
+
+Read path의 `RequestSink`는 request를 정확히 한 번 소비한다. `Accepted`는 책임 인수,
+`Invalid`는 protocol violation 즉시 close, `Rejected`는 overload 즉시 close이며 request retry나
+pending request state는 없다.
+
 Connection 상태는 `Open -> Closing -> Closed`다. Closing에서는 신규 application send를 거부하고
 drain deadline까지 기존 write buffer를 flush한다.
 
@@ -327,11 +355,20 @@ drain deadline까지 기존 write buffer를 flush한다.
 
 | 항목 | 기준 | 초과 처리 |
 | --- | ---: | --- |
-| 최대 frame | 256 KiB | protocol violation close |
+| Body | 65,536 bytes | protocol violation close |
+| Payload | 65,530 bytes | protocol violation close |
+| 전체 frame | 65,540 bytes | protocol violation close |
 | ReadBuffer | 512 KiB | 완전한 frame을 만들지 못하면 close |
-| Write soft watermark | 1 MiB | noncritical send reject 또는 coalesce |
+| Write soft watermark | 1 MiB | noncritical send를 append 전에 SoftLimit로 거부 |
 | Write hard watermark | 4 MiB | slow consumer close |
 | Close drain deadline | 2 s | 강제 close |
+
+Buffer 기준은 logical cap이다. connection마다 최대 read/frame 크기를 미리 reserve하지 않으며,
+decoder의 현재 buffered bytes와 write queue의 실제 queued bytes만 admission에 반영한다.
+
+Connection은 `Open -> Closing -> Closed`로 진행한다. Closing 진입 시 EPOLLIN과 application read를
+즉시 끄고 decoder를 reset한다. 기존 write buffer만 deadline까지 drain하며, 빈 buffer면 즉시 닫는다.
+protocol violation, slow consumer, peer close와 I/O error는 drain 없이 즉시 close한다.
 
 ## 9. Domain Result와 Effect
 

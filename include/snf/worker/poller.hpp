@@ -25,7 +25,9 @@ namespace snf::worker
         PollToken token;
         bool readable{false};
         bool writable{false};
-        bool error{false}; // EPOLLERR | EPOLLHUP | EPOLLRDHUP
+        bool error{false};       // EPOLLERR | EPOLLHUP | EPOLLRDHUP (legacy aggregate)
+        bool hangup{false};      // EPOLLHUP | EPOLLRDHUP
+        bool fatal_error{false}; // EPOLLERR
     };
 
     // Poller는 owner Worker thread 전용이다.

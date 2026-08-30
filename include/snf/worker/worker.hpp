@@ -1,18 +1,26 @@
 #pragma once
 
 #include "snf/worker/budget.hpp"
+#include "snf/worker/connection_table.hpp"
+#include "snf/worker/connection_work_queue.hpp"
 #include "snf/worker/identity.hpp"
 #include "snf/worker/inbox.hpp"
+#include "snf/worker/poll_registration.hpp"
 #include "snf/worker/poller.hpp"
+#include "snf/worker/request_sink.hpp"
 #include "snf/worker/timer_queue.hpp"
 #include "snf/worker/wakeup.hpp"
+#include "snf/worker/worker_network.hpp"
 
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <memory>
+#include <optional>
 #include <span>
 #include <thread>
+#include <vector>
 
 namespace snf::worker
 {
@@ -30,6 +38,8 @@ namespace snf::worker
         // 이렇게 나누지 않으면 "메인 루프가 일했다"는 사실을 테스트가 증명할 수 없다.
         std::uint64_t shutdown_inbox_events{0};
         std::uint64_t shutdown_timers_fired{0};
+
+        WorkerNetworkMetrics network{};
     };
 
     class Worker final
@@ -40,12 +50,35 @@ namespace snf::worker
         using TimerHandler = std::function<void(TimerPayload&&)>;
 
         Worker(WorkerId id, std::uint16_t worker_count, WorkerBudgets budgets, WorkerInboxConfig inbox_config);
+        Worker(
+            WorkerId id,
+            std::uint16_t worker_count,
+            WorkerBudgets budgets,
+            WorkerInboxConfig inbox_config,
+            WorkerNetworkConfig network_config,
+            RequestSink& request_sink
+        );
 
         Worker(const Worker&) = delete;
         Worker& operator=(const Worker&) = delete;
 
         void run();                  // 호출 thread를 owner로 고정
         void requestStop() noexcept; // 다른 thread에서 호출 가능
+
+        // Network startup is deliberately separate from the generic worker
+        // skeleton so actor/runtime users can opt into it incrementally.
+        void configureNetwork(const WorkerNetworkConfig& config, RequestSink& request_sink);
+        void attachListener(snf::net::UniqueFileDescriptor listener);
+        void bindRemoteTarget(WorkerId target, WorkerInboxPort port);
+
+        // owner Worker thread 전용. A remote target is converted to a
+        // RemoteConnectionSend in the target Worker's inbox.
+        [[nodiscard]] SendResult send(ConnectionRef connection, snf::protocol::Frame&& frame, bool critical = false);
+        [[nodiscard]] bool closeConnection(ConnectionRef connection, CloseReason reason, bool graceful = true);
+
+        [[nodiscard]] bool networkEnabled() const noexcept;
+        [[nodiscard]] std::size_t connectionCount() const noexcept;
+        [[nodiscard]] bool listenerPaused() const noexcept;
 
         // startup 전용 — Worker thread 시작 전에만 호출한다.
         [[nodiscard]] WorkerInboxPort bindInboxSource(WorkerId source) noexcept;
@@ -73,6 +106,16 @@ namespace snf::worker
         [[nodiscard]] std::optional<std::chrono::milliseconds> pollTimeout() const;
 
         void processPollEvents(std::span<const PollEvent> events, const IoBudget& budget);
+        void processReadQueue(const IoBudget& budget, TimePoint phase_started_at);
+        void acceptPendingClients(const IoBudget& budget, TimePoint phase_started_at);
+        [[nodiscard]] bool readConnection(
+            ConnectionHandle handle,
+            const IoBudget& budget,
+            TimePoint phase_started_at,
+            std::uint64_t& bytes_read,
+            std::size_t& frames_decoded,
+            bool& budget_exhausted
+        );
         void drainInbox(const InboxBudget& budget);
         void expireTimers(TimePoint now, const CountTimeBudget& budget);
         void runReadyActors(const CountTimeBudget& budget); // 4단계까지 no-op
@@ -81,7 +124,22 @@ namespace snf::worker
         void onEvent(WorkerEvent&& event);
         void onTimer(TimerPayload&& payload);
 
+        [[nodiscard]] SendResult sendLocal(ConnectionRef connection, snf::protocol::Frame&& frame, bool critical);
+        [[nodiscard]] bool enqueueRead(ConnectionSlot& slot);
+        [[nodiscard]] bool enqueueWrite(ConnectionSlot& slot);
+        void updateConnectionInterest(const ConnectionSlot& slot);
+        void forceClose(ConnectionHandle handle, CloseReason reason);
+        [[nodiscard]] bool beginGracefulClose(ConnectionHandle handle, CloseReason reason);
+        void maybeResumeListener();
+        void pauseListener();
+        void beginNetworkShutdown();
+        void runNetworkShutdown();
+        void releaseConnectionRegistration(ConnectionHandle handle) noexcept;
+        [[nodiscard]] std::optional<PollRegistrationView> registrationFor(ConnectionHandle handle) const noexcept;
+        [[nodiscard]] bool isCurrent(ConnectionHandle handle) const noexcept;
+
         WorkerId _id;
+        std::uint16_t _worker_count;
         WorkerBudgets _budgets;
         WakeupHandle _wakeup;
         Poller _poller;
@@ -94,5 +152,19 @@ namespace snf::worker
         bool _timers_have_due{false};
         EventHandler _event_handler{};
         TimerHandler _timer_handler{};
+
+        std::unique_ptr<ConnectionTable> _connections;
+        std::unique_ptr<PollRegistrationTable> _registrations;
+        std::unique_ptr<ReadWorkQueue> _read_work_queue;
+        std::unique_ptr<WriteWorkQueue> _write_work_queue;
+        std::vector<std::optional<PollRegistrationHandle>> _connection_registrations;
+        std::vector<WorkerInboxPort> _remote_ports;
+        snf::net::UniqueFileDescriptor _listener;
+        std::optional<PollRegistrationHandle> _listener_registration;
+        RequestSink* _request_sink{nullptr};
+        NullRequestSink _null_request_sink;
+        WorkerNetworkConfig _network_config{};
+        bool _listener_paused{false};
+        bool _network_stopping{false};
     };
 }

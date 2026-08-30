@@ -52,27 +52,28 @@
 
 ### 1단계 — Core identity
 
-- [ ] `ActorKey`, `ActivationRef`, `ConnectionRef`, `AwaitKey`를 확정한다.
-- [ ] Actor incarnation, connection generation과 operation ID의 생성·비교 규칙을 고정한다.
-- [ ] old incarnation/generation/operation event가 state를 변경하지 않는 model test를 만든다.
+- [x] `ActorKey`, `ActivationRef`, `ConnectionRef`, `AwaitKey`를 확정한다.
+- [x] Actor incarnation, connection generation과 operation ID의 생성·비교 규칙을 고정한다.
+- [x] old incarnation/generation/operation event가 state를 변경하지 않는 connection/registration test를 만든다.
 
 종료 조건: 모든 delayed event의 stale 여부를 pointer 없이 value identity로 판정한다.
 
 ### 2단계 — Worker skeleton
 
-- [ ] Worker-local Poller, WorkerInbox와 TimerQueue를 만든다.
-- [ ] poll, inbox, timer, Actor, write phase와 count/byte/time budget을 구현한다.
-- [ ] `stop_requested + wakeup`과 empty-loop shutdown을 검증한다.
-- [ ] owner-thread assertion과 watchdog stall metric을 추가한다.
+- [x] Worker-local Poller, WorkerInbox와 TimerQueue를 만든다.
+- [x] poll, inbox, timer, Actor, write phase와 count/byte/time budget을 구현한다.
+- [x] `stop_requested + wakeup`과 empty-loop shutdown을 검증한다.
+- [x] owner-thread assertion을 추가한다. watchdog stall metric은 Actor/DB phase에서 보강한다.
 
 종료 조건: runnable phase가 서로 starvation시키지 않고 Worker가 잠재적 blocking 호출을 하지 않는다.
 
 ### 3단계 — Connection path
 
-- [ ] accept 시 connection owner를 정하고 `ConnectionRef`에 generation과 owner를 저장한다.
-- [ ] read/decode/request translation을 owner Worker에서 실행한다.
-- [ ] local send는 write buffer에 직접 append하고 remote send/close는 WorkerInbox event로 전달한다.
-- [ ] read/write/frame/table 상한과 slow-consumer close를 검증한다.
+- [x] accept 시 connection owner를 정하고 `ConnectionRef`에 generation과 owner를 저장한다.
+- [x] read/decode/request translation 경계를 owner Worker의 `RequestSink`로 구현한다.
+- [x] local send는 write buffer에 직접 append하고 remote send/close는 WorkerInbox event로 전달한다.
+- [x] read/write/frame/table 상한과 slow-consumer close 경로를 검증한다.
+- [ ] 실제 game request translation과 legacy server의 신규 Worker 경로 전환을 완료한다.
 
 종료 조건: shared OutboundChannel 없이 partial I/O와 기존 protocol 통합 테스트를 통과한다.
 

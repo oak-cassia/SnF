@@ -96,6 +96,11 @@ add_library(snf_worker STATIC
     src/worker/wakeup.cpp
     src/worker/poller.cpp
     src/worker/inbox.cpp
+    src/worker/connection.cpp
+    src/worker/connection_table.cpp
+    src/worker/connection_work_queue.cpp
+    src/worker/poll_registration.cpp
+    src/worker/worker_group.cpp
     src/worker/worker.cpp
 )
 target_include_directories(snf_worker PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -230,11 +235,25 @@ if(BUILD_TESTING)
         tests/worker_inbox_test.cpp
         tests/worker_timer_queue_test.cpp
         tests/worker_loop_test.cpp
+        tests/worker_connection_test.cpp
     )
     target_link_libraries(snf_worker_tests PRIVATE snf_worker)
     snf_configure_target(snf_worker_tests)
 
     add_test(NAME snf_worker_tests COMMAND snf_worker_tests)
+
+    add_executable(snf_worker_network_integration_tests
+        tests/worker_network_integration_test.cpp
+    )
+    target_link_libraries(snf_worker_network_integration_tests
+        PRIVATE
+            snf_worker
+            Threads::Threads
+    )
+    snf_configure_target(snf_worker_network_integration_tests)
+
+    add_test(NAME snf_worker_network_integration_tests COMMAND snf_worker_network_integration_tests)
+    set_tests_properties(snf_worker_network_integration_tests PROPERTIES TIMEOUT 20)
 
     add_test(NAME snf_worker_layer
              COMMAND ${CMAKE_COMMAND} -DWORKER_ROOTS=${CMAKE_SOURCE_DIR}/include/snf/worker:${CMAKE_SOURCE_DIR}/src/worker

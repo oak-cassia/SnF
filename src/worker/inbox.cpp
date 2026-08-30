@@ -4,6 +4,7 @@
 #include <cassert>
 #include <memory>
 #include <new>
+#include <stdexcept>
 
 namespace snf::worker
 {
@@ -132,8 +133,10 @@ namespace snf::worker
         : _worker_count(worker_count)
         , _wakeup(&wakeup)
     {
-        assert(worker_count > 0);
-        assert(worker_count <= config.max_workers);
+        if (worker_count == 0 || worker_count > config.max_workers || config.max_bytes_per_worker == 0)
+        {
+            throw std::invalid_argument{"Invalid WorkerInbox configuration"};
+        }
 
         // lane 은 source id 로 직접 인덱싱하므로 자기 자신용 lane 도 함께 할당한다.
         // 자기 lane 은 사용하지 않지만(INV-03: local tell 은 mailbox 를 통과한다) 인덱싱이 단순해진다.
@@ -159,7 +162,15 @@ namespace snf::worker
     WorkerInboxPort WorkerInbox::bindSource(const WorkerId source) noexcept
     {
         assert(source.value < _worker_count);
+        if (source.value >= _worker_count)
+        {
+            return {};
+        }
         assert(!_bound[source.value]);
+        if (_bound[source.value])
+        {
+            return {};
+        }
         _bound[source.value] = true;
 
         WorkerInboxPort port;

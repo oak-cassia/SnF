@@ -21,6 +21,7 @@ namespace snf::worker
     struct IoBudget
     {
         std::size_t max_events;
+        std::size_t max_frames;
         std::uint64_t max_bytes;
         std::chrono::nanoseconds max_duration;
     };
@@ -50,6 +51,7 @@ namespace snf::worker
                 .poll =
                     {
                         .max_events = 1024,
+                        .max_frames = 1024,
                         .max_bytes = 4ull * 1024 * 1024,
                         .max_duration = 500us,
                     },

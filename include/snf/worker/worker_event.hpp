@@ -1,5 +1,6 @@
 #pragma once
 
+#include "snf/protocol/frame.hpp"
 #include "snf/worker/identity.hpp"
 
 #include <cstdint>
@@ -14,17 +15,31 @@ namespace snf::worker
         SlowConsumer = 2,
         PeerClosed = 3,
         Timeout = 4,
+        IoError = 5,
+        Overload = 6,
+        Application = 7,
+    };
+
+    struct RemoteConnectionSend
+    {
+        ConnectionRef connection;
+        snf::protocol::Frame frame;
+        bool critical{false};
+
+        [[nodiscard]] bool operator==(const RemoteConnectionSend&) const noexcept = default;
     };
 
     struct RemoteConnectionClose
     {
         ConnectionRef connection;
         CloseReason reason;
+        bool graceful{true};
 
         [[nodiscard]] bool operator==(const RemoteConnectionClose&) const noexcept = default;
     };
 
-    // 6단계에서 RemoteActorMessage, RemoteConnectionSend를 추가한다.
-    // 9단계에서 BlockingJobCompleted를 추가한다(adapter를 쓸 때만).
-    using WorkerEvent = std::variant<RemoteConnectionClose>;
+    // RemoteActorMessage와 BlockingJobCompleted는 actor/adapter 단계에서
+    // concrete event가 필요할 때 추가한다. Connection events는 지금
+    // owner Worker가 직접 소비한다.
+    using WorkerEvent = std::variant<RemoteConnectionSend, RemoteConnectionClose>;
 }

@@ -13,6 +13,7 @@ namespace snf::protocol
     inline constexpr std::uint32_t MIN_BODY_SIZE = FRAME_TYPE_SIZE + FRAME_REQUEST_ID_SIZE;
     inline constexpr std::uint32_t MAX_BODY_SIZE = 64 * 1024;
     inline constexpr std::uint32_t MAX_PAYLOAD_SIZE = MAX_BODY_SIZE - MIN_BODY_SIZE;
+    inline constexpr std::uint32_t MAX_FRAME_SIZE = FRAME_LENGTH_FIELD_SIZE + MAX_BODY_SIZE;
 
     enum class MessageType : std::uint16_t
     {
@@ -54,5 +55,7 @@ namespace snf::protocol
         MessageType type;
         std::uint32_t request_id;
         std::vector<std::byte> payload;
+
+        [[nodiscard]] bool operator==(const Frame&) const noexcept = default;
     };
 }

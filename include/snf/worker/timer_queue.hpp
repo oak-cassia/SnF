@@ -1,6 +1,7 @@
 #pragma once
 
 #include "snf/worker/budget.hpp"
+#include "snf/worker/connection.hpp"
 #include "snf/worker/identity.hpp"
 
 #include <algorithm>
@@ -23,8 +24,14 @@ namespace snf::worker
         [[nodiscard]] bool operator==(const AwaitTimeout&) const noexcept = default;
     };
 
-    // 7단계에서 activation-bound timer payload를 추가한다.
-    using TimerPayload = std::variant<AwaitTimeout>;
+    struct ConnectionCloseDeadline
+    {
+        ConnectionHandle connection;
+
+        [[nodiscard]] bool operator==(const ConnectionCloseDeadline&) const noexcept = default;
+    };
+
+    using TimerPayload = std::variant<AwaitTimeout, ConnectionCloseDeadline>;
 
     static_assert(std::is_nothrow_move_constructible_v<TimerPayload>);
 
