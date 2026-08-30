@@ -205,13 +205,13 @@ namespace snf::worker
 
         static_assert(hasUniqueTags(), "ActorPayloadRegistry: TAG values must be non-zero and unique!");
 
+    public:
         template <typename T>
         static constexpr bool isRegistered()
         {
             return (std::is_same_v<std::decay_t<T>, Ts> || ...);
         }
 
-    public:
         template <typename T>
         [[nodiscard]] static ActorEnvelope create(T&& payload)
         {

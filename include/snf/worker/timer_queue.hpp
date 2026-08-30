@@ -142,16 +142,16 @@ namespace snf::worker
 
         void reset() noexcept;
 
-    private:
-        friend class TimerAdmission;
-        friend class Worker;
-
         TimerReservation(TimerAdmission* admission, const std::uint64_t charged_bytes, const std::uint64_t turn_id) noexcept
             : _admission(admission)
             , _charged_bytes(charged_bytes)
             , _turn_id(turn_id)
         {
         }
+
+    private:
+        friend class TimerAdmission;
+        friend class Worker;
 
         TimerAdmission* _admission{nullptr};
         std::uint64_t _charged_bytes{0};

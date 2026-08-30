@@ -109,6 +109,19 @@ target_include_directories(snf_worker PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
 target_link_libraries(snf_worker PUBLIC snf_core Threads::Threads)
 snf_configure_target(snf_worker)
 
+add_library(snf_worker_game_runtime STATIC
+    src/adapter/protocol_encoder.cpp
+    src/adapter/to_effects.cpp
+    src/adapter/player_actor_adapter.cpp
+    src/adapter/zone_actor_adapter.cpp
+    src/adapter/room_actor_adapter.cpp
+    src/adapter/game_request_sink.cpp
+    src/adapter/game_actor_factory.cpp
+)
+target_include_directories(snf_worker_game_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(snf_worker_game_runtime PUBLIC snf_worker snf_game snf_core)
+snf_configure_target(snf_worker_game_runtime)
+
 add_library(snf_runtime STATIC
     src/runtime/runtime_completion.cpp
     src/runtime/actor_runtime.cpp
@@ -257,6 +270,19 @@ if(BUILD_TESTING)
 
     add_test(NAME snf_worker_network_integration_tests COMMAND snf_worker_network_integration_tests)
     set_tests_properties(snf_worker_network_integration_tests PROPERTIES TIMEOUT 20)
+
+    add_executable(snf_worker_adapter_tests
+        tests/worker_adapter_test.cpp
+    )
+    target_link_libraries(snf_worker_adapter_tests
+        PRIVATE
+            snf_worker_game_runtime
+            Threads::Threads
+    )
+    snf_configure_target(snf_worker_adapter_tests)
+
+    add_test(NAME snf_worker_adapter_tests COMMAND snf_worker_adapter_tests)
+    set_tests_properties(snf_worker_adapter_tests PROPERTIES TIMEOUT 20)
 
     add_test(NAME snf_worker_layer
              COMMAND ${CMAKE_COMMAND} -DWORKER_ROOTS=${CMAKE_SOURCE_DIR}/include/snf/worker:${CMAKE_SOURCE_DIR}/src/worker
