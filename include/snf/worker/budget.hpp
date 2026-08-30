@@ -20,9 +20,13 @@ namespace snf::worker
 
     struct IoBudget
     {
-        std::size_t max_events;
+        // These are independent upper bounds for one I/O phase. The phase
+        // duration is shared by poll dispatch, accepts, and read work.
+        std::size_t max_poll_events;
+        std::size_t max_accepts;
+        std::size_t max_read_connections;
         std::size_t max_frames;
-        std::uint64_t max_bytes;
+        std::uint64_t max_read_bytes;
         std::chrono::nanoseconds max_duration;
     };
 
@@ -50,9 +54,11 @@ namespace snf::worker
             return WorkerBudgets{
                 .poll =
                     {
-                        .max_events = 1024,
+                        .max_poll_events = 1024,
+                        .max_accepts = 64,
+                        .max_read_connections = 1024,
                         .max_frames = 1024,
-                        .max_bytes = 4ull * 1024 * 1024,
+                        .max_read_bytes = 4ull * 1024 * 1024,
                         .max_duration = 500us,
                     },
                 .inbox =

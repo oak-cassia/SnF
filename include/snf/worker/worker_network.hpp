@@ -30,6 +30,8 @@ namespace snf::worker
         std::uint64_t rejected_requests{0};
         std::uint64_t stale_poll_events{0};
         std::uint64_t stale_work_items{0};
+        std::uint64_t misrouted_events{0};
+        std::uint64_t invariant_violations{0};
         std::uint64_t soft_limit_sends{0};
         std::uint64_t hard_limit_sends{0};
         std::uint64_t read_budget_stops{0};
@@ -43,10 +45,10 @@ namespace snf::worker
 
     [[nodiscard]] inline bool isValid(const WorkerBudgets& budgets) noexcept
     {
-        return budgets.poll.max_events > 0 && budgets.poll.max_frames > 0 && budgets.poll.max_bytes > 0 &&
-               budgets.poll.max_duration > std::chrono::nanoseconds::zero() && budgets.inbox.max_events > 0 && budgets.inbox.max_per_lane > 0 &&
-               budgets.inbox.max_duration > std::chrono::nanoseconds::zero() && budgets.timers.max_count > 0 &&
-               budgets.timers.max_duration > std::chrono::nanoseconds::zero() && budgets.actors.max_count > 0 &&
+        return budgets.poll.max_poll_events > 0 && budgets.poll.max_accepts > 0 && budgets.poll.max_read_connections > 0 &&
+               budgets.poll.max_frames > 0 && budgets.poll.max_read_bytes > 0 && budgets.poll.max_duration > std::chrono::nanoseconds::zero() &&
+               budgets.inbox.max_events > 0 && budgets.inbox.max_per_lane > 0 && budgets.inbox.max_duration > std::chrono::nanoseconds::zero() &&
+               budgets.timers.max_count > 0 && budgets.timers.max_duration > std::chrono::nanoseconds::zero() && budgets.actors.max_count > 0 &&
                budgets.actors.max_duration > std::chrono::nanoseconds::zero() && budgets.writes.max_bytes > 0 &&
                budgets.writes.max_duration > std::chrono::nanoseconds::zero() && budgets.max_poll_timeout >= std::chrono::milliseconds::zero();
     }

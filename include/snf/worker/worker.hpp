@@ -71,8 +71,10 @@ namespace snf::worker
         void attachListener(snf::net::UniqueFileDescriptor listener);
         void bindRemoteTarget(WorkerId target, WorkerInboxPort port);
 
-        // owner Worker thread 전용. A remote target is converted to a
-        // RemoteConnectionSend in the target Worker's inbox.
+        // owner Worker thread 전용. The rvalue Frame is consumed by this
+        // call, including terminal failures; no result payload is returned.
+        // A remote target is converted to a RemoteConnectionSend in the
+        // target Worker's inbox.
         [[nodiscard]] SendResult send(ConnectionRef connection, snf::protocol::Frame&& frame, bool critical = false);
         [[nodiscard]] bool closeConnection(ConnectionRef connection, CloseReason reason, bool graceful = true);
 
@@ -107,7 +109,7 @@ namespace snf::worker
 
         void processPollEvents(std::span<const PollEvent> events, const IoBudget& budget);
         void processReadQueue(const IoBudget& budget, TimePoint phase_started_at);
-        void acceptPendingClients(const IoBudget& budget, TimePoint phase_started_at);
+        void acceptPendingClients(const IoBudget& budget, TimePoint phase_started_at, std::size_t& accepted);
         [[nodiscard]] bool readConnection(
             ConnectionHandle handle,
             const IoBudget& budget,
@@ -132,6 +134,7 @@ namespace snf::worker
         [[nodiscard]] bool beginGracefulClose(ConnectionHandle handle, CloseReason reason);
         void maybeResumeListener();
         void pauseListener();
+        [[noreturn]] void networkInvariantViolation(const char* message);
         void beginNetworkShutdown();
         void runNetworkShutdown();
         void releaseConnectionRegistration(ConnectionHandle handle) noexcept;

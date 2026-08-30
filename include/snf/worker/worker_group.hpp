@@ -34,7 +34,8 @@ namespace snf::worker
 
         [[nodiscard]] std::uint16_t port() const noexcept;
         [[nodiscard]] std::uint16_t workerCount() const noexcept;
-        [[nodiscard]] Worker& worker(std::size_t index) noexcept;
+        // Inspection-only accessor. Worker owner-thread APIs are not exposed
+        // through a mutable group reference.
         [[nodiscard]] const Worker& worker(std::size_t index) const noexcept;
         [[nodiscard]] bool isRunning() const noexcept;
 

@@ -77,6 +77,11 @@ namespace
             _worker = &worker;
         }
 
+        void setRequestCallback(std::function<void()> callback)
+        {
+            _request_callback = std::move(callback);
+        }
+
         [[nodiscard]] RequestPostResult tryPost(ConnectionRef connection, Frame&& frame) override
         {
             {
@@ -85,6 +90,11 @@ namespace
                 _state->requests.push_back(frame);
             }
             _state->changed.notify_all();
+
+            if (_request_callback)
+            {
+                _request_callback();
+            }
 
             if (_mode == SinkMode::RespondAndGracefulClose || _mode == SinkMode::RespondOverflow)
             {
@@ -130,6 +140,7 @@ namespace
         std::shared_ptr<SinkState> _state;
         SinkMode _mode;
         Worker* _worker;
+        std::function<void()> _request_callback;
     };
 
     [[nodiscard]] Frame pingFrame(const std::uint32_t request_id)
@@ -364,10 +375,8 @@ namespace
 
         auto remote_target_port = target_worker.bindInboxSource(WorkerId{1});
         source_worker.bindRemoteTarget(WorkerId{0}, std::move(remote_target_port));
-        auto trigger_port = source_worker.bindInboxSource(WorkerId{0});
-
-        source_worker.setEventHandler(
-            [&source_worker, target_state, source_state](WorkerEvent&&)
+        source_sink.setRequestCallback(
+            [&source_worker, target_state, source_state]
             {
                 ConnectionRef target_connection;
                 {
@@ -395,6 +404,9 @@ namespace
         auto listener = snf::net::create_tcp_listener(0);
         const std::uint16_t port = portOf(listener.getDescriptor());
         target_worker.attachListener(std::move(listener));
+        auto source_listener = snf::net::create_tcp_listener(0);
+        const std::uint16_t source_port = portOf(source_listener.getDescriptor());
+        source_worker.attachListener(std::move(source_listener));
 
         std::thread target_thread{[&target_worker]
                                   {
@@ -415,21 +427,8 @@ namespace
             }
         ));
 
-        ConnectionRef target_connection;
-        {
-            std::lock_guard lock{target_state->mutex};
-            target_connection = target_state->connections.front();
-        }
-        WorkerEnvelope trigger{
-            .event =
-                RemoteConnectionClose{
-                    .connection = target_connection,
-                    .reason = CloseReason::Application,
-                    .graceful = false,
-                },
-            .charged_bytes = static_cast<std::uint32_t>(sizeof(RemoteConnectionClose)),
-        };
-        assert(trigger_port.tryPush(std::move(trigger)) == InboxPushResult::Accepted);
+        auto source_client = connectClient(source_port);
+        sendAll(source_client.getDescriptor(), snf::protocol::encode_frame(pingFrame(89)));
         assert(waitFor(
             *source_state,
             [](const SinkState& observed)
@@ -516,6 +515,40 @@ namespace
     {
         run_terminal_sink_case(SinkMode::Invalid, RequestPostResult::Invalid, CloseReason::ProtocolViolation);
         run_terminal_sink_case(SinkMode::Rejected, RequestPostResult::Rejected, CloseReason::Overload);
+    }
+
+    void test_misrouted_network_events_are_not_sent_to_generic_handler()
+    {
+        auto state = std::make_shared<SinkState>();
+        TestRequestSink sink{state, SinkMode::Accept};
+        Worker worker(WorkerId{0}, 2, testBudgets(), WorkerInboxConfig{}, testNetworkConfig(), sink);
+        std::size_t generic_events = 0;
+        worker.setEventHandler(
+            [&generic_events](WorkerEvent&&)
+            {
+                ++generic_events;
+            }
+        );
+
+        auto source_port = worker.bindInboxSource(WorkerId{1});
+        const ConnectionRef remote_connection{ConnectionId{7}, ConnectionGeneration{8}, WorkerId{1}};
+        const Frame remote_frame = pingFrame(61);
+        WorkerEnvelope send_event{
+            .event = RemoteConnectionSend{.connection = remote_connection, .frame = remote_frame},
+            .charged_bytes = remoteSendCharge(remote_frame),
+        };
+        WorkerEnvelope close_event{
+            .event = RemoteConnectionClose{.connection = remote_connection, .reason = CloseReason::Application, .graceful = false},
+            .charged_bytes = static_cast<std::uint32_t>(sizeof(RemoteConnectionClose)),
+        };
+        assert(source_port.tryPush(std::move(send_event)) == InboxPushResult::Accepted);
+        assert(source_port.tryPush(std::move(close_event)) == InboxPushResult::Accepted);
+
+        worker.requestStop();
+        worker.run();
+
+        assert(generic_events == 0);
+        assert(worker.metrics().network.misrouted_events == 2);
     }
 
     void test_slow_consumer_hard_limit_closes_only_that_connection()
@@ -636,6 +669,7 @@ int main()
     test_decode_frame_budget_requeues_buffered_frames();
     test_remote_critical_send_and_graceful_close_preserve_semantics();
     test_request_sink_terminal_results_are_not_retried();
+    test_misrouted_network_events_are_not_sent_to_generic_handler();
     test_slow_consumer_hard_limit_closes_only_that_connection();
     test_listener_pauses_until_both_capacity_tables_have_room();
     test_group_bootstrap_binds_each_worker_with_port_zero();

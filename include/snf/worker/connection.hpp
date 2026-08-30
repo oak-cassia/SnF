@@ -134,7 +134,9 @@ namespace snf::worker
         [[nodiscard]] bool canBuffer(std::size_t byte_count) const noexcept;
         void resetReadBuffer() noexcept;
 
-        [[nodiscard]] SendResult appendFrame(const snf::protocol::Frame& frame, bool critical = false);
+        // The caller transfers the frame to the owner connection. The write
+        // buffer then encodes it into its byte-owned queue.
+        [[nodiscard]] SendResult appendFrame(snf::protocol::Frame&& frame, bool critical = false);
         [[nodiscard]] bool hasPendingWrite() const noexcept;
         [[nodiscard]] std::size_t queuedWriteBytes() const noexcept;
         [[nodiscard]] std::span<const std::byte> pendingWriteBytes() const noexcept;

@@ -243,11 +243,17 @@ DB socket readiness는 1번, blocking adapter completion은 2번, awaited timeou
 
 | Phase | 초기 상한 |
 | --- | ---: |
-| Poll/read | 1,024 events, 1,024 decoded frames, 4 MiB 또는 500 μs |
+| Poll dispatch | 1,024 poll events |
+| Accept | 64 accepts |
+| Read | 1,024 connections, 1,024 decoded frames, 4 MiB |
 | WorkerInbox | 4,096 events 또는 250 μs |
 | Timer expiry | 2,048 entries 또는 250 μs |
 | Actor turns | 1,024 turns 또는 1 ms |
 | Write flush | 4 MiB 또는 500 μs |
+
+Poll dispatch, accept와 read는 하나의 I/O phase duration인 500 μs를 공유한다. 각 sub-phase의 count/byte
+상한은 서로 독립적이며, `max_poll_events`, `max_accepts`, `max_read_connections`, `max_frames`와
+`max_read_bytes`로 표현한다.
 
 I/O, inbox와 timer phase는 Actor 코드를 직접 실행하지 않는다.
 
@@ -328,6 +334,10 @@ remote send
 -> connection owner WorkerInbox에 RemoteConnectionSend
 -> owner가 검증 후 writeBuffer에 append
 ```
+
+`Worker::send()`는 전달받은 rvalue `Frame`을 성공/실패와 관계없이 소비하며 실패한 frame을 호출자에게
+돌려주지 않는다. Inbox의 `tryPush()`는 자체 admission check가 실패하면 전달받은 `WorkerEnvelope`를
+move하지 않지만, 이미 envelope가 소유한 frame은 `Worker::send()`의 terminal 결과와 함께 폐기된다.
 
 `ConnectionTable`과 `PollRegistrationTable`은 서로 독립적인 bounded table이다. `accept4` 이후에는
 connection reservation, poll-registration reservation, `epoll_ctl(ADD)`를 모두 성공시킨 뒤 commit한다.

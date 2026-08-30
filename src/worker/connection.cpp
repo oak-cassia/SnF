@@ -226,7 +226,7 @@ namespace snf::worker
         _decoder.reset();
     }
 
-    SendResult ConnectionSlot::appendFrame(const snf::protocol::Frame& frame, const bool critical)
+    SendResult ConnectionSlot::appendFrame(snf::protocol::Frame&& frame, const bool critical)
     {
         if (isClosing())
         {

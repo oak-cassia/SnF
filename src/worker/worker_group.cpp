@@ -171,11 +171,6 @@ namespace snf::worker
         return _config.worker_count;
     }
 
-    Worker& WorkerGroup::worker(const std::size_t index) noexcept
-    {
-        return *_workers[index];
-    }
-
     const Worker& WorkerGroup::worker(const std::size_t index) const noexcept
     {
         return *_workers[index];

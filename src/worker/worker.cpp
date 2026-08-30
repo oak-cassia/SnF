@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -21,6 +22,12 @@ namespace
 {
     constexpr std::size_t MAX_RECEIVE_CHUNK = 64ull * 1024;
 
+    void discardFrame(snf::protocol::Frame&& frame)
+    {
+        snf::protocol::Frame discarded = std::move(frame);
+        static_cast<void>(discarded);
+    }
+
     [[nodiscard]] bool budgetExpired(const std::chrono::steady_clock::time_point started_at, const std::chrono::nanoseconds maximum_duration) noexcept
     {
         return std::chrono::steady_clock::now() - started_at >= maximum_duration;
@@ -33,7 +40,7 @@ namespace snf::worker
         : _id(id)
         , _worker_count(worker_count)
         , _budgets(budgets)
-        , _poller(budgets.poll.max_events)
+        , _poller(budgets.poll.max_poll_events)
         , _inbox(worker_count, _wakeup, inbox_config)
         , _remote_ports(worker_count)
     {
@@ -180,6 +187,7 @@ namespace snf::worker
         assertOwnerThread();
         if (!networkEnabled() || connection.owner.value >= _worker_count)
         {
+            discardFrame(std::move(frame));
             return SendResult::Rejected;
         }
 
@@ -190,6 +198,14 @@ namespace snf::worker
 
         if (frame.payload.size() > snf::protocol::MAX_PAYLOAD_SIZE)
         {
+            discardFrame(std::move(frame));
+            return SendResult::Rejected;
+        }
+
+        WorkerInboxPort& port = _remote_ports[connection.owner.value];
+        if (!port.isBound())
+        {
+            discardFrame(std::move(frame));
             return SendResult::Rejected;
         }
 
@@ -203,11 +219,6 @@ namespace snf::worker
             .event = std::move(remote),
             .charged_bytes = charge,
         };
-        WorkerInboxPort& port = _remote_ports[connection.owner.value];
-        if (!port.isBound())
-        {
-            return SendResult::Rejected;
-        }
         const InboxPushResult result = port.tryPush(std::move(envelope));
         if (result == InboxPushResult::Accepted)
         {
@@ -336,9 +347,10 @@ namespace snf::worker
 
         const auto started_at = std::chrono::steady_clock::now();
         std::size_t processed = 0;
+        std::size_t accepted = 0;
         for (const PollEvent& event : events)
         {
-            if (processed >= budget.max_events || budgetExpired(started_at, budget.max_duration))
+            if (processed >= budget.max_poll_events || budgetExpired(started_at, budget.max_duration))
             {
                 break;
             }
@@ -360,7 +372,7 @@ namespace snf::worker
             {
                 if (!_network_stopping && event.readable)
                 {
-                    acceptPendingClients(budget, started_at);
+                    acceptPendingClients(budget, started_at, accepted);
                 }
                 continue;
             }
@@ -439,7 +451,7 @@ namespace snf::worker
 
         while (!_read_work_queue->empty())
         {
-            if (processed >= budget.max_events || frames_decoded >= budget.max_frames || bytes_read >= budget.max_bytes ||
+            if (processed >= budget.max_read_connections || frames_decoded >= budget.max_frames || bytes_read >= budget.max_read_bytes ||
                 budgetExpired(phase_started_at, budget.max_duration))
             {
                 phase_budget_exhausted = true;
@@ -543,7 +555,7 @@ namespace snf::worker
                 return false;
             }
 
-            if (bytes_read >= budget.max_bytes)
+            if (bytes_read >= budget.max_read_bytes)
             {
                 budget_exhausted = true;
                 return true;
@@ -557,7 +569,7 @@ namespace snf::worker
             }
 
             const std::size_t room = slot->maxReadBufferBytes() - slot->bufferedByteCount();
-            const std::size_t remaining_budget = static_cast<std::size_t>(budget.max_bytes - bytes_read);
+            const std::size_t remaining_budget = static_cast<std::size_t>(budget.max_read_bytes - bytes_read);
             const std::size_t receive_size = std::min({room, remaining_budget, _network_config.receive_chunk_bytes, receive_buffer.size()});
             if (receive_size == 0)
             {
@@ -594,15 +606,14 @@ namespace snf::worker
         }
     }
 
-    void Worker::acceptPendingClients(const IoBudget& budget, const TimePoint phase_started_at)
+    void Worker::acceptPendingClients(const IoBudget& budget, const TimePoint phase_started_at, std::size_t& accepted)
     {
         if (!networkEnabled() || !_listener.isValid() || _network_stopping || _listener_paused)
         {
             return;
         }
 
-        std::size_t accepted = 0;
-        const std::size_t accept_limit = std::min(_network_config.max_accepts_per_poll, budget.max_events);
+        const std::size_t accept_limit = std::min(_network_config.max_accepts_per_poll, budget.max_accepts);
 
         while (accepted < accept_limit)
         {
@@ -860,32 +871,36 @@ namespace snf::worker
 
         if (networkEnabled())
         {
-            bool handled = false;
+            bool recognized = false;
             std::visit(
-                [this, &handled](auto&& network_event)
+                [this, &recognized](auto&& network_event)
                 {
                     using Event = std::decay_t<decltype(network_event)>;
                     if constexpr (std::is_same_v<Event, RemoteConnectionSend>)
                     {
-                        if (network_event.connection.owner == _id)
+                        recognized = true;
+                        if (network_event.connection.owner != _id)
                         {
-                            static_cast<void>(sendLocal(network_event.connection, std::move(network_event.frame), network_event.critical));
-                            handled = true;
+                            ++_metrics.network.misrouted_events;
+                            return;
                         }
+                        static_cast<void>(sendLocal(network_event.connection, std::move(network_event.frame), network_event.critical));
                     }
                     else if constexpr (std::is_same_v<Event, RemoteConnectionClose>)
                     {
-                        if (network_event.connection.owner == _id)
+                        recognized = true;
+                        if (network_event.connection.owner != _id)
                         {
-                            static_cast<void>(closeConnection(network_event.connection, network_event.reason, network_event.graceful));
-                            handled = true;
+                            ++_metrics.network.misrouted_events;
+                            return;
                         }
+                        static_cast<void>(closeConnection(network_event.connection, network_event.reason, network_event.graceful));
                     }
                 },
                 event
             );
 
-            if (handled)
+            if (recognized)
             {
                 return;
             }
@@ -920,6 +935,10 @@ namespace snf::worker
 
     SendResult Worker::sendLocal(const ConnectionRef connection, snf::protocol::Frame&& frame, const bool critical)
     {
+        // Take ownership before any lookup or encoding can fail. This keeps
+        // Worker::send's consume-on-failure contract true even for rejected
+        // stale handles and allocation exceptions in the encoder.
+        snf::protocol::Frame owned_frame = std::move(frame);
         const ConnectionHandle handle{.id = connection.id, .generation = connection.generation};
         ConnectionSlot* slot = _connections->find(handle);
         if (slot == nullptr)
@@ -931,7 +950,7 @@ namespace snf::worker
             return SendResult::Stale;
         }
 
-        const SendResult result = slot->appendFrame(frame, critical);
+        const SendResult result = slot->appendFrame(std::move(owned_frame), critical);
         if (result == SendResult::HardLimit)
         {
             ++_metrics.network.hard_limit_sends;
@@ -989,7 +1008,7 @@ namespace snf::worker
         const auto registration = registrationFor(slot.handle());
         if (!registration)
         {
-            return;
+            networkInvariantViolation("Active connection has no poll registration");
         }
         _poller.modify(slot.descriptor(), registration->token, PollInterest{.read = slot.isOpen(), .write = slot.waitingEpollout()});
     }
@@ -1057,16 +1076,20 @@ namespace snf::worker
 
     void Worker::maybeResumeListener()
     {
-        if (!_listener_paused || _network_stopping || !_listener.isValid() || !_listener_registration || !_connections->hasCapacity() ||
-            !_registrations->hasCapacity())
+        if (!_listener_paused || _network_stopping || !_listener.isValid() || !_connections->hasCapacity() || !_registrations->hasCapacity())
         {
             return;
+        }
+
+        if (!_listener_registration)
+        {
+            networkInvariantViolation("Listener has no poll registration while resuming");
         }
 
         const auto registration = _registrations->lookup(*_listener_registration);
         if (!registration)
         {
-            return;
+            networkInvariantViolation("Listener poll registration is not active while resuming");
         }
         _poller.modify(_listener.getDescriptor(), registration->token, PollInterest{.read = true, .write = false});
         _listener_paused = false;
@@ -1075,19 +1098,31 @@ namespace snf::worker
 
     void Worker::pauseListener()
     {
-        if (_listener_paused || !_listener.isValid() || !_listener_registration)
+        if (_listener_paused || !_listener.isValid())
         {
             return;
+        }
+
+        if (!_listener_registration)
+        {
+            networkInvariantViolation("Listener has no poll registration while pausing");
         }
 
         const auto registration = _registrations->lookup(*_listener_registration);
         if (!registration)
         {
-            return;
+            networkInvariantViolation("Listener poll registration is not active while pausing");
         }
         _poller.modify(_listener.getDescriptor(), registration->token, PollInterest{.read = false, .write = false});
         _listener_paused = true;
         ++_metrics.network.listener_pauses;
+    }
+
+    [[noreturn]] void Worker::networkInvariantViolation(const char* message)
+    {
+        ++_metrics.network.invariant_violations;
+        assert(false && "Worker network invariant violated");
+        throw std::logic_error{message};
     }
 
     void Worker::beginNetworkShutdown()
