@@ -78,6 +78,11 @@ namespace snf::worker
             worker.expireTimers(now, budget);
         }
 
+        static void drainInbox(Worker& worker, const InboxBudget& budget)
+        {
+            worker.drainInbox(budget);
+        }
+
         static void removeActor(Worker& worker, const ActorHandle handle, const ActorRemovalReason reason)
         {
             worker.removeActor(handle, reason);
@@ -3134,6 +3139,329 @@ namespace
         assert(worker.actorCount() == 0);
         assert(destructs.load() == 1);
     }
+
+    void test_tell_local_mailbox_non_reentrancy_and_no_self_lane()
+    {
+        const WorkerActorConfig config{
+            .actor_table_capacity = 10,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 20,
+            .max_mailbox_bytes_total = 2048,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+            .max_concurrent_loading = 10,
+        };
+
+        std::atomic<int> turns_executed{0};
+        FunctionalActorFactory factory(
+            [&turns_executed](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<FunctionalActor>(
+                    [&turns_executed](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
+                    {
+                        ++turns_executed;
+                        return CompletedTurn{.effects = EffectBatch{}};
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        assert(worker.tell(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        assert(worker.metrics().actor.remote_tells_sent == 0);
+        assert(worker.totalMailboxMessages() == 1);
+
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(turns_executed.load() == 1);
+        assert(worker.totalMailboxMessages() == 0);
+    }
+
+    void test_tell_remote_routes_to_target_inbox_fifo_and_bounds()
+    {
+        const WorkerActorConfig config{
+            .actor_table_capacity = 10,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 20,
+            .max_mailbox_bytes_total = 2048,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+            .max_concurrent_loading = 10,
+        };
+
+        std::vector<std::size_t> executed_payload_sizes;
+        FunctionalActorFactory factory0(
+            [](ActorKey) -> ActorConstructionResult
+            {
+                return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(nullptr));
+            }
+        );
+        FunctionalActorFactory factory1(
+            [&executed_payload_sizes](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<FunctionalActor>(
+                    [&executed_payload_sizes](ActorEnvelope&& envelope, const ActorTurnContext&) -> TurnResult
+                    {
+                        executed_payload_sizes.push_back(envelope.frame.payload.size());
+                        return CompletedTurn{.effects = EffectBatch{}};
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker w0(WorkerId{0}, 2, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory0);
+        Worker w1(WorkerId{1}, 2, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory1);
+
+        w0.bindRemoteTarget(WorkerId{1}, w1.bindInboxSource(WorkerId{0}));
+        w1.bindRemoteTarget(WorkerId{0}, w0.bindInboxSource(WorkerId{1}));
+
+        ActorKey k1{.kind = ActorKind::Player, .entity = 1};
+        while (ownerOf(k1, 2, config.placement_seed) != WorkerId{1})
+        {
+            ++k1.entity;
+        }
+
+        assert(w0.tell(k1, makeEnvelope(16)) == DeliveryResult::Accepted);
+        assert(w0.tell(k1, makeEnvelope(32)) == DeliveryResult::Accepted);
+        assert(w0.metrics().actor.remote_tells_sent == 2);
+        assert(w1.metrics().actor.remote_tells_received == 0);
+
+        WorkerActorTestAccess::drainInbox(w1, WorkerBudgets::defaults().inbox);
+        assert(w1.metrics().actor.remote_tells_received == 2);
+        assert(w1.metrics().actor.remote_tells_delivered == 2);
+        assert(w1.metrics().actor.remote_tell_delivery_failures == 0);
+        assert(w1.totalMailboxMessages() == 2);
+
+        WorkerActorTestAccess::runReadyActors(w1, WorkerBudgets::defaults().actors);
+        assert(executed_payload_sizes.size() == 2);
+        assert(executed_payload_sizes[0] == 16);
+        assert(executed_payload_sizes[1] == 32);
+    }
+
+    void test_tell_remote_inbox_full_and_charge_overflow_rejections()
+    {
+        const WorkerActorConfig config{
+            .actor_table_capacity = 10,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 20,
+            .max_mailbox_bytes_total = 2048,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+            .max_concurrent_loading = 10,
+        };
+
+        const WorkerInboxConfig small_inbox{
+            .max_bytes_per_worker = 60,
+            .max_workers = 32,
+        };
+
+        FunctionalActorFactory factory0([](ActorKey) -> ActorConstructionResult { return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(nullptr)); });
+        FunctionalActorFactory factory1([](ActorKey) -> ActorConstructionResult { return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(nullptr)); });
+
+        Worker w0(WorkerId{0}, 2, WorkerBudgets::defaults(), small_inbox, config, factory0);
+        Worker w1(WorkerId{1}, 2, WorkerBudgets::defaults(), small_inbox, config, factory1);
+
+        w0.bindRemoteTarget(WorkerId{1}, w1.bindInboxSource(WorkerId{0}));
+
+        ActorKey k1{.kind = ActorKind::Player, .entity = 1};
+        while (ownerOf(k1, 2, config.placement_seed) != WorkerId{1})
+        {
+            ++k1.entity;
+        }
+
+        assert(w0.tell(k1, makeEnvelope(16)) == DeliveryResult::Accepted);
+        // 2nd push exceeds byte capacity 40 -> RemoteInboxFull
+        assert(w0.tell(k1, makeEnvelope(16)) == DeliveryResult::RemoteInboxFull);
+        assert(w0.metrics().actor.remote_tell_rejections == 1);
+
+        ActorEnvelope huge_env = makeEnvelope(16);
+        huge_env.charged_bytes = static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()) + 100ULL;
+        assert(w0.tell(k1, std::move(huge_env)) == DeliveryResult::RemoteInboxFull);
+        assert(w0.metrics().actor.remote_tell_rejections == 2);
+    }
+
+    void test_tell_actor_effect_remote_routing()
+    {
+        const WorkerActorConfig config{
+            .actor_table_capacity = 10,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 20,
+            .max_mailbox_bytes_total = 2048,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+            .max_concurrent_loading = 10,
+        };
+
+        ActorKey k1{.kind = ActorKind::Player, .entity = 1};
+        while (ownerOf(k1, 2, config.placement_seed) != WorkerId{1})
+        {
+            ++k1.entity;
+        }
+
+        ActorKey k0{.kind = ActorKind::Player, .entity = 1};
+        while (ownerOf(k0, 2, config.placement_seed) != WorkerId{0})
+        {
+            ++k0.entity;
+        }
+
+        FunctionalActorFactory factory0(
+            [k1](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<FunctionalActor>(
+                    [k1](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
+                    {
+                        EffectBatch effects;
+                        effects.push(TellActorEffect{.target = k1, .message = makeEnvelope(64)});
+                        return CompletedTurn{.effects = std::move(effects)};
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        std::atomic<bool> received_on_w1{false};
+        FunctionalActorFactory factory1(
+            [&received_on_w1](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<FunctionalActor>(
+                    [&received_on_w1](ActorEnvelope&& envelope, const ActorTurnContext&) -> TurnResult
+                    {
+                        if (envelope.frame.payload.size() == 64)
+                        {
+                            received_on_w1.store(true);
+                        }
+                        return CompletedTurn{.effects = EffectBatch{}};
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker w0(WorkerId{0}, 2, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory0);
+        Worker w1(WorkerId{1}, 2, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory1);
+
+        w0.bindRemoteTarget(WorkerId{1}, w1.bindInboxSource(WorkerId{0}));
+        w1.bindRemoteTarget(WorkerId{0}, w0.bindInboxSource(WorkerId{1}));
+
+        assert(w0.tell(k0, makeEnvelope(16)) == DeliveryResult::Accepted);
+        WorkerActorTestAccess::runReadyActors(w0, WorkerBudgets::defaults().actors);
+        assert(w0.metrics().actor.remote_tells_sent == 1);
+
+        WorkerActorTestAccess::drainInbox(w1, WorkerBudgets::defaults().inbox);
+        assert(w1.metrics().actor.remote_tells_received == 1);
+        assert(w1.metrics().actor.remote_tells_delivered == 1);
+
+        WorkerActorTestAccess::runReadyActors(w1, WorkerBudgets::defaults().actors);
+        assert(received_on_w1.load() == true);
+    }
+
+    void test_remote_actor_message_without_runtime_and_misrouted_metrics()
+    {
+        const WorkerActorConfig config{
+            .actor_table_capacity = 10,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 20,
+            .max_mailbox_bytes_total = 2048,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+            .max_concurrent_loading = 10,
+        };
+
+        NullRequestSink sink;
+        Worker w_no_actor(WorkerId{1}, 2, WorkerBudgets::defaults(), WorkerInboxConfig{}, WorkerNetworkConfig{}, sink);
+        auto port = w_no_actor.bindInboxSource(WorkerId{0});
+
+        ActorKey k1{.kind = ActorKind::Player, .entity = 1};
+        while (ownerOf(k1, 2, config.placement_seed) != WorkerId{1})
+        {
+            ++k1.entity;
+        }
+
+        assert(port.tryPush(WorkerEnvelope{
+            .event = RemoteActorMessage{.target = k1, .message = makeEnvelope(16)},
+            .charged_bytes = 64,
+        }) == InboxPushResult::Accepted);
+
+        WorkerActorTestAccess::drainInbox(w_no_actor, WorkerBudgets::defaults().inbox);
+        assert(w_no_actor.metrics().actor.remote_tells_received == 1);
+        assert(w_no_actor.metrics().actor.remote_tell_delivery_failures == 1);
+        assert(w_no_actor.metrics().actor.actor_events_without_runtime == 1);
+
+        FunctionalActorFactory factory([](ActorKey) -> ActorConstructionResult { return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(nullptr)); });
+        Worker w1(WorkerId{1}, 2, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        auto port1 = w1.bindInboxSource(WorkerId{0});
+
+        ActorKey k0{.kind = ActorKind::Player, .entity = 1};
+        while (ownerOf(k0, 2, config.placement_seed) != WorkerId{0})
+        {
+            ++k0.entity;
+        }
+
+        assert(port1.tryPush(WorkerEnvelope{
+            .event = RemoteActorMessage{.target = k0, .message = makeEnvelope(16)},
+            .charged_bytes = 64,
+        }) == InboxPushResult::Accepted);
+
+        WorkerActorTestAccess::drainInbox(w1, WorkerBudgets::defaults().inbox);
+        assert(w1.metrics().actor.remote_tells_received == 1);
+        assert(w1.metrics().actor.remote_tell_delivery_failures == 1);
+        assert(w1.metrics().actor.misrouted_actor_events == 1);
+    }
+
+    void test_tell_closed_when_stopping_or_port_unbound()
+    {
+        const WorkerActorConfig config{
+            .actor_table_capacity = 10,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 20,
+            .max_mailbox_bytes_total = 2048,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+            .max_concurrent_loading = 10,
+        };
+
+        FunctionalActorFactory factory([](ActorKey) -> ActorConstructionResult { return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(nullptr)); });
+        Worker w0(WorkerId{0}, 2, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+
+        ActorKey k1{.kind = ActorKind::Player, .entity = 1};
+        while (ownerOf(k1, 2, config.placement_seed) != WorkerId{1})
+        {
+            ++k1.entity;
+        }
+
+        ActorKey k0{.kind = ActorKind::Player, .entity = 1};
+        while (ownerOf(k0, 2, config.placement_seed) != WorkerId{0})
+        {
+            ++k0.entity;
+        }
+
+        assert(w0.tell(k1, makeEnvelope(16)) == DeliveryResult::Closed);
+
+        w0.requestStop();
+        assert(w0.tell(k0, makeEnvelope(16)) == DeliveryResult::Closed);
+        assert(w0.tell(k1, makeEnvelope(16)) == DeliveryResult::Closed);
+    }
 }
 
 void run_worker_actor_tests()
@@ -3204,4 +3532,12 @@ void run_worker_actor_tests()
     test_shutdown_logical_cancel_reaches_a_suspended_actor_with_queued_mail();
     test_shutdown_new_suspension_immediately_cancelled_no_long_term_blocked();
     test_shutdown_forced_destruction_on_deadline_expiry_metrics();
+
+    // 6A Tests
+    test_tell_local_mailbox_non_reentrancy_and_no_self_lane();
+    test_tell_remote_routes_to_target_inbox_fifo_and_bounds();
+    test_tell_remote_inbox_full_and_charge_overflow_rejections();
+    test_tell_actor_effect_remote_routing();
+    test_remote_actor_message_without_runtime_and_misrouted_metrics();
+    test_tell_closed_when_stopping_or_port_unbound();
 }

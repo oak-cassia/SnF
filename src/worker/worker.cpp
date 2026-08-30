@@ -278,6 +278,70 @@ namespace snf::worker
         return graceful ? beginGracefulClose(handle, reason) : (forceClose(handle, reason), true);
     }
 
+    DeliveryResult Worker::tell(const ActorKey key, ActorEnvelope envelope)
+    {
+        assertOwnerThread();
+        if (_shutting_down || _stop_requested.load(std::memory_order_acquire) || !actorsConfigured())
+        {
+            return DeliveryResult::Closed;
+        }
+        return tellInternal(key, std::move(envelope), false);
+    }
+
+    DeliveryResult Worker::tellInternal(const ActorKey key, ActorEnvelope envelope, const bool allow_quiescing)
+    {
+        assertOwnerThread();
+        if (!actorsConfigured())
+        {
+            return DeliveryResult::Closed;
+        }
+
+        if (_shutting_down && !allow_quiescing)
+        {
+            return DeliveryResult::Closed;
+        }
+
+        const WorkerId owner = ownerOf(key, _worker_count, _actor_config.placement_seed);
+        if (owner == _id)
+        {
+            return tryDeliverLocalInternal(key, std::move(envelope));
+        }
+
+        if (owner.value >= _remote_ports.size() || !_remote_ports[owner.value].isBound())
+        {
+            return DeliveryResult::Closed;
+        }
+
+        const std::uint64_t charge = envelope.chargedBytes();
+        if (charge > std::numeric_limits<std::uint32_t>::max())
+        {
+            ++_metrics.actor.remote_tell_rejections;
+            return DeliveryResult::RemoteInboxFull;
+        }
+
+        WorkerEnvelope worker_envelope{
+            .event = RemoteActorMessage{
+                .target = key,
+                .message = std::move(envelope),
+            },
+            .charged_bytes = static_cast<std::uint32_t>(charge),
+        };
+
+        WorkerInboxPort& port = _remote_ports[owner.value];
+        const InboxPushResult push_result = port.tryPush(std::move(worker_envelope));
+        if (push_result == InboxPushResult::Accepted)
+        {
+            ++_metrics.actor.remote_tells_sent;
+            return DeliveryResult::Accepted;
+        }
+        if (push_result == InboxPushResult::Full)
+        {
+            ++_metrics.actor.remote_tell_rejections;
+            return DeliveryResult::RemoteInboxFull;
+        }
+        return DeliveryResult::Closed;
+    }
+
     DeliveryResult Worker::tryDeliverLocal(const ActorKey key, ActorEnvelope envelope)
     {
         assertOwnerThread();
@@ -1226,7 +1290,7 @@ namespace snf::worker
                 }
                 else if constexpr (std::is_same_v<T, TellActorEffect>)
                 {
-                    const DeliveryResult result = tryDeliverLocalInternal(concrete_effect.target, std::move(concrete_effect.message));
+                    const DeliveryResult result = tellInternal(concrete_effect.target, std::move(concrete_effect.message), true);
                     if (result != DeliveryResult::Accepted)
                     {
                         ++_metrics.actor.effect_tell_failures;
@@ -1644,6 +1708,37 @@ namespace snf::worker
     void Worker::onEvent(WorkerEvent&& event)
     {
         assertOwnerThread();
+
+        if (std::holds_alternative<RemoteActorMessage>(event))
+        {
+            auto& remote_actor_msg = std::get<RemoteActorMessage>(event);
+            ++_metrics.actor.remote_tells_received;
+
+            if (!actorsConfigured())
+            {
+                ++_metrics.actor.remote_tell_delivery_failures;
+                ++_metrics.actor.actor_events_without_runtime;
+                return;
+            }
+
+            if (ownerOf(remote_actor_msg.target, _worker_count, _actor_config.placement_seed) != _id)
+            {
+                ++_metrics.actor.remote_tell_delivery_failures;
+                ++_metrics.actor.misrouted_actor_events;
+                return;
+            }
+
+            const DeliveryResult delivery_result = tryDeliverLocalInternal(remote_actor_msg.target, std::move(remote_actor_msg.message));
+            if (delivery_result == DeliveryResult::Accepted)
+            {
+                ++_metrics.actor.remote_tells_delivered;
+            }
+            else
+            {
+                ++_metrics.actor.remote_tell_delivery_failures;
+            }
+            return;
+        }
 
         if (networkEnabled())
         {

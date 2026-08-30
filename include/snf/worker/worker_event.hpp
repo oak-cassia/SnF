@@ -1,6 +1,7 @@
 #pragma once
 
 #include "snf/protocol/frame.hpp"
+#include "snf/worker/actor_envelope.hpp"
 #include "snf/worker/identity.hpp"
 
 #include <cstdint>
@@ -38,8 +39,13 @@ namespace snf::worker
         [[nodiscard]] bool operator==(const RemoteConnectionClose&) const noexcept = default;
     };
 
-    // RemoteActorMessage와 BlockingJobCompleted는 actor/adapter 단계에서
-    // concrete event가 필요할 때 추가한다. Connection events는 지금
-    // owner Worker가 직접 소비한다.
-    using WorkerEvent = std::variant<RemoteConnectionSend, RemoteConnectionClose>;
+    struct RemoteActorMessage
+    {
+        ActorKey target;
+        ActorEnvelope message;
+
+        [[nodiscard]] bool operator==(const RemoteActorMessage&) const noexcept = default;
+    };
+
+    using WorkerEvent = std::variant<RemoteConnectionSend, RemoteConnectionClose, RemoteActorMessage>;
 }

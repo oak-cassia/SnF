@@ -46,6 +46,7 @@ namespace snf::worker
         Stopping = 5,
         Closed = 6,
         ActivationLimit = 7,
+        RemoteInboxFull = 8,
     };
 
     struct ActorHandle
@@ -555,6 +556,13 @@ namespace snf::worker
         std::uint64_t stale_await_timeouts{0};
         std::uint64_t cancelled_blocked_actors{0};
         std::uint64_t forced_blocked_destructions{0};
+        std::uint64_t remote_tells_sent{0};
+        std::uint64_t remote_tell_rejections{0};
+        std::uint64_t remote_tells_received{0};
+        std::uint64_t remote_tells_delivered{0};
+        std::uint64_t remote_tell_delivery_failures{0};
+        std::uint64_t misrouted_actor_events{0};
+        std::uint64_t actor_events_without_runtime{0};
         std::uint64_t total_slice_duration_ns{0};
         std::chrono::nanoseconds max_slice_duration{0};
     };

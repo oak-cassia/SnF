@@ -112,6 +112,10 @@ namespace snf::worker
         [[nodiscard]] SendResult send(ConnectionRef connection, snf::protocol::Frame&& frame, bool critical = false);
         [[nodiscard]] bool closeConnection(ConnectionRef connection, CloseReason reason, bool graceful = true);
 
+        // Send an actor message. If local, delivers to local mailbox; if remote, routes to target WorkerInbox.
+        // Owner thread only.
+        [[nodiscard]] DeliveryResult tell(ActorKey key, ActorEnvelope envelope);
+
         // Transitional local implementation primitive used by RequestSink and TellActorEffect.
         // Owner thread only.
         [[nodiscard]] DeliveryResult tryDeliverLocal(ActorKey key, ActorEnvelope envelope);
@@ -183,6 +187,7 @@ namespace snf::worker
         [[nodiscard]] std::optional<PollRegistrationView> registrationFor(ConnectionHandle handle) const noexcept;
         [[nodiscard]] bool isCurrent(ConnectionHandle handle) const noexcept;
 
+        [[nodiscard]] DeliveryResult tellInternal(ActorKey key, ActorEnvelope envelope, bool allow_quiescing);
         [[nodiscard]] DeliveryResult tryDeliverLocalInternal(ActorKey key, ActorEnvelope envelope);
         void applyEffect(ActorSlot& current_slot, Effect&& effect, bool& stopped);
         // Completion source for the Step 5 synthetic scaffold. The source owns the stale metric
