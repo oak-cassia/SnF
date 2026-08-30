@@ -26,6 +26,17 @@
 
 namespace snf::worker
 {
+    struct WorkerActorTestAccess;
+
+    enum class ActorRemovalReason : std::uint8_t
+    {
+        Stopped,
+        ActivationRejected,
+        ActivationTimedOut,
+        ActivationCancelled,
+        ShutdownForced,
+    };
+
     struct WorkerMetrics
     {
         std::uint64_t loop_iterations{0};
@@ -173,6 +184,11 @@ namespace snf::worker
 
         [[nodiscard]] DeliveryResult tryDeliverLocalInternal(ActorKey key, ActorEnvelope envelope);
         void applyEffect(ActorSlot& current_slot, Effect&& effect, bool& stopped);
+        [[nodiscard]] bool tryMarkSyntheticCommandReady(AwaitKey key, SyntheticAwaitOutcome outcome);
+        void removeActor(ActorHandle handle, ActorRemovalReason reason);
+        MailboxUsage discardMailbox(ActorSlot& slot);
+
+        friend struct WorkerActorTestAccess;
 
         void runUnifiedShutdown();
         void beginShutdownPhaseA();
@@ -213,6 +229,7 @@ namespace snf::worker
         std::unique_ptr<ReadyActorQueue> _ready_queue;
         ActorFactory* _actor_factory{nullptr};
         WorkerActorConfig _actor_config{};
+        OperationIdSource _operation_ids{};
         std::size_t _total_mailbox_messages{0};
         std::uint64_t _total_mailbox_bytes{0};
         bool _shutting_down{false};

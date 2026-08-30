@@ -18,6 +18,41 @@
 #include <utility>
 #include <vector>
 
+namespace snf::worker
+{
+    struct WorkerActorTestAccess
+    {
+        static void runReadyActors(Worker& worker, const CountTimeBudget& budget)
+        {
+            worker.runReadyActors(budget);
+        }
+
+        static bool tryMarkSyntheticCommandReady(Worker& worker, const AwaitKey key, const SyntheticAwaitOutcome outcome)
+        {
+            return worker.tryMarkSyntheticCommandReady(key, outcome);
+        }
+
+        static const std::optional<BlockedTask>& blocked(Worker& worker, const ActorKey key)
+        {
+            auto* slot = worker._actors->find(key);
+            assert(slot != nullptr);
+            return slot->blocked();
+        }
+
+        static ActorHandle handle(Worker& worker, const ActorKey key)
+        {
+            auto* slot = worker._actors->find(key);
+            assert(slot != nullptr);
+            return slot->handle();
+        }
+
+        static void removeActor(Worker& worker, const ActorHandle handle, const ActorRemovalReason reason)
+        {
+            worker.removeActor(handle, reason);
+        }
+    };
+}
+
 namespace
 {
     using namespace snf::worker;
@@ -1329,6 +1364,549 @@ namespace
         assert(worker.metrics().actor.actor_turns == ACTOR_COUNT);
         assert(worker.totalMailboxMessages() == 0);
     }
+
+    // =========================================================================
+    // 5A — Suspended Turn & BlockedTask Tests
+    // =========================================================================
+
+    ActorTask makeOneShotSuspendingTask(
+        std::atomic<int>& step,
+        std::atomic<int>& destruct_count,
+        const bool throw_on_resume = false
+    )
+    {
+        struct DestructTracker
+        {
+            std::atomic<int>& count;
+            ~DestructTracker() { ++count; }
+        } tracker{destruct_count};
+
+        step = 1;
+        const auto outcome = co_await SyntheticAwait{};
+        static_cast<void>(outcome);
+
+        if (throw_on_resume)
+        {
+            throw std::runtime_error{"Coro exception"};
+        }
+
+        step = 2;
+        co_return CompletedTurn{.effects = EffectBatch{}};
+    }
+
+    ActorTask makeTwoShotSuspendingTask(
+        std::atomic<int>& step
+    )
+    {
+        step = 1;
+        const auto outcome1 = co_await SyntheticAwait{};
+        static_cast<void>(outcome1);
+
+        step = 2;
+        const auto outcome2 = co_await SyntheticAwait{};
+        static_cast<void>(outcome2);
+
+        step = 3;
+        co_return CompletedTurn{.effects = EffectBatch{}};
+    }
+
+    class SuspendingActor final : public ActorInstance
+    {
+    public:
+        using TaskFactory = std::function<ActorTask()>;
+
+        explicit SuspendingActor(TaskFactory factory)
+            : _factory(std::move(factory))
+        {
+        }
+
+        TurnResult dispatch(ActorEnvelope&&, const ActorTurnContext&) override
+        {
+            assert(_factory);
+            ActorTask task = _factory();
+            const auto status = task.resume();
+            if (status == ActorTaskStatus::Suspended)
+            {
+                return SuspendedTurn{std::move(task)};
+            }
+            return task.takeCompleted();
+        }
+
+    private:
+        TaskFactory _factory;
+    };
+
+    void test_suspended_actor_does_not_dispatch_next_mailbox_command()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+        };
+
+        std::atomic<int> step{0};
+        std::atomic<int> destructs{0};
+
+        FunctionalActorFactory factory(
+            [&step, &destructs](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<SuspendingActor>(
+                    [&step, &destructs]()
+                    {
+                        return makeOneShotSuspendingTask(step, destructs, false);
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        // 1. Deliver first message -> activates and queues
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+
+        // Run ready actors -> dispatches and suspends
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+
+        assert(step.load() == 1);
+        assert(worker.metrics().actor.suspended_turns == 1);
+
+        // 2. Deliver second message to suspended actor -> placed in mailbox
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        assert(worker.totalMailboxMessages() == 1);
+
+        // Run ready actors again -> suspended actor must NOT dispatch 2nd message (INV-04)
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(step.load() == 1);
+        assert(worker.totalMailboxMessages() == 1);
+    }
+
+    void test_completion_does_not_inline_resume_only_in_actor_phase()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+        };
+
+        std::atomic<int> step{0};
+        std::atomic<int> destructs{0};
+
+        FunctionalActorFactory factory(
+            [&step, &destructs](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<SuspendingActor>(
+                    [&step, &destructs]()
+                    {
+                        return makeOneShotSuspendingTask(step, destructs, false);
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(step.load() == 1);
+
+        const auto& blocked = WorkerActorTestAccess::blocked(worker, key);
+        assert(blocked.has_value());
+        assert(std::holds_alternative<SyntheticSuspendedCommand>(*blocked));
+        const AwaitKey await_key = std::get<SyntheticSuspendedCommand>(*blocked).key;
+
+        // Mark completion ready -> does NOT resume inline!
+        assert(WorkerActorTestAccess::tryMarkSyntheticCommandReady(worker, await_key, SyntheticAwaitOutcome::Completed));
+        assert(step.load() == 1); // Still 1! Not inline resumed.
+
+        // Run ready actors -> resumes continuation in actor phase
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(step.load() == 2);
+        assert(worker.metrics().actor.resumed_turns == 1);
+    }
+
+    void test_duplicate_completion_dropped()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+        };
+
+        std::atomic<int> step{0};
+        std::atomic<int> destructs{0};
+
+        FunctionalActorFactory factory(
+            [&step, &destructs](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<SuspendingActor>(
+                    [&step, &destructs]()
+                    {
+                        return makeOneShotSuspendingTask(step, destructs, false);
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(step.load() == 1);
+
+        const auto& blocked = WorkerActorTestAccess::blocked(worker, key);
+        assert(blocked.has_value());
+        const AwaitKey await_key = std::get<SyntheticSuspendedCommand>(*blocked).key;
+
+        // First completion succeeds
+        assert(WorkerActorTestAccess::tryMarkSyntheticCommandReady(worker, await_key, SyntheticAwaitOutcome::Completed));
+
+        // Second completion with same key is dropped
+        assert(!WorkerActorTestAccess::tryMarkSyntheticCommandReady(worker, await_key, SyntheticAwaitOutcome::Completed));
+    }
+
+    void test_stale_operation_id_and_incarnation_completion_dropped()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+        };
+
+        std::atomic<int> step{0};
+        std::atomic<int> destructs{0};
+
+        FunctionalActorFactory factory(
+            [&step, &destructs](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<SuspendingActor>(
+                    [&step, &destructs]()
+                    {
+                        return makeOneShotSuspendingTask(step, destructs, false);
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(step.load() == 1);
+
+        const auto& blocked = WorkerActorTestAccess::blocked(worker, key);
+        assert(blocked.has_value());
+        const AwaitKey real_key = std::get<SyntheticSuspendedCommand>(*blocked).key;
+
+        // Stale operation id -> rejected
+        const AwaitKey bad_op{real_key.actor, real_key.incarnation, OperationId{999}};
+        assert(!WorkerActorTestAccess::tryMarkSyntheticCommandReady(worker, bad_op, SyntheticAwaitOutcome::Completed));
+
+        // Stale incarnation -> rejected
+        const AwaitKey bad_inc{real_key.actor, ActorIncarnation{999}, real_key.operation};
+        assert(!WorkerActorTestAccess::tryMarkSyntheticCommandReady(worker, bad_inc, SyntheticAwaitOutcome::Completed));
+
+        // Real key succeeds
+        assert(WorkerActorTestAccess::tryMarkSyntheticCommandReady(worker, real_key, SyntheticAwaitOutcome::Completed));
+    }
+
+    void test_resume_only_occurs_via_ready_queue()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+        };
+
+        std::atomic<int> step{0};
+        std::atomic<int> destructs{0};
+
+        FunctionalActorFactory factory(
+            [&step, &destructs](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<SuspendingActor>(
+                    [&step, &destructs]()
+                    {
+                        return makeOneShotSuspendingTask(step, destructs, false);
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+
+        assert(worker.metrics().actor.suspended_turns == 1);
+        assert(worker.metrics().actor.resumed_turns == 0);
+
+        const auto& blocked = WorkerActorTestAccess::blocked(worker, key);
+        const AwaitKey await_key = std::get<SyntheticSuspendedCommand>(*blocked).key;
+        assert(WorkerActorTestAccess::tryMarkSyntheticCommandReady(worker, await_key, SyntheticAwaitOutcome::Completed));
+
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+
+        assert(worker.metrics().actor.suspended_turns == 1);
+        assert(worker.metrics().actor.resumed_turns == 1);
+        assert(worker.metrics().actor.actor_turns == 2); // 1 initial dispatch turn + 1 resume turn
+    }
+
+    void test_chained_sequential_suspensions_replace_blocked_correctly()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+        };
+
+        std::atomic<int> step{0};
+
+        FunctionalActorFactory factory(
+            [&step](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<SuspendingActor>(
+                    [&step]()
+                    {
+                        return makeTwoShotSuspendingTask(step);
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+
+        // 1st suspension (step == 1, op == 1)
+        assert(step.load() == 1);
+        const auto& blocked1 = WorkerActorTestAccess::blocked(worker, key);
+        assert(blocked1.has_value());
+        const AwaitKey key1 = std::get<SyntheticSuspendedCommand>(*blocked1).key;
+        assert(key1.operation.value == 1);
+
+        // Resume 1st suspension -> will advance to step 2 and suspend again (op == 2)
+        assert(WorkerActorTestAccess::tryMarkSyntheticCommandReady(worker, key1, SyntheticAwaitOutcome::Completed));
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+
+        assert(step.load() == 2);
+        const auto& blocked2 = WorkerActorTestAccess::blocked(worker, key);
+        assert(blocked2.has_value());
+        const AwaitKey key2 = std::get<SyntheticSuspendedCommand>(*blocked2).key;
+        assert(key2.operation.value == 2);
+
+        // Resume 2nd suspension -> will advance to step 3 and complete turn
+        assert(WorkerActorTestAccess::tryMarkSyntheticCommandReady(worker, key2, SyntheticAwaitOutcome::Completed));
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+
+        assert(step.load() == 3);
+        assert(worker.metrics().actor.suspended_turns == 2);
+        assert(worker.metrics().actor.resumed_turns == 2);
+    }
+
+    void test_coroutine_frame_destroyed_exactly_once()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+        };
+
+        std::atomic<int> step{0};
+        std::atomic<int> destructs{0};
+
+        FunctionalActorFactory factory(
+            [&step, &destructs](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<SuspendingActor>(
+                    [&step, &destructs]()
+                    {
+                        return makeOneShotSuspendingTask(step, destructs, false);
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+
+        // Suspended: frame is alive, destructs == 0
+        assert(step.load() == 1);
+        assert(destructs.load() == 0);
+
+        const auto& blocked = WorkerActorTestAccess::blocked(worker, key);
+        const AwaitKey await_key = std::get<SyntheticSuspendedCommand>(*blocked).key;
+        assert(WorkerActorTestAccess::tryMarkSyntheticCommandReady(worker, await_key, SyntheticAwaitOutcome::Completed));
+
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+
+        // Completed: coroutine frame destroyed exactly once!
+        assert(step.load() == 2);
+        assert(destructs.load() == 1);
+    }
+
+    void test_exception_in_coroutine_rethrows_at_resume_boundary()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+        };
+
+        std::atomic<int> step{0};
+        std::atomic<int> destructs{0};
+
+        FunctionalActorFactory factory(
+            [&step, &destructs](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<SuspendingActor>(
+                    [&step, &destructs]()
+                    {
+                        return makeOneShotSuspendingTask(step, destructs, true /* throw on resume */);
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+
+        const auto& blocked = WorkerActorTestAccess::blocked(worker, key);
+        assert(blocked.has_value());
+        const AwaitKey await_key = std::get<SyntheticSuspendedCommand>(*blocked).key;
+        assert(WorkerActorTestAccess::tryMarkSyntheticCommandReady(worker, await_key, SyntheticAwaitOutcome::Completed));
+
+        // Resuming will rethrow the exception from the coroutine frame
+        bool caught = false;
+        try
+        {
+            WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        }
+        catch (const std::runtime_error& err)
+        {
+            caught = true;
+            assert(std::string(err.what()) == "Coro exception");
+        }
+        assert(caught);
+    }
+
+    void test_suspended_actor_removed_resets_mailbox_accounting()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+        };
+
+        std::atomic<int> step{0};
+        std::atomic<int> destructs{0};
+
+        FunctionalActorFactory factory(
+            [&step, &destructs](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<SuspendingActor>(
+                    [&step, &destructs]()
+                    {
+                        return makeOneShotSuspendingTask(step, destructs, false);
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+
+        // Enqueue extra mailbox message
+        assert(worker.tryDeliverLocal(key, makeEnvelope(24)) == DeliveryResult::Accepted);
+        assert(worker.totalMailboxMessages() == 1);
+        assert(worker.totalMailboxBytes() > 0);
+
+        const ActorHandle handle = WorkerActorTestAccess::handle(worker, key);
+        WorkerActorTestAccess::removeActor(worker, handle, ActorRemovalReason::Stopped);
+
+        assert(worker.actorCount() == 0);
+        assert(worker.totalMailboxMessages() == 0);
+        assert(worker.totalMailboxBytes() == 0);
+        assert(destructs.load() == 1); // coroutine frame cleanly destroyed during removeActor
+    }
 }
 
 void run_worker_actor_tests()
@@ -1365,4 +1943,15 @@ void run_worker_actor_tests()
     test_shutdown_cleans_up_all_resources_after_deadline();
 
     test_10000_actors_deterministic_execution();
+
+    // 5A Tests
+    test_suspended_actor_does_not_dispatch_next_mailbox_command();
+    test_completion_does_not_inline_resume_only_in_actor_phase();
+    test_duplicate_completion_dropped();
+    test_stale_operation_id_and_incarnation_completion_dropped();
+    test_resume_only_occurs_via_ready_queue();
+    test_chained_sequential_suspensions_replace_blocked_correctly();
+    test_coroutine_frame_destroyed_exactly_once();
+    test_exception_in_coroutine_rethrows_at_resume_boundary();
+    test_suspended_actor_removed_resets_mailbox_accounting();
 }

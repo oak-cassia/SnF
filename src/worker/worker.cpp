@@ -2,6 +2,7 @@
 
 #include "snf/net/socket_options.hpp"
 #include "snf/net/system_error.hpp"
+#include "snf/worker/stale.hpp"
 
 #include <algorithm>
 #include <array>
@@ -913,6 +914,105 @@ namespace snf::worker
                 continue;
             }
 
+            // Check if this slot has a ready suspended continuation
+            if (slot->hasBlocked() && std::holds_alternative<SyntheticSuspendedCommand>(*slot->blocked()))
+            {
+                auto& suspended_cmd = std::get<SyntheticSuspendedCommand>(*slot->blocked());
+                if (!suspended_cmd.completion.has_value())
+                {
+                    continue;
+                }
+
+                // 1. Move SyntheticSuspendedCommand to local
+                SyntheticSuspendedCommand command = std::move(suspended_cmd);
+                const SyntheticAwaitOutcome outcome = *command.completion;
+
+                // 2. Clear blocked to prepare slot for potential re-suspension
+                slot->clearBlocked();
+
+                // 3. Set Running
+                slot->setState(ActorState::Running);
+
+                // 4. Resume coroutine
+                ActorTask task = std::move(command.task);
+                const auto slice_started_at = std::chrono::steady_clock::now();
+                ++turns_executed;
+                ++_metrics.actor.actor_turns;
+                ++_metrics.actor.resumed_turns;
+
+                const ActorTaskStatus status = task.resume(outcome);
+
+                const auto slice_duration =
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - slice_started_at);
+                _metrics.actor.total_slice_duration_ns += static_cast<std::uint64_t>(slice_duration.count());
+                if (slice_duration > _metrics.actor.max_slice_duration)
+                {
+                    _metrics.actor.max_slice_duration = slice_duration;
+                }
+
+                if (status == ActorTaskStatus::Suspended)
+                {
+                    const OperationId op = _operation_ids.next();
+                    const AwaitKey await_key{
+                        .actor = slot->key(),
+                        .incarnation = slot->incarnation(),
+                        .operation = op,
+                    };
+                    const auto deadline = std::chrono::steady_clock::now() + _actor_config.await_timeout;
+                    slot->setBlocked(SyntheticSuspendedCommand{
+                        .key = await_key,
+                        .deadline = deadline,
+                        .task = std::move(task),
+                        .completion = std::nullopt,
+                    });
+                    slot->setState(ActorState::Suspended);
+                    ++_metrics.actor.suspended_turns;
+                }
+                else
+                {
+                    CompletedTurn completed = task.takeCompleted();
+                    if (completed.effects.size() > EffectBatch::MAX_EFFECTS)
+                    {
+                        throw std::logic_error{"EffectBatch capacity exceeded maximum limit of 64"};
+                    }
+
+                    bool stopped = false;
+                    for (auto& effect : completed.effects.mutableEffects())
+                    {
+                        applyEffect(*slot, std::move(effect), stopped);
+                    }
+
+                    if (stopped)
+                    {
+                        removeActor(handle, ActorRemovalReason::Stopped);
+                    }
+                    else
+                    {
+                        if (!slot->mailbox().empty())
+                        {
+                            slot->setState(ActorState::Queued);
+                            _ready_queue->push(slot->handle());
+                        }
+                        else
+                        {
+                            slot->setState(ActorState::Idle);
+                        }
+                    }
+                }
+
+                if (phase_budget_exhausted)
+                {
+                    break;
+                }
+                continue;
+            }
+
+            // Suspended actor must never dispatch mailbox messages (INV-04)
+            if (slot->hasBlocked())
+            {
+                continue;
+            }
+
             slot->setState(ActorState::Running);
 
             const std::size_t remaining_phase_turns = budget.max_count - turns_executed;
@@ -920,6 +1020,7 @@ namespace snf::worker
 
             std::size_t slice_turns = 0;
             bool stopped = false;
+            bool suspended = false;
             const auto slice_started_at = std::chrono::steady_clock::now();
 
             while (slice_turns < slice_limit && !slot->mailbox().empty())
@@ -943,6 +1044,28 @@ namespace snf::worker
                 ++turns_executed;
                 ++slice_turns;
                 ++_metrics.actor.actor_turns;
+
+                if (std::holds_alternative<SuspendedTurn>(result))
+                {
+                    auto& suspended_turn = std::get<SuspendedTurn>(result);
+                    const OperationId op = _operation_ids.next();
+                    const AwaitKey await_key{
+                        .actor = slot->key(),
+                        .incarnation = slot->incarnation(),
+                        .operation = op,
+                    };
+                    const auto deadline = std::chrono::steady_clock::now() + _actor_config.await_timeout;
+                    slot->setBlocked(SyntheticSuspendedCommand{
+                        .key = await_key,
+                        .deadline = deadline,
+                        .task = std::move(suspended_turn.task),
+                        .completion = std::nullopt,
+                    });
+                    slot->setState(ActorState::Suspended);
+                    ++_metrics.actor.suspended_turns;
+                    suspended = true;
+                    break;
+                }
 
                 auto& completed = std::get<CompletedTurn>(result);
                 if (completed.effects.size() > EffectBatch::MAX_EFFECTS)
@@ -971,18 +1094,9 @@ namespace snf::worker
 
             if (stopped)
             {
-                const std::size_t rem_msgs = slot->mailbox().size();
-                const std::uint64_t rem_bytes = slot->mailbox().chargedBytes();
-                _total_mailbox_messages -= rem_msgs;
-                _total_mailbox_bytes -= rem_bytes;
-                _metrics.actor.discarded_mailbox_messages += rem_msgs;
-                _metrics.actor.discarded_mailbox_bytes += rem_bytes;
-                slot->mailbox().clear();
-
-                static_cast<void>(_actors->release(handle));
-                ++_metrics.actor.stopped_actors;
+                removeActor(handle, ActorRemovalReason::Stopped);
             }
-            else
+            else if (!suspended)
             {
                 if (!slot->mailbox().empty())
                 {
@@ -1045,6 +1159,90 @@ namespace snf::worker
             },
             effect
         );
+    }
+
+    bool Worker::tryMarkSyntheticCommandReady(const AwaitKey key, const SyntheticAwaitOutcome outcome)
+    {
+        assertOwnerThread();
+        if (!actorsConfigured())
+        {
+            return false;
+        }
+
+        ActorSlot* slot = _actors->find(key.actor);
+        if (slot == nullptr)
+        {
+            return false;
+        }
+
+        if (slot->state() != ActorState::Suspended || !slot->hasBlocked())
+        {
+            return false;
+        }
+
+        if (!std::holds_alternative<SyntheticSuspendedCommand>(*slot->blocked()))
+        {
+            return false;
+        }
+
+        auto& command = std::get<SyntheticSuspendedCommand>(*slot->blocked());
+        if (!acceptsCompletion(key, command.key))
+        {
+            return false;
+        }
+
+        if (command.completion.has_value())
+        {
+            return false;
+        }
+
+        command.completion = outcome;
+        slot->setState(ActorState::Queued);
+        _ready_queue->push(slot->handle());
+        return true;
+    }
+
+    MailboxUsage Worker::discardMailbox(ActorSlot& slot)
+    {
+        const MailboxUsage usage = slot.mailboxUsage();
+        _total_mailbox_messages -= usage.message_count;
+        _total_mailbox_bytes -= usage.charged_bytes;
+        _metrics.actor.discarded_mailbox_messages += usage.message_count;
+        _metrics.actor.discarded_mailbox_bytes += usage.charged_bytes;
+        slot.clearMailbox();
+        return usage;
+    }
+
+    void Worker::removeActor(const ActorHandle handle, const ActorRemovalReason reason)
+    {
+        if (_actors == nullptr)
+        {
+            return;
+        }
+        ActorSlot* slot = _actors->find(handle);
+        if (slot == nullptr || slot->incarnation() != handle.incarnation)
+        {
+            return;
+        }
+
+        // 1. slot.clearBlocked() (coroutine frame destroyed first)
+        slot->clearBlocked();
+
+        // 2. discardMailbox(slot)
+        static_cast<void>(discardMailbox(*slot));
+
+        // 3. state == Loading: decrement loading count (for 5B)
+
+        // 4. slot.setInstance(nullptr)
+        slot->setInstance(nullptr);
+
+        // 5. release
+        static_cast<void>(_actors->release(handle));
+
+        if (reason == ActorRemovalReason::Stopped || reason == ActorRemovalReason::ShutdownForced)
+        {
+            ++_metrics.actor.stopped_actors;
+        }
     }
 
     void Worker::flushWrites(const ByteTimeBudget& budget)
@@ -1533,15 +1731,7 @@ namespace snf::worker
                 if (slot != nullptr && (slot->state() == ActorState::Idle || slot->state() == ActorState::Queued))
                 {
                     slot->setState(ActorState::Stopping);
-                    const std::size_t rem_msgs = slot->mailbox().size();
-                    const std::uint64_t rem_bytes = slot->mailbox().chargedBytes();
-                    _total_mailbox_messages -= rem_msgs;
-                    _total_mailbox_bytes -= rem_bytes;
-                    _metrics.actor.discarded_mailbox_messages += rem_msgs;
-                    _metrics.actor.discarded_mailbox_bytes += rem_bytes;
-                    slot->mailbox().clear();
-                    static_cast<void>(_actors->release(handle));
-                    ++_metrics.actor.stopped_actors;
+                    removeActor(handle, ActorRemovalReason::Stopped);
                 }
             }
         }
@@ -1592,19 +1782,7 @@ namespace snf::worker
             const auto handles = _actors->activeHandles();
             for (const auto handle : handles)
             {
-                ActorSlot* slot = _actors->find(handle);
-                if (slot != nullptr)
-                {
-                    const std::size_t rem_msgs = slot->mailbox().size();
-                    const std::uint64_t rem_bytes = slot->mailbox().chargedBytes();
-                    _total_mailbox_messages -= rem_msgs;
-                    _total_mailbox_bytes -= rem_bytes;
-                    _metrics.actor.discarded_mailbox_messages += rem_msgs;
-                    _metrics.actor.discarded_mailbox_bytes += rem_bytes;
-                    slot->mailbox().clear();
-                    static_cast<void>(_actors->release(handle));
-                    ++_metrics.actor.stopped_actors;
-                }
+                removeActor(handle, ActorRemovalReason::ShutdownForced);
             }
             _ready_queue->clear();
         }

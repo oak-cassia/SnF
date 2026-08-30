@@ -8,10 +8,19 @@
 #include <optional>
 #include <stdexcept>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace snf::worker
 {
+    struct MailboxUsage
+    {
+        std::size_t message_count{0};
+        std::uint64_t charged_bytes{0};
+
+        [[nodiscard]] bool operator==(const MailboxUsage&) const noexcept = default;
+    };
+
     class ActorSlot final
     {
     public:
@@ -73,6 +82,19 @@ namespace snf::worker
             return _mailbox;
         }
 
+        [[nodiscard]] MailboxUsage mailboxUsage() const noexcept
+        {
+            return MailboxUsage{
+                .message_count = _mailbox.size(),
+                .charged_bytes = _mailbox.chargedBytes(),
+            };
+        }
+
+        void clearMailbox() noexcept
+        {
+            _mailbox.clear();
+        }
+
         [[nodiscard]] ActorInstance* instance() noexcept
         {
             return _instance.get();
@@ -93,12 +115,38 @@ namespace snf::worker
             return _instance != nullptr;
         }
 
+        [[nodiscard]] bool hasBlocked() const noexcept
+        {
+            return _blocked.has_value();
+        }
+
+        [[nodiscard]] const std::optional<BlockedTask>& blocked() const noexcept
+        {
+            return _blocked;
+        }
+
+        [[nodiscard]] std::optional<BlockedTask>& blocked() noexcept
+        {
+            return _blocked;
+        }
+
+        void setBlocked(BlockedTask blocked)
+        {
+            _blocked = std::move(blocked);
+        }
+
+        void clearBlocked() noexcept
+        {
+            _blocked.reset();
+        }
+
     private:
         ActorKey _key;
         ActorIncarnation _incarnation;
         std::size_t _slot_index;
         ActorState _state{ActorState::Idle};
         std::unique_ptr<ActorInstance> _instance{nullptr};
+        std::optional<BlockedTask> _blocked{std::nullopt};
         Mailbox _mailbox{};
     };
 
@@ -149,7 +197,6 @@ namespace snf::worker
 
             Reservation(const Reservation&) = delete;
             Reservation& operator=(const Reservation&) = delete;
-
             Reservation(Reservation&& other) noexcept;
             Reservation& operator=(Reservation&& other) noexcept;
 
@@ -178,10 +225,8 @@ namespace snf::worker
         ActorTable& operator=(const ActorTable&) = delete;
 
         [[nodiscard]] std::optional<Reservation> tryReserve(ActorKey key);
-
         [[nodiscard]] ActorSlot* find(ActorKey key) noexcept;
         [[nodiscard]] const ActorSlot* find(ActorKey key) const noexcept;
-
         [[nodiscard]] ActorSlot* find(ActorHandle handle) noexcept;
         [[nodiscard]] const ActorSlot* find(ActorHandle handle) const noexcept;
 

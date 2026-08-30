@@ -7,9 +7,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <coroutine>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -21,12 +23,15 @@
 
 namespace snf::worker
 {
+    using TimePoint = std::chrono::steady_clock::time_point;
+
     enum class ActorState : std::uint8_t
     {
         Idle = 0,
         Queued = 1,
         Running = 2,
-        Stopping = 3,
+        Suspended = 3,
+        Stopping = 4,
     };
 
     enum class DeliveryResult : std::uint8_t
@@ -256,7 +261,223 @@ namespace snf::worker
         EffectBatch effects;
     };
 
-    using TurnResult = std::variant<CompletedTurn>;
+    enum class SyntheticAwaitOutcome : std::uint8_t
+    {
+        Completed = 0,
+        Rejected = 1,
+        TimedOut = 2,
+        Cancelled = 3,
+    };
+
+    struct SyntheticAwait
+    {
+    };
+
+    enum class ActorTaskStatus : std::uint8_t
+    {
+        Suspended = 0,
+        Completed = 1,
+    };
+
+    class ActorTask final
+    {
+    public:
+        struct promise_type;
+        using Handle = std::coroutine_handle<promise_type>;
+
+        struct promise_type
+        {
+            std::variant<std::monostate, CompletedTurn, std::exception_ptr> result{};
+            std::optional<SyntheticAwaitOutcome> await_outcome{std::nullopt};
+
+            ActorTask get_return_object() noexcept;
+
+            std::suspend_always initial_suspend() noexcept
+            {
+                return {};
+            }
+
+            std::suspend_always final_suspend() noexcept
+            {
+                return {};
+            }
+
+            void unhandled_exception() noexcept
+            {
+                result = std::current_exception();
+            }
+
+            void return_value(CompletedTurn completed) noexcept
+            {
+                result = std::move(completed);
+            }
+
+            auto await_transform(SyntheticAwait) noexcept
+            {
+                struct Awaiter
+                {
+                    promise_type& promise;
+
+                    bool await_ready() const noexcept
+                    {
+                        return false;
+                    }
+
+                    void await_suspend(std::coroutine_handle<promise_type>) noexcept
+                    {
+                    }
+
+                    SyntheticAwaitOutcome await_resume()
+                    {
+                        if (std::holds_alternative<std::exception_ptr>(promise.result))
+                        {
+                            std::rethrow_exception(std::get<std::exception_ptr>(promise.result));
+                        }
+                        if (!promise.await_outcome.has_value())
+                        {
+                            throw std::logic_error{"ActorTask resumed without await outcome"};
+                        }
+                        const auto outcome = *promise.await_outcome;
+                        promise.await_outcome.reset();
+                        return outcome;
+                    }
+                };
+                return Awaiter{*this};
+            }
+        };
+
+        ActorTask() noexcept = default;
+
+        explicit ActorTask(Handle handle) noexcept
+            : _handle(handle)
+        {
+        }
+
+        ~ActorTask()
+        {
+            if (_handle)
+            {
+                _handle.destroy();
+                _handle = nullptr;
+            }
+        }
+
+        ActorTask(const ActorTask&) = delete;
+        ActorTask& operator=(const ActorTask&) = delete;
+
+        ActorTask(ActorTask&& other) noexcept
+            : _handle(std::exchange(other._handle, nullptr))
+        {
+        }
+
+        ActorTask& operator=(ActorTask&& other) noexcept
+        {
+            if (this != &other)
+            {
+                if (_handle)
+                {
+                    _handle.destroy();
+                }
+                _handle = std::exchange(other._handle, nullptr);
+            }
+            return *this;
+        }
+
+        [[nodiscard]] bool valid() const noexcept
+        {
+            return _handle != nullptr;
+        }
+
+        [[nodiscard]] bool done() const noexcept
+        {
+            return _handle != nullptr && _handle.done();
+        }
+
+        [[nodiscard]] ActorTaskStatus resume()
+        {
+            if (!_handle || _handle.done())
+            {
+                throw std::logic_error{"Cannot resume invalid or finished ActorTask"};
+            }
+
+            _handle.resume();
+
+            auto& promise = _handle.promise();
+            if (std::holds_alternative<std::exception_ptr>(promise.result))
+            {
+                std::rethrow_exception(std::get<std::exception_ptr>(promise.result));
+            }
+
+            return _handle.done() ? ActorTaskStatus::Completed : ActorTaskStatus::Suspended;
+        }
+
+        [[nodiscard]] ActorTaskStatus resume(const SyntheticAwaitOutcome outcome)
+        {
+            if (!_handle || _handle.done())
+            {
+                throw std::logic_error{"Cannot resume invalid or finished ActorTask"};
+            }
+
+            _handle.promise().await_outcome = outcome;
+            _handle.resume();
+
+            auto& promise = _handle.promise();
+            if (std::holds_alternative<std::exception_ptr>(promise.result))
+            {
+                std::rethrow_exception(std::get<std::exception_ptr>(promise.result));
+            }
+
+            return _handle.done() ? ActorTaskStatus::Completed : ActorTaskStatus::Suspended;
+        }
+
+        [[nodiscard]] CompletedTurn takeCompleted()
+        {
+            if (!_handle || !_handle.done())
+            {
+                throw std::logic_error{"ActorTask is not completed"};
+            }
+
+            auto& promise = _handle.promise();
+            if (std::holds_alternative<std::exception_ptr>(promise.result))
+            {
+                std::rethrow_exception(std::get<std::exception_ptr>(promise.result));
+            }
+
+            if (!std::holds_alternative<CompletedTurn>(promise.result))
+            {
+                throw std::logic_error{"ActorTask completed without return value"};
+            }
+
+            CompletedTurn completed = std::move(std::get<CompletedTurn>(promise.result));
+            promise.result = std::monostate{};
+            return completed;
+        }
+
+    private:
+        Handle _handle{nullptr};
+    };
+
+    inline ActorTask ActorTask::promise_type::get_return_object() noexcept
+    {
+        return ActorTask{Handle::from_promise(*this)};
+    }
+
+    struct SuspendedTurn
+    {
+        ActorTask task;
+    };
+
+    using TurnResult = std::variant<CompletedTurn, SuspendedTurn>;
+
+    struct SyntheticSuspendedCommand
+    {
+        AwaitKey key;
+        TimePoint deadline;
+        ActorTask task;
+        std::optional<SyntheticAwaitOutcome> completion{std::nullopt};
+    };
+
+    using BlockedTask = std::variant<SyntheticSuspendedCommand>;
 
     class ActorInstance
     {
@@ -324,6 +545,7 @@ namespace snf::worker
         std::size_t max_turns_per_actor_slice{30};
         std::uint64_t placement_seed{0};
         std::chrono::milliseconds worker_shutdown_timeout{2000};
+        std::chrono::milliseconds await_timeout{2000};
     };
 
     [[nodiscard]] inline bool isValid(const WorkerActorConfig& config) noexcept
@@ -334,12 +556,16 @@ namespace snf::worker
                config.max_mailbox_messages_total >= config.max_mailbox_messages_per_actor &&
                config.max_mailbox_bytes_total >= config.max_mailbox_bytes_per_actor &&
                config.max_turns_per_actor_slice > 0 &&
-               config.worker_shutdown_timeout >= std::chrono::milliseconds::zero();
+               config.worker_shutdown_timeout >= std::chrono::milliseconds::zero() &&
+               config.await_timeout > std::chrono::milliseconds::zero();
     }
 
     struct WorkerActorMetrics
     {
         std::uint64_t actor_turns{0};
+        std::uint64_t suspended_turns{0};
+        std::uint64_t resumed_turns{0};
+        std::uint64_t stale_completions{0};
         std::uint64_t stale_ready_handles{0};
         std::uint64_t budget_stops{0};
         std::uint64_t stopped_actors{0};
