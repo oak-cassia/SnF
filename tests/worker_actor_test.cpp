@@ -37,9 +37,16 @@ namespace snf::worker
             return worker.completeSyntheticCommand(key, outcome);
         }
 
-        static bool beginActivationLoad(Worker& worker, const ActorKey key, ActorEnvelope&& first_message)
+        static DeliveryResult beginActivationLoad(Worker& worker, const ActorKey key, ActorEnvelope&& first_message)
         {
             return worker.beginActivationLoad(key, std::move(first_message));
+        }
+
+        static MailboxUsage discardMailbox(Worker& worker, const ActorKey key)
+        {
+            auto* slot = worker._actors->find(key);
+            assert(slot != nullptr);
+            return worker.discardMailbox(*slot);
         }
 
         static void completeSyntheticActivation(Worker& worker, const AwaitKey key, const SyntheticActivationOutcome outcome)
@@ -2112,7 +2119,7 @@ namespace
         const ActorKey key{.kind = ActorKind::Player, .entity = 1};
 
         // 1. Begin activation load
-        assert(WorkerActorTestAccess::beginActivationLoad(worker, key, makeEnvelope(16)));
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, key, makeEnvelope(16)) == DeliveryResult::Accepted);
         assert(worker.loadingCount() == 1);
         assert(worker.actorCount() == 1);
         assert(worker.totalMailboxMessages() == 1);
@@ -2130,6 +2137,42 @@ namespace
         assert(worker.metrics().actor.actor_turns == 0);
         assert(worker.totalMailboxMessages() == 2);
         assert(WorkerActorTestAccess::slot(worker, key)->state() == ActorState::Loading);
+    }
+
+    void test_activation_load_enforces_the_same_mailbox_byte_cap_as_local_delivery()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 2,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 32,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 32,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+            .max_concurrent_loading = 10,
+        };
+
+        FunctionalActorFactory factory(nullptr);
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        // The caller cannot under-report the charge to slip past the cap on the activation path
+        // any more than it can on tryDeliverLocal().
+        ActorEnvelope underreported{
+            .connection = std::nullopt,
+            .frame = makeFrame(64),
+            .charged_bytes = 1,
+        };
+        assert(underreported.chargedBytes() > config.max_mailbox_bytes_per_actor);
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, key, std::move(underreported)) == DeliveryResult::MailboxFull);
+
+        assert(worker.actorCount() == 0);
+        assert(worker.loadingCount() == 0);
+        assert(worker.totalMailboxMessages() == 0);
+        assert(worker.totalMailboxBytes() == 0);
+        assert(worker.metrics().actor.activation_loads_started == 0);
     }
 
     void test_activation_success_transitions_to_idle_or_queued_based_on_mailbox()
@@ -2166,7 +2209,7 @@ namespace
 
         // Case A: Non-empty mailbox -> transitions to Queued and pushes to ready queue
         const ActorKey key1{.kind = ActorKind::Player, .entity = 1};
-        assert(WorkerActorTestAccess::beginActivationLoad(worker, key1, makeEnvelope(16)));
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, key1, makeEnvelope(16)) == DeliveryResult::Accepted);
         assert(worker.loadingCount() == 1);
 
         const AwaitKey await_key1 = std::get<ActivationLoad>(*WorkerActorTestAccess::blocked(worker, key1)).key;
@@ -2181,11 +2224,13 @@ namespace
 
         // Case B: Empty mailbox -> transitions directly to Idle
         const ActorKey key2{.kind = ActorKind::Player, .entity = 2};
-        assert(WorkerActorTestAccess::beginActivationLoad(worker, key2, makeEnvelope(16)));
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, key2, makeEnvelope(16)) == DeliveryResult::Accepted);
         assert(worker.loadingCount() == 1);
 
-        // Discard mailbox before activation completion to simulate empty mailbox
-        WorkerActorTestAccess::slot(worker, key2)->clearMailbox();
+        // Drain through the Worker helper to simulate an empty mailbox. Calling
+        // ActorSlot::clearMailbox() directly would leave _total_mailbox_messages inflated.
+        static_cast<void>(WorkerActorTestAccess::discardMailbox(worker, key2));
+        assert(worker.totalMailboxMessages() == 0);
 
         const AwaitKey await_key2 = std::get<ActivationLoad>(*WorkerActorTestAccess::blocked(worker, key2)).key;
         WorkerActorTestAccess::completeSyntheticActivation(worker, await_key2, SyntheticActivationOutcome::Ready);
@@ -2235,7 +2280,7 @@ namespace
 
         // 1. Rejected outcome
         const ActorKey key1{.kind = ActorKind::Player, .entity = 1};
-        assert(WorkerActorTestAccess::beginActivationLoad(worker, key1, makeEnvelope(16)));
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, key1, makeEnvelope(16)) == DeliveryResult::Accepted);
         assert(worker.tryDeliverLocal(key1, makeEnvelope(20)) == DeliveryResult::Accepted);
         assert(worker.loadingCount() == 1);
         assert(worker.totalMailboxMessages() == 2);
@@ -2251,7 +2296,7 @@ namespace
 
         // 2. TimedOut outcome
         const ActorKey key2{.kind = ActorKind::Player, .entity = 2};
-        assert(WorkerActorTestAccess::beginActivationLoad(worker, key2, makeEnvelope(16)));
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, key2, makeEnvelope(16)) == DeliveryResult::Accepted);
         const AwaitKey await_key2 = std::get<ActivationLoad>(*WorkerActorTestAccess::blocked(worker, key2)).key;
         WorkerActorTestAccess::completeSyntheticActivation(worker, await_key2, SyntheticActivationOutcome::TimedOut);
 
@@ -2262,7 +2307,7 @@ namespace
 
         // 3. Cancelled outcome
         const ActorKey key3{.kind = ActorKind::Player, .entity = 3};
-        assert(WorkerActorTestAccess::beginActivationLoad(worker, key3, makeEnvelope(16)));
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, key3, makeEnvelope(16)) == DeliveryResult::Accepted);
         const AwaitKey await_key3 = std::get<ActivationLoad>(*WorkerActorTestAccess::blocked(worker, key3)).key;
         WorkerActorTestAccess::completeSyntheticActivation(worker, await_key3, SyntheticActivationOutcome::Cancelled);
 
@@ -2274,7 +2319,7 @@ namespace
         // 4. construct() returns Rejected when outcome is Ready
         factory_reject = true;
         const ActorKey key4{.kind = ActorKind::Player, .entity = 4};
-        assert(WorkerActorTestAccess::beginActivationLoad(worker, key4, makeEnvelope(16)));
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, key4, makeEnvelope(16)) == DeliveryResult::Accepted);
         const AwaitKey await_key4 = std::get<ActivationLoad>(*WorkerActorTestAccess::blocked(worker, key4)).key;
         WorkerActorTestAccess::completeSyntheticActivation(worker, await_key4, SyntheticActivationOutcome::Ready);
 
@@ -2319,14 +2364,14 @@ namespace
         const ActorKey key2{.kind = ActorKind::Player, .entity = 2};
         const ActorKey key3{.kind = ActorKind::Player, .entity = 3};
 
-        assert(WorkerActorTestAccess::beginActivationLoad(worker, key1, makeEnvelope(16)));
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, key1, makeEnvelope(16)) == DeliveryResult::Accepted);
         assert(worker.loadingCount() == 1);
 
-        assert(WorkerActorTestAccess::beginActivationLoad(worker, key2, makeEnvelope(16)));
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, key2, makeEnvelope(16)) == DeliveryResult::Accepted);
         assert(worker.loadingCount() == 2);
 
         // 3rd concurrent loading exceeds cap of 2 -> rejected
-        assert(!WorkerActorTestAccess::beginActivationLoad(worker, key3, makeEnvelope(16)));
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, key3, makeEnvelope(16)) == DeliveryResult::ActivationLimit);
         assert(worker.loadingCount() == 2);
         assert(worker.actorCount() == 2);
         assert(worker.metrics().actor.loading_limit_rejections == 1);
@@ -2364,7 +2409,7 @@ namespace
         Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
         const ActorKey key{.kind = ActorKind::Player, .entity = 1};
 
-        assert(WorkerActorTestAccess::beginActivationLoad(worker, key, makeEnvelope(16)));
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, key, makeEnvelope(16)) == DeliveryResult::Accepted);
         const AwaitKey real_key = std::get<ActivationLoad>(*WorkerActorTestAccess::blocked(worker, key)).key;
 
         // 1. Stale operation id -> dropped
@@ -2426,9 +2471,9 @@ namespace
         const ActorKey k2{.kind = ActorKind::Player, .entity = 2};
         const ActorKey k3{.kind = ActorKind::Player, .entity = 3};
 
-        assert(WorkerActorTestAccess::beginActivationLoad(worker, k1, makeEnvelope(16)));
-        assert(WorkerActorTestAccess::beginActivationLoad(worker, k2, makeEnvelope(16)));
-        assert(WorkerActorTestAccess::beginActivationLoad(worker, k3, makeEnvelope(16)));
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, k1, makeEnvelope(16)) == DeliveryResult::Accepted);
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, k2, makeEnvelope(16)) == DeliveryResult::Accepted);
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, k3, makeEnvelope(16)) == DeliveryResult::Accepted);
         assert(worker.loadingCount() == 3);
 
         // 1 completes Ready -> loadingCount becomes 2
@@ -2499,6 +2544,7 @@ void run_worker_actor_tests()
     // 5B Tests
     test_loading_actor_does_not_dispatch_messages_and_enqueues_to_mailbox();
     test_activation_success_transitions_to_idle_or_queued_based_on_mailbox();
+    test_activation_load_enforces_the_same_mailbox_byte_cap_as_local_delivery();
     test_activation_failure_discards_mailbox_releases_slot_and_resets_accounting();
     test_concurrent_loading_cap_exceeded_returns_false_and_increments_metric();
     test_loading_stale_and_duplicate_completions_dropped();

@@ -1030,6 +1030,9 @@ namespace snf::worker
                 continue;
             }
 
+            // A Loading slot has no instance and is never Queued, so it cannot reach dispatch.
+            assert(slot->hasInstance());
+
             slot->setState(ActorState::Running);
 
             const std::size_t remaining_phase_turns = budget.max_count - turns_executed;
@@ -1229,64 +1232,65 @@ namespace snf::worker
         return true;
     }
 
-    bool Worker::beginActivationLoad(const ActorKey key, ActorEnvelope&& first_message)
+    DeliveryResult Worker::beginActivationLoad(const ActorKey key, ActorEnvelope&& first_message)
     {
         assertOwnerThread();
         if (!actorsConfigured())
         {
-            return false;
+            return DeliveryResult::Closed;
         }
 
         if (!_actors->hasCapacity())
         {
-            return false;
+            return DeliveryResult::ActorTableFull;
         }
 
         if (_loading_count >= _actor_config.max_concurrent_loading)
         {
             ++_metrics.actor.loading_limit_rejections;
-            return false;
+            return DeliveryResult::ActivationLimit;
         }
 
-        if (1 > _actor_config.max_mailbox_messages_per_actor ||
-            first_message.chargedBytes() > _actor_config.max_mailbox_bytes_per_actor ||
-            _total_mailbox_messages + 1 > _actor_config.max_mailbox_messages_total ||
-            _total_mailbox_bytes + first_message.chargedBytes() > _actor_config.max_mailbox_bytes_total)
+        // Same admission arithmetic as tryDeliverLocalInternal(): the helper keeps the byte
+        // comparison from wrapping, so both entry points enforce the cap identically.
+        const std::uint64_t charge = first_message.chargedBytes();
+        if (charge > _actor_config.max_mailbox_bytes_per_actor ||
+            _total_mailbox_messages >= _actor_config.max_mailbox_messages_total ||
+            exceedsByteLimit(_total_mailbox_bytes, charge, _actor_config.max_mailbox_bytes_total))
         {
-            return false;
+            return DeliveryResult::MailboxFull;
         }
 
         auto reservation = _actors->tryReserve(key);
         if (!reservation.has_value())
         {
-            return false;
+            return DeliveryResult::ActorTableFull;
         }
 
         ActorSlot& slot = reservation->slot();
         slot.setInstance(nullptr);
         slot.setState(ActorState::Loading);
 
-        const OperationId op = _operation_ids.next();
         const AwaitKey await_key{
             .actor = key,
             .incarnation = slot.incarnation(),
-            .operation = op,
+            .operation = _operation_ids.next(),
         };
-        const auto deadline = std::chrono::steady_clock::now() + _actor_config.await_timeout;
         slot.setBlocked(ActivationLoad{
             .key = await_key,
-            .deadline = deadline,
+            .deadline = std::chrono::steady_clock::now() + _actor_config.await_timeout,
         });
 
-        const std::uint64_t charge = first_message.chargedBytes();
+        // Confirm the aggregate accounting only once the enqueue has succeeded. A throwing push
+        // would otherwise leave the counters inflated while the Reservation rolls the slot back.
+        slot.mailbox().push(std::move(first_message));
         _total_mailbox_messages += 1;
         _total_mailbox_bytes += charge;
-        slot.mailbox().push(std::move(first_message));
 
         reservation->commit();
         ++_loading_count;
         ++_metrics.actor.activation_loads_started;
-        return true;
+        return DeliveryResult::Accepted;
     }
 
     void Worker::completeSyntheticActivation(const AwaitKey key, const SyntheticActivationOutcome outcome)
@@ -1319,7 +1323,25 @@ namespace snf::worker
 
         if (outcome == SyntheticActivationOutcome::Ready)
         {
-            ActorConstructionResult result = _actor_factory->construct(key.actor);
+            ActorConstructionResult result;
+            try
+            {
+                result = _actor_factory->construct(key.actor);
+            }
+            catch (...)
+            {
+                ++_metrics.actor.activation_load_failures;
+                removeActor(slot->handle(), ActorRemovalReason::ActivationRejected);
+                throw;
+            }
+
+            if (result.status == ActorConstructionResult::Status::Ready && !result.isReady())
+            {
+                ++_metrics.actor.activation_load_failures;
+                removeActor(slot->handle(), ActorRemovalReason::ActivationRejected);
+                throw std::logic_error{"Actor factory returned an invalid Ready result"};
+            }
+
             if (result.isReady())
             {
                 slot->setInstance(std::move(result.instance));

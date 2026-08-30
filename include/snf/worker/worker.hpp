@@ -190,7 +190,7 @@ namespace snf::worker
         // raise stale_await_timeouts instead. Step 8's completeDb() takes over this role.
         bool completeSyntheticCommand(AwaitKey key, SyntheticAwaitOutcome outcome);
         [[nodiscard]] bool tryMarkSyntheticCommandReady(AwaitKey key, SyntheticAwaitOutcome outcome);
-        [[nodiscard]] bool beginActivationLoad(ActorKey key, ActorEnvelope&& first_message);
+        [[nodiscard]] DeliveryResult beginActivationLoad(ActorKey key, ActorEnvelope&& first_message);
         void completeSyntheticActivation(AwaitKey key, SyntheticActivationOutcome outcome);
         void removeActor(ActorHandle handle, ActorRemovalReason reason);
         MailboxUsage discardMailbox(ActorSlot& slot);
