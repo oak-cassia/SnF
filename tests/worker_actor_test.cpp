@@ -3462,6 +3462,222 @@ namespace
         assert(w0.tell(k0, makeEnvelope(16)) == DeliveryResult::Closed);
         assert(w0.tell(k1, makeEnvelope(16)) == DeliveryResult::Closed);
     }
+
+    void test_barrier_unit_contracts()
+    {
+        WorkerQuiescenceBarrier barrier(2);
+        assert(!barrier.armed());
+        assert(!barrier.snapshot().armed);
+        assert(!barrier.snapshot().all_quiescent);
+        assert(barrier.snapshot().epoch == 0);
+
+        barrier.arm();
+        assert(barrier.armed());
+        assert(barrier.snapshot().armed);
+        assert(!barrier.snapshot().all_quiescent);
+
+        // Worker 0 marks quiescent with epoch 0
+        assert(barrier.tryMarkQuiescent(WorkerId{0}, 0) == true);
+        assert(!barrier.snapshot().all_quiescent);
+
+        // Worker 1 publishes an event to Worker 0
+        barrier.notePublished(WorkerId{0});
+        assert(barrier.snapshot().epoch == 1);
+        assert(!barrier.snapshot().all_quiescent);
+
+        // Worker 0 tries to commit with stale epoch 0 -> fails!
+        assert(barrier.tryMarkQuiescent(WorkerId{0}, 0) == false);
+
+        // Worker 0 commits with new epoch 1 -> succeeds
+        assert(barrier.tryMarkQuiescent(WorkerId{0}, 1) == true);
+        assert(!barrier.snapshot().all_quiescent);
+
+        // Worker 1 commits with epoch 1 -> all quiescent!
+        assert(barrier.tryMarkQuiescent(WorkerId{1}, 1) == true);
+        assert(barrier.snapshot().all_quiescent);
+
+        // Worker 0 finds work and marks active -> all quiescent is false
+        barrier.markActive(WorkerId{0});
+        assert(!barrier.snapshot().all_quiescent);
+
+        // Abort
+        barrier.abort();
+        assert(barrier.snapshot().aborted);
+        assert(!barrier.snapshot().all_quiescent);
+        assert(barrier.tryMarkQuiescent(WorkerId{0}, 1) == false);
+    }
+
+    void test_barrier_note_published_increments_epoch_even_when_already_active()
+    {
+        WorkerQuiescenceBarrier barrier(2);
+        barrier.arm();
+        assert(barrier.snapshot().epoch == 0);
+
+        // Worker 0 is active (initial state)
+        barrier.notePublished(WorkerId{0});
+        assert(barrier.snapshot().epoch == 1);
+
+        barrier.notePublished(WorkerId{0});
+        assert(barrier.snapshot().epoch == 2);
+    }
+
+    void test_worker_group_cross_worker_tell_exact_accounting_and_quiescence()
+    {
+        const WorkerActorConfig actor_config{
+            .actor_table_capacity = 20,
+            .max_mailbox_messages_per_actor = 20,
+            .max_mailbox_bytes_per_actor = 4096,
+            .max_mailbox_messages_total = 40,
+            .max_mailbox_bytes_total = 8192,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+            .max_concurrent_loading = 10,
+        };
+
+        const WorkerGroupConfig group_config{
+            .worker_count = 2,
+            .max_workers = 32,
+            .port = 0,
+            .budgets = WorkerBudgets::defaults(),
+            .inbox = WorkerInboxConfig{},
+            .network = WorkerNetworkConfig{},
+            .actor = actor_config,
+        };
+
+        std::atomic<int> turns_w0{0};
+        std::atomic<int> turns_w1{0};
+
+        ActorKey k0{.kind = ActorKind::Player, .entity = 1};
+        while (ownerOf(k0, 2, actor_config.placement_seed) != WorkerId{0})
+        {
+            ++k0.entity;
+        }
+
+        ActorKey k1{.kind = ActorKind::Player, .entity = 1};
+        while (ownerOf(k1, 2, actor_config.placement_seed) != WorkerId{1})
+        {
+            ++k1.entity;
+        }
+
+        auto factory_factory = [&turns_w0, &turns_w1](const WorkerId id) -> std::unique_ptr<ActorFactory>
+        {
+            if (id == WorkerId{0})
+            {
+                return std::make_unique<FunctionalActorFactory>(
+                    [&turns_w0](ActorKey) -> ActorConstructionResult
+                    {
+                        auto actor = std::make_unique<FunctionalActor>(
+                            [&turns_w0](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
+                            {
+                                ++turns_w0;
+                                return CompletedTurn{.effects = EffectBatch{}};
+                            }
+                        );
+                        return ActorConstructionResult::ready(std::move(actor));
+                    }
+                );
+            }
+            return std::make_unique<FunctionalActorFactory>(
+                [&turns_w1](ActorKey) -> ActorConstructionResult
+                {
+                    auto actor = std::make_unique<FunctionalActor>(
+                        [&turns_w1](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
+                        {
+                            ++turns_w1;
+                            return CompletedTurn{.effects = EffectBatch{}};
+                        }
+                    );
+                    return ActorConstructionResult::ready(std::move(actor));
+                }
+            );
+        };
+
+        WorkerGroup group(group_config, {}, factory_factory);
+        group.start();
+
+        // Let the threads run
+        std::this_thread::sleep_for(20ms);
+
+        group.requestStop();
+        group.join();
+
+        const auto& w0 = group.worker(0);
+        const auto& w1 = group.worker(1);
+
+        const std::uint64_t total_sent = w0.metrics().actor.remote_tells_sent + w1.metrics().actor.remote_tells_sent;
+        const std::uint64_t total_received = w0.metrics().actor.remote_tells_received + w1.metrics().actor.remote_tells_received;
+        const std::uint64_t total_delivered = w0.metrics().actor.remote_tells_delivered + w1.metrics().actor.remote_tells_delivered;
+
+        assert(total_sent == total_received);
+        assert(total_delivered == total_received);
+    }
+
+    void test_worker_group_quiescence_with_suspended_actors_logical_cancel()
+    {
+        const WorkerActorConfig actor_config{
+            .actor_table_capacity = 20,
+            .max_mailbox_messages_per_actor = 20,
+            .max_mailbox_bytes_per_actor = 4096,
+            .max_mailbox_messages_total = 40,
+            .max_mailbox_bytes_total = 8192,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+            .max_concurrent_loading = 10,
+        };
+
+        const WorkerGroupConfig group_config{
+            .worker_count = 2,
+            .max_workers = 32,
+            .port = 0,
+            .budgets = WorkerBudgets::defaults(),
+            .inbox = WorkerInboxConfig{},
+            .network = WorkerNetworkConfig{},
+            .actor = actor_config,
+        };
+
+        std::atomic<int> suspended_count{0};
+        std::atomic<int> cancelled_count{0};
+
+        auto factory_factory = [&suspended_count, &cancelled_count](WorkerId) -> std::unique_ptr<ActorFactory>
+        {
+            return std::make_unique<FunctionalActorFactory>(
+                [&suspended_count, &cancelled_count](ActorKey) -> ActorConstructionResult
+                {
+                    auto actor = std::make_unique<SuspendingActor>(
+                        [&suspended_count, &cancelled_count]() -> ActorTask
+                        {
+                            ++suspended_count;
+                            SyntheticAwait awaiter;
+                            auto outcome = co_await awaiter;
+                            if (outcome == SyntheticAwaitOutcome::Cancelled)
+                            {
+                                ++cancelled_count;
+                            }
+                            co_return CompletedTurn{.effects = EffectBatch{}};
+                        }
+                    );
+                    return ActorConstructionResult::ready(std::move(actor));
+                }
+            );
+        };
+
+        WorkerGroup group(group_config, {}, factory_factory);
+        group.start();
+
+        std::this_thread::sleep_for(20ms);
+
+        group.requestStop();
+        group.join();
+
+        const auto& w0 = group.worker(0);
+        const auto& w1 = group.worker(1);
+        assert(w0.metrics().shutdown_barrier_timeouts == 0);
+        assert(w1.metrics().shutdown_barrier_timeouts == 0);
+    }
 }
 
 void run_worker_actor_tests()
@@ -3540,4 +3756,10 @@ void run_worker_actor_tests()
     test_tell_actor_effect_remote_routing();
     test_remote_actor_message_without_runtime_and_misrouted_metrics();
     test_tell_closed_when_stopping_or_port_unbound();
+
+    // 6B Tests
+    test_barrier_unit_contracts();
+    test_barrier_note_published_increments_epoch_even_when_already_active();
+    test_worker_group_cross_worker_tell_exact_accounting_and_quiescence();
+    test_worker_group_quiescence_with_suspended_actors_logical_cancel();
 }

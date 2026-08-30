@@ -102,7 +102,7 @@ namespace snf::worker
     bool InboxLane::isEmpty() const noexcept
     {
         const std::uint64_t head = _consumer.head.load(std::memory_order_relaxed);
-        const std::uint64_t tail = _producer.tail.load(std::memory_order_relaxed);
+        const std::uint64_t tail = _producer.tail.load(std::memory_order_acquire);
         return head == tail;
     }
 
@@ -185,6 +185,18 @@ namespace snf::worker
         {
             _lanes[i].close();
         }
+    }
+
+    bool WorkerInbox::isEmpty() const noexcept
+    {
+        for (std::uint16_t i = 0; i < _worker_count; ++i)
+        {
+            if (!_lanes[i].isEmpty())
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     std::uint16_t WorkerInbox::workerCount() const noexcept

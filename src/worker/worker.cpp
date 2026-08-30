@@ -198,9 +198,32 @@ namespace snf::worker
         }
         if (_remote_ports[target.value].isBound())
         {
-            throw std::logic_error{"A remote Worker inbox target is already bound"};
+            throw std::invalid_argument{"Remote Worker inbox target is already bound"};
         }
         _remote_ports[target.value] = std::move(port);
+    }
+
+    void Worker::attachBarrier(WorkerQuiescenceBarrier* barrier) noexcept
+    {
+        _barrier = barrier;
+    }
+
+    bool Worker::hasBlockedActors() const noexcept
+    {
+        if (_actors == nullptr)
+        {
+            return false;
+        }
+        const auto handles = _actors->activeHandles();
+        for (const auto handle : handles)
+        {
+            const ActorSlot* slot = _actors->find(handle);
+            if (slot != nullptr && slot->hasBlocked())
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     SendResult Worker::send(const ConnectionRef connection, snf::protocol::Frame&& frame, const bool critical)
@@ -243,6 +266,10 @@ namespace snf::worker
         const InboxPushResult result = port.tryPush(std::move(envelope));
         if (result == InboxPushResult::Accepted)
         {
+            if (_barrier != nullptr)
+            {
+                _barrier->notePublished(connection.owner);
+            }
             return SendResult::Accepted;
         }
         return result == InboxPushResult::Closed ? SendResult::Closing : SendResult::Rejected;
@@ -267,7 +294,12 @@ namespace snf::worker
                 .event = RemoteConnectionClose{.connection = connection, .reason = reason, .graceful = graceful},
                 .charged_bytes = static_cast<std::uint32_t>(sizeof(RemoteConnectionClose)),
             };
-            return port.tryPush(std::move(envelope)) == InboxPushResult::Accepted;
+            const bool accepted = port.tryPush(std::move(envelope)) == InboxPushResult::Accepted;
+            if (accepted && _barrier != nullptr)
+            {
+                _barrier->notePublished(connection.owner);
+            }
+            return accepted;
         }
 
         const ConnectionHandle handle{.id = connection.id, .generation = connection.generation};
@@ -332,6 +364,10 @@ namespace snf::worker
         if (push_result == InboxPushResult::Accepted)
         {
             ++_metrics.actor.remote_tells_sent;
+            if (_barrier != nullptr)
+            {
+                _barrier->notePublished(owner);
+            }
             return DeliveryResult::Accepted;
         }
         if (push_result == InboxPushResult::Full)
@@ -2052,6 +2088,7 @@ namespace snf::worker
     void Worker::beginShutdownPhaseA()
     {
         _shutting_down = true;
+        _network_stopping = true;
 
         if (_listener_registration)
         {
@@ -2092,78 +2129,239 @@ namespace snf::worker
                     }
                 }
             }
+
+            if (_read_work_queue != nullptr)
+            {
+                while (const auto read_handle = _read_work_queue->tryPop())
+                {
+                    ConnectionSlot* slot = _connections->find(*read_handle);
+                    if (slot != nullptr)
+                    {
+                        slot->setReadQueued(false);
+                    }
+                }
+            }
         }
     }
 
     void Worker::runShutdownPhaseB(const TimePoint deadline)
     {
-        bool first_iteration = true;
-        bool logical_cancel_performed = false;
-
-        while (std::chrono::steady_clock::now() < deadline)
+        if (_barrier == nullptr)
         {
-            const auto now = std::chrono::steady_clock::now();
-            const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
-            const auto regular_timeout = (first_iteration || hasRunnableWork())
-                ? std::chrono::milliseconds(0)
-                : pollTimeout().value_or(remaining);
-            const auto timeout = std::min(regular_timeout, remaining);
-            const auto events = _poller.wait(timeout);
+            bool first_iteration = true;
+            bool logical_cancel_performed = false;
 
-            processPollEvents(events, _budgets.poll);
-            drainInbox(_budgets.inbox);
-            expireTimers(std::chrono::steady_clock::now(), _budgets.timers);
-            runReadyActors(_budgets.actors);
-            flushWrites(_budgets.writes);
-
-            first_iteration = false;
-
-            // Mailbox depth is deliberately not part of this test. Once the ready queue is empty
-            // and no inbox or timer work is pending, every remaining message belongs to a blocked
-            // actor, and a blocked actor's mailbox cannot drain until the actor unblocks. Waiting
-            // on it would skip the logical cancel in exactly the case the cancel exists for.
-            const bool runnable_work_empty =
-                (_ready_queue == nullptr || _ready_queue->empty()) && !_inbox_has_more && !_timers_have_due;
-
-            if (runnable_work_empty)
+            while (std::chrono::steady_clock::now() < deadline)
             {
-                if (!logical_cancel_performed && _actors != nullptr)
+                ++_metrics.shutdown_quiescence_rounds;
+                const auto now = std::chrono::steady_clock::now();
+                const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
+                const auto regular_timeout = (first_iteration || hasRunnableWork())
+                    ? std::chrono::milliseconds(0)
+                    : pollTimeout().value_or(remaining);
+                const auto timeout = std::min(regular_timeout, remaining);
+                const auto events = _poller.wait(timeout);
+
+                processPollEvents(events, _budgets.poll);
+                drainInbox(_budgets.inbox);
+                expireTimers(std::chrono::steady_clock::now(), _budgets.timers);
+                runReadyActors(_budgets.actors);
+                flushWrites(_budgets.writes);
+
+                first_iteration = false;
+
+                const bool runnable_work_empty =
+                    (_ready_queue == nullptr || _ready_queue->empty()) && _inbox.isEmpty() && !_inbox_has_more && !_timers_have_due;
+
+                if (runnable_work_empty)
                 {
-                    logical_cancel_performed = true;
-                    bool any_cancelled = false;
-                    const auto handles = _actors->activeHandles();
-                    for (const auto handle : handles)
+                    if (!logical_cancel_performed && _actors != nullptr && hasBlockedActors())
                     {
-                        ActorSlot* slot = _actors->find(handle);
-                        if (slot != nullptr && slot->hasBlocked())
+                        logical_cancel_performed = true;
+                        bool any_cancelled = false;
+                        const auto handles = _actors->activeHandles();
+                        for (const auto handle : handles)
                         {
-                            if (std::holds_alternative<SyntheticSuspendedCommand>(*slot->blocked()))
+                            ActorSlot* slot = _actors->find(handle);
+                            if (slot != nullptr && slot->hasBlocked())
                             {
-                                auto& cmd = std::get<SyntheticSuspendedCommand>(*slot->blocked());
-                                if (!cmd.completion.has_value())
+                                if (std::holds_alternative<SyntheticSuspendedCommand>(*slot->blocked()))
                                 {
-                                    cmd.completion = SyntheticAwaitOutcome::Cancelled;
-                                    slot->setState(ActorState::Queued);
-                                    _ready_queue->push(slot->handle());
+                                    auto& cmd = std::get<SyntheticSuspendedCommand>(*slot->blocked());
+                                    if (!cmd.completion.has_value())
+                                    {
+                                        cmd.completion = SyntheticAwaitOutcome::Cancelled;
+                                        slot->setState(ActorState::Queued);
+                                        _ready_queue->push(slot->handle());
+                                        ++_metrics.actor.cancelled_blocked_actors;
+                                        any_cancelled = true;
+                                    }
+                                }
+                                else if (std::holds_alternative<ActivationLoad>(*slot->blocked()))
+                                {
                                     ++_metrics.actor.cancelled_blocked_actors;
-                                    any_cancelled = true;
+                                    removeActor(handle, ActorRemovalReason::ActivationCancelled);
                                 }
                             }
-                            else if (std::holds_alternative<ActivationLoad>(*slot->blocked()))
-                            {
-                                ++_metrics.actor.cancelled_blocked_actors;
-                                removeActor(handle, ActorRemovalReason::ActivationCancelled);
-                            }
+                        }
+
+                        if (any_cancelled)
+                        {
+                            continue;
                         }
                     }
 
-                    if (any_cancelled)
+                    if (!hasBlockedActors())
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+        else
+        {
+            enum class ShutdownBState { Active, Waiting };
+            ShutdownBState state = ShutdownBState::Active;
+            bool logical_cancel_performed = false;
+
+            while (std::chrono::steady_clock::now() < deadline)
+            {
+                ++_metrics.shutdown_quiescence_rounds;
+                const auto now = std::chrono::steady_clock::now();
+
+                if (state == ShutdownBState::Active)
+                {
+                    const auto events = _poller.wait(std::chrono::milliseconds(0));
+                    if (!events.empty())
+                    {
+                        processPollEvents(events, _budgets.poll);
+                    }
+
+                    drainInbox(_budgets.inbox);
+                    expireTimers(now, _budgets.timers);
+                    runReadyActors(_budgets.actors);
+                    flushWrites(_budgets.writes);
+
+                    const bool runnable_work =
+                        (_ready_queue != nullptr && !_ready_queue->empty()) ||
+                        (!_inbox.isEmpty()) ||
+                        _inbox_has_more;
+
+                    if (runnable_work)
                     {
                         continue;
                     }
+
+                    if (_actors != nullptr && hasBlockedActors())
+                    {
+                        if (!logical_cancel_performed)
+                        {
+                            logical_cancel_performed = true;
+                            bool any_cancelled = false;
+                            const auto handles = _actors->activeHandles();
+                            for (const auto handle : handles)
+                            {
+                                ActorSlot* slot = _actors->find(handle);
+                                if (slot != nullptr && slot->hasBlocked())
+                                {
+                                    if (std::holds_alternative<SyntheticSuspendedCommand>(*slot->blocked()))
+                                    {
+                                        auto& cmd = std::get<SyntheticSuspendedCommand>(*slot->blocked());
+                                        if (!cmd.completion.has_value())
+                                        {
+                                            cmd.completion = SyntheticAwaitOutcome::Cancelled;
+                                            slot->setState(ActorState::Queued);
+                                            _ready_queue->push(slot->handle());
+                                            ++_metrics.actor.cancelled_blocked_actors;
+                                            any_cancelled = true;
+                                        }
+                                    }
+                                    else if (std::holds_alternative<ActivationLoad>(*slot->blocked()))
+                                    {
+                                        ++_metrics.actor.cancelled_blocked_actors;
+                                        removeActor(handle, ActorRemovalReason::ActivationCancelled);
+                                    }
+                                }
+                            }
+
+                            if (any_cancelled)
+                            {
+                                continue;
+                            }
+                        }
+                        else
+                        {
+                            continue;
+                        }
+                    }
+
+                    state = ShutdownBState::Waiting;
                 }
 
-                break;
+                if (state == ShutdownBState::Waiting)
+                {
+                    const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+                    const auto wait_dur = std::min(std::chrono::milliseconds(1), std::max(std::chrono::milliseconds(0), remaining));
+                    const auto events = _poller.wait(wait_dur);
+
+                    if (!events.empty())
+                    {
+                        _barrier->markActive(_id);
+                        state = ShutdownBState::Active;
+                        processPollEvents(events, _budgets.poll);
+                        continue;
+                    }
+
+                    const auto snap = _barrier->snapshot();
+                    if (snap.aborted)
+                    {
+                        ++_metrics.shutdown_barrier_aborts;
+                        break;
+                    }
+
+                    const bool has_work =
+                        (!_inbox.isEmpty()) ||
+                        (_ready_queue != nullptr && !_ready_queue->empty()) ||
+                        (_actors != nullptr && hasBlockedActors());
+
+                    if (has_work)
+                    {
+                        _barrier->markActive(_id);
+                        state = ShutdownBState::Active;
+                        continue;
+                    }
+
+                    const bool marked = _barrier->tryMarkQuiescent(_id, snap.epoch);
+                    if (!marked)
+                    {
+                        continue;
+                    }
+
+                    const auto snap_after = _barrier->snapshot();
+                    if (snap_after.aborted)
+                    {
+                        ++_metrics.shutdown_barrier_aborts;
+                        break;
+                    }
+
+                    if (snap_after.all_quiescent)
+                    {
+                        const auto snap_verify = _barrier->snapshot();
+                        if (snap_verify.all_quiescent && snap_verify.epoch == snap_after.epoch && !snap_verify.aborted)
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (_barrier != nullptr && std::chrono::steady_clock::now() >= deadline)
+            {
+                const auto snap = _barrier->snapshot();
+                if (!snap.all_quiescent)
+                {
+                    ++_metrics.shutdown_barrier_timeouts;
+                }
             }
         }
 

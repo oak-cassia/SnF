@@ -34,6 +34,7 @@ namespace snf::worker
         ActorFactoryFactory actor_factory_factory
     )
         : _config(config)
+        , _barrier(config.worker_count)
     {
         if (!isValid(config))
         {
@@ -79,6 +80,7 @@ namespace snf::worker
 
             auto worker = std::make_unique<Worker>(WorkerId{index}, config.worker_count, config.budgets, config.inbox, config.network, *sink);
             worker->attachListener(std::move(listeners[index]));
+            worker->attachBarrier(&_barrier);
 
             if (actor_factory_factory && config.actor)
             {
@@ -137,6 +139,7 @@ namespace snf::worker
         }
         catch (...)
         {
+            _barrier.abort();
             stopAndJoinStartedThreads();
             throw;
         }
@@ -179,6 +182,7 @@ namespace snf::worker
 
     void WorkerGroup::requestStop() noexcept
     {
+        _barrier.arm();
         for (const auto& worker : _workers)
         {
             worker->requestStop();
@@ -213,6 +217,7 @@ namespace snf::worker
         }
         catch (...)
         {
+            _barrier.abort();
             {
                 std::lock_guard lock{_failure_mutex};
                 if (!_failure)

@@ -2,6 +2,7 @@
 
 #include "snf/worker/actor.hpp"
 #include "snf/worker/actor_table.hpp"
+#include "snf/worker/barrier.hpp"
 #include "snf/worker/budget.hpp"
 #include "snf/worker/connection_table.hpp"
 #include "snf/worker/connection_work_queue.hpp"
@@ -51,6 +52,9 @@ namespace snf::worker
         // 이렇게 나누지 않으면 "메인 루프가 일했다"는 사실을 테스트가 증명할 수 없다.
         std::uint64_t shutdown_inbox_events{0};
         std::uint64_t shutdown_timers_fired{0};
+        std::uint64_t shutdown_quiescence_rounds{0};
+        std::uint64_t shutdown_barrier_timeouts{0};
+        std::uint64_t shutdown_barrier_aborts{0};
 
         WorkerNetworkMetrics network{};
         WorkerActorMetrics actor{};
@@ -102,6 +106,7 @@ namespace snf::worker
         void configureNetwork(const WorkerNetworkConfig& config, RequestSink& request_sink);
         void attachListener(snf::net::UniqueFileDescriptor listener);
         void bindRemoteTarget(WorkerId target, WorkerInboxPort port);
+        void attachBarrier(WorkerQuiescenceBarrier* barrier) noexcept;
 
         void configureActors(const WorkerActorConfig& config, ActorFactory& factory);
 
@@ -199,6 +204,7 @@ namespace snf::worker
         void completeSyntheticActivation(AwaitKey key, SyntheticActivationOutcome outcome);
         void removeActor(ActorHandle handle, ActorRemovalReason reason);
         MailboxUsage discardMailbox(ActorSlot& slot);
+        [[nodiscard]] bool hasBlockedActors() const noexcept;
 
         friend struct WorkerActorTestAccess;
 
@@ -215,6 +221,7 @@ namespace snf::worker
         Poller _poller;
         WorkerInbox _inbox;
         TimerQueue _timers;
+        WorkerQuiescenceBarrier* _barrier{nullptr};
         std::atomic<bool> _stop_requested{false};
         std::thread::id _owner_thread{};
         WorkerMetrics _metrics{};    // owner thread 전용 plain counter

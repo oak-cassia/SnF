@@ -1,5 +1,6 @@
 #pragma once
 
+#include "snf/worker/barrier.hpp"
 #include "snf/worker/worker.hpp"
 
 #include <cstddef>
@@ -49,6 +50,7 @@ namespace snf::worker
         void stopAndJoinStartedThreads() noexcept;
 
         WorkerGroupConfig _config;
+        WorkerQuiescenceBarrier _barrier;
         std::uint16_t _port{0};
         std::vector<std::unique_ptr<RequestSink>> _sinks;
         std::vector<std::unique_ptr<ActorFactory>> _actor_factories;

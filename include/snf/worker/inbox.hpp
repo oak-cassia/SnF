@@ -213,6 +213,7 @@ namespace snf::worker
 
         void close() noexcept;
 
+        [[nodiscard]] bool isEmpty() const noexcept;
         [[nodiscard]] std::uint16_t workerCount() const noexcept;
         [[nodiscard]] InboxLane& lane(std::size_t index) noexcept;
         [[nodiscard]] const InboxLane& lane(std::size_t index) const noexcept;
