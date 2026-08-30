@@ -109,11 +109,15 @@ add_library(snf_worker STATIC
     src/worker/poll_registration.cpp
     src/worker/actor_table.cpp
     src/worker/barrier.cpp
+    src/worker/db_client.cpp
     src/worker/worker_group.cpp
     src/worker/worker.cpp
 )
 target_include_directories(snf_worker PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(snf_worker PUBLIC snf_core Threads::Threads)
+# The DbClient is a concrete part of the worker runtime rather than an injected
+# interface, so snf_worker links the client library directly. Driver calls stay
+# inside src/worker/db_client.cpp.
+target_link_libraries(snf_worker PUBLIC snf_core Threads::Threads PRIVATE PkgConfig::MySQL)
 snf_configure_target(snf_worker)
 
 add_library(snf_worker_game_runtime STATIC
@@ -310,6 +314,26 @@ if(BUILD_TESTING)
     add_test(NAME snf_db_conformance_mysql COMMAND snf_db_conformance_tests --mysql)
     set_tests_properties(snf_db_conformance_mysql PROPERTIES
         TIMEOUT 30
+        SKIP_RETURN_CODE 77
+    )
+
+    add_executable(snf_worker_db_client_tests
+        tests/worker_db_client_test.cpp
+    )
+    target_link_libraries(snf_worker_db_client_tests
+        PRIVATE
+            snf_worker
+            PkgConfig::MySQL
+            Threads::Threads
+    )
+    snf_configure_target(snf_worker_db_client_tests)
+
+    add_test(NAME snf_worker_db_client_stub COMMAND snf_worker_db_client_tests --stub)
+    set_tests_properties(snf_worker_db_client_stub PROPERTIES TIMEOUT 20)
+
+    add_test(NAME snf_worker_db_client_mysql COMMAND snf_worker_db_client_tests --mysql)
+    set_tests_properties(snf_worker_db_client_mysql PROPERTIES
+        TIMEOUT 60
         SKIP_RETURN_CODE 77
     )
 

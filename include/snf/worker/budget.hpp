@@ -37,6 +37,18 @@ namespace snf::worker
         std::chrono::nanoseconds max_duration;
     };
 
+    // Streaming a result set can hand back row after row without ever waiting on the
+    // socket, so one readiness event could otherwise run to the end of a large query
+    // and starve every other phase. These are independent upper bounds for one DB
+    // phase; whatever is left over resumes on the next loop iteration.
+    struct DbProgressBudget
+    {
+        std::size_t max_steps;
+        std::size_t max_rows;
+        std::uint64_t max_bytes;
+        std::chrono::nanoseconds max_duration;
+    };
+
     // 시간 측정은 steady_clock::now()를 phase 시작에 한 번 읽고 이후 64개마다 다시 읽는다.
     // 항목마다 now()를 부르면 그 자체가 비용이 되기 때문이다.
     struct WorkerBudgets
@@ -46,6 +58,7 @@ namespace snf::worker
         CountTimeBudget timers;
         CountTimeBudget actors;
         ByteTimeBudget writes;
+        DbProgressBudget db;
         std::chrono::milliseconds max_poll_timeout;
 
         [[nodiscard]] static constexpr WorkerBudgets defaults() noexcept
@@ -80,6 +93,13 @@ namespace snf::worker
                 .writes =
                     {
                         .max_bytes = 4ull * 1024 * 1024,
+                        .max_duration = 500us,
+                    },
+                .db =
+                    {
+                        .max_steps = 64,
+                        .max_rows = 1024,
+                        .max_bytes = 1ull * 1024 * 1024,
                         .max_duration = 500us,
                     },
                 .max_poll_timeout = 50ms,
