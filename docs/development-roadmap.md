@@ -78,37 +78,38 @@
 
 ### 4단계 — Actor path
 
-- [ ] Worker-local ActorTable, bounded mailbox와 ReadyActorQueue를 만든다.
-- [ ] `Loading/Idle/Queued/Running/Suspended/Stopping` 상태 전이를 구현한다.
-- [ ] local tell도 mailbox를 통과시키고 한 turn에 command 또는 continuation 하나만 실행한다.
-- [ ] ActorTable과 concurrent Loading hard cap을 추가한다.
+- [x] Worker-local ActorTable, bounded mailbox와 ReadyActorQueue를 만든다.
+- [x] `Idle/Queued/Running/Stopping` 상태 전이와 synchronous immediate construction을 구현한다.
+- [x] local delivery primitive(`tryDeliverLocal`)와 mailbox 기반 non-reentrant FIFO command turn(`CompletedTurn`)을 실행한다.
+- [x] `SendFrame`, `CloseConnection`, `TellActor`, `StopActor` 네 concrete effect의 ordered batch 적용을 검증한다.
+- [x] Actor quiescence와 connection drain을 단일 absolute deadline으로 통합한 graceful shutdown을 구현한다.
 
-종료 조건: single-worker 결정성, multi-worker routing, non-reentrancy와 duplicate-ready 방지를 검증한다.
+종료 조건: single-worker 결정성, non-reentrancy, duplicate-ready 방지와 concrete effect ordered application을 검증한다.
 
-### 5단계 — BlockedTask와 activation
+### 5단계 — BlockedTask와 async activation
 
+- [ ] `Loading`, `Suspended` 상태와 nullable ActorSlot의 실제 비동기 activation을 구현한다.
 - [ ] `ActivationLoad`와 `SuspendedDbCommand`를 `ActorSlot.blocked`에 저장한다.
-- [ ] continuation, deadline과 completion identity의 다른 Worker-level 저장소를 만들지 않는다.
-- [ ] Loading success/failure와 Suspended completion을 concrete type별로 처리한다.
+- [ ] `SuspendedTurn`, continuation, concurrent Loading cap을 추가한다.
 - [ ] timeout 후 late completion과 completion 후 stale timeout을 모두 no-op으로 만든다.
 
-종료 조건: Actor가 기다리는 상태를 `ActorSlot.blocked` 한 곳에서만 찾을 수 있다.
+종료 조건: Actor가 기다리는 상태를 `ActorSlot.blocked` 한 곳에서만 찾을 수 있고 비동기 continuation이 시작한 Worker에서 재개된다.
 
-### 6단계 — Cross-worker event
+### 6단계 — Cross-worker event와 Public Tell
 
+- [ ] 최종 public `Worker::tell()`을 추가하고 `WrongOwner` 분기를 remote delivery로 전환한다.
 - [ ] remote actor message, connection send/close와 실제 필요한 application completion을 concrete
   `WorkerEvent`로 정의한다.
 - [ ] MPSC queue를 count/byte bounded로 만들고 enqueue 실패를 caller에게 반환한다.
-- [ ] accepted external adapter job은 completion slot까지 submit 시점에 예약한다.
-- [ ] hot Actor remote-tell stress와 inbox overload를 검증한다.
+- [ ] WorkerGroup producer quiescence와 shutdown barrier를 구현한다.
 
 종료 조건: 다른 Worker가 owner object pointer를 보관하거나 queue 자리를 기다리지 않는다.
 
-### 7단계 — Result와 Effect
+### 7단계 — Result와 Effect Adapter
 
-- [ ] Player/Zone/Room result를 `toEffects(context, result)` overload로 변환한다.
-- [ ] `SendFrame`, `CloseConnection`, `TellActor`, `ScheduleTimer`, `StopActor`의 ordered batch를 만든다.
-- [ ] effect type별 고정 failure semantics와 stop-batch 동작을 검증한다.
+- [ ] Player/Zone/Room domain adapter에서 typed result를 `toEffects(context, result)` overload로 변환한다.
+- [ ] `ScheduleTimerEffect` 등 추가 Effect별 failure semantics와 stop-batch 정책을 적용한다.
+- [ ] 실제 fan-out 측정에 따라 `EffectBatch` cap을 재결정한다.
 - [ ] `RequestSink`에서 실제 game request translation과 Actor ingress를 연결한다.
 - [ ] Domain 코드에서 Worker, ActorTable, ConnectionTable과 send/tell 직접 호출을 제거한다.
 
