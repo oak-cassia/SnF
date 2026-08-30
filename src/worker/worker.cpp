@@ -165,6 +165,7 @@ namespace snf::worker
         _ready_queue = std::make_unique<ReadyActorQueue>(config.actor_table_capacity);
         _actor_factory = &factory;
         _actor_config = config;
+        _timers.setMaxApplicationTimerBytes(config.max_application_timer_bytes_total);
     }
 
     void Worker::attachListener(snf::net::UniqueFileDescriptor listener)
@@ -378,6 +379,25 @@ namespace snf::worker
         }
         ++_metrics.actor.remote_tell_rejections;
         return DeliveryResult::Closed;
+    }
+
+    std::optional<TimerReservation> Worker::tryReserve(const std::uint64_t charged_bytes, const std::uint64_t turn_id) noexcept
+    {
+        assertOwnerThread();
+        if (_shutting_down || _network_stopping)
+        {
+            return std::nullopt;
+        }
+        if (!_timers.tryReserveApplicationTimer(charged_bytes))
+        {
+            return std::nullopt;
+        }
+        return TimerReservation(this, charged_bytes, turn_id);
+    }
+
+    void Worker::releaseReservation(const std::uint64_t charged_bytes) noexcept
+    {
+        _timers.releaseApplicationTimerReservation(charged_bytes);
     }
 
     DeliveryResult Worker::tryDeliverLocal(const ActorKey key, ActorEnvelope envelope)
@@ -1120,16 +1140,8 @@ namespace snf::worker
                     // the frame must never outlive it.
                     task = ActorTask{};
 
-                    if (completed.effects.size() > EffectBatch::MAX_EFFECTS)
-                    {
-                        throw std::logic_error{"EffectBatch capacity exceeded maximum limit of 64"};
-                    }
-
                     bool stopped = false;
-                    for (auto& effect : completed.effects.mutableEffects())
-                    {
-                        applyEffect(*slot, std::move(effect), stopped);
-                    }
+                    applyEffectBatch(*slot, std::move(completed.effects), stopped);
 
                     if (stopped)
                     {
@@ -1251,15 +1263,7 @@ namespace snf::worker
                 }
 
                 auto& completed = std::get<CompletedTurn>(result);
-                if (completed.effects.size() > EffectBatch::MAX_EFFECTS)
-                {
-                    throw std::logic_error{"EffectBatch capacity exceeded maximum limit of 64"};
-                }
-
-                for (auto& effect : completed.effects.mutableEffects())
-                {
-                    applyEffect(*slot, std::move(effect), stopped);
-                }
+                applyEffectBatch(*slot, std::move(completed.effects), stopped);
 
                 if (stopped)
                 {
@@ -1304,44 +1308,134 @@ namespace snf::worker
         }
     }
 
-    void Worker::applyEffect(ActorSlot& current_slot, Effect&& effect, bool& stopped)
+    void Worker::applyEffectBatch(ActorSlot& current_slot, EffectBatch&& batch, bool& stopped)
     {
-        std::visit(
-            [this, &current_slot, &stopped](auto&& concrete_effect)
+        if (batch.size() > EffectBatch::MAX_EFFECTS)
+        {
+            throw std::logic_error{"EffectBatch capacity exceeded maximum limit of 64"};
+        }
+
+        bool has_stop = false;
+        bool has_schedule_timer = false;
+        for (const auto& effect : batch.effects())
+        {
+            if (std::holds_alternative<StopActorEffect>(effect))
             {
-                using T = std::decay_t<decltype(concrete_effect)>;
-                if constexpr (std::is_same_v<T, SendFrameEffect>)
+                has_stop = true;
+            }
+            else if (std::holds_alternative<ScheduleTimerEffect>(effect))
+            {
+                has_schedule_timer = true;
+            }
+        }
+        if (has_stop && has_schedule_timer)
+        {
+            throw std::logic_error{"StopActorEffect and ScheduleTimerEffect cannot coexist in the same EffectBatch"};
+        }
+
+        for (const auto& effect : batch.effects())
+        {
+            if (std::holds_alternative<ScheduleTimerEffect>(effect))
+            {
+                const auto& timer_effect = std::get<ScheduleTimerEffect>(effect);
+                if (timer_effect.reservation.has_value())
                 {
-                    const SendResult result = send(concrete_effect.connection, std::move(concrete_effect.frame), concrete_effect.critical);
-                    if (result != SendResult::Accepted)
+                    const auto& res = *timer_effect.reservation;
+                    if (!res.isValid() || res.admission() != this)
                     {
-                        ++_metrics.actor.effect_send_failures;
+                        throw std::logic_error{"TimerReservation is invalid or does not belong to this Worker"};
+                    }
+                    if (res.chargedBytes() != timer_effect.message.chargedBytes())
+                    {
+                        throw std::logic_error{"TimerReservation charged bytes does not match message charged bytes"};
                     }
                 }
-                else if constexpr (std::is_same_v<T, CloseConnectionEffect>)
+            }
+        }
+
+        for (auto& effect : batch.mutableEffects())
+        {
+            bool halt_batch = false;
+            std::visit(
+                [this, &current_slot, &stopped, &halt_batch](auto&& concrete_effect)
                 {
-                    const bool closed = closeConnection(concrete_effect.connection, concrete_effect.reason, concrete_effect.graceful);
-                    if (!closed)
+                    using T = std::decay_t<decltype(concrete_effect)>;
+                    if constexpr (std::is_same_v<T, SendFrameEffect>)
                     {
-                        ++_metrics.actor.effect_close_failures;
+                        const SendResult result = send(concrete_effect.connection, std::move(concrete_effect.frame), concrete_effect.critical);
+                        if (result != SendResult::Accepted)
+                        {
+                            ++_metrics.actor.effect_send_failures;
+                        }
                     }
-                }
-                else if constexpr (std::is_same_v<T, TellActorEffect>)
-                {
-                    const DeliveryResult result = tellInternal(concrete_effect.target, std::move(concrete_effect.message), true);
-                    if (result != DeliveryResult::Accepted)
+                    else if constexpr (std::is_same_v<T, CloseConnectionEffect>)
                     {
-                        ++_metrics.actor.effect_tell_failures;
+                        const bool closed = closeConnection(concrete_effect.connection, concrete_effect.reason, concrete_effect.graceful);
+                        if (!closed)
+                        {
+                            ++_metrics.actor.effect_close_failures;
+                        }
                     }
-                }
-                else if constexpr (std::is_same_v<T, StopActorEffect>)
-                {
-                    current_slot.setState(ActorState::Stopping);
-                    stopped = true;
-                }
-            },
-            effect
-        );
+                    else if constexpr (std::is_same_v<T, TellActorEffect>)
+                    {
+                        const DeliveryResult result = tellInternal(concrete_effect.target, std::move(concrete_effect.message), true);
+                        if (result != DeliveryResult::Accepted)
+                        {
+                            ++_metrics.actor.effect_tell_failures;
+                        }
+                    }
+                    else if constexpr (std::is_same_v<T, StopActorEffect>)
+                    {
+                        current_slot.setState(ActorState::Stopping);
+                        stopped = true;
+                    }
+                    else if constexpr (std::is_same_v<T, ScheduleTimerEffect>)
+                    {
+                        const ActivationRef target = current_slot.activationRef();
+                        if (concrete_effect.reservation.has_value())
+                        {
+                            auto res = std::move(*concrete_effect.reservation);
+                            const auto charge = res._charged_bytes;
+                            res._admission = nullptr;
+                            res._charged_bytes = 0;
+                            res._turn_id = 0;
+                            _timers.commitReservedApplicationTimer(
+                                concrete_effect.deadline,
+                                target,
+                                std::move(concrete_effect.message),
+                                charge
+                            );
+                            ++_metrics.actor.application_timers_scheduled;
+                        }
+                        else
+                        {
+                            if (_shutting_down || _network_stopping)
+                            {
+                                ++_metrics.actor.timer_schedule_failures;
+                                halt_batch = true;
+                                return;
+                            }
+                            if (!_timers.tryScheduleApplicationTimer(
+                                    concrete_effect.deadline,
+                                    target,
+                                    std::move(concrete_effect.message)))
+                            {
+                                ++_metrics.actor.timer_schedule_failures;
+                                halt_batch = true;
+                                return;
+                            }
+                            ++_metrics.actor.application_timers_scheduled;
+                        }
+                    }
+                },
+                effect
+            );
+
+            if (halt_batch)
+            {
+                break;
+            }
+        }
     }
 
     bool Worker::completeSyntheticCommand(const AwaitKey key, const SyntheticAwaitOutcome outcome)
@@ -1874,6 +1968,46 @@ namespace snf::worker
             return;
         }
 
+        if (actorsConfigured() && std::holds_alternative<ApplicationTimer>(payload))
+        {
+            auto app_timer = std::move(std::get<ApplicationTimer>(payload));
+            ActorSlot* slot = _actors->find(app_timer.target.actor);
+            if (slot == nullptr || slot->incarnation() != app_timer.target.incarnation)
+            {
+                ++_metrics.actor.stale_application_timers;
+                return;
+            }
+
+            if (slot->state() == ActorState::Stopping)
+            {
+                ++_metrics.actor.application_timer_delivery_failures;
+                return;
+            }
+
+            const std::uint64_t charge = app_timer.message.chargedBytes();
+            if (slot->mailbox().size() >= _actor_config.max_mailbox_messages_per_actor ||
+                slot->mailbox().chargedBytes() > _actor_config.max_mailbox_bytes_per_actor ||
+                charge > _actor_config.max_mailbox_bytes_per_actor - slot->mailbox().chargedBytes() ||
+                _total_mailbox_messages >= _actor_config.max_mailbox_messages_total ||
+                _total_mailbox_bytes > _actor_config.max_mailbox_bytes_total ||
+                charge > _actor_config.max_mailbox_bytes_total - _total_mailbox_bytes)
+            {
+                ++_metrics.actor.application_timer_delivery_failures;
+                return;
+            }
+
+            slot->mailbox().push(std::move(app_timer.message));
+            _total_mailbox_messages += 1;
+            _total_mailbox_bytes += charge;
+            if (slot->state() == ActorState::Idle)
+            {
+                slot->setState(ActorState::Queued);
+                _ready_queue->push(slot->handle());
+            }
+            ++_metrics.actor.application_timers_delivered;
+            return;
+        }
+
         if (_timer_handler)
         {
             _timer_handler(std::move(payload));
@@ -2148,6 +2282,9 @@ namespace snf::worker
 
     void Worker::runShutdownPhaseB(const TimePoint deadline)
     {
+        const std::size_t cancelled_app_timers = _timers.cancelApplicationTimers();
+        _metrics.actor.cancelled_application_timers += cancelled_app_timers;
+
         if (_barrier == nullptr)
         {
             bool first_iteration = true;
@@ -2173,7 +2310,8 @@ namespace snf::worker
                 first_iteration = false;
 
                 const bool runnable_work_empty =
-                    (_ready_queue == nullptr || _ready_queue->empty()) && _inbox.isEmpty() && !_inbox_has_more && !_timers_have_due;
+                    (_ready_queue == nullptr || _ready_queue->empty()) && _inbox.isEmpty() && !_inbox_has_more && !_timers_have_due &&
+                    _timers.applicationTimerCount() == 0 && _timers.reservedApplicationTimerBytes() == 0;
 
                 if (runnable_work_empty)
                 {
@@ -2324,7 +2462,9 @@ namespace snf::worker
                     const bool has_work =
                         (!_inbox.isEmpty()) ||
                         (_ready_queue != nullptr && !_ready_queue->empty()) ||
-                        (_actors != nullptr && hasBlockedActors());
+                        (_actors != nullptr && hasBlockedActors()) ||
+                        (_timers.applicationTimerCount() > 0) ||
+                        (_timers.reservedApplicationTimerBytes() > 0);
 
                     if (has_work)
                     {

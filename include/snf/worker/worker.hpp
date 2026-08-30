@@ -60,7 +60,7 @@ namespace snf::worker
         WorkerActorMetrics actor{};
     };
 
-    class Worker final
+    class Worker final : public TimerAdmission
     {
     public:
         using TimePoint = std::chrono::steady_clock::time_point;
@@ -192,9 +192,12 @@ namespace snf::worker
         [[nodiscard]] std::optional<PollRegistrationView> registrationFor(ConnectionHandle handle) const noexcept;
         [[nodiscard]] bool isCurrent(ConnectionHandle handle) const noexcept;
 
+        [[nodiscard]] std::optional<TimerReservation> tryReserve(std::uint64_t charged_bytes, std::uint64_t turn_id) noexcept override;
+        void releaseReservation(std::uint64_t charged_bytes) noexcept override;
+
         [[nodiscard]] DeliveryResult tellInternal(ActorKey key, ActorEnvelope envelope, bool allow_quiescing);
         [[nodiscard]] DeliveryResult tryDeliverLocalInternal(ActorKey key, ActorEnvelope envelope);
-        void applyEffect(ActorSlot& current_slot, Effect&& effect, bool& stopped);
+        void applyEffectBatch(ActorSlot& current_slot, EffectBatch&& batch, bool& stopped);
         // Completion source for the Step 5 synthetic scaffold. The source owns the stale metric
         // decision so tryMarkSyntheticCommandReady() stays metric-free and 5C's timer path can
         // raise stale_await_timeouts instead. Step 8's completeDb() takes over this role.

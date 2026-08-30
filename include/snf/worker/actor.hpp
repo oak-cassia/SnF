@@ -4,6 +4,7 @@
 #include "snf/worker/actor_envelope.hpp"
 #include "snf/worker/connection.hpp"
 #include "snf/worker/identity.hpp"
+#include "snf/worker/timer_queue.hpp"
 #include "snf/worker/worker_event.hpp"
 
 #include <algorithm>
@@ -151,11 +152,19 @@ namespace snf::worker
         [[nodiscard]] bool operator==(const StopActorEffect&) const noexcept = default;
     };
 
+    struct ScheduleTimerEffect
+    {
+        TimePoint deadline{};
+        ActorEnvelope message{};
+        std::optional<TimerReservation> reservation{std::nullopt};
+    };
+
     using Effect = std::variant<
         SendFrameEffect,
         CloseConnectionEffect,
         TellActorEffect,
-        StopActorEffect>;
+        StopActorEffect,
+        ScheduleTimerEffect>;
 
     class EffectBatch final
     {
@@ -163,6 +172,13 @@ namespace snf::worker
         static constexpr std::size_t MAX_EFFECTS = 64;
 
         EffectBatch() = default;
+        ~EffectBatch() = default;
+
+        EffectBatch(const EffectBatch&) = delete;
+        EffectBatch& operator=(const EffectBatch&) = delete;
+
+        EffectBatch(EffectBatch&&) noexcept = default;
+        EffectBatch& operator=(EffectBatch&&) noexcept = default;
 
         [[nodiscard]] bool tryPush(Effect effect)
         {
@@ -213,8 +229,19 @@ namespace snf::worker
 
     struct CompletedTurn
     {
-        EffectBatch effects;
+        EffectBatch effects{};
     };
+
+    static_assert(std::is_nothrow_move_constructible_v<ActorEnvelope>);
+    static_assert(std::is_nothrow_move_constructible_v<TimerReservation>);
+    static_assert(std::is_nothrow_move_constructible_v<ScheduleTimerEffect>);
+    static_assert(std::is_nothrow_move_constructible_v<Effect>);
+    static_assert(std::is_nothrow_move_constructible_v<EffectBatch>);
+    static_assert(std::is_nothrow_move_constructible_v<CompletedTurn>);
+    static_assert(!std::is_copy_constructible_v<TimerReservation>);
+    static_assert(!std::is_copy_constructible_v<ScheduleTimerEffect>);
+    static_assert(!std::is_copy_constructible_v<EffectBatch>);
+    static_assert(!std::is_copy_constructible_v<CompletedTurn>);
 
     enum class SyntheticAwaitOutcome : std::uint8_t
     {
@@ -516,6 +543,7 @@ namespace snf::worker
         std::chrono::milliseconds worker_shutdown_timeout{2000};
         std::chrono::milliseconds await_timeout{2000};
         std::size_t max_concurrent_loading{1024};
+        std::uint64_t max_application_timer_bytes_total{64ull * 1024 * 1024};
     };
 
     [[nodiscard]] inline bool isValid(const WorkerActorConfig& config) noexcept
@@ -528,7 +556,8 @@ namespace snf::worker
                config.max_turns_per_actor_slice > 0 &&
                config.worker_shutdown_timeout >= std::chrono::milliseconds::zero() &&
                config.await_timeout > std::chrono::milliseconds::zero() &&
-               config.max_concurrent_loading > 0;
+               config.max_concurrent_loading > 0 &&
+               config.max_application_timer_bytes_total > 0;
     }
 
     struct WorkerActorMetrics
@@ -561,6 +590,12 @@ namespace snf::worker
         std::uint64_t remote_tell_delivery_failures{0};
         std::uint64_t misrouted_actor_events{0};
         std::uint64_t actor_events_without_runtime{0};
+        std::uint64_t application_timers_scheduled{0};
+        std::uint64_t application_timers_delivered{0};
+        std::uint64_t application_timer_delivery_failures{0};
+        std::uint64_t timer_schedule_failures{0};
+        std::uint64_t stale_application_timers{0};
+        std::uint64_t cancelled_application_timers{0};
         std::uint64_t total_slice_duration_ns{0};
         std::chrono::nanoseconds max_slice_duration{0};
     };

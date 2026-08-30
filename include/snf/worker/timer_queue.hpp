@@ -1,5 +1,6 @@
 #pragma once
 
+#include "snf/worker/actor_envelope.hpp"
 #include "snf/worker/budget.hpp"
 #include "snf/worker/connection.hpp"
 #include "snf/worker/identity.hpp"
@@ -8,6 +9,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <type_traits>
@@ -31,41 +33,191 @@ namespace snf::worker
         [[nodiscard]] bool operator==(const ConnectionCloseDeadline&) const noexcept = default;
     };
 
-    using TimerPayload = std::variant<AwaitTimeout, ConnectionCloseDeadline>;
+    struct ApplicationTimer
+    {
+        ActivationRef target;
+        ActorEnvelope message;
+        std::uint64_t charged_bytes{0};
+    };
+
+    using TimerPayload = std::variant<AwaitTimeout, ConnectionCloseDeadline, ApplicationTimer>;
 
     static_assert(std::is_nothrow_move_constructible_v<TimerPayload>);
+
+    struct TimerEntry
+    {
+        using TimePoint = std::chrono::steady_clock::time_point;
+
+        TimePoint deadline;
+        TimerPayload payload;
+
+        TimerEntry(const TimePoint d, TimerPayload p) noexcept
+            : deadline(d)
+            , payload(std::move(p))
+        {
+        }
+
+        TimerEntry(TimerEntry&&) noexcept = default;
+        TimerEntry& operator=(TimerEntry&&) noexcept = default;
+
+        TimerEntry(const TimerEntry&) = delete;
+        TimerEntry& operator=(const TimerEntry&) = delete;
+
+        [[nodiscard]] bool operator>(const TimerEntry& other) const noexcept
+        {
+            return deadline > other.deadline;
+        }
+    };
+
+    static_assert(std::is_nothrow_move_constructible_v<TimerEntry>);
+    static_assert(std::is_nothrow_swappable_v<TimerEntry>);
 
     struct ExpireResult
     {
         std::size_t expired{0};
-        bool due_items_remain{false}; // now 이전 deadline이 아직 남았다
+        bool due_items_remain{false};
         bool budget_exhausted{false};
     };
 
-    // TimerQueue 계약:
-    // - trySchedule(), commitReserved(), tryReserve(), expire() 모두 owner Worker thread 전용이다.
-    // - 외부 thread가 실행 중인 Worker의 TimerQueue에 직접 접근하지 않는다.
-    // - 동일한 deadline 사이의 만료 순서는 보장하지 않는다 (§9.3).
-    //
-    // Reservation no-fail 계약:
-    // tryReserve() == true -> 뒤따르는 commitReserved()는 capacity 또는 allocation 때문에 실패하지 않는다.
-    // 이를 위해 생성자에서 _heap.reserve(CAPACITY)로 메모리를 선확보한다.
+    class TimerAdmission;
+
+    class TimerReservation final
+    {
+    public:
+        TimerReservation() noexcept = default;
+        ~TimerReservation() noexcept;
+
+        TimerReservation(const TimerReservation&) = delete;
+        TimerReservation& operator=(const TimerReservation&) = delete;
+
+        TimerReservation(TimerReservation&& other) noexcept
+            : _admission(other._admission)
+            , _charged_bytes(other._charged_bytes)
+            , _turn_id(other._turn_id)
+        {
+            other._admission = nullptr;
+            other._charged_bytes = 0;
+            other._turn_id = 0;
+        }
+
+        TimerReservation& operator=(TimerReservation&& other) noexcept
+        {
+            if (this != &other)
+            {
+                reset();
+                _admission = other._admission;
+                _charged_bytes = other._charged_bytes;
+                _turn_id = other._turn_id;
+                other._admission = nullptr;
+                other._charged_bytes = 0;
+                other._turn_id = 0;
+            }
+            return *this;
+        }
+
+        [[nodiscard]] bool isValid() const noexcept
+        {
+            return _admission != nullptr;
+        }
+
+        [[nodiscard]] explicit operator bool() const noexcept
+        {
+            return isValid();
+        }
+
+        [[nodiscard]] std::uint64_t chargedBytes() const noexcept
+        {
+            return _charged_bytes;
+        }
+
+        [[nodiscard]] std::uint64_t turnId() const noexcept
+        {
+            return _turn_id;
+        }
+
+        [[nodiscard]] TimerAdmission* admission() const noexcept
+        {
+            return _admission;
+        }
+
+        void reset() noexcept;
+
+    private:
+        friend class TimerAdmission;
+        friend class Worker;
+
+        TimerReservation(TimerAdmission* admission, const std::uint64_t charged_bytes, const std::uint64_t turn_id) noexcept
+            : _admission(admission)
+            , _charged_bytes(charged_bytes)
+            , _turn_id(turn_id)
+        {
+        }
+
+        TimerAdmission* _admission{nullptr};
+        std::uint64_t _charged_bytes{0};
+        std::uint64_t _turn_id{0};
+    };
+
+    static_assert(std::is_nothrow_move_constructible_v<TimerReservation>);
+    static_assert(!std::is_copy_constructible_v<TimerReservation>);
+    static_assert(!std::is_copy_assignable_v<TimerReservation>);
+
+    class TimerAdmission
+    {
+    public:
+        virtual ~TimerAdmission() = default;
+        [[nodiscard]] virtual std::optional<TimerReservation> tryReserve(std::uint64_t charged_bytes, std::uint64_t turn_id) noexcept = 0;
+        virtual void releaseReservation(std::uint64_t charged_bytes) noexcept = 0;
+    };
+
+    inline void TimerReservation::reset() noexcept
+    {
+        if (_admission != nullptr)
+        {
+            _admission->releaseReservation(_charged_bytes);
+            _admission = nullptr;
+            _charged_bytes = 0;
+            _turn_id = 0;
+        }
+    }
+
+    inline TimerReservation::~TimerReservation() noexcept
+    {
+        reset();
+    }
+
     class TimerQueue
     {
     public:
         static constexpr std::size_t CAPACITY = 65536;
         using TimePoint = std::chrono::steady_clock::time_point;
+        using Entry = TimerEntry;
 
-        TimerQueue()
+        explicit TimerQueue(const std::uint64_t max_application_timer_bytes = 64 * 1024 * 1024)
+            : _max_application_timer_bytes(max_application_timer_bytes)
         {
             _heap.reserve(CAPACITY);
         }
 
+        void setMaxApplicationTimerBytes(const std::uint64_t max_bytes) noexcept
+        {
+            _max_application_timer_bytes = max_bytes;
+        }
+
         [[nodiscard]] bool trySchedule(const TimePoint deadline, TimerPayload payload)
         {
-            if (_heap.size() + _reserved >= CAPACITY)
+            if (_heap.size() + _reserved_entries >= CAPACITY)
             {
                 return false;
+            }
+            if (std::holds_alternative<ApplicationTimer>(payload))
+            {
+                const auto charge = std::get<ApplicationTimer>(payload).charged_bytes;
+                if (_application_timer_bytes + _reserved_application_timer_bytes + charge > _max_application_timer_bytes)
+                {
+                    return false;
+                }
+                _application_timer_bytes += charge;
             }
             _heap.push_back(Entry{deadline, std::move(payload)});
             std::push_heap(_heap.begin(), _heap.end(), std::greater<Entry>{});
@@ -74,26 +226,139 @@ namespace snf::worker
 
         [[nodiscard]] bool tryReserve() noexcept
         {
-            if (_heap.size() + _reserved >= CAPACITY)
+            if (_heap.size() + _reserved_entries >= CAPACITY)
             {
                 return false;
             }
-            ++_reserved;
+            ++_reserved_entries;
             return true;
         }
 
         void releaseReservation() noexcept
         {
-            assert(_reserved > 0);
-            --_reserved;
+            assert(_reserved_entries > 0);
+            --_reserved_entries;
         }
 
-        void commitReserved(const TimePoint deadline, TimerPayload payload)
+        void commitReserved(const TimePoint deadline, TimerPayload payload) noexcept
         {
-            assert(_reserved > 0);
-            --_reserved;
+            assert(_reserved_entries > 0);
+            --_reserved_entries;
+            if (std::holds_alternative<ApplicationTimer>(payload))
+            {
+                _application_timer_bytes += std::get<ApplicationTimer>(payload).charged_bytes;
+            }
             _heap.push_back(Entry{deadline, std::move(payload)});
             std::push_heap(_heap.begin(), _heap.end(), std::greater<Entry>{});
+        }
+
+        [[nodiscard]] bool tryReserveApplicationTimer(const std::uint64_t charged_bytes) noexcept
+        {
+            if (_heap.size() + _reserved_entries >= CAPACITY)
+            {
+                return false;
+            }
+            if (_application_timer_bytes + _reserved_application_timer_bytes + charged_bytes > _max_application_timer_bytes)
+            {
+                return false;
+            }
+            ++_reserved_entries;
+            _reserved_application_timer_bytes += charged_bytes;
+            return true;
+        }
+
+        void releaseApplicationTimerReservation(const std::uint64_t charged_bytes) noexcept
+        {
+            assert(_reserved_entries > 0);
+            assert(_reserved_application_timer_bytes >= charged_bytes);
+            --_reserved_entries;
+            _reserved_application_timer_bytes -= charged_bytes;
+        }
+
+        void commitReservedApplicationTimer(
+            const TimePoint deadline,
+            const ActivationRef target,
+            ActorEnvelope message,
+            const std::uint64_t charged_bytes
+        ) noexcept
+        {
+            assert(_reserved_entries > 0);
+            assert(_reserved_application_timer_bytes >= charged_bytes);
+            --_reserved_entries;
+            _reserved_application_timer_bytes -= charged_bytes;
+            _application_timer_bytes += charged_bytes;
+            _heap.push_back(Entry{deadline, ApplicationTimer{target, std::move(message), charged_bytes}});
+            std::push_heap(_heap.begin(), _heap.end(), std::greater<Entry>{});
+        }
+
+        [[nodiscard]] bool tryScheduleApplicationTimer(
+            const TimePoint deadline,
+            const ActivationRef target,
+            ActorEnvelope message
+        )
+        {
+            const std::uint64_t charge = message.chargedBytes();
+            if (_heap.size() + _reserved_entries >= CAPACITY)
+            {
+                return false;
+            }
+            if (_application_timer_bytes + _reserved_application_timer_bytes + charge > _max_application_timer_bytes)
+            {
+                return false;
+            }
+            _application_timer_bytes += charge;
+            _heap.push_back(Entry{deadline, ApplicationTimer{target, std::move(message), charge}});
+            std::push_heap(_heap.begin(), _heap.end(), std::greater<Entry>{});
+            return true;
+        }
+
+        [[nodiscard]] std::size_t cancelApplicationTimers() noexcept
+        {
+            std::size_t count = 0;
+            auto it = _heap.begin();
+            while (it != _heap.end())
+            {
+                if (std::holds_alternative<ApplicationTimer>(it->payload))
+                {
+                    const auto charge = std::get<ApplicationTimer>(it->payload).charged_bytes;
+                    assert(_application_timer_bytes >= charge);
+                    _application_timer_bytes -= charge;
+                    ++count;
+                    it = _heap.erase(it);
+                }
+                else
+                {
+                    ++it;
+                }
+            }
+            if (count > 0)
+            {
+                std::make_heap(_heap.begin(), _heap.end(), std::greater<Entry>{});
+            }
+            return count;
+        }
+
+        [[nodiscard]] std::size_t applicationTimerCount() const noexcept
+        {
+            std::size_t count = 0;
+            for (const auto& entry : _heap)
+            {
+                if (std::holds_alternative<ApplicationTimer>(entry.payload))
+                {
+                    ++count;
+                }
+            }
+            return count;
+        }
+
+        [[nodiscard]] std::uint64_t applicationTimerBytes() const noexcept
+        {
+            return _application_timer_bytes;
+        }
+
+        [[nodiscard]] std::uint64_t reservedApplicationTimerBytes() const noexcept
+        {
+            return _reserved_application_timer_bytes;
         }
 
         [[nodiscard]] std::optional<TimePoint> nextDeadline() const noexcept
@@ -110,7 +375,8 @@ namespace snf::worker
             return _heap.size();
         }
 
-        template <class Handler> [[nodiscard]] ExpireResult expire(const TimePoint now, const CountTimeBudget& budget, Handler&& handler)
+        template <class Handler>
+        [[nodiscard]] ExpireResult expire(const TimePoint now, const CountTimeBudget& budget, Handler&& handler)
         {
             ExpireResult result{};
             const auto start_time = std::chrono::steady_clock::now();
@@ -127,6 +393,13 @@ namespace snf::worker
                 std::pop_heap(_heap.begin(), _heap.end(), std::greater<Entry>{});
                 Entry entry = std::move(_heap.back());
                 _heap.pop_back();
+
+                if (std::holds_alternative<ApplicationTimer>(entry.payload))
+                {
+                    const auto charge = std::get<ApplicationTimer>(entry.payload).charged_bytes;
+                    assert(_application_timer_bytes >= charge);
+                    _application_timer_bytes -= charge;
+                }
 
                 handler(std::move(entry.payload));
                 ++result.expired;
@@ -155,18 +428,10 @@ namespace snf::worker
         }
 
     private:
-        struct Entry
-        {
-            TimePoint deadline;
-            TimerPayload payload;
-
-            bool operator>(const Entry& other) const noexcept
-            {
-                return deadline > other.deadline;
-            }
-        };
-
         std::vector<Entry> _heap;
-        std::size_t _reserved{0};
+        std::size_t _reserved_entries{0};
+        std::uint64_t _max_application_timer_bytes{64 * 1024 * 1024};
+        std::uint64_t _application_timer_bytes{0};
+        std::uint64_t _reserved_application_timer_bytes{0};
     };
 }
