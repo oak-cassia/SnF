@@ -7,8 +7,15 @@
 // belongs to the real-server mode.
 //
 // Modes:
-//   --stub   TCP stall only. Always runs.
-//   --mysql  Real server. Skips with 77 when SNF_MYSQL_TEST_HOST is unset.
+//   --stub             TCP stall only. Always runs.
+//   --mysql            Real server. Skips with 77 when SNF_MYSQL_TEST_HOST is unset.
+//   --mysql-auth-cost  Connect cost per TLS/auth option. Investigation, not a gate.
+//
+// Headline finding: every driver entry point stays in the microsecond range except
+// connect, where one call holds the thread for about 8ms. That cost is the TLS
+// handshake, not caching_sha2_password: ssl_mode=DISABLED brings the same connect
+// down to roughly 100us while still authenticating. The client default is
+// SSL_MODE_PREFERRED, so a config that does not name a mode pays it silently.
 
 #include "snf/net/tcp_listener.hpp"
 #include "snf/net/unique_file_descriptor.hpp"
@@ -563,10 +570,11 @@ namespace
     // the handshake is not a startup-only concern. This measures a second connect
     // from a fresh handle against the same server.
     //
-    // Measured on MySQL 8.4 with caching_sha2_password: one call inside every
-    // connect holds the thread for roughly 9ms, and the second attempt costs the
-    // same as the first. It is therefore per-connection, not a one-time library
-    // initialisation. Reconnects have to be budgeted, not treated as free.
+    // Measured on MySQL 8.4: one call inside every connect holds the thread for
+    // roughly 8ms, and the second attempt costs the same as the first, so it is
+    // per-connection rather than one-time library initialisation. --mysql-auth-cost
+    // attributes it to the TLS handshake. Whether reconnects need budgeting
+    // therefore depends on the deployed ssl_mode.
     void test_reconnect_handshake_cost(const MySqlTestConfig& config)
     {
         std::chrono::nanoseconds worst_connect_call{0};
@@ -605,6 +613,103 @@ namespace
                   << std::chrono::duration_cast<std::chrono::microseconds>(worst_connect_call).count()
                   << "us, repeated on every connect. Query, fetch and free stay in the microsecond range." << std::endl;
     }
+
+    struct ConnectVariant
+    {
+        const char* name;
+        // Applied before connecting. Returning false means the variant cannot be
+        // built on this client and is skipped rather than reported as slow.
+        bool (*configure)(MYSQL*);
+    };
+
+    // Isolates where the multi-millisecond connect call goes. The candidates are
+    // the caching_sha2_password RSA exchange (which needs the server public key on
+    // an unencrypted link) and the TLS handshake. Running the same connect under
+    // each option set is the cheapest way to tell them apart.
+    //
+    // Measured against MySQL 8.4, worst connect call per variant:
+    //   baseline (SSL_MODE_PREFERRED)  ~8000us
+    //   get_server_public_key=1        ~8000us
+    //   ssl_mode=REQUIRED              ~8000us
+    //   ssl_mode=DISABLED              ~100us   <- and auth still succeeds
+    // So the cost is TLS. It is spent inside one call that then returns NOT_READY,
+    // which is handshake work rather than a blocked wait, but it occupies the
+    // worker thread either way.
+    void test_connect_cost_by_auth_option(const MySqlTestConfig& config)
+    {
+        static constexpr ConnectVariant VARIANTS[] = {
+            {"baseline (no options)",
+             [](MYSQL*)
+             {
+                 return true;
+             }},
+            {"get_server_public_key=1",
+             [](MYSQL* mysql)
+             {
+                 bool enabled = true;
+                 return ::mysql_options(mysql, MYSQL_OPT_GET_SERVER_PUBLIC_KEY, &enabled) == 0;
+             }},
+            {"ssl_mode=DISABLED",
+             [](MYSQL* mysql)
+             {
+                 unsigned int mode = SSL_MODE_DISABLED;
+                 return ::mysql_options(mysql, MYSQL_OPT_SSL_MODE, &mode) == 0;
+             }},
+            {"ssl_mode=REQUIRED",
+             [](MYSQL* mysql)
+             {
+                 unsigned int mode = SSL_MODE_REQUIRED;
+                 return ::mysql_options(mysql, MYSQL_OPT_SSL_MODE, &mode) == 0;
+             }},
+        };
+
+        for (const ConnectVariant& variant : VARIANTS)
+        {
+            for (int attempt = 1; attempt <= 2; ++attempt)
+            {
+                MYSQL* mysql = ::mysql_init(nullptr);
+                assert(mysql != nullptr);
+
+                if (!variant.configure(mysql))
+                {
+                    std::cout << "    " << variant.name << ": option rejected by this client" << std::endl;
+                    ::mysql_close(mysql);
+                    break;
+                }
+
+                CallProbe probe;
+                probe.trace("mysql_real_connect_nonblocking");
+                snf::worker::Poller poller{16};
+                AsyncDriver driver{poller, *mysql, probe};
+
+                const net_async_status connected = driver.run(
+                    "mysql_real_connect_nonblocking",
+                    [&]
+                    {
+                        return ::mysql_real_connect_nonblocking(
+                            mysql, config.host.c_str(), config.user.c_str(), config.password.c_str(), config.database.c_str(), config.port, nullptr, 0
+                        );
+                    },
+                    5000ms
+                );
+
+                if (connected != NET_ASYNC_COMPLETE)
+                {
+                    std::cout << "    " << variant.name << " attempt " << attempt << ": FAILED - " << ::mysql_error(mysql) << std::endl;
+                    driver.unregister();
+                    ::mysql_close(mysql);
+                    break;
+                }
+
+                const auto worst = std::chrono::duration_cast<std::chrono::microseconds>(probe.maxDurationOf("mysql_real_connect_nonblocking"));
+                std::cout << "    " << variant.name << " attempt " << attempt << ": worst call " << worst.count() << "us" << std::endl;
+                probe.report();
+
+                driver.unregister();
+                ::mysql_close(mysql);
+            }
+        }
+    }
 }
 
 int main(const int argc, const char* const* const argv)
@@ -639,6 +744,20 @@ int main(const int argc, const char* const* const argv)
             std::cout << "  - test_real_server_async_query_and_streaming_fetch PASSED" << std::endl;
             test_reconnect_handshake_cost(*config);
             std::cout << "  - test_reconnect_handshake_cost PASSED" << std::endl;
+        }
+    }
+    else if (mode == "--mysql-auth-cost")
+    {
+        const auto config = testConfig();
+        if (!config)
+        {
+            std::cout << "SNF_MYSQL_TEST_HOST is unset." << std::endl;
+            exit_code = SKIP_EXIT_CODE;
+        }
+        else
+        {
+            std::cout << "Measuring connect cost per auth option..." << std::endl;
+            test_connect_cost_by_auth_option(*config);
         }
     }
     else
