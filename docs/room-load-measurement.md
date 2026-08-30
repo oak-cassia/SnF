@@ -3,7 +3,7 @@
 > 문서 상태: **현행(legacy) 런타임 baseline**
 > 이 수치는 별도 Reactor, ActorRuntime과 shared OutboundChannel 구조에서 측정했다. Unified Worker
 > Runtime의 승인 수치로 재사용하지 않으며, 전환 후 같은 workload로 다시 측정한다. 목표 구조는
-> [Unified Worker Runtime 아키텍처](./unified-worker-runtime.md)를 따른다.
+> [Unified Worker Runtime 아키텍처](./architecture/unified-worker-runtime.md)를 따른다.
 
 측정일은 2026-08-23이다. `snf-server-dev:latest`의 Release build를 Docker Linux
 6.12.5-linuxkit/aarch64에서 실행했다. container에 보인 자원은 10 CPU, 약 7.65 GiB memory이고

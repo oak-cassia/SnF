@@ -1,7 +1,7 @@
 # SnF 개발 로드맵
 
 > 현재 우선순위: **Unified Worker Runtime 전환**
-> 목표 구조: [Unified Worker Runtime 아키텍처](./unified-worker-runtime.md)
+> 목표 구조: [Unified Worker Runtime 아키텍처](./architecture/unified-worker-runtime.md)
 > 원칙: wire/gameplay 의미와 기존 검증 가능한 동작을 보존하면서 실행 경계를 단계적으로 교체한다.
 
 ## 1. 전환 전 기준
@@ -109,11 +109,11 @@
 
 ### 7단계 — Result와 Effect Adapter
 
-- [ ] Player/Zone/Room domain adapter에서 typed result를 `toEffects(context, result)` overload로 변환한다.
-- [ ] `ScheduleTimerEffect` 등 추가 Effect별 failure semantics와 stop-batch 정책을 적용한다.
-- [ ] 실제 fan-out 측정에 따라 `EffectBatch` cap을 재결정한다.
-- [ ] `RequestSink`에서 실제 game request translation과 Actor ingress를 연결한다.
-- [ ] Domain 코드에서 Worker, ActorTable, ConnectionTable과 send/tell 직접 호출을 제거한다.
+- [x] Player/Zone/Room domain adapter에서 typed result를 `toEffects(context, result)` overload로 변환한다.
+- [x] `ScheduleTimerEffect` 등 추가 Effect별 failure semantics와 stop-batch 정책을 적용한다.
+- [x] 실제 fan-out 측정에 따라 `EffectBatch` cap을 재결정한다.
+- [x] `RequestSink`에서 실제 game request translation과 Actor ingress를 연결한다.
+- [x] Domain 코드에서 Worker, ActorTable, ConnectionTable과 send/tell 직접 호출을 제거한다.
 
 종료 조건: Worker가 typed domain result 의미를 알지 않고 별도 OutcomeHandler hierarchy가 없다.
 

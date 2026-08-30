@@ -5,10 +5,11 @@
 > 적용 범위: C++ 게임 서버의 connection I/O, Actor 실행, timer, 비동기 DB, effect 적용과 lifecycle
 > 주의: 이 문서는 목표 구조를 설명한다. 현재 코드 구조는 전환이 끝날 때까지 다를 수 있다.
 
-현재 구현에는 이 문서의 첫 번째 독립 vertical slice가 포함되어 있다. `snf::worker::WorkerGroup`이
-`SO_REUSEPORT` listener와 Worker를 bootstrap하고, Worker는 bounded accept/read/decode/write,
-generation 검증, remote connection event와 close lifecycle을 소유한다. Actor·DB·Effect phase는
-아직 다음 전환 단계의 대상이다.
+현재 구현은 개발 로드맵 6단계까지 반영한다. `snf::worker::WorkerGroup`이 `SO_REUSEPORT` listener와
+Worker를 bootstrap하고, Worker는 bounded connection I/O와 close lifecycle, ActorTable·mailbox·ready
+queue, synthetic blocked operation과 activation, concrete effect 적용, local/cross-worker tell 및
+publication-safe shutdown barrier를 소유한다. Domain result adapter와 native async DB는 이후 전환
+단계의 대상이다.
 
 설계의 중심 문장은 다음과 같다.
 

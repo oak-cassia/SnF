@@ -2,7 +2,7 @@
 
 > 문서 상태: **domain authority 보존 / persistence 실행 경로 전환 예정**
 > Player gameplay state와 durability 의미는 이 문서가 소유한다. thread, queue, coroutine과 DB 진행
-> 방식은 [Unified Worker Runtime](./unified-worker-runtime.md)이 우선한다. 현행
+> 방식은 [Unified Worker Runtime](./architecture/unified-worker-runtime.md)이 우선한다. 현행
 > `PlayerPersistenceService`와 blocking MySQL worker는 target 구조가 아니다.
 
 ## 1. Authority

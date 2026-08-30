@@ -2,8 +2,9 @@
 
 ## 아키텍처 기준
 
-- [Unified Worker Runtime 아키텍처](./unified-worker-runtime.md)가 앞으로 구현할 서버 런타임의 유일한
+- [Unified Worker Runtime 아키텍처](./architecture/unified-worker-runtime.md)가 앞으로 구현할 서버 런타임의 유일한
   기준 문서다.
+- [아키텍처 문서 안내](./architecture/README.md)는 기준 문서와 구현 해설의 구분을 설명한다.
 - 루트 [README](../README.md)의 구조 설명과 코드 링크는 전환이 끝날 때까지 **현행 구현**을 설명한다.
   목표 구조로 읽지 않는다.
 - 새 문서에서 `ActorRuntime`, `ActorBinding`, 별도 network Reactor, shared `OutboundChannel`,

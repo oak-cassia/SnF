@@ -3,7 +3,7 @@
 > epoll 기반 네트워크, Actor 실행 모델과 MySQL 영속화 설계 및 구현
 >
 > **아키텍처 전환 안내 (2026-08-29):** 이 README의 구조와 코드 링크는 현재 구현을 설명합니다.
-> 앞으로 구현할 기준은 [Unified Worker Runtime 아키텍처](docs/unified-worker-runtime.md)이며,
+> 앞으로 구현할 기준은 [Unified Worker Runtime 아키텍처](docs/architecture/unified-worker-runtime.md)이며,
 > 문서 분류는 [docs/README](docs/README.md)를 따릅니다.
 
 ---
