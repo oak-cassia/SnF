@@ -73,6 +73,11 @@ namespace snf::worker
             return slot->handle();
         }
 
+        static void expireTimers(Worker& worker, const TimePoint now, const CountTimeBudget& budget)
+        {
+            worker.expireTimers(now, budget);
+        }
+
         static void removeActor(Worker& worker, const ActorHandle handle, const ActorRemovalReason reason)
         {
             worker.removeActor(handle, reason);
@@ -2492,6 +2497,577 @@ namespace
         assert(worker.loadingCount() == 0);
         assert(worker.actorCount() == 0);
     }
+
+    // =========================================================================
+    // 5C — Timeout / Cancellation / Race Tests
+    // =========================================================================
+
+    void test_completion_first_then_late_timeout_stale_drop()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 50ms,
+            .max_concurrent_loading = 10,
+        };
+
+        std::atomic<int> step{0};
+        SyntheticAwaitOutcome received_outcome{SyntheticAwaitOutcome::Rejected};
+
+        FunctionalActorFactory factory(
+            [&step, &received_outcome](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<SuspendingActor>(
+                    [&step, &received_outcome]() -> ActorTask
+                    {
+                        step.store(1);
+                        SyntheticAwait awaiter;
+                        auto outcome = co_await awaiter;
+                        received_outcome = outcome;
+                        step.store(2);
+                        co_return CompletedTurn{.effects = EffectBatch{}};
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(step.load() == 1);
+
+        const AwaitKey await_key = std::get<SyntheticSuspendedCommand>(*WorkerActorTestAccess::blocked(worker, key)).key;
+
+        // 1. Completion arrives first
+        assert(WorkerActorTestAccess::completeSyntheticCommand(worker, await_key, SyntheticAwaitOutcome::Completed));
+        assert(WorkerActorTestAccess::slot(worker, key)->state() == ActorState::Queued);
+
+        // 2. Late timeout fires after deadline
+        WorkerActorTestAccess::expireTimers(worker, std::chrono::steady_clock::now() + 100ms, WorkerBudgets::defaults().timers);
+        assert(worker.metrics().actor.stale_await_timeouts == 1);
+
+        // 3. Resumed turn completes with original Completed outcome
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(step.load() == 2);
+        assert(received_outcome == SyntheticAwaitOutcome::Completed);
+    }
+
+    void test_timeout_first_then_late_backend_completion_stale_drop()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 50ms,
+            .max_concurrent_loading = 10,
+        };
+
+        std::atomic<int> step{0};
+        SyntheticAwaitOutcome received_outcome{SyntheticAwaitOutcome::Rejected};
+
+        FunctionalActorFactory factory(
+            [&step, &received_outcome](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<SuspendingActor>(
+                    [&step, &received_outcome]() -> ActorTask
+                    {
+                        step.store(1);
+                        SyntheticAwait awaiter;
+                        auto outcome = co_await awaiter;
+                        received_outcome = outcome;
+                        step.store(2);
+                        co_return CompletedTurn{.effects = EffectBatch{}};
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(step.load() == 1);
+
+        const AwaitKey await_key = std::get<SyntheticSuspendedCommand>(*WorkerActorTestAccess::blocked(worker, key)).key;
+
+        // 1. Timeout fires first
+        WorkerActorTestAccess::expireTimers(worker, std::chrono::steady_clock::now() + 100ms, WorkerBudgets::defaults().timers);
+        assert(worker.metrics().actor.stale_await_timeouts == 0);
+        assert(WorkerActorTestAccess::slot(worker, key)->state() == ActorState::Queued);
+
+        // 2. Late backend completion arrives -> dropped as stale
+        assert(!WorkerActorTestAccess::completeSyntheticCommand(worker, await_key, SyntheticAwaitOutcome::Completed));
+        assert(worker.metrics().actor.stale_completions == 1);
+
+        // 3. Resumed turn receives TimedOut outcome
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(step.load() == 2);
+        assert(received_outcome == SyntheticAwaitOutcome::TimedOut);
+    }
+
+    void test_loading_actor_timeout_then_late_activation_completion_stale_drop()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 50ms,
+            .max_concurrent_loading = 10,
+        };
+
+        FunctionalActorFactory factory(
+            [](ActorKey) -> ActorConstructionResult
+            {
+                return ActorConstructionResult::ready(
+                    std::make_unique<FunctionalActor>(
+                        [](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
+                        {
+                            return CompletedTurn{.effects = EffectBatch{}};
+                        }
+                    )
+                );
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        const AwaitKey await_key = std::get<ActivationLoad>(*WorkerActorTestAccess::blocked(worker, key)).key;
+        assert(worker.loadingCount() == 1);
+
+        // 1. Timeout fires for Loading actor -> removes actor
+        WorkerActorTestAccess::expireTimers(worker, std::chrono::steady_clock::now() + 100ms, WorkerBudgets::defaults().timers);
+        assert(worker.loadingCount() == 0);
+        assert(worker.actorCount() == 0);
+        assert(worker.metrics().actor.activation_load_failures == 1);
+
+        // 2. Late completion arrives -> dropped as stale
+        WorkerActorTestAccess::completeSyntheticActivation(worker, await_key, SyntheticActivationOutcome::Ready);
+        assert(worker.metrics().actor.stale_activation_completions == 1);
+    }
+
+    void test_actor_removal_then_late_completion_drop()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+            .max_concurrent_loading = 10,
+        };
+
+        std::atomic<int> step{0};
+        std::atomic<int> destructs{0};
+
+        FunctionalActorFactory factory(
+            [&step, &destructs](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<SuspendingActor>(
+                    [&step, &destructs]()
+                    {
+                        return makeOneShotSuspendingTask(step, destructs, false);
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(step.load() == 1);
+
+        const AwaitKey await_key = std::get<SyntheticSuspendedCommand>(*WorkerActorTestAccess::blocked(worker, key)).key;
+        const ActorHandle handle = WorkerActorTestAccess::handle(worker, key);
+
+        // Remove actor while suspended
+        WorkerActorTestAccess::removeActor(worker, handle, ActorRemovalReason::Stopped);
+        assert(worker.actorCount() == 0);
+
+        // Late completion -> dropped
+        assert(!WorkerActorTestAccess::completeSyntheticCommand(worker, await_key, SyntheticAwaitOutcome::Completed));
+        assert(worker.metrics().actor.stale_completions == 1);
+    }
+
+    void test_slot_reuse_old_incarnation_completion_drop()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 1,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+            .max_concurrent_loading = 10,
+        };
+
+        std::atomic<int> step{0};
+        std::atomic<int> destructs{0};
+
+        FunctionalActorFactory factory(
+            [&step, &destructs](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<SuspendingActor>(
+                    [&step, &destructs]()
+                    {
+                        return makeOneShotSuspendingTask(step, destructs, false);
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        // Incarnation 1 starts and suspends
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        const AwaitKey await_key1 = std::get<SyntheticSuspendedCommand>(*WorkerActorTestAccess::blocked(worker, key)).key;
+        const ActorHandle handle1 = WorkerActorTestAccess::handle(worker, key);
+
+        // Incarnation 1 removed
+        WorkerActorTestAccess::removeActor(worker, handle1, ActorRemovalReason::Stopped);
+
+        // Incarnation 2 starts and suspends
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        const AwaitKey await_key2 = std::get<SyntheticSuspendedCommand>(*WorkerActorTestAccess::blocked(worker, key)).key;
+        assert(await_key2.incarnation != await_key1.incarnation);
+
+        // Late completion for incarnation 1 -> dropped
+        assert(!WorkerActorTestAccess::completeSyntheticCommand(worker, await_key1, SyntheticAwaitOutcome::Completed));
+        assert(worker.metrics().actor.stale_completions == 1);
+
+        // Valid completion for incarnation 2 -> succeeds
+        assert(WorkerActorTestAccess::completeSyntheticCommand(worker, await_key2, SyntheticAwaitOutcome::Completed));
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(WorkerActorTestAccess::slot(worker, key)->state() == ActorState::Idle);
+    }
+
+    void test_operation_N_timeout_then_operation_N_plus_1_completion_race()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 50ms,
+            .max_concurrent_loading = 10,
+        };
+
+        std::atomic<int> stage{0};
+        FunctionalActorFactory factory(
+            [&stage](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<SuspendingActor>(
+                    [&stage]() -> ActorTask
+                    {
+                        stage.store(1);
+                        SyntheticAwait awaiter1;
+                        auto outcome1 = co_await awaiter1;
+                        (void)outcome1;
+
+                        stage.store(2);
+                        SyntheticAwait awaiter2;
+                        auto outcome2 = co_await awaiter2;
+                        (void)outcome2;
+
+                        stage.store(3);
+                        co_return CompletedTurn{.effects = EffectBatch{}};
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(stage.load() == 1);
+
+        const AwaitKey await_key1 = std::get<SyntheticSuspendedCommand>(*WorkerActorTestAccess::blocked(worker, key)).key;
+
+        // 1. Timeout fires for Op 1 -> resumes and enters Op 2
+        WorkerActorTestAccess::expireTimers(worker, std::chrono::steady_clock::now() + 100ms, WorkerBudgets::defaults().timers);
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(stage.load() == 2);
+
+        const AwaitKey await_key2 = std::get<SyntheticSuspendedCommand>(*WorkerActorTestAccess::blocked(worker, key)).key;
+        assert(await_key2.operation != await_key1.operation);
+
+        // 2. Late backend completion for Op 1 arrives -> dropped as stale
+        assert(!WorkerActorTestAccess::completeSyntheticCommand(worker, await_key1, SyntheticAwaitOutcome::Completed));
+        assert(worker.metrics().actor.stale_completions == 1);
+
+        // 3. Valid completion for Op 2 arrives -> succeeds
+        assert(WorkerActorTestAccess::completeSyntheticCommand(worker, await_key2, SyntheticAwaitOutcome::Completed));
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(stage.load() == 3);
+        assert(WorkerActorTestAccess::slot(worker, key)->state() == ActorState::Idle);
+    }
+
+    void test_timer_reservation_failure_command_resumes_rejected_activation_fails_fast()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+            .max_concurrent_loading = 10,
+        };
+
+        std::atomic<int> step{0};
+        SyntheticAwaitOutcome received_outcome{SyntheticAwaitOutcome::Completed};
+
+        FunctionalActorFactory factory(
+            [&step, &received_outcome](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<SuspendingActor>(
+                    [&step, &received_outcome]() -> ActorTask
+                    {
+                        step.store(1);
+                        SyntheticAwait awaiter;
+                        auto outcome = co_await awaiter;
+                        received_outcome = outcome;
+                        step.store(2);
+                        co_return CompletedTurn{.effects = EffectBatch{}};
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+
+        // Exhaust timer queue capacity
+        for (std::size_t i = 0; i < TimerQueue::CAPACITY; ++i)
+        {
+            const auto deadline = std::chrono::steady_clock::now() + 1000s;
+            assert(worker.trySchedule(deadline, TimerPayload{AwaitTimeout{AwaitKey{}}}));
+        }
+
+        // Case A: Suspending command turn fails timer reservation -> resumes with Rejected
+        const ActorKey key1{.kind = ActorKind::Player, .entity = 1};
+        assert(worker.tryDeliverLocal(key1, makeEnvelope(16)) == DeliveryResult::Accepted);
+
+        // Dispatch runs turn, tryReserve fails -> Queued with Rejected
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(step.load() == 2);
+        assert(received_outcome == SyntheticAwaitOutcome::Rejected);
+        assert(WorkerActorTestAccess::slot(worker, key1)->state() == ActorState::Idle);
+
+        // Case B: beginActivationLoad fails timer reservation -> rejected immediately
+        const ActorKey key2{.kind = ActorKind::Player, .entity = 2};
+        assert(WorkerActorTestAccess::beginActivationLoad(worker, key2, makeEnvelope(16)) != DeliveryResult::Accepted);
+        assert(worker.loadingCount() == 0);
+    }
+
+    void test_shutdown_logical_cancel_unwinds_coroutine_and_applies_effects()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+            .max_concurrent_loading = 10,
+        };
+
+        std::atomic<int> step{0};
+        std::atomic<bool> cancelled_seen{false};
+
+        FunctionalActorFactory factory(
+            [&step, &cancelled_seen](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<SuspendingActor>(
+                    [&step, &cancelled_seen]() -> ActorTask
+                    {
+                        step.store(1);
+                        SyntheticAwait awaiter;
+                        auto outcome = co_await awaiter;
+                        if (outcome == SyntheticAwaitOutcome::Cancelled)
+                        {
+                            cancelled_seen.store(true);
+                        }
+                        step.store(2);
+                        EffectBatch effects;
+                        effects.push(StopActorEffect{});
+                        co_return CompletedTurn{
+                            .effects = std::move(effects)
+                        };
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(step.load() == 1);
+        assert(WorkerActorTestAccess::slot(worker, key)->state() == ActorState::Suspended);
+
+        // Request stop and run shutdown
+        worker.requestStop();
+        worker.run();
+
+        assert(cancelled_seen.load());
+        assert(step.load() == 2);
+        assert(worker.metrics().actor.cancelled_blocked_actors == 1);
+        assert(worker.actorCount() == 0);
+    }
+
+    void test_shutdown_new_suspension_immediately_cancelled_no_long_term_blocked()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+            .max_concurrent_loading = 10,
+        };
+
+        std::atomic<int> suspensions{0};
+        std::atomic<int> completions{0};
+
+        FunctionalActorFactory factory(
+            [&suspensions, &completions](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<SuspendingActor>(
+                    [&suspensions, &completions]() -> ActorTask
+                    {
+                        suspensions.fetch_add(1);
+                        SyntheticAwait awaiter;
+                        auto outcome = co_await awaiter;
+                        if (outcome == SyntheticAwaitOutcome::Cancelled)
+                        {
+                            completions.fetch_add(1);
+                        }
+                        co_return CompletedTurn{.effects = EffectBatch{}};
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        // Queue message in mailbox before shutdown
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+
+        worker.requestStop();
+        worker.run();
+
+        assert(suspensions.load() == 1);
+        assert(completions.load() == 1);
+        assert(worker.metrics().actor.cancelled_blocked_actors >= 1);
+        assert(worker.actorCount() == 0);
+    }
+
+    void test_shutdown_forced_destruction_on_deadline_expiry_metrics()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 2000ms,
+            .max_concurrent_loading = 10,
+        };
+
+        std::atomic<int> step{0};
+        std::atomic<int> destructs{0};
+
+        FunctionalActorFactory factory(
+            [&step, &destructs](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<SuspendingActor>(
+                    [&step, &destructs]()
+                    {
+                        return makeOneShotSuspendingTask(step, destructs, false);
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(step.load() == 1);
+
+        const ActorHandle handle = WorkerActorTestAccess::handle(worker, key);
+        assert(WorkerActorTestAccess::slot(worker, key)->hasBlocked());
+
+        // Simulate forced shutdown destruction in Phase D
+        WorkerActorTestAccess::removeActor(worker, handle, ActorRemovalReason::ShutdownForced);
+        assert(worker.metrics().actor.forced_blocked_destructions == 1);
+        assert(worker.metrics().actor.stopped_actors == 1);
+        assert(worker.actorCount() == 0);
+        assert(destructs.load() == 1);
+    }
 }
 
 void run_worker_actor_tests()
@@ -2549,4 +3125,16 @@ void run_worker_actor_tests()
     test_concurrent_loading_cap_exceeded_returns_false_and_increments_metric();
     test_loading_stale_and_duplicate_completions_dropped();
     test_loading_count_invariant_across_all_lifecycle_paths();
+
+    // 5C Tests
+    test_completion_first_then_late_timeout_stale_drop();
+    test_timeout_first_then_late_backend_completion_stale_drop();
+    test_loading_actor_timeout_then_late_activation_completion_stale_drop();
+    test_actor_removal_then_late_completion_drop();
+    test_slot_reuse_old_incarnation_completion_drop();
+    test_operation_N_timeout_then_operation_N_plus_1_completion_race();
+    test_timer_reservation_failure_command_resumes_rejected_activation_fails_fast();
+    test_shutdown_logical_cancel_unwinds_coroutine_and_applies_effects();
+    test_shutdown_new_suspension_immediately_cancelled_no_long_term_blocked();
+    test_shutdown_forced_destruction_on_deadline_expiry_metrics();
 }

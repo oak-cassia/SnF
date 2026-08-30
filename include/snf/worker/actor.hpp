@@ -598,6 +598,9 @@ namespace snf::worker
         std::uint64_t activation_load_failures{0};
         std::uint64_t loading_limit_rejections{0};
         std::uint64_t stale_activation_completions{0};
+        std::uint64_t stale_await_timeouts{0};
+        std::uint64_t cancelled_blocked_actors{0};
+        std::uint64_t forced_blocked_destructions{0};
         std::uint64_t total_slice_duration_ns{0};
         std::chrono::nanoseconds max_slice_duration{0};
     };

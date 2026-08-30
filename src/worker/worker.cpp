@@ -970,14 +970,44 @@ namespace snf::worker
                         .operation = op,
                     };
                     const auto deadline = std::chrono::steady_clock::now() + _actor_config.await_timeout;
-                    slot->setBlocked(SyntheticSuspendedCommand{
-                        .key = await_key,
-                        .deadline = deadline,
-                        .task = std::move(task),
-                        .completion = std::nullopt,
-                    });
-                    slot->setState(ActorState::Suspended);
-                    ++_metrics.actor.suspended_turns;
+
+                    if (_shutting_down)
+                    {
+                        slot->setBlocked(SyntheticSuspendedCommand{
+                            .key = await_key,
+                            .deadline = deadline,
+                            .task = std::move(task),
+                            .completion = SyntheticAwaitOutcome::Cancelled,
+                        });
+                        slot->setState(ActorState::Queued);
+                        _ready_queue->push(slot->handle());
+                        ++_metrics.actor.suspended_turns;
+                        ++_metrics.actor.cancelled_blocked_actors;
+                    }
+                    else if (!_timers.tryReserve())
+                    {
+                        slot->setBlocked(SyntheticSuspendedCommand{
+                            .key = await_key,
+                            .deadline = deadline,
+                            .task = std::move(task),
+                            .completion = SyntheticAwaitOutcome::Rejected,
+                        });
+                        slot->setState(ActorState::Queued);
+                        _ready_queue->push(slot->handle());
+                        ++_metrics.actor.suspended_turns;
+                    }
+                    else
+                    {
+                        slot->setBlocked(SyntheticSuspendedCommand{
+                            .key = await_key,
+                            .deadline = deadline,
+                            .task = std::move(task),
+                            .completion = std::nullopt,
+                        });
+                        slot->setState(ActorState::Suspended);
+                        _timers.commitReserved(deadline, AwaitTimeout{await_key});
+                        ++_metrics.actor.suspended_turns;
+                    }
                 }
                 else
                 {
@@ -1068,6 +1098,7 @@ namespace snf::worker
                 if (std::holds_alternative<SuspendedTurn>(result))
                 {
                     auto& suspended_turn = std::get<SuspendedTurn>(result);
+                    ActorTask task = std::move(suspended_turn.task);
                     const OperationId op = _operation_ids.next();
                     const AwaitKey await_key{
                         .actor = slot->key(),
@@ -1075,14 +1106,44 @@ namespace snf::worker
                         .operation = op,
                     };
                     const auto deadline = std::chrono::steady_clock::now() + _actor_config.await_timeout;
-                    slot->setBlocked(SyntheticSuspendedCommand{
-                        .key = await_key,
-                        .deadline = deadline,
-                        .task = std::move(suspended_turn.task),
-                        .completion = std::nullopt,
-                    });
-                    slot->setState(ActorState::Suspended);
-                    ++_metrics.actor.suspended_turns;
+
+                    if (_shutting_down)
+                    {
+                        slot->setBlocked(SyntheticSuspendedCommand{
+                            .key = await_key,
+                            .deadline = deadline,
+                            .task = std::move(task),
+                            .completion = SyntheticAwaitOutcome::Cancelled,
+                        });
+                        slot->setState(ActorState::Queued);
+                        _ready_queue->push(slot->handle());
+                        ++_metrics.actor.suspended_turns;
+                        ++_metrics.actor.cancelled_blocked_actors;
+                    }
+                    else if (!_timers.tryReserve())
+                    {
+                        slot->setBlocked(SyntheticSuspendedCommand{
+                            .key = await_key,
+                            .deadline = deadline,
+                            .task = std::move(task),
+                            .completion = SyntheticAwaitOutcome::Rejected,
+                        });
+                        slot->setState(ActorState::Queued);
+                        _ready_queue->push(slot->handle());
+                        ++_metrics.actor.suspended_turns;
+                    }
+                    else
+                    {
+                        slot->setBlocked(SyntheticSuspendedCommand{
+                            .key = await_key,
+                            .deadline = deadline,
+                            .task = std::move(task),
+                            .completion = std::nullopt,
+                        });
+                        slot->setState(ActorState::Suspended);
+                        _timers.commitReserved(deadline, AwaitTimeout{await_key});
+                        ++_metrics.actor.suspended_turns;
+                    }
                     suspended = true;
                     break;
                 }
@@ -1235,7 +1296,7 @@ namespace snf::worker
     DeliveryResult Worker::beginActivationLoad(const ActorKey key, ActorEnvelope&& first_message)
     {
         assertOwnerThread();
-        if (!actorsConfigured())
+        if (_shutting_down || !actorsConfigured())
         {
             return DeliveryResult::Closed;
         }
@@ -1261,9 +1322,15 @@ namespace snf::worker
             return DeliveryResult::MailboxFull;
         }
 
+        if (!_timers.tryReserve())
+        {
+            return DeliveryResult::ActorTableFull;
+        }
+
         auto reservation = _actors->tryReserve(key);
         if (!reservation.has_value())
         {
+            _timers.releaseReservation();
             return DeliveryResult::ActorTableFull;
         }
 
@@ -1276,9 +1343,10 @@ namespace snf::worker
             .incarnation = slot.incarnation(),
             .operation = _operation_ids.next(),
         };
+        const auto deadline = std::chrono::steady_clock::now() + _actor_config.await_timeout;
         slot.setBlocked(ActivationLoad{
             .key = await_key,
-            .deadline = std::chrono::steady_clock::now() + _actor_config.await_timeout,
+            .deadline = deadline,
         });
 
         // Confirm the aggregate accounting only once the enqueue has succeeded. A throwing push
@@ -1288,6 +1356,7 @@ namespace snf::worker
         _total_mailbox_bytes += charge;
 
         reservation->commit();
+        _timers.commitReserved(deadline, AwaitTimeout{await_key});
         ++_loading_count;
         ++_metrics.actor.activation_loads_started;
         return DeliveryResult::Accepted;
@@ -1402,6 +1471,11 @@ namespace snf::worker
         if (slot == nullptr || slot->incarnation() != handle.incarnation)
         {
             return;
+        }
+
+        if (slot->hasBlocked() && reason == ActorRemovalReason::ShutdownForced)
+        {
+            ++_metrics.actor.forced_blocked_destructions;
         }
 
         if (slot->state() == ActorState::Loading)
@@ -1614,6 +1688,35 @@ namespace snf::worker
             {
                 ++_metrics.network.close_deadline_expirations;
                 forceClose(handle, CloseReason::Timeout);
+            }
+            return;
+        }
+
+        if (actorsConfigured() && std::holds_alternative<AwaitTimeout>(payload))
+        {
+            const AwaitKey key = std::get<AwaitTimeout>(payload).key;
+            ActorSlot* slot = _actors->find(key.actor);
+            if (slot != nullptr && slot->hasBlocked())
+            {
+                if (std::holds_alternative<SyntheticSuspendedCommand>(*slot->blocked()))
+                {
+                    if (!tryMarkSyntheticCommandReady(key, SyntheticAwaitOutcome::TimedOut))
+                    {
+                        ++_metrics.actor.stale_await_timeouts;
+                    }
+                }
+                else if (std::holds_alternative<ActivationLoad>(*slot->blocked()))
+                {
+                    completeSyntheticActivation(key, SyntheticActivationOutcome::TimedOut);
+                }
+                else
+                {
+                    ++_metrics.actor.stale_await_timeouts;
+                }
+            }
+            else
+            {
+                ++_metrics.actor.stale_await_timeouts;
             }
             return;
         }
@@ -1880,6 +1983,8 @@ namespace snf::worker
     void Worker::runShutdownPhaseB(const TimePoint deadline)
     {
         bool first_iteration = true;
+        bool logical_cancel_performed = false;
+
         while (std::chrono::steady_clock::now() < deadline)
         {
             const auto now = std::chrono::steady_clock::now();
@@ -1897,10 +2002,47 @@ namespace snf::worker
             flushWrites(_budgets.writes);
 
             first_iteration = false;
-            const bool actor_quiescent =
+            const bool runnable_work_empty =
                 (_ready_queue == nullptr || _ready_queue->empty()) && (_total_mailbox_messages == 0) && !_inbox_has_more && !_timers_have_due;
-            if (actor_quiescent)
+
+            if (runnable_work_empty)
             {
+                if (!logical_cancel_performed && _actors != nullptr)
+                {
+                    logical_cancel_performed = true;
+                    bool any_cancelled = false;
+                    const auto handles = _actors->activeHandles();
+                    for (const auto handle : handles)
+                    {
+                        ActorSlot* slot = _actors->find(handle);
+                        if (slot != nullptr && slot->hasBlocked())
+                        {
+                            if (std::holds_alternative<SyntheticSuspendedCommand>(*slot->blocked()))
+                            {
+                                auto& cmd = std::get<SyntheticSuspendedCommand>(*slot->blocked());
+                                if (!cmd.completion.has_value())
+                                {
+                                    cmd.completion = SyntheticAwaitOutcome::Cancelled;
+                                    slot->setState(ActorState::Queued);
+                                    _ready_queue->push(slot->handle());
+                                    ++_metrics.actor.cancelled_blocked_actors;
+                                    any_cancelled = true;
+                                }
+                            }
+                            else if (std::holds_alternative<ActivationLoad>(*slot->blocked()))
+                            {
+                                ++_metrics.actor.cancelled_blocked_actors;
+                                removeActor(handle, ActorRemovalReason::ActivationCancelled);
+                            }
+                        }
+                    }
+
+                    if (any_cancelled)
+                    {
+                        continue;
+                    }
+                }
+
                 break;
             }
         }
