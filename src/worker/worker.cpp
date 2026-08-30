@@ -42,6 +42,34 @@ namespace
 
 namespace snf::worker
 {
+    Worker::ActorTurnScope::ActorTurnScope(Worker& worker) noexcept
+        : _worker(worker)
+    {
+        if (_worker._active_actor_turn_id.has_value() || _worker._timers.reservedApplicationTimerCount() != 0 ||
+            _worker._last_actor_turn_id == std::numeric_limits<std::uint64_t>::max())
+        {
+            assert(false && "Actor turn lifecycle invariant violated");
+            std::terminate();
+        }
+        _id = ++_worker._last_actor_turn_id;
+        _worker._active_actor_turn_id = _id;
+    }
+
+    Worker::ActorTurnScope::~ActorTurnScope() noexcept
+    {
+        if (_worker._active_actor_turn_id != std::optional{_id} || _worker._timers.reservedApplicationTimerCount() != 0)
+        {
+            assert(false && "TimerReservation escaped its Actor turn");
+            std::terminate();
+        }
+        _worker._active_actor_turn_id.reset();
+    }
+
+    std::uint64_t Worker::ActorTurnScope::id() const noexcept
+    {
+        return _id;
+    }
+
     Worker::Worker(const WorkerId id, const std::uint16_t worker_count, const WorkerBudgets budgets, const WorkerInboxConfig inbox_config)
         : _id(id)
         , _worker_count(worker_count)
@@ -381,6 +409,11 @@ namespace snf::worker
     std::optional<TimerReservation> Worker::tryReserve(const std::uint64_t charged_bytes, const std::uint64_t turn_id) noexcept
     {
         assertOwnerThread();
+        if (!_active_actor_turn_id.has_value() || turn_id == 0 || *_active_actor_turn_id != turn_id)
+        {
+            assert(false && "TimerReservation requested outside its active Actor turn");
+            std::terminate();
+        }
         if (_shutting_down || _network_stopping)
         {
             return std::nullopt;
@@ -394,6 +427,7 @@ namespace snf::worker
 
     void Worker::releaseReservation(const std::uint64_t charged_bytes) noexcept
     {
+        assertOwnerThread();
         _timers.releaseApplicationTimerReservation(charged_bytes);
     }
 
@@ -562,6 +596,10 @@ namespace snf::worker
     bool Worker::trySchedule(const TimePoint deadline, TimerPayload payload)
     {
         assertOwnerThread();
+        if (std::holds_alternative<ApplicationTimer>(payload))
+        {
+            throw std::logic_error{"Application timers must be scheduled through EffectBatch"};
+        }
         return _timers.trySchedule(deadline, std::move(payload));
     }
 
@@ -1060,6 +1098,7 @@ namespace snf::worker
 
                 // 4. Resume coroutine
                 ActorTask task = std::move(command.task);
+                ActorTurnScope turn_scope{*this};
                 const auto slice_started_at = std::chrono::steady_clock::now();
                 ++turns_executed;
                 ++_metrics.actor.actor_turns;
@@ -1135,7 +1174,7 @@ namespace snf::worker
                     task = ActorTask{};
 
                     bool stopped = false;
-                    applyEffectBatch(*slot, std::move(completed.effects), stopped);
+                    applyEffectBatch(*slot, std::move(completed.effects), stopped, turn_scope.id());
 
                     if (stopped)
                     {
@@ -1193,9 +1232,11 @@ namespace snf::worker
                 _total_mailbox_messages -= 1;
                 _total_mailbox_bytes -= envelope.chargedBytes();
 
+                ActorTurnScope turn_scope{*this};
                 const ActorTurnContext context{
                     .activation = slot->activationRef(),
                     .now = std::chrono::steady_clock::now(),
+                    .turn_id = turn_scope.id(),
                 };
 
                 TurnResult result = slot->instance()->dispatch(std::move(envelope), context);
@@ -1257,7 +1298,7 @@ namespace snf::worker
                 }
 
                 auto& completed = std::get<CompletedTurn>(result);
-                applyEffectBatch(*slot, std::move(completed.effects), stopped);
+                applyEffectBatch(*slot, std::move(completed.effects), stopped, turn_scope.id());
 
                 if (stopped)
                 {
@@ -1301,7 +1342,7 @@ namespace snf::worker
         }
     }
 
-    void Worker::applyEffectBatch(ActorSlot& current_slot, EffectBatch&& batch, bool& stopped)
+    void Worker::applyEffectBatch(ActorSlot& current_slot, EffectBatch&& batch, bool& stopped, const std::uint64_t turn_id)
     {
         if (batch.size() > EffectBatch::MAX_EFFECTS)
         {
@@ -1341,6 +1382,10 @@ namespace snf::worker
                     if (res.chargedBytes() != timer_effect.message.chargedBytes())
                     {
                         throw std::logic_error{"TimerReservation charged bytes does not match message charged bytes"};
+                    }
+                    if (turn_id == 0 || res.turnId() != turn_id)
+                    {
+                        throw std::logic_error{"TimerReservation does not belong to the current Actor turn"};
                     }
                 }
             }
@@ -2259,15 +2304,58 @@ namespace snf::worker
         }
     }
 
+    bool Worker::cancelBlockedActorsForShutdown()
+    {
+        if (_actors == nullptr)
+        {
+            return false;
+        }
+
+        bool any_cancelled = false;
+        const auto handles = _actors->activeHandles();
+        for (const auto handle : handles)
+        {
+            ActorSlot* slot = _actors->find(handle);
+            if (slot == nullptr || !slot->hasBlocked())
+            {
+                continue;
+            }
+
+            if (std::holds_alternative<SyntheticSuspendedCommand>(*slot->blocked()))
+            {
+                auto& command = std::get<SyntheticSuspendedCommand>(*slot->blocked());
+                if (!command.completion.has_value())
+                {
+                    command.completion = SyntheticAwaitOutcome::Cancelled;
+                    slot->setState(ActorState::Queued);
+                    _ready_queue->push(slot->handle());
+                    ++_metrics.actor.cancelled_blocked_actors;
+                    any_cancelled = true;
+                }
+            }
+            else if (std::holds_alternative<ActivationLoad>(*slot->blocked()))
+            {
+                ++_metrics.actor.cancelled_blocked_actors;
+                removeActor(handle, ActorRemovalReason::ActivationCancelled);
+                any_cancelled = true;
+            }
+        }
+        return any_cancelled;
+    }
+
     void Worker::runShutdownPhaseB(const TimePoint deadline)
     {
         const std::size_t cancelled_app_timers = _timers.cancelApplicationTimers();
         _metrics.actor.cancelled_application_timers += cancelled_app_timers;
 
+        // Actor cancellation precedes timer expiry during quiescence. Otherwise an AwaitTimeout
+        // that becomes due while workers converge on the barrier can win over shutdown cancel.
+        const bool cancelled_blocked_at_entry = cancelBlockedActorsForShutdown();
+
         if (_barrier == nullptr)
         {
             bool first_iteration = true;
-            bool logical_cancel_performed = false;
+            bool logical_cancel_performed = cancelled_blocked_at_entry;
 
             while (std::chrono::steady_clock::now() < deadline)
             {
@@ -2287,43 +2375,16 @@ namespace snf::worker
 
                 first_iteration = false;
 
-                const bool runnable_work_empty =
-                    (_ready_queue == nullptr || _ready_queue->empty()) && _inbox.isEmpty() && !_inbox_has_more && !_timers_have_due &&
-                    _timers.applicationTimerCount() == 0 && _timers.reservedApplicationTimerBytes() == 0;
+                const bool runnable_work_empty = (_ready_queue == nullptr || _ready_queue->empty()) && _inbox.isEmpty() && !_inbox_has_more &&
+                                                 !_timers_have_due && _timers.applicationTimerCount() == 0 &&
+                                                 _timers.reservedApplicationTimerCount() == 0 && _timers.reservedApplicationTimerBytes() == 0;
 
                 if (runnable_work_empty)
                 {
                     if (!logical_cancel_performed && _actors != nullptr && hasBlockedActors())
                     {
                         logical_cancel_performed = true;
-                        bool any_cancelled = false;
-                        const auto handles = _actors->activeHandles();
-                        for (const auto handle : handles)
-                        {
-                            ActorSlot* slot = _actors->find(handle);
-                            if (slot != nullptr && slot->hasBlocked())
-                            {
-                                if (std::holds_alternative<SyntheticSuspendedCommand>(*slot->blocked()))
-                                {
-                                    auto& cmd = std::get<SyntheticSuspendedCommand>(*slot->blocked());
-                                    if (!cmd.completion.has_value())
-                                    {
-                                        cmd.completion = SyntheticAwaitOutcome::Cancelled;
-                                        slot->setState(ActorState::Queued);
-                                        _ready_queue->push(slot->handle());
-                                        ++_metrics.actor.cancelled_blocked_actors;
-                                        any_cancelled = true;
-                                    }
-                                }
-                                else if (std::holds_alternative<ActivationLoad>(*slot->blocked()))
-                                {
-                                    ++_metrics.actor.cancelled_blocked_actors;
-                                    removeActor(handle, ActorRemovalReason::ActivationCancelled);
-                                }
-                            }
-                        }
-
-                        if (any_cancelled)
+                        if (cancelBlockedActorsForShutdown())
                         {
                             continue;
                         }
@@ -2344,7 +2405,7 @@ namespace snf::worker
                 Waiting
             };
             ShutdownBState state = ShutdownBState::Active;
-            bool logical_cancel_performed = false;
+            bool logical_cancel_performed = cancelled_blocked_at_entry;
 
             while (std::chrono::steady_clock::now() < deadline)
             {
@@ -2376,34 +2437,7 @@ namespace snf::worker
                         if (!logical_cancel_performed)
                         {
                             logical_cancel_performed = true;
-                            bool any_cancelled = false;
-                            const auto handles = _actors->activeHandles();
-                            for (const auto handle : handles)
-                            {
-                                ActorSlot* slot = _actors->find(handle);
-                                if (slot != nullptr && slot->hasBlocked())
-                                {
-                                    if (std::holds_alternative<SyntheticSuspendedCommand>(*slot->blocked()))
-                                    {
-                                        auto& cmd = std::get<SyntheticSuspendedCommand>(*slot->blocked());
-                                        if (!cmd.completion.has_value())
-                                        {
-                                            cmd.completion = SyntheticAwaitOutcome::Cancelled;
-                                            slot->setState(ActorState::Queued);
-                                            _ready_queue->push(slot->handle());
-                                            ++_metrics.actor.cancelled_blocked_actors;
-                                            any_cancelled = true;
-                                        }
-                                    }
-                                    else if (std::holds_alternative<ActivationLoad>(*slot->blocked()))
-                                    {
-                                        ++_metrics.actor.cancelled_blocked_actors;
-                                        removeActor(handle, ActorRemovalReason::ActivationCancelled);
-                                    }
-                                }
-                            }
-
-                            if (any_cancelled)
+                            if (cancelBlockedActorsForShutdown())
                             {
                                 continue;
                             }
@@ -2438,12 +2472,9 @@ namespace snf::worker
                         break;
                     }
 
-                    const bool has_work =
-                        (!_inbox.isEmpty()) ||
-                        (_ready_queue != nullptr && !_ready_queue->empty()) ||
-                        (_actors != nullptr && hasBlockedActors()) ||
-                        (_timers.applicationTimerCount() > 0) ||
-                        (_timers.reservedApplicationTimerBytes() > 0);
+                    const bool has_work = (!_inbox.isEmpty()) || (_ready_queue != nullptr && !_ready_queue->empty()) ||
+                                          (_actors != nullptr && hasBlockedActors()) || (_timers.applicationTimerCount() > 0) ||
+                                          (_timers.reservedApplicationTimerCount() > 0) || (_timers.reservedApplicationTimerBytes() > 0);
 
                     if (has_work)
                     {

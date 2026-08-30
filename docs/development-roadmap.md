@@ -114,6 +114,10 @@
 - [x] 실제 fan-out 측정에 따라 `EffectBatch` cap을 재결정한다.
 - [x] `RequestSink`에서 실제 game request translation과 Actor ingress를 연결한다.
 - [x] Domain 코드에서 Worker, ActorTable, ConnectionTable과 send/tell 직접 호출을 제거한다.
+- [x] legacy/new 경로가 같은 protocol encoder를 사용하고 TCP Ping 왕복으로 ingress → Actor → effect → outbound를 검증한다.
+- [x] Room critical deadline을 exact logical charge로 turn-local pre-admission하고, reserved commit의 no-fail/invariant 경계를 고정한다.
+- [x] application timer 만료·shutdown cancellation에서 TimerQueue accounting을 반환한 뒤 mailbox admission을 별도로 수행한다.
+- [x] Room의 4명/16 effect domain proof와 `EffectBatch`의 64개 runtime hard cap을 분리해 검증한다.
 
 종료 조건: Worker가 typed domain result 의미를 알지 않고 별도 OutcomeHandler hierarchy가 없다.
 

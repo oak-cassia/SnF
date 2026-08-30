@@ -1,20 +1,11 @@
 #include "snf/server/protocol_zone_result_sink.hpp"
 
-#include "snf/protocol/payload_writer.hpp"
+#include "snf/adapter/protocol_encoder.hpp"
 
-#include <algorithm>
-#include <cstddef>
-#include <cstdint>
-#include <limits>
 #include <utility>
-#include <vector>
 
 namespace snf::server
 {
-    using snf::protocol::append_u16;
-    using snf::protocol::append_u32;
-    using snf::protocol::append_u64;
-
     ProtocolZoneResultSink::ProtocolZoneResultSink(OutboundSink& outbound) noexcept
         : _outbound(outbound)
     {
@@ -76,44 +67,20 @@ namespace snf::server
 
     snf::protocol::Frame ProtocolZoneResultSink::map(const ZoneInboundCommand& command, const ZoneResult& result) const
     {
-        snf::protocol::MessageType type = snf::protocol::MessageType::Moved;
+        snf::adapter::ZoneReplyFrameKind kind = snf::adapter::ZoneReplyFrameKind::Moved;
         switch (command.reply->kind)
         {
         case ZoneReplyKind::Entered:
-            type = snf::protocol::MessageType::ZoneEntered;
+            kind = snf::adapter::ZoneReplyFrameKind::Entered;
             break;
         case ZoneReplyKind::Moved:
-            type = snf::protocol::MessageType::Moved;
+            kind = snf::adapter::ZoneReplyFrameKind::Moved;
             break;
         case ZoneReplyKind::Left:
-            type = snf::protocol::MessageType::ZoneLeft;
+            kind = snf::adapter::ZoneReplyFrameKind::Left;
             break;
         }
 
-        const ZonePosition position = result.position.value_or(ZonePosition{});
-        constexpr std::size_t FIXED_PAYLOAD_SIZE = 1 + 8 + 8 + 4 + 4 + 2;
-        constexpr std::size_t MAX_VISIBLE_BY_PAYLOAD = (snf::protocol::MAX_PAYLOAD_SIZE - FIXED_PAYLOAD_SIZE) / 8;
-        const std::size_t visible_count = std::min(
-            result.visible_players.size(), std::min(static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()), MAX_VISIBLE_BY_PAYLOAD)
-        );
-
-        std::vector<std::byte> payload;
-        payload.reserve(1 + 8 + 8 + 4 + 4 + 2 + visible_count * 8);
-        payload.push_back(static_cast<std::byte>(static_cast<std::uint8_t>(result.status)));
-        append_u64(payload, command.zone.value);
-        append_u64(payload, result.route_epoch);
-        append_u32(payload, static_cast<std::uint32_t>(position.x));
-        append_u32(payload, static_cast<std::uint32_t>(position.y));
-        append_u16(payload, static_cast<std::uint16_t>(visible_count));
-        for (std::size_t index = 0; index < visible_count; ++index)
-        {
-            append_u64(payload, result.visible_players[index].value);
-        }
-
-        return snf::protocol::Frame{
-            .type = type,
-            .request_id = command.reply->request_id,
-            .payload = std::move(payload),
-        };
+        return snf::adapter::encodeZoneReply(kind, command.zone, result, command.reply->request_id);
     }
 }

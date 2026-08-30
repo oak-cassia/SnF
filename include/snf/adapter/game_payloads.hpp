@@ -13,11 +13,18 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <vector>
 
 namespace snf::adapter
 {
+    [[nodiscard]] constexpr std::uint64_t logicalCharge(const std::uint64_t fixed, const std::size_t dynamic_capacity) noexcept
+    {
+        const auto dynamic = static_cast<std::uint64_t>(dynamic_capacity);
+        return dynamic > std::numeric_limits<std::uint64_t>::max() - fixed ? std::numeric_limits<std::uint64_t>::max() : fixed + dynamic;
+    }
+
     struct PlayerCommandMessage
     {
         std::optional<snf::worker::ConnectionRef> connection{std::nullopt};
@@ -76,12 +83,13 @@ namespace snf::worker
         static constexpr std::uint32_t TAG = 1;
         static std::uint64_t calculateCharge(const snf::adapter::PlayerCommandMessage& msg) noexcept
         {
-            std::uint64_t charge = sizeof(snf::adapter::PlayerCommandMessage);
             if (std::holds_alternative<snf::server::PingCommand>(msg.command))
             {
-                charge += std::get<snf::server::PingCommand>(msg.command).payload.capacity();
+                return snf::adapter::logicalCharge(
+                    sizeof(snf::adapter::PlayerCommandMessage), std::get<snf::server::PingCommand>(msg.command).payload.capacity()
+                );
             }
-            return charge;
+            return sizeof(snf::adapter::PlayerCommandMessage);
         }
     };
 
@@ -144,7 +152,7 @@ namespace snf::worker
         static constexpr std::uint32_t TAG = 8;
         static std::uint64_t calculateCharge(const snf::adapter::PingMessage& msg) noexcept
         {
-            return sizeof(snf::adapter::PingMessage) + msg.payload.capacity();
+            return snf::adapter::logicalCharge(sizeof(snf::adapter::PingMessage), msg.payload.capacity());
         }
     };
 }

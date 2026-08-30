@@ -5,10 +5,27 @@
 
 namespace snf::adapter
 {
-    snf::worker::TurnResult ZoneActorAdapter::dispatch(
-        snf::worker::ActorEnvelope&& envelope,
-        const snf::worker::ActorTurnContext& context
-    )
+    namespace
+    {
+        [[nodiscard]] std::optional<ZoneReplyFrameKind> replyKind(const snf::server::ZoneCommand& command) noexcept
+        {
+            if (std::holds_alternative<snf::server::EnterZoneCommand>(command))
+            {
+                return ZoneReplyFrameKind::Entered;
+            }
+            if (std::holds_alternative<snf::server::MoveInZoneCommand>(command))
+            {
+                return ZoneReplyFrameKind::Moved;
+            }
+            if (std::holds_alternative<snf::server::LeaveZoneCommand>(command))
+            {
+                return ZoneReplyFrameKind::Left;
+            }
+            return std::nullopt;
+        }
+    }
+
+    snf::worker::TurnResult ZoneActorAdapter::dispatch(snf::worker::ActorEnvelope&& envelope, const snf::worker::ActorTurnContext& context)
     {
         if (envelope.is<ZoneCommandMessage>())
         {
@@ -17,6 +34,8 @@ namespace snf::adapter
             const ZoneTurnContext turn_ctx{
                 .connection = msg.connection,
                 .request_id = msg.request_id,
+                .zone = _zone.id(),
+                .reply_kind = replyKind(msg.command),
                 .now = context.now,
                 .zone_empty = (_zone.playerCount() == 0),
             };
@@ -32,6 +51,8 @@ namespace snf::adapter
             const ZoneTurnContext turn_ctx{
                 .connection = std::nullopt,
                 .request_id = 0,
+                .zone = _zone.id(),
+                .reply_kind = std::nullopt,
                 .now = context.now,
                 .zone_empty = (_zone.playerCount() == 0),
             };

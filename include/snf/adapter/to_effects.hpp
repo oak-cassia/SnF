@@ -1,6 +1,7 @@
 #pragma once
 
 #include "snf/adapter/game_payloads.hpp"
+#include "snf/adapter/protocol_encoder.hpp"
 #include "snf/game/player_result.hpp"
 #include "snf/game/room_result.hpp"
 #include "snf/game/zone_result.hpp"
@@ -31,6 +32,8 @@ namespace snf::adapter
     {
         std::optional<snf::worker::ConnectionRef> connection{std::nullopt};
         std::uint32_t request_id{0};
+        snf::server::ZoneId zone{};
+        std::optional<ZoneReplyFrameKind> reply_kind{std::nullopt};
         std::chrono::steady_clock::time_point now{};
         bool zone_empty{false};
     };
@@ -52,6 +55,8 @@ namespace snf::adapter
     {
         std::optional<snf::worker::ConnectionRef> connection{std::nullopt};
         std::uint32_t request_id{0};
+        snf::server::RoomId room{};
+        std::optional<RoomReplyFrameKind> reply_kind{std::nullopt};
         std::chrono::steady_clock::time_point now{};
         std::vector<RoomAudienceRoute> audience_routes{};
     };

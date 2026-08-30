@@ -3907,7 +3907,9 @@ namespace
             .max_turns_per_actor_slice = 30,
             .placement_seed = 0,
             .worker_shutdown_timeout = 2000ms,
-            .await_timeout = 2000ms,
+            // Keep the natural await deadline well outside this test's 2-second
+            // observation window so shutdown cancellation is the only completion source.
+            .await_timeout = 30s,
             .max_concurrent_loading = 10,
         };
 

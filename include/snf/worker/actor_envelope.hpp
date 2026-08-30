@@ -169,29 +169,22 @@ namespace snf::worker
         static consteval bool hasUniqueTags()
         {
             constexpr std::size_t N = sizeof...(Ts);
-            if constexpr (N <= 1)
+            constexpr std::array<std::uint32_t, N> tags = {ActorPayloadTraits<Ts>::TAG...};
+            for (std::size_t i = 0; i < N; ++i)
             {
-                return true;
-            }
-            else
-            {
-                constexpr std::array<std::uint32_t, N> tags = {ActorPayloadTraits<Ts>::TAG...};
-                for (std::size_t i = 0; i < N; ++i)
+                if (tags[i] == 0)
                 {
-                    if (tags[i] == 0)
+                    return false;
+                }
+                for (std::size_t j = i + 1; j < N; ++j)
+                {
+                    if (tags[i] == tags[j])
                     {
                         return false;
                     }
-                    for (std::size_t j = i + 1; j < N; ++j)
-                    {
-                        if (tags[i] == tags[j])
-                        {
-                            return false;
-                        }
-                    }
                 }
-                return true;
             }
+            return true;
         }
 
         static_assert(hasUniqueTags(), "ActorPayloadRegistry: TAG values must be non-zero and unique!");

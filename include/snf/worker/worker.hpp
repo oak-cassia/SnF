@@ -155,6 +155,22 @@ namespace snf::worker
         [[nodiscard]] WorkerId id() const noexcept;
 
     private:
+        class ActorTurnScope final
+        {
+        public:
+            explicit ActorTurnScope(Worker& worker) noexcept;
+            ~ActorTurnScope() noexcept;
+
+            ActorTurnScope(const ActorTurnScope&) = delete;
+            ActorTurnScope& operator=(const ActorTurnScope&) = delete;
+
+            [[nodiscard]] std::uint64_t id() const noexcept;
+
+        private:
+            Worker& _worker;
+            std::uint64_t _id{0};
+        };
+
         void bindOwnerThread() noexcept;
         void assertOwnerThread() const noexcept;
         [[nodiscard]] bool hasRunnableWork() const noexcept;
@@ -197,7 +213,7 @@ namespace snf::worker
 
         [[nodiscard]] DeliveryResult tellInternal(ActorKey key, ActorEnvelope envelope, bool allow_quiescing);
         [[nodiscard]] DeliveryResult tryDeliverLocalInternal(ActorKey key, ActorEnvelope envelope);
-        void applyEffectBatch(ActorSlot& current_slot, EffectBatch&& batch, bool& stopped);
+        void applyEffectBatch(ActorSlot& current_slot, EffectBatch&& batch, bool& stopped, std::uint64_t turn_id);
         // Completion source for the Step 5 synthetic scaffold. The source owns the stale metric
         // decision so tryMarkSyntheticCommandReady() stays metric-free and 5C's timer path can
         // raise stale_await_timeouts instead. Step 8's completeDb() takes over this role.
@@ -213,6 +229,7 @@ namespace snf::worker
 
         void runUnifiedShutdown();
         void beginShutdownPhaseA();
+        [[nodiscard]] bool cancelBlockedActorsForShutdown();
         void runShutdownPhaseB(TimePoint deadline);
         void runShutdownPhaseC(TimePoint deadline);
         void runShutdownPhaseD(TimePoint deadline);
@@ -252,6 +269,8 @@ namespace snf::worker
         ActorFactory* _actor_factory{nullptr};
         WorkerActorConfig _actor_config{};
         OperationIdSource _operation_ids{};
+        std::uint64_t _last_actor_turn_id{0};
+        std::optional<std::uint64_t> _active_actor_turn_id{std::nullopt};
         std::size_t _total_mailbox_messages{0};
         std::uint64_t _total_mailbox_bytes{0};
         std::size_t _loading_count{0};

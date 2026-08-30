@@ -2,7 +2,9 @@
 
 #include "snf/protocol/payload_writer.hpp"
 
+#include <algorithm>
 #include <cstddef>
+#include <limits>
 #include <type_traits>
 #include <utility>
 
@@ -254,67 +256,114 @@ namespace snf::adapter
     }
 
     snf::protocol::Frame encodeZoneReply(
+        const ZoneReplyFrameKind kind,
+        const snf::server::ZoneId zone,
         const snf::server::ZoneResult& result,
         const std::uint32_t request_id
     )
     {
+        snf::protocol::MessageType type = snf::protocol::MessageType::Moved;
+        switch (kind)
+        {
+        case ZoneReplyFrameKind::Entered:
+            type = snf::protocol::MessageType::ZoneEntered;
+            break;
+        case ZoneReplyFrameKind::Moved:
+            type = snf::protocol::MessageType::Moved;
+            break;
+        case ZoneReplyFrameKind::Left:
+            type = snf::protocol::MessageType::ZoneLeft;
+            break;
+        }
+
+        constexpr std::size_t FIXED_PAYLOAD_SIZE = 1 + 8 + 8 + 4 + 4 + 2;
+        constexpr std::size_t MAX_VISIBLE_BY_PAYLOAD = (snf::protocol::MAX_PAYLOAD_SIZE - FIXED_PAYLOAD_SIZE) / 8;
         std::vector<std::byte> payload;
-        const std::size_t visible_count = result.visible_players.size();
-        payload.reserve(1 + 8 + 8 + 8 + 2 + (visible_count * 8));
+        const std::size_t visible_count = std::min(
+            result.visible_players.size(), std::min(static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()), MAX_VISIBLE_BY_PAYLOAD)
+        );
+        payload.reserve(FIXED_PAYLOAD_SIZE + (visible_count * 8));
 
         payload.push_back(static_cast<std::byte>(result.status));
-        append_u64(payload, result.player ? result.player->value : 0);
-        append_u32(payload, result.position ? result.position->x : 0);
-        append_u32(payload, result.position ? result.position->y : 0);
+        append_u64(payload, zone.value);
         append_u64(payload, result.route_epoch);
+        append_u32(payload, static_cast<std::uint32_t>(result.position ? result.position->x : 0));
+        append_u32(payload, static_cast<std::uint32_t>(result.position ? result.position->y : 0));
         append_u16(payload, static_cast<std::uint16_t>(visible_count));
-        for (const auto& visible_player : result.visible_players)
+        for (std::size_t index = 0; index < visible_count; ++index)
         {
-            append_u64(payload, visible_player.value);
+            append_u64(payload, result.visible_players[index].value);
         }
 
         return snf::protocol::Frame{
-            .type = snf::protocol::MessageType::ZoneEntered,
+            .type = type,
             .request_id = request_id,
             .payload = std::move(payload),
         };
     }
 
     snf::protocol::Frame encodeRoomReply(
+        const RoomReplyFrameKind kind,
+        const snf::server::RoomId room,
         const snf::server::RoomResult& result,
         const std::uint32_t request_id
     )
     {
+        if (kind == RoomReplyFrameKind::SkillAcknowledged || kind == RoomReplyFrameKind::MoveAcknowledged)
+        {
+            return snf::protocol::Frame{
+                .type = kind == RoomReplyFrameKind::SkillAcknowledged ? snf::protocol::MessageType::SkillAcknowledged
+                                                                      : snf::protocol::MessageType::MoveAcknowledged,
+                .request_id = request_id,
+                .payload =
+                    {
+                        static_cast<std::byte>(result.status),
+                        static_cast<std::byte>(result.phase),
+                    },
+            };
+        }
+
         std::vector<std::byte> payload;
-        payload.reserve(1 + 1 + 8 + 8 + 1);
+        payload.reserve(1 + 1 + 8);
         payload.push_back(static_cast<std::byte>(result.status));
         payload.push_back(static_cast<std::byte>(result.phase));
-        append_u64(payload, result.player ? result.player->value : 0);
-        append_u64(payload, result.boss_health);
-        payload.push_back(static_cast<std::byte>(result.boss_spawned ? 1 : 0));
+        append_u64(payload, room.value);
 
         return snf::protocol::Frame{
-            .type = snf::protocol::MessageType::RoomJoined,
+            .type = kind == RoomReplyFrameKind::Joined ? snf::protocol::MessageType::RoomJoined : snf::protocol::MessageType::BattleStarted,
             .request_id = request_id,
             .payload = std::move(payload),
         };
     }
 
-    snf::protocol::Frame encodeBattleDigest(
-        const snf::server::BattleDigest& digest,
-        const std::uint32_t request_id
-    )
+    std::optional<snf::protocol::Frame> encodeBattleDigest(const snf::server::RoomResult& result, const std::uint32_t request_id)
     {
+        if (!result.digest.has_value())
+        {
+            return std::nullopt;
+        }
+
+        const auto& digest = *result.digest;
+        if (digest.events.size() > std::numeric_limits<std::uint16_t>::max())
+        {
+            return std::nullopt;
+        }
+
         std::size_t size = DIGEST_HEADER_SIZE;
         for (const auto& event : digest.events)
         {
-            size += encoded_event_size(event);
+            const std::size_t event_size = encoded_event_size(event);
+            if (size > snf::protocol::MAX_PAYLOAD_SIZE || event_size > snf::protocol::MAX_PAYLOAD_SIZE - size)
+            {
+                return std::nullopt;
+            }
+            size += event_size;
         }
 
         std::vector<std::byte> payload;
         payload.reserve(size);
         append_u64(payload, digest.sequence);
-        payload.push_back(static_cast<std::byte>(snf::server::RoomPhase::Running));
+        payload.push_back(static_cast<std::byte>(result.phase));
         append_u16(payload, static_cast<std::uint16_t>(digest.events.size()));
         for (const auto& event : digest.events)
         {
@@ -328,28 +377,20 @@ namespace snf::adapter
         };
     }
 
-    snf::protocol::Frame encodeBattleOutcome(
-        const snf::server::RoomResult& result,
-        const std::uint32_t request_id
-    )
+    snf::protocol::Frame encodeBattleCleared(const std::uint64_t experience, const std::uint32_t request_id)
     {
-        if (result.outcome == snf::server::BattleOutcome::Cleared)
-        {
-            std::uint64_t exp = 0;
-            if (!result.grants.empty())
-            {
-                exp = result.grants.front().experience;
-            }
-            std::vector<std::byte> payload;
-            payload.reserve(8);
-            append_u64(payload, exp);
-            return snf::protocol::Frame{
-                .type = snf::protocol::MessageType::BattleCleared,
-                .request_id = request_id,
-                .payload = std::move(payload),
-            };
-        }
+        std::vector<std::byte> payload;
+        payload.reserve(8);
+        append_u64(payload, experience);
+        return snf::protocol::Frame{
+            .type = snf::protocol::MessageType::BattleCleared,
+            .request_id = request_id,
+            .payload = std::move(payload),
+        };
+    }
 
+    snf::protocol::Frame encodeBattleFailure(const snf::server::RoomResult& result, const std::uint32_t request_id)
+    {
         std::vector<std::byte> payload;
         payload.reserve(8 + 1 + 1);
         append_u64(payload, result.boss_health);

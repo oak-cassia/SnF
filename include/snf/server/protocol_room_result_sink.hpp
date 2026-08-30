@@ -40,9 +40,6 @@ namespace snf::server
         void publishDigest(const RoomResult& result);
         void publishClear(const RoomResult& result);
         void publishFailure(const RoomResult& result);
-        [[nodiscard]] static std::vector<std::byte> encodeRoomStatusPayload(RoomCommandStatus status, RoomPhase phase, RoomId room);
-        [[nodiscard]] std::optional<std::size_t> digestPayloadSize(const BattleDigest& digest) const noexcept;
-        [[nodiscard]] std::vector<std::byte> digestPayload(const RoomResult& result) const;
         [[nodiscard]] bool send(snf::net::ConnectionId connection, snf::protocol::Frame frame);
 
         OutboundSink& _outbound;

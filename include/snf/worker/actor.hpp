@@ -121,6 +121,7 @@ namespace snf::worker
     {
         ActivationRef activation;
         std::chrono::steady_clock::time_point now;
+        std::uint64_t turn_id{0};
     };
 
     struct SendFrameEffect

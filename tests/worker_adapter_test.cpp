@@ -9,14 +9,26 @@
 #include "snf/game/player.hpp"
 #include "snf/game/room.hpp"
 #include "snf/game/zone.hpp"
+#include "snf/net/tcp_listener.hpp"
+#include "snf/net/unique_file_descriptor.hpp"
+#include "snf/protocol/frame_codec.hpp"
 #include "snf/worker/actor.hpp"
 #include "snf/worker/timer_queue.hpp"
 #include "snf/worker/worker.hpp"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+
 #include <cassert>
+#include <cerrno>
 #include <chrono>
+#include <cstdint>
 #include <iostream>
+#include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -36,7 +48,8 @@ namespace
         [[nodiscard]] std::optional<snf::worker::TimerReservation> tryReserve(const std::uint64_t charged_bytes, const std::uint64_t turn_id) noexcept
             override
         {
-            if (should_fail || _reserved_bytes + charged_bytes > _capacity)
+            assert(turn_id != 0);
+            if (should_fail || _reserved_bytes > _capacity || charged_bytes > _capacity - _reserved_bytes)
             {
                 return std::nullopt;
             }
@@ -54,6 +67,69 @@ namespace
         std::uint64_t _capacity{1000};
         std::uint64_t _reserved_bytes{0};
     };
+
+    [[nodiscard]] std::uint16_t portOf(const int descriptor)
+    {
+        sockaddr_in address{};
+        socklen_t address_size = sizeof(address);
+        assert(::getsockname(descriptor, reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
+        return ntohs(address.sin_port);
+    }
+
+    [[nodiscard]] snf::net::UniqueFileDescriptor connectClient(const std::uint16_t port)
+    {
+        const int descriptor = ::socket(AF_INET, SOCK_STREAM, 0);
+        assert(descriptor != -1);
+        snf::net::UniqueFileDescriptor client{descriptor};
+
+        timeval timeout{.tv_sec = 2, .tv_usec = 0};
+        assert(::setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0);
+
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_port = htons(port);
+        assert(::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1);
+
+        int result = ::connect(descriptor, reinterpret_cast<const sockaddr*>(&address), sizeof(address));
+        while (result == -1 && errno == EINTR)
+        {
+            result = ::connect(descriptor, reinterpret_cast<const sockaddr*>(&address), sizeof(address));
+        }
+        assert(result == 0);
+        return client;
+    }
+
+    void sendAll(const int descriptor, const std::vector<std::byte>& bytes)
+    {
+        std::size_t offset = 0;
+        while (offset < bytes.size())
+        {
+            const ssize_t sent = ::send(descriptor, bytes.data() + offset, bytes.size() - offset, MSG_NOSIGNAL);
+            if (sent == -1 && errno == EINTR)
+            {
+                continue;
+            }
+            assert(sent > 0);
+            offset += static_cast<std::size_t>(sent);
+        }
+    }
+
+    [[nodiscard]] std::vector<std::byte> receiveExact(const int descriptor, const std::size_t byte_count)
+    {
+        std::vector<std::byte> bytes(byte_count);
+        std::size_t offset = 0;
+        while (offset < byte_count)
+        {
+            const ssize_t received = ::recv(descriptor, bytes.data() + offset, byte_count - offset, 0);
+            if (received == -1 && errno == EINTR)
+            {
+                continue;
+            }
+            assert(received > 0);
+            offset += static_cast<std::size_t>(received);
+        }
+        return bytes;
+    }
 
     class MockRequestSink final : public snf::worker::RequestSink
     {
@@ -209,6 +285,8 @@ namespace
         auto& leave_completed = std::get<snf::worker::CompletedTurn>(leave_result);
         assert(leave_completed.effects.size() == 2);
         assert(std::holds_alternative<snf::worker::SendFrameEffect>(leave_completed.effects.effects()[0]));
+        const auto& leave_reply = std::get<snf::worker::SendFrameEffect>(leave_completed.effects.effects()[0]);
+        assert(leave_reply.frame.type == snf::protocol::MessageType::ZoneLeft);
         assert(std::holds_alternative<snf::worker::StopActorEffect>(leave_completed.effects.effects()[1]));
     }
 
@@ -216,9 +294,10 @@ namespace
     {
         MockTimerAdmission admission(2048);
         snf::adapter::RoomActorAdapter room_actor(snf::server::RoomId{1}, &admission);
-        const snf::worker::ActorTurnContext turn_ctx{
+        const snf::worker::ActorTurnContext join_turn_ctx{
             .activation = snf::worker::ActivationRef{},
             .now = std::chrono::steady_clock::now(),
+            .turn_id = 1,
         };
 
         const snf::worker::ConnectionRef conn{
@@ -237,7 +316,7 @@ namespace
                 },
         });
 
-        auto join_result = room_actor.dispatch(std::move(join_envelope), turn_ctx);
+        auto join_result = room_actor.dispatch(std::move(join_envelope), join_turn_ctx);
         assert(std::holds_alternative<snf::worker::CompletedTurn>(join_result));
         assert(room_actor.room().participantCount() == 1);
         assert(room_actor.room().canStartBattle());
@@ -249,7 +328,12 @@ namespace
             .command = snf::server::StartBattle{},
         });
 
-        auto start_result = room_actor.dispatch(std::move(start_envelope), turn_ctx);
+        const snf::worker::ActorTurnContext start_turn_ctx{
+            .activation = snf::worker::ActivationRef{},
+            .now = join_turn_ctx.now,
+            .turn_id = 2,
+        };
+        auto start_result = room_actor.dispatch(std::move(start_envelope), start_turn_ctx);
         assert(std::holds_alternative<snf::worker::CompletedTurn>(start_result));
         auto& start_completed = std::get<snf::worker::CompletedTurn>(start_result);
 
@@ -260,6 +344,10 @@ namespace
         assert(timer_effect.reservation.has_value());
         assert(timer_effect.reservation->isValid());
         assert(timer_effect.reservation->admission() == &admission);
+        assert(timer_effect.reservation->turnId() == start_turn_ctx.turn_id);
+
+        const auto& reply_effect = std::get<snf::worker::SendFrameEffect>(start_completed.effects.effects()[1]);
+        assert(reply_effect.frame.type == snf::protocol::MessageType::BattleStarted);
 
         assert(room_actor.room().phase() == snf::server::RoomPhase::Running);
     }
@@ -270,9 +358,10 @@ namespace
         admission.should_fail = true; // Inject admission failure!
 
         snf::adapter::RoomActorAdapter room_actor(snf::server::RoomId{1}, &admission);
-        const snf::worker::ActorTurnContext turn_ctx{
+        const snf::worker::ActorTurnContext join_turn_ctx{
             .activation = snf::worker::ActivationRef{},
             .now = std::chrono::steady_clock::now(),
+            .turn_id = 1,
         };
 
         const snf::worker::ConnectionRef conn{
@@ -291,7 +380,7 @@ namespace
                 },
         });
 
-        auto join_result = room_actor.dispatch(std::move(join_envelope), turn_ctx);
+        auto join_result = room_actor.dispatch(std::move(join_envelope), join_turn_ctx);
         assert(std::holds_alternative<snf::worker::CompletedTurn>(join_result));
         assert(room_actor.room().canStartBattle());
 
@@ -302,7 +391,12 @@ namespace
             .command = snf::server::StartBattle{},
         });
 
-        auto start_result = room_actor.dispatch(std::move(start_envelope), turn_ctx);
+        const snf::worker::ActorTurnContext start_turn_ctx{
+            .activation = snf::worker::ActivationRef{},
+            .now = join_turn_ctx.now,
+            .turn_id = 2,
+        };
+        auto start_result = room_actor.dispatch(std::move(start_envelope), start_turn_ctx);
         assert(std::holds_alternative<snf::worker::CompletedTurn>(start_result));
         auto& start_completed = std::get<snf::worker::CompletedTurn>(start_result);
 
@@ -313,8 +407,154 @@ namespace
         assert(start_completed.effects.size() == 1);
         assert(std::holds_alternative<snf::worker::SendFrameEffect>(start_completed.effects.effects()[0]));
         const auto& reply_effect = std::get<snf::worker::SendFrameEffect>(start_completed.effects.effects()[0]);
-        assert(reply_effect.frame.type == snf::protocol::MessageType::RoomJoined);
+        assert(reply_effect.frame.type == snf::protocol::MessageType::BattleStarted);
         assert(static_cast<snf::server::RoomCommandStatus>(reply_effect.frame.payload[0]) == snf::server::RoomCommandStatus::RuntimeOverloaded);
+    }
+
+    void test_room_routes_remain_bounded_and_follow_result_audience()
+    {
+        MockTimerAdmission admission(2048);
+        snf::server::RoomConfig config{};
+        config.max_participants = 1;
+        snf::adapter::RoomActorAdapter room_actor(snf::server::RoomId{1}, &admission, config);
+
+        const snf::worker::ActorTurnContext turn_context{
+            .activation = snf::worker::ActivationRef{},
+            .now = std::chrono::steady_clock::now(),
+            .turn_id = 1,
+        };
+        const snf::worker::ConnectionRef first_connection{
+            .id = snf::worker::ConnectionId{3},
+            .generation = snf::worker::ConnectionGeneration{1},
+            .owner = snf::worker::WorkerId{0},
+        };
+        const snf::worker::ConnectionRef rejected_connection{
+            .id = snf::worker::ConnectionId{4},
+            .generation = snf::worker::ConnectionGeneration{1},
+            .owner = snf::worker::WorkerId{0},
+        };
+
+        auto join_first = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::RoomCommandMessage{
+            .connection = first_connection,
+            .request_id = 1,
+            .command =
+                snf::server::JoinRoom{
+                    .player = snf::server::PlayerId{101},
+                    .stats = snf::server::CombatStats{.attack = 10, .health = 100},
+                    .equipped_skill_id = snf::server::SLASH_SKILL_ID,
+                },
+        });
+        auto first_result = room_actor.dispatch(std::move(join_first), turn_context);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(first_result));
+
+        auto join_rejected = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::RoomCommandMessage{
+            .connection = rejected_connection,
+            .request_id = 2,
+            .command =
+                snf::server::JoinRoom{
+                    .player = snf::server::PlayerId{202},
+                    .stats = snf::server::CombatStats{.attack = 10, .health = 100},
+                    .equipped_skill_id = snf::server::SLASH_SKILL_ID,
+                },
+        });
+        auto rejected_result = room_actor.dispatch(std::move(join_rejected), turn_context);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(rejected_result));
+        const auto& rejected_effects = std::get<snf::worker::CompletedTurn>(rejected_result).effects;
+        assert(rejected_effects.size() == 1);
+        const auto& rejected_reply = std::get<snf::worker::SendFrameEffect>(rejected_effects.effects()[0]);
+        assert(static_cast<snf::server::RoomCommandStatus>(rejected_reply.frame.payload[0]) == snf::server::RoomCommandStatus::RoomFull);
+
+        auto start = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::RoomCommandMessage{
+            .connection = first_connection,
+            .request_id = 3,
+            .command = snf::server::StartBattle{},
+        });
+        const snf::worker::ActorTurnContext start_context{
+            .activation = snf::worker::ActivationRef{},
+            .now = turn_context.now,
+            .turn_id = 2,
+        };
+        auto start_result = room_actor.dispatch(std::move(start), start_context);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(start_result));
+        for (const auto& effect : std::get<snf::worker::CompletedTurn>(start_result).effects.effects())
+        {
+            if (const auto* send = std::get_if<snf::worker::SendFrameEffect>(&effect))
+            {
+                assert(send->connection != rejected_connection);
+            }
+        }
+
+        const snf::adapter::RoomTurnContext audience_context{
+            .room = snf::server::RoomId{1},
+            .now = turn_context.now,
+            .audience_routes =
+                {
+                    snf::adapter::RoomAudienceRoute{
+                        .player = snf::server::PlayerId{101},
+                        .connection = first_connection,
+                    },
+                    snf::adapter::RoomAudienceRoute{
+                        .player = snf::server::PlayerId{202},
+                        .connection = rejected_connection,
+                    },
+                },
+        };
+        const snf::server::RoomResult audience_result{
+            .phase = snf::server::RoomPhase::Running,
+            .digest = snf::server::BattleDigest{.sequence = 9},
+            .audience = {snf::server::PlayerId{101}},
+        };
+        const auto audience_effects = snf::adapter::toEffects(audience_context, audience_result);
+        assert(audience_effects.size() == 1);
+        const auto& audience_send = std::get<snf::worker::SendFrameEffect>(audience_effects.effects()[0]);
+        assert(audience_send.connection == first_connection);
+
+        config.max_participants = snf::adapter::MAX_ROOM_PARTICIPANTS + 1;
+        bool rejected_config = false;
+        try
+        {
+            [[maybe_unused]] snf::adapter::RoomActorAdapter invalid_room(snf::server::RoomId{2}, &admission, config);
+        }
+        catch (const std::invalid_argument&)
+        {
+            rejected_config = true;
+        }
+        assert(rejected_config);
+    }
+
+    void test_timer_queue_application_accounting()
+    {
+        snf::worker::TimerQueue queue(512);
+        assert(queue.tryReserveApplicationTimer(60));
+        assert(queue.reservedApplicationTimerCount() == 1);
+        assert(queue.reservedApplicationTimerBytes() == 60);
+        assert(!queue.tryReserveApplicationTimer(std::numeric_limits<std::uint64_t>::max()));
+        queue.releaseApplicationTimerReservation(60);
+        assert(queue.reservedApplicationTimerCount() == 0);
+        assert(queue.reservedApplicationTimerBytes() == 0);
+
+        assert(queue.tryReserveApplicationTimer(0));
+        assert(queue.reservedApplicationTimerCount() == 1);
+        queue.releaseApplicationTimerReservation(0);
+        assert(queue.reservedApplicationTimerCount() == 0);
+
+        auto message = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PingMessage{
+            .connection =
+                snf::worker::ConnectionRef{
+                    .id = snf::worker::ConnectionId{1},
+                    .generation = snf::worker::ConnectionGeneration{1},
+                    .owner = snf::worker::WorkerId{0},
+                },
+            .request_id = 7,
+            .payload = {std::byte{0x01}, std::byte{0x02}},
+        });
+        const auto charge = message.chargedBytes();
+        assert(queue.tryScheduleApplicationTimer(std::chrono::steady_clock::now() + 1h, snf::worker::ActivationRef{}, std::move(message)));
+        assert(queue.applicationTimerCount() == 1);
+        assert(queue.applicationTimerBytes() == charge);
+        assert(queue.cancelApplicationTimers() == 1);
+        assert(queue.applicationTimerCount() == 0);
+        assert(queue.applicationTimerBytes() == 0);
     }
 
     void test_effect_batch_validation_and_mutual_exclusion()
@@ -429,6 +669,7 @@ namespace
 
         // Shutdown cleanly completed
         assert(worker.metrics().actor.application_timers_scheduled >= 1);
+        assert(worker.metrics().actor.cancelled_application_timers >= 1);
     }
 
     void test_ping_request_sink_vertical_slice()
@@ -445,39 +686,64 @@ namespace
         snf::adapter::GameActorFactory factory;
         snf::adapter::GameRequestSink request_sink;
 
+        snf::worker::WorkerNetworkConfig network_config{};
+        network_config.table.capacity = 8;
+        network_config.poll_registration_capacity = 9;
+        network_config.max_accepts_per_poll = 8;
+        network_config.receive_chunk_bytes = 1024;
+
         snf::worker::Worker worker(
             snf::worker::WorkerId{0},
             1,
             snf::worker::WorkerBudgets::defaults(),
             snf::worker::WorkerInboxConfig{},
+            network_config,
+            request_sink,
             actor_config,
             factory
         );
         factory.setTimerAdmission(worker);
         request_sink.setWorker(worker);
 
-        const snf::worker::ConnectionRef conn{
-            .id = snf::worker::ConnectionId{1},
-            .generation = snf::worker::ConnectionGeneration{1},
-            .owner = snf::worker::WorkerId{0},
-        };
+        auto listener = snf::net::create_tcp_listener(0);
+        const std::uint16_t port = portOf(listener.getDescriptor());
+        worker.attachListener(std::move(listener));
 
-        snf::protocol::Frame ping_frame{
+        const snf::protocol::Frame ping_frame{
             .type = snf::protocol::MessageType::Ping,
             .request_id = 1234,
             .payload = {std::byte{0xDE}, std::byte{0xAD}},
         };
 
-        const auto post_result = request_sink.tryPost(conn, std::move(ping_frame));
-        assert(post_result == snf::worker::RequestPostResult::Accepted);
+        std::thread th(
+            [&]()
+            {
+                worker.run();
+            }
+        );
+        auto client = connectClient(port);
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(ping_frame));
 
-        std::thread th([&]() { worker.run(); });
-        std::this_thread::sleep_for(30ms);
+        const snf::protocol::Frame expected_pong{
+            .type = snf::protocol::MessageType::Pong,
+            .request_id = ping_frame.request_id,
+            .payload = ping_frame.payload,
+        };
+        const auto encoded_pong = receiveExact(client.getDescriptor(), snf::protocol::encode_frame(expected_pong).size());
+        snf::protocol::FrameDecoder decoder;
+        const auto decoded = decoder.append(encoded_pong);
+        assert(decoded.ok());
+        assert(decoded.frames.size() == 1);
+        assert(decoded.frames.front() == expected_pong);
+
         worker.requestStop();
         th.join();
 
-        // Player actor dispatched ping and produced pong response effect
+        // The request crossed the actual socket, actor, effect, and socket-write path.
+        assert(worker.metrics().network.received_frames == 1);
+        assert(worker.metrics().network.sent_frames == 1);
         assert(worker.metrics().actor.actor_turns >= 1);
+        assert(worker.metrics().actor.effect_send_failures == 0);
     }
 }
 
@@ -502,6 +768,12 @@ int main()
 
     test_room_adapter_critical_deadline_pre_admission_failure();
     std::cout << "  - test_room_adapter_critical_deadline_pre_admission_failure PASSED" << std::endl;
+
+    test_room_routes_remain_bounded_and_follow_result_audience();
+    std::cout << "  - test_room_routes_remain_bounded_and_follow_result_audience PASSED" << std::endl;
+
+    test_timer_queue_application_accounting();
+    std::cout << "  - test_timer_queue_application_accounting PASSED" << std::endl;
 
     test_effect_batch_validation_and_mutual_exclusion();
     std::cout << "  - test_effect_batch_validation_and_mutual_exclusion PASSED" << std::endl;

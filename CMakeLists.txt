@@ -88,6 +88,13 @@ target_include_directories(snf_core
 )
 snf_configure_target(snf_core)
 
+add_library(snf_game_protocol STATIC
+    src/adapter/protocol_encoder.cpp
+)
+target_include_directories(snf_game_protocol PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(snf_game_protocol PUBLIC snf_game snf_core)
+snf_configure_target(snf_game_protocol)
+
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(MySQL REQUIRED IMPORTED_TARGET mysqlclient)
@@ -110,7 +117,6 @@ target_link_libraries(snf_worker PUBLIC snf_core Threads::Threads)
 snf_configure_target(snf_worker)
 
 add_library(snf_worker_game_runtime STATIC
-    src/adapter/protocol_encoder.cpp
     src/adapter/to_effects.cpp
     src/adapter/player_actor_adapter.cpp
     src/adapter/zone_actor_adapter.cpp
@@ -119,7 +125,7 @@ add_library(snf_worker_game_runtime STATIC
     src/adapter/game_actor_factory.cpp
 )
 target_include_directories(snf_worker_game_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(snf_worker_game_runtime PUBLIC snf_worker snf_game snf_core)
+target_link_libraries(snf_worker_game_runtime PUBLIC snf_worker snf_game_protocol)
 snf_configure_target(snf_worker_game_runtime)
 
 add_library(snf_runtime STATIC
@@ -160,7 +166,7 @@ add_library(snf_server_runtime STATIC
     src/server/game_server.cpp
     src/server/tcp_server.cpp
 )
-target_link_libraries(snf_server_runtime PUBLIC snf_game snf_core snf_runtime)
+target_link_libraries(snf_server_runtime PUBLIC snf_game snf_core snf_game_protocol snf_runtime)
 snf_configure_target(snf_server_runtime)
 
 add_library(snf_mysql_player_repository STATIC

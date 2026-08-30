@@ -404,13 +404,22 @@ using Effect = std::variant<
     ScheduleTimerEffect,
     StopActorEffect>;
 
-struct EffectBatch {
-    SmallVector<Effect, 8> ordered;
+class EffectBatch {
+public:
+    static constexpr std::size_t MAX_EFFECTS = 64;
+    bool tryPush(Effect effect); // MAX_EFFECTS에서 명시적으로 reject
+
+private:
+    std::vector<Effect> ordered;
 };
 ```
 
 Effect를 종류별 vector로 나누지 않고 한 ordered list에 둔다. 이미 적용한 앞 effect는 뒤 effect 실패로
 rollback하지 않는다. 각 effect의 실패 의미는 concrete type 계약으로 고정한다.
+
+`Effect`, `EffectBatch`, `CompletedTurn`은 copy하지 않고 move-only chain으로 Worker까지 전달한다.
+`MAX_EFFECTS`는 컨테이너의 inline capacity가 아니라 명시적인 runtime hard cap이다. 현재 Room의 참가자
+hard cap 4명에서 계산한 domain upper bound는 16이며 `static_assert(16 <= 64)`로 연결한다.
 
 | Effect | 실패 의미 |
 | --- | --- |
@@ -419,6 +428,26 @@ rollback하지 않는다. 각 effect의 실패 의미는 concrete type 계약으
 | TellActor | bounded delivery. 실패는 metric과 diagnostic에 기록; 강한 보장은 별도 protocol로 모델링 |
 | ScheduleTimer | bounded insert 실패 시 runtime failure를 기록하고 기본적으로 남은 batch 중단 |
 | StopActor | safe point에서 idempotent Stopping 전환 |
+
+한 batch에는 `StopActorEffect`와 새로운 `ScheduleTimerEffect`가 함께 존재하지 않는다. 7단계 application
+timer는 현재 dispatch 중인 Actor 자신만 대상으로 하며 Worker가 현재 `ActivationRef`를 stamp한다.
+
+Room battle deadline처럼 domain mutation에 필수인 timer는 adapter가 deadline envelope을 먼저 만들고
+그 envelope의 logical charge로 `handle()` 전에 자리를 예약한다. 실패하면 `RuntimeOverloaded`를 반환하고
+domain handle을 호출하지 않는다. 성공 후 domain mutation이 발생했다면 reserved timer commit까지는
+recoverable failure 지점이 아니며 invariant 위반은 process fail-fast다. Reservation의 RAII 반환은 resource
+leak 방지이지 domain transaction rollback이 아니다.
+
+`TimerReservation`은 특정 Worker TimerQueue, entry 1개, 정확한 message charge와 생성 turn ID에 묶인
+move-only token이다. ActorSlot, mailbox, coroutine frame 또는 다음 event-loop iteration으로 넘겨 보관하지
+않는다. 정상 token의 reserved commit은 allocation/capacity 때문에 실패하지 않으며 queue, turn 또는 charge
+mismatch는 invariant violation이다. `toEffects()`는 외부 service 조회·새 예약·domain mutation을 하지 않고,
+이미 준비된 값과 reservation token만 소비하는 deterministic mapping이다.
+
+Application payload는 game runtime의 단일 `GameActorPayloadRegistry`에 모두 등록한다. Registry는 모든
+concrete payload의 non-zero tag uniqueness를 compile time에 검증하고, envelope extraction은 tag와 실제
+type identity를 함께 확인한다. `chargedBytes()`는 owned dynamic capacity를 포함하는 overflow-safe,
+conservative logical memory charge다.
 
 강한 일관성이 필요한 작업은 Actor aggregate state, DB transaction, idempotency key, request/ack 또는
 실제 요구가 있는 durable outbox로 해결한다. `EffectBatch` 자체는 transaction이 아니다.
@@ -538,6 +567,11 @@ sequence number나 expected version을 message payload에 넣는다.
 | Awaited command | 완료 전에는 다음 mailbox command를 실행하지 않음 | 다른 Actor와의 상대 완료 순서 |
 | Timer | deadline 이전 실행 금지 | 같은 deadline 사이의 total order |
 
+Application timer가 만료되면 TimerQueue entry를 먼저 제거하여 entry/byte accounting을 정확히 한 번
+반환한다. 그 뒤 ActorKey + incarnation을 검증하고 mailbox admission을 별도로 수행한다. 성공하면 mailbox가
+message와 자신의 count/byte charge를 소유하고, stale activation·Stopping·mailbox full이면 message를
+파괴한다. TimerQueue와 mailbox accounting은 같은 logical charge를 사용해도 서로 독립된 resource다.
+
 Stale 검증 key는 다음과 같다.
 
 | 이벤트 | 검증 key |
@@ -598,6 +632,11 @@ Graceful shutdown:
 8. hard deadline 뒤 남은 coroutine/resource 정리
 9. Worker thread join
 ```
+
+`QuiescingActors`에 들어가면 신규 application ingress를 막고 application timer entry를 실제로 제거·파괴한
+뒤 accounting을 반환한다. 그 다음 blocked Actor cancel과 runnable work drain을 수행한다. live application
+timer 또는 live `TimerReservation` 중 하나라도 0이 아니면 Worker는 Actor quiescence를 선언하지 않는다. Await
+timeout과 connection close deadline은 application timer cancellation 대상이 아니다.
 
 WorkerInbox와 poller는 completion producer가 종료될 때까지 살아 있어야 한다. Worker 하나의 invariant
 위반은 기본적으로 process fail-fast다. 부분 Worker 재시작은 v1.3에서 지원하지 않는다.

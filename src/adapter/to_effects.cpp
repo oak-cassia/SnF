@@ -6,10 +6,25 @@
 
 namespace snf::adapter
 {
-    snf::worker::EffectBatch toEffects(
-        const PlayerTurnContext& context,
-        const snf::server::PlayerResult& result
-    )
+    namespace
+    {
+        [[nodiscard]] std::optional<snf::worker::ConnectionRef> connectionFor(
+            const RoomTurnContext& context,
+            const snf::server::PlayerId player
+        ) noexcept
+        {
+            for (const auto& route : context.audience_routes)
+            {
+                if (route.player == player)
+                {
+                    return route.connection;
+                }
+            }
+            return std::nullopt;
+        }
+    }
+
+    snf::worker::EffectBatch toEffects(const PlayerTurnContext& context, const snf::server::PlayerResult& result)
     {
         snf::worker::EffectBatch batch;
 
@@ -53,11 +68,11 @@ namespace snf::adapter
     {
         snf::worker::EffectBatch batch;
 
-        if (context.connection.has_value())
+        if (context.connection.has_value() && context.reply_kind.has_value())
         {
             batch.push(snf::worker::SendFrameEffect{
                 .connection = *context.connection,
-                .frame = encodeZoneReply(result, context.request_id),
+                .frame = encodeZoneReply(*context.reply_kind, context.zone, result, context.request_id),
                 .critical = false,
             });
         }
@@ -97,26 +112,26 @@ namespace snf::adapter
             });
         }
 
-        if (context.connection.has_value())
+        if (context.connection.has_value() && context.reply_kind.has_value())
         {
             batch.push(snf::worker::SendFrameEffect{
                 .connection = *context.connection,
-                .frame = encodeRoomReply(result, context.request_id),
+                .frame = encodeRoomReply(*context.reply_kind, context.room, result, context.request_id),
                 .critical = false,
             });
         }
 
         if (result.digest.has_value())
         {
-            const auto digest_frame = encodeBattleDigest(*result.digest, 0);
-            if (digest_frame.payload.size() > snf::protocol::MAX_PAYLOAD_SIZE)
+            const auto digest_frame = encodeBattleDigest(result, snf::protocol::UNSOLICITED_REQUEST_ID);
+            if (!digest_frame.has_value())
             {
-                for (const auto& route : context.audience_routes)
+                for (const auto player : result.audience)
                 {
-                    if (route.connection.has_value())
+                    if (const auto connection = connectionFor(context, player))
                     {
                         batch.push(snf::worker::CloseConnectionEffect{
-                            .connection = *route.connection,
+                            .connection = *connection,
                             .reason = snf::worker::CloseReason::SlowConsumer,
                             .graceful = false,
                         });
@@ -125,13 +140,13 @@ namespace snf::adapter
             }
             else
             {
-                for (const auto& route : context.audience_routes)
+                for (const auto player : result.audience)
                 {
-                    if (route.connection.has_value())
+                    if (const auto connection = connectionFor(context, player))
                     {
                         batch.push(snf::worker::SendFrameEffect{
-                            .connection = *route.connection,
-                            .frame = digest_frame,
+                            .connection = *connection,
+                            .frame = *digest_frame,
                             .critical = false,
                         });
                     }
@@ -141,16 +156,33 @@ namespace snf::adapter
 
         if (result.outcome.has_value())
         {
-            const auto outcome_frame = encodeBattleOutcome(result, 0);
-            for (const auto& route : context.audience_routes)
+            if (*result.outcome == snf::server::BattleOutcome::Cleared)
             {
-                if (route.connection.has_value())
+                for (const auto& grant : result.grants)
                 {
-                    batch.push(snf::worker::SendFrameEffect{
-                        .connection = *route.connection,
-                        .frame = outcome_frame,
-                        .critical = false,
-                    });
+                    if (const auto connection = connectionFor(context, grant.player))
+                    {
+                        batch.push(snf::worker::SendFrameEffect{
+                            .connection = *connection,
+                            .frame = encodeBattleCleared(grant.experience, snf::protocol::UNSOLICITED_REQUEST_ID),
+                            .critical = false,
+                        });
+                    }
+                }
+            }
+            else
+            {
+                const auto outcome_frame = encodeBattleFailure(result, snf::protocol::UNSOLICITED_REQUEST_ID);
+                for (const auto player : result.audience)
+                {
+                    if (const auto connection = connectionFor(context, player))
+                    {
+                        batch.push(snf::worker::SendFrameEffect{
+                            .connection = *connection,
+                            .frame = outcome_frame,
+                            .critical = false,
+                        });
+                    }
                 }
             }
 
@@ -175,7 +207,7 @@ namespace snf::adapter
             batch.push(snf::worker::ScheduleTimerEffect{
                 .deadline = context.now + *result.tick_after,
                 .message = GameActorPayloadRegistry::create(RoomTickMessage{
-                    .room = snf::server::RoomId{},
+                    .room = context.room,
                     .tick = 1,
                 }),
                 .reservation = std::nullopt,

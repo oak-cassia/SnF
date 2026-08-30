@@ -16,11 +16,7 @@ namespace snf::adapter
             snf::server::RoomId room_id,
             snf::worker::TimerAdmission* timer_admission = nullptr,
             snf::server::RoomConfig config = {}
-        )
-            : _room(room_id, config)
-            , _timer_admission(timer_admission)
-        {
-        }
+        );
 
         [[nodiscard]] snf::server::Room& room() noexcept
         {

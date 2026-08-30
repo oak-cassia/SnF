@@ -10,7 +10,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
+#include <exception>
 #include <optional>
 #include <type_traits>
 #include <utility>
@@ -33,11 +33,34 @@ namespace snf::worker
         [[nodiscard]] bool operator==(const ConnectionCloseDeadline&) const noexcept = default;
     };
 
-    struct ApplicationTimer
+    class TimerQueue;
+    class Worker;
+
+    class ApplicationTimer final
     {
+    public:
+        ApplicationTimer(ApplicationTimer&&) noexcept = default;
+        ApplicationTimer& operator=(ApplicationTimer&&) noexcept = default;
+        ApplicationTimer(const ApplicationTimer&) = delete;
+        ApplicationTimer& operator=(const ApplicationTimer&) = delete;
+
+        [[nodiscard]] std::uint64_t chargedBytes() const noexcept
+        {
+            return message.chargedBytes();
+        }
+
+    private:
+        friend class TimerQueue;
+        friend class Worker;
+
+        ApplicationTimer(const ActivationRef target_ref, ActorEnvelope envelope) noexcept
+            : target(target_ref)
+            , message(std::move(envelope))
+        {
+        }
+
         ActivationRef target;
         ActorEnvelope message;
-        std::uint64_t charged_bytes{0};
     };
 
     using TimerPayload = std::variant<AwaitTimeout, ConnectionCloseDeadline, ApplicationTimer>;
@@ -69,8 +92,17 @@ namespace snf::worker
         }
     };
 
+    struct TimerEntryDeadlineGreater final
+    {
+        [[nodiscard]] bool operator()(const TimerEntry& left, const TimerEntry& right) const noexcept
+        {
+            return left > right;
+        }
+    };
+
     static_assert(std::is_nothrow_move_constructible_v<TimerEntry>);
     static_assert(std::is_nothrow_swappable_v<TimerEntry>);
+    static_assert(std::is_nothrow_invocable_r_v<bool, TimerEntryDeadlineGreater, const TimerEntry&, const TimerEntry&>);
 
     struct ExpireResult
     {
@@ -201,32 +233,33 @@ namespace snf::worker
 
         void setMaxApplicationTimerBytes(const std::uint64_t max_bytes) noexcept
         {
+            requireInvariant(_application_timer_bytes <= max_bytes && _reserved_application_timer_bytes <= max_bytes - _application_timer_bytes);
             _max_application_timer_bytes = max_bytes;
         }
 
         [[nodiscard]] bool trySchedule(const TimePoint deadline, TimerPayload payload)
         {
-            if (_heap.size() + _reserved_entries >= CAPACITY)
+            if (!hasEntryCapacity())
             {
                 return false;
             }
             if (std::holds_alternative<ApplicationTimer>(payload))
             {
-                const auto charge = std::get<ApplicationTimer>(payload).charged_bytes;
-                if (_application_timer_bytes + _reserved_application_timer_bytes + charge > _max_application_timer_bytes)
+                const auto charge = std::get<ApplicationTimer>(payload).chargedBytes();
+                if (!hasApplicationByteCapacity(charge))
                 {
                     return false;
                 }
                 _application_timer_bytes += charge;
             }
             _heap.push_back(Entry{deadline, std::move(payload)});
-            std::push_heap(_heap.begin(), _heap.end(), std::greater<Entry>{});
+            std::push_heap(_heap.begin(), _heap.end(), TimerEntryDeadlineGreater{});
             return true;
         }
 
         [[nodiscard]] bool tryReserve() noexcept
         {
-            if (_heap.size() + _reserved_entries >= CAPACITY)
+            if (!hasEntryCapacity())
             {
                 return false;
             }
@@ -236,42 +269,47 @@ namespace snf::worker
 
         void releaseReservation() noexcept
         {
-            assert(_reserved_entries > 0);
+            requireInvariant(_reserved_entries > 0);
             --_reserved_entries;
         }
 
         void commitReserved(const TimePoint deadline, TimerPayload payload) noexcept
         {
-            assert(_reserved_entries > 0);
+            requireInvariant(_reserved_entries > 0);
             --_reserved_entries;
             if (std::holds_alternative<ApplicationTimer>(payload))
             {
-                _application_timer_bytes += std::get<ApplicationTimer>(payload).charged_bytes;
+                const auto charge = std::get<ApplicationTimer>(payload).chargedBytes();
+                requireInvariant(hasCommittedApplicationByteCapacity(charge));
+                _application_timer_bytes += charge;
             }
             _heap.push_back(Entry{deadline, std::move(payload)});
-            std::push_heap(_heap.begin(), _heap.end(), std::greater<Entry>{});
+            std::push_heap(_heap.begin(), _heap.end(), TimerEntryDeadlineGreater{});
         }
 
         [[nodiscard]] bool tryReserveApplicationTimer(const std::uint64_t charged_bytes) noexcept
         {
-            if (_heap.size() + _reserved_entries >= CAPACITY)
+            if (!hasEntryCapacity())
             {
                 return false;
             }
-            if (_application_timer_bytes + _reserved_application_timer_bytes + charged_bytes > _max_application_timer_bytes)
+            if (!hasApplicationByteCapacity(charged_bytes))
             {
                 return false;
             }
             ++_reserved_entries;
+            ++_reserved_application_timer_entries;
             _reserved_application_timer_bytes += charged_bytes;
             return true;
         }
 
         void releaseApplicationTimerReservation(const std::uint64_t charged_bytes) noexcept
         {
-            assert(_reserved_entries > 0);
-            assert(_reserved_application_timer_bytes >= charged_bytes);
+            requireInvariant(_reserved_entries > 0);
+            requireInvariant(_reserved_application_timer_entries > 0);
+            requireInvariant(_reserved_application_timer_bytes >= charged_bytes);
             --_reserved_entries;
+            --_reserved_application_timer_entries;
             _reserved_application_timer_bytes -= charged_bytes;
         }
 
@@ -282,55 +320,59 @@ namespace snf::worker
             const std::uint64_t charged_bytes
         ) noexcept
         {
-            assert(_reserved_entries > 0);
-            assert(_reserved_application_timer_bytes >= charged_bytes);
+            requireInvariant(_reserved_entries > 0);
+            requireInvariant(_reserved_application_timer_entries > 0);
+            requireInvariant(_reserved_application_timer_bytes >= charged_bytes);
+            requireInvariant(message.chargedBytes() == charged_bytes);
+            requireInvariant(hasCommittedApplicationByteCapacity(charged_bytes));
             --_reserved_entries;
+            --_reserved_application_timer_entries;
             _reserved_application_timer_bytes -= charged_bytes;
             _application_timer_bytes += charged_bytes;
-            _heap.push_back(Entry{deadline, ApplicationTimer{target, std::move(message), charged_bytes}});
-            std::push_heap(_heap.begin(), _heap.end(), std::greater<Entry>{});
+            ApplicationTimer application_timer{target, std::move(message)};
+            _heap.push_back(Entry{deadline, TimerPayload{std::move(application_timer)}});
+            std::push_heap(_heap.begin(), _heap.end(), TimerEntryDeadlineGreater{});
         }
 
         [[nodiscard]] bool tryScheduleApplicationTimer(const TimePoint deadline, const ActivationRef target, ActorEnvelope message)
         {
             const std::uint64_t charge = message.chargedBytes();
-            if (_heap.size() + _reserved_entries >= CAPACITY)
+            if (!hasEntryCapacity())
             {
                 return false;
             }
-            if (_application_timer_bytes + _reserved_application_timer_bytes + charge > _max_application_timer_bytes)
+            if (!hasApplicationByteCapacity(charge))
             {
                 return false;
             }
             _application_timer_bytes += charge;
-            _heap.push_back(Entry{deadline, ApplicationTimer{target, std::move(message), charge}});
-            std::push_heap(_heap.begin(), _heap.end(), std::greater<Entry>{});
+            ApplicationTimer application_timer{target, std::move(message)};
+            _heap.push_back(Entry{deadline, TimerPayload{std::move(application_timer)}});
+            std::push_heap(_heap.begin(), _heap.end(), TimerEntryDeadlineGreater{});
             return true;
         }
 
         [[nodiscard]] std::size_t cancelApplicationTimers() noexcept
         {
-            std::size_t count = 0;
-            auto it = _heap.begin();
-            while (it != _heap.end())
-            {
-                if (std::holds_alternative<ApplicationTimer>(it->payload))
+            const std::size_t count = std::erase_if(
+                _heap,
+                [this](const Entry& entry) noexcept
                 {
-                    const auto charge = std::get<ApplicationTimer>(it->payload).charged_bytes;
-                    assert(_application_timer_bytes >= charge);
+                    if (!std::holds_alternative<ApplicationTimer>(entry.payload))
+                    {
+                        return false;
+                    }
+                    const auto charge = std::get<ApplicationTimer>(entry.payload).chargedBytes();
+                    requireInvariant(_application_timer_bytes >= charge);
                     _application_timer_bytes -= charge;
-                    ++count;
-                    it = _heap.erase(it);
+                    return true;
                 }
-                else
-                {
-                    ++it;
-                }
-            }
+            );
             if (count > 0)
             {
-                std::make_heap(_heap.begin(), _heap.end(), std::greater<Entry>{});
+                std::make_heap(_heap.begin(), _heap.end(), TimerEntryDeadlineGreater{});
             }
+            requireInvariant(applicationTimerCount() != 0 || _application_timer_bytes == 0);
             return count;
         }
 
@@ -355,6 +397,11 @@ namespace snf::worker
         [[nodiscard]] std::uint64_t reservedApplicationTimerBytes() const noexcept
         {
             return _reserved_application_timer_bytes;
+        }
+
+        [[nodiscard]] std::size_t reservedApplicationTimerCount() const noexcept
+        {
+            return _reserved_application_timer_entries;
         }
 
         [[nodiscard]] std::optional<TimePoint> nextDeadline() const noexcept
@@ -385,14 +432,14 @@ namespace snf::worker
                     break;
                 }
 
-                std::pop_heap(_heap.begin(), _heap.end(), std::greater<Entry>{});
+                std::pop_heap(_heap.begin(), _heap.end(), TimerEntryDeadlineGreater{});
                 Entry entry = std::move(_heap.back());
                 _heap.pop_back();
 
                 if (std::holds_alternative<ApplicationTimer>(entry.payload))
                 {
-                    const auto charge = std::get<ApplicationTimer>(entry.payload).charged_bytes;
-                    assert(_application_timer_bytes >= charge);
+                    const auto charge = std::get<ApplicationTimer>(entry.payload).chargedBytes();
+                    requireInvariant(_application_timer_bytes >= charge);
                     _application_timer_bytes -= charge;
                 }
 
@@ -423,8 +470,42 @@ namespace snf::worker
         }
 
     private:
+        [[nodiscard]] bool hasEntryCapacity() const noexcept
+        {
+            return _reserved_entries < CAPACITY && _heap.size() < CAPACITY - _reserved_entries;
+        }
+
+        [[nodiscard]] bool hasApplicationByteCapacity(const std::uint64_t charge) const noexcept
+        {
+            if (_application_timer_bytes > _max_application_timer_bytes)
+            {
+                return false;
+            }
+            const auto after_committed = _max_application_timer_bytes - _application_timer_bytes;
+            if (_reserved_application_timer_bytes > after_committed)
+            {
+                return false;
+            }
+            return charge <= after_committed - _reserved_application_timer_bytes;
+        }
+
+        [[nodiscard]] bool hasCommittedApplicationByteCapacity(const std::uint64_t charge) const noexcept
+        {
+            return _application_timer_bytes <= _max_application_timer_bytes && charge <= _max_application_timer_bytes - _application_timer_bytes;
+        }
+
+        static void requireInvariant(const bool condition) noexcept
+        {
+            if (!condition)
+            {
+                assert(false && "TimerQueue invariant violated");
+                std::terminate();
+            }
+        }
+
         std::vector<Entry> _heap;
         std::size_t _reserved_entries{0};
+        std::size_t _reserved_application_timer_entries{0};
         std::uint64_t _max_application_timer_bytes{64 * 1024 * 1024};
         std::uint64_t _application_timer_bytes{0};
         std::uint64_t _reserved_application_timer_bytes{0};
