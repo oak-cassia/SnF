@@ -164,9 +164,13 @@ Native DB completion은 같은 Worker의 poll phase에서 발생하므로 inbox�
 `Worker::completeDb()`로 들어온다. Blocking adapter job은 submit 시 completion slot까지 예약해
 accepted completion이 queue full로 유실되지 않게 한다.
 
-현재 connection vertical slice에서 실제 concrete event는 `RemoteConnectionSend`와
-`RemoteConnectionClose`이며, 두 event 모두 full `ConnectionRef`를 운반한다. 대상 Worker는 inbox에서
-event를 한 번 소비한 뒤 generation을 검증하고 owner-local `ConnectionSlot`에 적용한다.
+6단계의 armed shutdown barrier에서는 cross-worker event producer를 같은 barrier에 참가하는 Worker
+thread로 제한한다. foreign-thread producer를 실제로 추가할 때는 producer participation counter 또는
+별도 in-flight publication protocol을 함께 도입해야 한다.
+
+현재 concrete event는 `RemoteActorMessage`, `RemoteConnectionSend`, `RemoteConnectionClose`다.
+connection event는 full `ConnectionRef`를 운반하며 대상 Worker가 generation을 검증한 뒤 owner-local
+`ConnectionSlot`에 적용한다. Actor event는 target `ActorKey`를 재검증한 뒤 local mailbox에 admission한다.
 
 ```cpp
 struct ActivationLoad {
@@ -597,6 +601,13 @@ Graceful shutdown:
 WorkerInbox와 poller는 completion producer가 종료될 때까지 살아 있어야 한다. Worker 하나의 invariant
 위반은 기본적으로 process fail-fast다. 부분 Worker 재시작은 v1.3에서 지원하지 않는다.
 
+6단계에서는 cross-worker Actor가 처음 생기므로 10단계의 shutdown 작업 중 최소 loss-prevention만
+앞당긴다. WorkerGroup stop은 32-bit participant mask, 30-bit publication epoch, armed/aborted flag를
+단일 64-bit atomic에 저장한다. 성공한 remote enqueue는 target bit를 clear하고 target이 이미 active여도
+epoch를 증가시킨다. Worker는 empty scan 전에 읽은 epoch가 그대로일 때만 quiescence를 commit한다.
+shutdown 한 번에 30-bit epoch가 소진되면 wrap하지 않고 abort하여 forced cleanup으로 전환한다.
+watchdog, 장시간 shutdown 부하와 운영 품질 검증은 10단계의 책임으로 남긴다.
+
 ## 14. 구현 전환 순서
 
 | 단계 | 산출물 | 완료 기준 |
@@ -606,7 +617,7 @@ WorkerInbox와 poller는 completion producer가 종료될 때까지 살아 있�
 | 3 | ConnectionTable, decode, direct write buffer | protocol과 slow-consumer test |
 | 4 | ActorTable, mailbox, ReadyActorQueue, bounded activation | single-worker deterministic test |
 | 5 | ActivationLoad와 SuspendedDbCommand | Loading/Suspended completion test |
-| 6 | concrete WorkerEvent와 local/remote tell/send | MPSC stress와 reject path |
+| 6 | concrete WorkerEvent와 local/remote tell/send | source별 SPSC stress, reject path와 최소 group quiescence |
 | 7 | `toEffects` overload와 ordered EffectBatch | effect order와 failure test |
 | 8 | Worker-local DbClient와 `completeDb` | driver conformance와 stale test |
 | 9 | 선택 blocking/CPU adapter | saturation과 cancel test |

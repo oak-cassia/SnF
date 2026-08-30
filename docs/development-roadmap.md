@@ -101,8 +101,9 @@
 - [x] 최종 public `Worker::tell()`을 추가하고 `WrongOwner` 분기를 remote delivery로 전환한다.
 - [x] remote actor message, connection send/close와 실제 필요한 application completion을 concrete
   `WorkerEvent`로 정의한다.
-- [x] MPSC queue를 count/byte bounded로 만들고 enqueue 실패를 caller에게 반환한다.
-- [x] WorkerGroup producer quiescence와 shutdown barrier를 구현한다.
+- [x] 논리적 multi-producer WorkerInbox를 source별 count/byte-bounded SPSC lane으로 구성하고 enqueue 실패를 caller에게 반환한다.
+- [x] cross-worker Actor publication 손실을 막는 최소 WorkerGroup quiescence barrier를 구현한다. watchdog, 장시간 shutdown
+  부하와 운영 품질 게이트는 10단계에서 마무리한다.
 
 종료 조건: 다른 Worker가 owner object pointer를 보관하거나 queue 자리를 기다리지 않는다.
 

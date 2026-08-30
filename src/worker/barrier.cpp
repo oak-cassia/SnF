@@ -1,13 +1,17 @@
 #include "snf/worker/barrier.hpp"
 
 #include <cassert>
+#include <stdexcept>
 
 namespace snf::worker
 {
-    WorkerQuiescenceBarrier::WorkerQuiescenceBarrier(const std::uint16_t worker_count) noexcept
+    WorkerQuiescenceBarrier::WorkerQuiescenceBarrier(const std::uint16_t worker_count)
         : _worker_count(worker_count)
     {
-        assert(worker_count > 0 && worker_count <= MAX_WORKERS);
+        if (worker_count == 0 || worker_count > MAX_WORKERS)
+        {
+            throw std::invalid_argument{"WorkerQuiescenceBarrier worker count must be between 1 and 32"};
+        }
         _full_mask = (worker_count == 32) ? 0xFFFFFFFFU : ((1U << worker_count) - 1U);
         _state.store(0, std::memory_order_relaxed);
     }

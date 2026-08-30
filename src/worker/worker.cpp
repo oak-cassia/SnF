@@ -341,6 +341,7 @@ namespace snf::worker
 
         if (owner.value >= _remote_ports.size() || !_remote_ports[owner.value].isBound())
         {
+            ++_metrics.actor.remote_tell_rejections;
             return DeliveryResult::Closed;
         }
 
@@ -375,6 +376,7 @@ namespace snf::worker
             ++_metrics.actor.remote_tell_rejections;
             return DeliveryResult::RemoteInboxFull;
         }
+        ++_metrics.actor.remote_tell_rejections;
         return DeliveryResult::Closed;
     }
 
@@ -675,7 +677,7 @@ namespace snf::worker
                 continue;
             }
 
-            if (slot->isOpen() && event.readable && !slot->readQueued() && !enqueueRead(*slot))
+            if (!_network_stopping && slot->isOpen() && event.readable && !slot->readQueued() && !enqueueRead(*slot))
             {
                 forceClose(handle, CloseReason::Overload);
             }
@@ -689,7 +691,7 @@ namespace snf::worker
 
     void Worker::processReadQueue(const IoBudget& budget, const TimePoint phase_started_at)
     {
-        if (!networkEnabled())
+        if (!networkEnabled() || _network_stopping)
         {
             return;
         }

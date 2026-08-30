@@ -21,7 +21,7 @@ namespace snf::worker
             std::uint32_t epoch{0}; // 30-bit stored epoch
         };
 
-        explicit WorkerQuiescenceBarrier(std::uint16_t worker_count = MAX_WORKERS) noexcept;
+        explicit WorkerQuiescenceBarrier(std::uint16_t worker_count = MAX_WORKERS);
 
         void arm() noexcept;
         [[nodiscard]] bool armed() const noexcept;

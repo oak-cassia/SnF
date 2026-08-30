@@ -8,9 +8,11 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <sys/socket.h>
@@ -83,9 +85,56 @@ namespace snf::worker
             worker.drainInbox(budget);
         }
 
+        static PollEvent installReadableConnection(Worker& worker, snf::net::UniqueFileDescriptor socket)
+        {
+            const int descriptor = socket.getDescriptor();
+            auto connection = worker._connections->tryReserve(std::move(socket), worker._id);
+            assert(connection.has_value());
+            const ConnectionHandle handle = connection->handle();
+
+            auto registration = worker._registrations->tryReserve(descriptor, PollTargetKind::ClientConnection, handle);
+            assert(registration.has_value());
+            const PollToken token = registration->token();
+            const PollRegistrationHandle registration_handle = registration->handle();
+
+            registration->commit();
+            connection->commit();
+            worker._connection_registrations[handle.id.value] = registration_handle;
+
+            return PollEvent{.token = token, .readable = true};
+        }
+
+        static void beginShutdownPhaseA(Worker& worker)
+        {
+            worker.beginShutdownPhaseA();
+        }
+
+        static void processPollEvents(Worker& worker, const std::span<const PollEvent> events, const IoBudget& budget)
+        {
+            worker.processPollEvents(events, budget);
+        }
+
+        static bool readWorkQueueEmpty(const Worker& worker)
+        {
+            return worker._read_work_queue == nullptr || worker._read_work_queue->empty();
+        }
+
+        static void closeInbox(Worker& worker)
+        {
+            worker._inbox.close();
+        }
+
         static void removeActor(Worker& worker, const ActorHandle handle, const ActorRemovalReason reason)
         {
             worker.removeActor(handle, reason);
+        }
+    };
+
+    struct WorkerGroupTestAccess
+    {
+        static Worker& worker(WorkerGroup& group, const std::size_t index)
+        {
+            return *group._workers[index];
         }
     };
 }
@@ -125,6 +174,35 @@ namespace
     {
         return ActorEnvelope::fromFrame(makeFrame(payload_size, type, req_id));
     }
+
+    class CountingRequestSink final : public RequestSink
+    {
+    public:
+        [[nodiscard]] RequestPostResult tryPost(ConnectionRef, Frame&&) override
+        {
+            ++posts;
+            return RequestPostResult::Accepted;
+        }
+
+        std::atomic<std::size_t> posts{0};
+    };
+
+    struct ShutdownActorGate
+    {
+        std::mutex mutex;
+        std::condition_variable changed;
+        bool source_dispatch_started{false};
+        bool release_source{false};
+        std::atomic<std::size_t> target_turns{0};
+    };
+
+    struct SuspensionObservation
+    {
+        std::mutex mutex;
+        std::condition_variable changed;
+        std::atomic<std::size_t> suspended{0};
+        std::atomic<std::size_t> cancelled{0};
+    };
 
     class FunctionalActor final : public ActorInstance
     {
@@ -3457,14 +3535,81 @@ namespace
         }
 
         assert(w0.tell(k1, makeEnvelope(16)) == DeliveryResult::Closed);
+        assert(w0.metrics().actor.remote_tell_rejections == 1);
+
+        FunctionalActorFactory factory1([](ActorKey) -> ActorConstructionResult { return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(nullptr)); });
+        Worker w1(WorkerId{1}, 2, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory1);
+        w0.bindRemoteTarget(WorkerId{1}, w1.bindInboxSource(WorkerId{0}));
+        WorkerActorTestAccess::closeInbox(w1);
+        assert(w0.tell(k1, makeEnvelope(16)) == DeliveryResult::Closed);
+        assert(w0.metrics().actor.remote_tell_rejections == 2);
 
         w0.requestStop();
         assert(w0.tell(k0, makeEnvelope(16)) == DeliveryResult::Closed);
         assert(w0.tell(k1, makeEnvelope(16)) == DeliveryResult::Closed);
     }
 
+    void test_shutdown_phase_a_rejects_stale_readable_events()
+    {
+        CountingRequestSink sink;
+        Worker worker(
+            WorkerId{0},
+            1,
+            WorkerBudgets::defaults(),
+            WorkerInboxConfig{},
+            WorkerNetworkConfig{},
+            sink
+        );
+
+        auto sockets = makeSocketPair();
+        const PollEvent stale_readable = WorkerActorTestAccess::installReadableConnection(worker, std::move(sockets.left));
+        const auto encoded = snf::protocol::encode_frame(makeFrame(16));
+        const auto sent = ::send(sockets.right.getDescriptor(), encoded.data(), encoded.size(), 0);
+        assert(sent == static_cast<ssize_t>(encoded.size()));
+
+        WorkerActorTestAccess::beginShutdownPhaseA(worker);
+        WorkerActorTestAccess::processPollEvents(
+            worker,
+            std::span<const PollEvent>{&stale_readable, 1},
+            WorkerBudgets::defaults().poll
+        );
+
+        assert(sink.posts.load() == 0);
+        assert(WorkerActorTestAccess::readWorkQueueEmpty(worker));
+    }
+
     void test_barrier_unit_contracts()
     {
+        bool zero_rejected = false;
+        try
+        {
+            WorkerQuiescenceBarrier invalid{0};
+            static_cast<void>(invalid);
+        }
+        catch (const std::invalid_argument&)
+        {
+            zero_rejected = true;
+        }
+        assert(zero_rejected);
+
+        bool over_limit_rejected = false;
+        try
+        {
+            WorkerQuiescenceBarrier invalid{33};
+            static_cast<void>(invalid);
+        }
+        catch (const std::invalid_argument&)
+        {
+            over_limit_rejected = true;
+        }
+        assert(over_limit_rejected);
+
+        WorkerGroupConfig invalid_group_config;
+        invalid_group_config.worker_count = 33;
+        invalid_group_config.max_workers = 33;
+        invalid_group_config.inbox.max_workers = 33;
+        assert(!isValid(invalid_group_config));
+
         WorkerQuiescenceBarrier barrier(2);
         assert(!barrier.armed());
         assert(!barrier.snapshot().armed);
@@ -3546,8 +3691,7 @@ namespace
             .actor = actor_config,
         };
 
-        std::atomic<int> turns_w0{0};
-        std::atomic<int> turns_w1{0};
+        auto gate = std::make_shared<ShutdownActorGate>();
 
         ActorKey k0{.kind = ActorKind::Player, .entity = 1};
         while (ownerOf(k0, 2, actor_config.placement_seed) != WorkerId{0})
@@ -3561,18 +3705,32 @@ namespace
             ++k1.entity;
         }
 
-        auto factory_factory = [&turns_w0, &turns_w1](const WorkerId id) -> std::unique_ptr<ActorFactory>
+        auto factory_factory = [gate, k1](const WorkerId id) -> std::unique_ptr<ActorFactory>
         {
             if (id == WorkerId{0})
             {
                 return std::make_unique<FunctionalActorFactory>(
-                    [&turns_w0](ActorKey) -> ActorConstructionResult
+                    [gate, k1](ActorKey) -> ActorConstructionResult
                     {
                         auto actor = std::make_unique<FunctionalActor>(
-                            [&turns_w0](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
+                            [gate, k1](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
                             {
-                                ++turns_w0;
-                                return CompletedTurn{.effects = EffectBatch{}};
+                                {
+                                    std::unique_lock lock{gate->mutex};
+                                    gate->source_dispatch_started = true;
+                                    gate->changed.notify_all();
+                                    gate->changed.wait(
+                                        lock,
+                                        [gate]
+                                        {
+                                            return gate->release_source;
+                                        }
+                                    );
+                                }
+
+                                EffectBatch effects;
+                                effects.push(TellActorEffect{.target = k1, .message = makeEnvelope(32)});
+                                return CompletedTurn{.effects = std::move(effects)};
                             }
                         );
                         return ActorConstructionResult::ready(std::move(actor));
@@ -3580,12 +3738,13 @@ namespace
                 );
             }
             return std::make_unique<FunctionalActorFactory>(
-                [&turns_w1](ActorKey) -> ActorConstructionResult
+                [gate](ActorKey) -> ActorConstructionResult
                 {
                     auto actor = std::make_unique<FunctionalActor>(
-                        [&turns_w1](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
+                        [gate](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
                         {
-                            ++turns_w1;
+                            gate->target_turns.fetch_add(1, std::memory_order_release);
+                            gate->changed.notify_all();
                             return CompletedTurn{.effects = EffectBatch{}};
                         }
                     );
@@ -3595,12 +3754,31 @@ namespace
         };
 
         WorkerGroup group(group_config, {}, factory_factory);
+        Worker& source = WorkerGroupTestAccess::worker(group, 0);
+        Worker& target = WorkerGroupTestAccess::worker(group, 1);
+        assert(source.tell(k0, makeEnvelope(16)) == DeliveryResult::Accepted);
+        assert(target.tell(k1, makeEnvelope(16)) == DeliveryResult::Accepted);
+
         group.start();
 
-        // Let the threads run
-        std::this_thread::sleep_for(20ms);
+        {
+            std::unique_lock lock{gate->mutex};
+            assert(gate->changed.wait_for(
+                lock,
+                2s,
+                [gate]
+                {
+                    return gate->source_dispatch_started && gate->target_turns.load(std::memory_order_acquire) == 1;
+                }
+            ));
+        }
 
         group.requestStop();
+        {
+            std::lock_guard lock{gate->mutex};
+            gate->release_source = true;
+        }
+        gate->changed.notify_all();
         group.join();
 
         const auto& w0 = group.worker(0);
@@ -3610,8 +3788,14 @@ namespace
         const std::uint64_t total_received = w0.metrics().actor.remote_tells_received + w1.metrics().actor.remote_tells_received;
         const std::uint64_t total_delivered = w0.metrics().actor.remote_tells_delivered + w1.metrics().actor.remote_tells_delivered;
 
-        assert(total_sent == total_received);
+        assert(total_sent == 1);
+        assert(total_received == total_sent);
         assert(total_delivered == total_received);
+        assert(gate->target_turns.load(std::memory_order_acquire) == 2);
+        assert(w0.metrics().actor.remote_tell_delivery_failures == 0);
+        assert(w1.metrics().actor.remote_tell_delivery_failures == 0);
+        assert(w0.metrics().shutdown_barrier_timeouts == 0);
+        assert(w1.metrics().shutdown_barrier_timeouts == 0);
     }
 
     void test_worker_group_quiescence_with_suspended_actors_logical_cancel()
@@ -3639,23 +3823,36 @@ namespace
             .actor = actor_config,
         };
 
-        std::atomic<int> suspended_count{0};
-        std::atomic<int> cancelled_count{0};
+        auto observation = std::make_shared<SuspensionObservation>();
 
-        auto factory_factory = [&suspended_count, &cancelled_count](WorkerId) -> std::unique_ptr<ActorFactory>
+        ActorKey k0{.kind = ActorKind::Player, .entity = 1};
+        while (ownerOf(k0, 2, actor_config.placement_seed) != WorkerId{0})
+        {
+            ++k0.entity;
+        }
+
+        ActorKey k1{.kind = ActorKind::Player, .entity = 1};
+        while (ownerOf(k1, 2, actor_config.placement_seed) != WorkerId{1})
+        {
+            ++k1.entity;
+        }
+
+        auto factory_factory = [observation](WorkerId) -> std::unique_ptr<ActorFactory>
         {
             return std::make_unique<FunctionalActorFactory>(
-                [&suspended_count, &cancelled_count](ActorKey) -> ActorConstructionResult
+                [observation](ActorKey) -> ActorConstructionResult
                 {
                     auto actor = std::make_unique<SuspendingActor>(
-                        [&suspended_count, &cancelled_count]() -> ActorTask
+                        [observation]() -> ActorTask
                         {
-                            ++suspended_count;
+                            observation->suspended.fetch_add(1, std::memory_order_release);
+                            observation->changed.notify_all();
                             SyntheticAwait awaiter;
                             auto outcome = co_await awaiter;
                             if (outcome == SyntheticAwaitOutcome::Cancelled)
                             {
-                                ++cancelled_count;
+                                observation->cancelled.fetch_add(1, std::memory_order_release);
+                                observation->changed.notify_all();
                             }
                             co_return CompletedTurn{.effects = EffectBatch{}};
                         }
@@ -3666,15 +3863,29 @@ namespace
         };
 
         WorkerGroup group(group_config, {}, factory_factory);
+        assert(WorkerGroupTestAccess::worker(group, 0).tell(k0, makeEnvelope(16)) == DeliveryResult::Accepted);
+        assert(WorkerGroupTestAccess::worker(group, 1).tell(k1, makeEnvelope(16)) == DeliveryResult::Accepted);
         group.start();
 
-        std::this_thread::sleep_for(20ms);
+        {
+            std::unique_lock lock{observation->mutex};
+            assert(observation->changed.wait_for(
+                lock,
+                2s,
+                [observation]
+                {
+                    return observation->suspended.load(std::memory_order_acquire) == 2;
+                }
+            ));
+        }
 
         group.requestStop();
         group.join();
 
         const auto& w0 = group.worker(0);
         const auto& w1 = group.worker(1);
+        assert(observation->suspended.load(std::memory_order_acquire) == 2);
+        assert(observation->cancelled.load(std::memory_order_acquire) == 2);
         assert(w0.metrics().shutdown_barrier_timeouts == 0);
         assert(w1.metrics().shutdown_barrier_timeouts == 0);
     }
@@ -3758,6 +3969,7 @@ void run_worker_actor_tests()
     test_tell_closed_when_stopping_or_port_unbound();
 
     // 6B Tests
+    test_shutdown_phase_a_rejects_stale_readable_events();
     test_barrier_unit_contracts();
     test_barrier_note_published_increments_epoch_even_when_already_active();
     test_worker_group_cross_worker_tell_exact_accounting_and_quiescence();

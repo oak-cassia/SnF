@@ -14,6 +14,8 @@
 
 namespace snf::worker
 {
+    struct WorkerGroupTestAccess;
+
     class WorkerGroup final
     {
     public:
@@ -46,6 +48,8 @@ namespace snf::worker
         [[nodiscard]] bool isRunning() const noexcept;
 
     private:
+        friend struct WorkerGroupTestAccess;
+
         void workerMain(std::size_t index) noexcept;
         void stopAndJoinStartedThreads() noexcept;
 
