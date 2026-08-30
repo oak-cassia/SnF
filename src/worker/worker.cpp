@@ -1322,9 +1322,11 @@ namespace snf::worker
             return DeliveryResult::MailboxFull;
         }
 
+        // The await timeout slot is part of admitting an activation, so exhausting it rejects the
+        // activation rather than reporting a full actor table.
         if (!_timers.tryReserve())
         {
-            return DeliveryResult::ActorTableFull;
+            return DeliveryResult::ActivationLimit;
         }
 
         auto reservation = _actors->tryReserve(key);
@@ -1350,8 +1352,17 @@ namespace snf::worker
         });
 
         // Confirm the aggregate accounting only once the enqueue has succeeded. A throwing push
-        // would otherwise leave the counters inflated while the Reservation rolls the slot back.
-        slot.mailbox().push(std::move(first_message));
+        // would otherwise leave the counters inflated while the Reservation rolls the slot back,
+        // and would strand the timer reservation for the lifetime of the Worker.
+        try
+        {
+            slot.mailbox().push(std::move(first_message));
+        }
+        catch (...)
+        {
+            _timers.releaseReservation();
+            throw;
+        }
         _total_mailbox_messages += 1;
         _total_mailbox_bytes += charge;
 
@@ -1707,7 +1718,16 @@ namespace snf::worker
                 }
                 else if (std::holds_alternative<ActivationLoad>(*slot->blocked()))
                 {
-                    completeSyntheticActivation(key, SyntheticActivationOutcome::TimedOut);
+                    // Screen the identity here so a stale timer is counted against the timer
+                    // source instead of completeSyntheticActivation()'s completion counter.
+                    if (acceptsCompletion(key, std::get<ActivationLoad>(*slot->blocked()).key))
+                    {
+                        completeSyntheticActivation(key, SyntheticActivationOutcome::TimedOut);
+                    }
+                    else
+                    {
+                        ++_metrics.actor.stale_await_timeouts;
+                    }
                 }
                 else
                 {
@@ -2002,8 +2022,13 @@ namespace snf::worker
             flushWrites(_budgets.writes);
 
             first_iteration = false;
+
+            // Mailbox depth is deliberately not part of this test. Once the ready queue is empty
+            // and no inbox or timer work is pending, every remaining message belongs to a blocked
+            // actor, and a blocked actor's mailbox cannot drain until the actor unblocks. Waiting
+            // on it would skip the logical cancel in exactly the case the cancel exists for.
             const bool runnable_work_empty =
-                (_ready_queue == nullptr || _ready_queue->empty()) && (_total_mailbox_messages == 0) && !_inbox_has_more && !_timers_have_due;
+                (_ready_queue == nullptr || _ready_queue->empty()) && !_inbox_has_more && !_timers_have_due;
 
             if (runnable_work_empty)
             {

@@ -89,7 +89,8 @@
 ### 5단계 — BlockedTask와 async activation
 
 - [x] `Loading`, `Suspended` 상태와 nullable ActorSlot의 실제 비동기 activation을 구현한다.
-- [x] `ActivationLoad`와 `SuspendedDbCommand`를 `ActorSlot.blocked`에 저장한다.
+- [x] `ActivationLoad`와 suspended command를 `ActorSlot.blocked`에 저장한다. 지금 저장하는 것은 synthetic
+  scaffold이며 concrete `SuspendedDbCommand`는 8단계에서 이를 대체한다.
 - [x] `SuspendedTurn`, continuation, concurrent Loading cap을 추가한다.
 - [x] timeout 후 late completion과 completion 후 stale timeout을 모두 no-op으로 만든다.
 

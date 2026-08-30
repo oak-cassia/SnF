@@ -2967,6 +2967,72 @@ namespace
         assert(worker.actorCount() == 0);
     }
 
+    void test_shutdown_logical_cancel_reaches_a_suspended_actor_with_queued_mail()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 300ms,
+            .await_timeout = 2000ms,
+            .max_concurrent_loading = 10,
+        };
+
+        std::atomic<int> step{0};
+        std::atomic<bool> cancelled_seen{false};
+
+        FunctionalActorFactory factory(
+            [&step, &cancelled_seen](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<SuspendingActor>(
+                    [&step, &cancelled_seen]() -> ActorTask
+                    {
+                        step.store(1);
+                        SyntheticAwait awaiter;
+                        auto outcome = co_await awaiter;
+                        if (outcome == SyntheticAwaitOutcome::Cancelled)
+                        {
+                            cancelled_seen.store(true);
+                        }
+                        step.store(2);
+                        EffectBatch effects;
+                        effects.push(StopActorEffect{});
+                        co_return CompletedTurn{
+                            .effects = std::move(effects)
+                        };
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(step.load() == 1);
+        assert(WorkerActorTestAccess::slot(worker, key)->state() == ActorState::Suspended);
+
+        // A blocked actor's mailbox is not runnable work: it cannot drain until the actor unblocks,
+        // so quiescence must not wait on it before cancelling.
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        assert(worker.totalMailboxMessages() == 1);
+
+        worker.requestStop();
+        worker.run();
+
+        assert(cancelled_seen.load());
+        assert(step.load() == 2);
+        assert(worker.metrics().actor.cancelled_blocked_actors == 1);
+        assert(worker.metrics().actor.forced_blocked_destructions == 0);
+        assert(worker.actorCount() == 0);
+    }
+
     void test_shutdown_new_suspension_immediately_cancelled_no_long_term_blocked()
     {
         WorkerActorConfig config{
@@ -3135,6 +3201,7 @@ void run_worker_actor_tests()
     test_operation_N_timeout_then_operation_N_plus_1_completion_race();
     test_timer_reservation_failure_command_resumes_rejected_activation_fails_fast();
     test_shutdown_logical_cancel_unwinds_coroutine_and_applies_effects();
+    test_shutdown_logical_cancel_reaches_a_suspended_actor_with_queued_mail();
     test_shutdown_new_suspension_immediately_cancelled_no_long_term_blocked();
     test_shutdown_forced_destruction_on_deadline_expiry_metrics();
 }
