@@ -100,6 +100,7 @@ add_library(snf_worker STATIC
     src/worker/connection_table.cpp
     src/worker/connection_work_queue.cpp
     src/worker/poll_registration.cpp
+    src/worker/actor_table.cpp
     src/worker/worker_group.cpp
     src/worker/worker.cpp
 )
@@ -236,6 +237,7 @@ if(BUILD_TESTING)
         tests/worker_timer_queue_test.cpp
         tests/worker_loop_test.cpp
         tests/worker_connection_test.cpp
+        tests/worker_actor_test.cpp
     )
     target_link_libraries(snf_worker_tests PRIVATE snf_worker)
     snf_configure_target(snf_worker_tests)
