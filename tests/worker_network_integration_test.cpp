@@ -1121,15 +1121,40 @@ namespace
         return batch;
     }
 
+    struct IntegrationPingPayload
+    {
+        ConnectionRef connection;
+        Frame frame;
+    };
+}
+
+namespace snf::worker
+{
+    template <>
+    struct ActorPayloadTraits<IntegrationPingPayload>
+    {
+        static constexpr std::uint32_t TAG = 1;
+        static std::uint64_t calculateCharge(const IntegrationPingPayload& p) noexcept
+        {
+            return static_cast<std::uint64_t>(p.frame.payload.size()) +
+                   snf::protocol::FRAME_LENGTH_FIELD_SIZE + snf::protocol::MIN_BODY_SIZE;
+        }
+    };
+}
+
+namespace
+{
+    using IntegrationPayloadRegistry = snf::worker::ActorPayloadRegistry<IntegrationPingPayload>;
+
     class SyntheticPlayerActor final : public ActorInstance
     {
     public:
         TurnResult dispatch(ActorEnvelope&& envelope, const ActorTurnContext&) override
         {
-            assert(envelope.connection.has_value());
+            auto payload = envelope.take<IntegrationPingPayload>();
             const SyntheticPlayerCommand command{
-                .connection = *envelope.connection,
-                .request_id = envelope.frame.request_id,
+                .connection = payload.connection,
+                .request_id = payload.frame.request_id,
             };
 
             const SyntheticPlayerResult domain_result{
@@ -1155,8 +1180,8 @@ namespace
         {
             assert(_worker != nullptr);
             const ActorKey key{.kind = ActorKind::Player, .entity = 1};
-            const DeliveryResult delivery =
-                _worker->tryDeliverLocal(key, ActorEnvelope::fromFrame(connection, std::move(frame)));
+            auto envelope = IntegrationPayloadRegistry::create(IntegrationPingPayload{connection, std::move(frame)});
+            const DeliveryResult delivery = _worker->tryDeliverLocal(key, std::move(envelope));
             return delivery == DeliveryResult::Accepted ? RequestPostResult::Accepted : RequestPostResult::Rejected;
         }
 
@@ -1193,8 +1218,8 @@ namespace
         TurnResult dispatch(ActorEnvelope&& envelope, const ActorTurnContext&) override
         {
             std::unique_lock lock{_state->mutex};
-            assert(envelope.connection.has_value());
-            _state->connection = envelope.connection;
+            auto payload = envelope.take<IntegrationPingPayload>();
+            _state->connection = payload.connection;
             _state->dispatch_started = true;
             _state->changed.notify_all();
             _state->changed.wait(

@@ -170,9 +170,49 @@ namespace
         };
     }
 
+    struct TestPingPayload
+    {
+        std::optional<ConnectionRef> connection{};
+        Frame frame{};
+        std::uint64_t explicit_charge{0};
+    };
+}
+
+namespace snf::worker
+{
+    template <>
+    struct ActorPayloadTraits<TestPingPayload>
+    {
+        static constexpr std::uint32_t TAG = 1;
+        static std::uint64_t calculateCharge(const TestPingPayload& p) noexcept
+        {
+            const auto frame_bytes = static_cast<std::uint64_t>(p.frame.payload.size()) +
+                                     snf::protocol::FRAME_LENGTH_FIELD_SIZE + snf::protocol::MIN_BODY_SIZE;
+            return std::max<std::uint64_t>(p.explicit_charge, frame_bytes);
+        }
+    };
+}
+
+namespace
+{
+    using TestActorPayloadRegistry = snf::worker::ActorPayloadRegistry<TestPingPayload>;
+
     [[nodiscard]] ActorEnvelope makeEnvelope(const std::size_t payload_size = 16, const MessageType type = MessageType::Ping, const std::uint32_t req_id = 1)
     {
-        return ActorEnvelope::fromFrame(makeFrame(payload_size, type, req_id));
+        return TestActorPayloadRegistry::create(TestPingPayload{
+            .connection = std::nullopt,
+            .frame = makeFrame(payload_size, type, req_id),
+            .explicit_charge = 0,
+        });
+    }
+
+    [[nodiscard]] ActorEnvelope makeEnvelopeWithCharge(const std::size_t payload_size, const std::uint64_t explicit_charge)
+    {
+        return TestActorPayloadRegistry::create(TestPingPayload{
+            .connection = std::nullopt,
+            .frame = makeFrame(payload_size, MessageType::Ping, 1),
+            .explicit_charge = explicit_charge,
+        });
     }
 
     class CountingRequestSink final : public RequestSink
@@ -426,11 +466,7 @@ namespace
         Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
         const ActorKey key{.kind = ActorKind::Player, .entity = 1};
 
-        ActorEnvelope underreported{
-            .connection = std::nullopt,
-            .frame = makeFrame(64),
-            .charged_bytes = 1,
-        };
+        ActorEnvelope underreported = makeEnvelopeWithCharge(64, 1);
         assert(underreported.chargedBytes() > config.max_mailbox_bytes_per_actor);
         assert(worker.tryDeliverLocal(key, std::move(underreported)) == DeliveryResult::MailboxFull);
         assert(worker.actorCount() == 0);
@@ -582,7 +618,7 @@ namespace
                 auto actor = std::make_unique<FunctionalActor>(
                     [&received_requests](ActorEnvelope&& env, const ActorTurnContext&) -> TurnResult
                     {
-                        received_requests.push_back(env.frame.request_id);
+                        received_requests.push_back(env.get<TestPingPayload>().frame.request_id);
                         return CompletedTurn{.effects = EffectBatch{}};
                     }
                 );
@@ -825,7 +861,7 @@ namespace
                         }
 
                         EffectBatch batch;
-                        if (env.frame.request_id == 1)
+                        if (env.get<TestPingPayload>().frame.request_id == 1)
                         {
                             // Self tell: send request 2 to self
                             batch.push(TellActorEffect{
@@ -1121,7 +1157,7 @@ namespace
                     auto actor = std::make_unique<FunctionalActor>(
                         [&peer_received](ActorEnvelope&& env, const ActorTurnContext&) -> TurnResult
                         {
-                            if (env.frame.request_id == 42)
+                            if (env.get<TestPingPayload>().frame.request_id == 42)
                             {
                                 peer_received.store(true, std::memory_order_release);
                             }
@@ -1329,7 +1365,7 @@ namespace
                     auto actor = std::make_unique<FunctionalActor>(
                         [&peer_received](ActorEnvelope&& env, const ActorTurnContext&) -> TurnResult
                         {
-                            if (env.frame.request_id == 88)
+                            if (env.get<TestPingPayload>().frame.request_id == 88)
                             {
                                 peer_received.store(true, std::memory_order_release);
                             }
@@ -2248,11 +2284,7 @@ namespace
 
         // The caller cannot under-report the charge to slip past the cap on the activation path
         // any more than it can on tryDeliverLocal().
-        ActorEnvelope underreported{
-            .connection = std::nullopt,
-            .frame = makeFrame(64),
-            .charged_bytes = 1,
-        };
+        ActorEnvelope underreported = makeEnvelopeWithCharge(64, 1);
         assert(underreported.chargedBytes() > config.max_mailbox_bytes_per_actor);
         assert(WorkerActorTestAccess::beginActivationLoad(worker, key, std::move(underreported)) == DeliveryResult::MailboxFull);
 
@@ -3288,7 +3320,7 @@ namespace
                 auto actor = std::make_unique<FunctionalActor>(
                     [&executed_payload_sizes](ActorEnvelope&& envelope, const ActorTurnContext&) -> TurnResult
                     {
-                        executed_payload_sizes.push_back(envelope.frame.payload.size());
+                        executed_payload_sizes.push_back(envelope.get<TestPingPayload>().frame.payload.size());
                         return CompletedTurn{.effects = EffectBatch{}};
                     }
                 );
@@ -3364,8 +3396,7 @@ namespace
         assert(w0.tell(k1, makeEnvelope(16)) == DeliveryResult::RemoteInboxFull);
         assert(w0.metrics().actor.remote_tell_rejections == 1);
 
-        ActorEnvelope huge_env = makeEnvelope(16);
-        huge_env.charged_bytes = static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()) + 100ULL;
+        ActorEnvelope huge_env = makeEnvelopeWithCharge(16, static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()) + 100ULL);
         assert(w0.tell(k1, std::move(huge_env)) == DeliveryResult::RemoteInboxFull);
         assert(w0.metrics().actor.remote_tell_rejections == 2);
     }
@@ -3419,7 +3450,7 @@ namespace
                 auto actor = std::make_unique<FunctionalActor>(
                     [&received_on_w1](ActorEnvelope&& envelope, const ActorTurnContext&) -> TurnResult
                     {
-                        if (envelope.frame.payload.size() == 64)
+                        if (envelope.get<TestPingPayload>().frame.payload.size() == 64)
                         {
                             received_on_w1.store(true);
                         }

@@ -43,8 +43,6 @@ namespace snf::worker
     {
         ActorKey target;
         ActorEnvelope message;
-
-        [[nodiscard]] bool operator==(const RemoteActorMessage&) const noexcept = default;
     };
 
     using WorkerEvent = std::variant<RemoteConnectionSend, RemoteConnectionClose, RemoteActorMessage>;

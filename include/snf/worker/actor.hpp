@@ -144,8 +144,6 @@ namespace snf::worker
     {
         ActorKey target;
         ActorEnvelope message;
-
-        [[nodiscard]] bool operator==(const TellActorEffect&) const noexcept = default;
     };
 
     struct StopActorEffect
