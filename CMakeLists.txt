@@ -290,6 +290,29 @@ if(BUILD_TESTING)
     add_test(NAME snf_worker_adapter_tests COMMAND snf_worker_adapter_tests)
     set_tests_properties(snf_worker_adapter_tests PROPERTIES TIMEOUT 20)
 
+    add_executable(snf_db_conformance_tests
+        tests/db_driver_conformance_test.cpp
+    )
+    target_link_libraries(snf_db_conformance_tests
+        PRIVATE
+            snf_worker
+            PkgConfig::MySQL
+            Threads::Threads
+    )
+    snf_configure_target(snf_db_conformance_tests)
+
+    # The stall mode needs no database and always runs. The real-server mode is the
+    # one that closes the Stage 8A gate, so it is a separate test: a skip has to be
+    # visible as a skip rather than folded into a passing run.
+    add_test(NAME snf_db_conformance_stub COMMAND snf_db_conformance_tests --stub)
+    set_tests_properties(snf_db_conformance_stub PROPERTIES TIMEOUT 20)
+
+    add_test(NAME snf_db_conformance_mysql COMMAND snf_db_conformance_tests --mysql)
+    set_tests_properties(snf_db_conformance_mysql PROPERTIES
+        TIMEOUT 30
+        SKIP_RETURN_CODE 77
+    )
+
     add_test(NAME snf_worker_layer
              COMMAND ${CMAKE_COMMAND} -DWORKER_ROOTS=${CMAKE_SOURCE_DIR}/include/snf/worker:${CMAKE_SOURCE_DIR}/src/worker
                      -P ${CMAKE_SOURCE_DIR}/cmake/check_worker_layer.cmake)

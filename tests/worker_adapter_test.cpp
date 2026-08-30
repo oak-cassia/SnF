@@ -10,19 +10,14 @@
 #include "snf/game/room.hpp"
 #include "snf/game/zone.hpp"
 #include "snf/net/tcp_listener.hpp"
-#include "snf/net/unique_file_descriptor.hpp"
 #include "snf/protocol/frame_codec.hpp"
 #include "snf/worker/actor.hpp"
 #include "snf/worker/timer_queue.hpp"
 #include "snf/worker/worker.hpp"
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <sys/time.h>
+#include "socket_test_support.hpp"
 
 #include <cassert>
-#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <iostream>
@@ -37,6 +32,11 @@ using namespace std::chrono_literals;
 
 namespace
 {
+    using snf::test::connectClient;
+    using snf::test::portOf;
+    using snf::test::receiveExact;
+    using snf::test::sendAll;
+
     class MockTimerAdmission final : public snf::worker::TimerAdmission
     {
     public:
@@ -67,69 +67,6 @@ namespace
         std::uint64_t _capacity{1000};
         std::uint64_t _reserved_bytes{0};
     };
-
-    [[nodiscard]] std::uint16_t portOf(const int descriptor)
-    {
-        sockaddr_in address{};
-        socklen_t address_size = sizeof(address);
-        assert(::getsockname(descriptor, reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
-        return ntohs(address.sin_port);
-    }
-
-    [[nodiscard]] snf::net::UniqueFileDescriptor connectClient(const std::uint16_t port)
-    {
-        const int descriptor = ::socket(AF_INET, SOCK_STREAM, 0);
-        assert(descriptor != -1);
-        snf::net::UniqueFileDescriptor client{descriptor};
-
-        timeval timeout{.tv_sec = 2, .tv_usec = 0};
-        assert(::setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0);
-
-        sockaddr_in address{};
-        address.sin_family = AF_INET;
-        address.sin_port = htons(port);
-        assert(::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1);
-
-        int result = ::connect(descriptor, reinterpret_cast<const sockaddr*>(&address), sizeof(address));
-        while (result == -1 && errno == EINTR)
-        {
-            result = ::connect(descriptor, reinterpret_cast<const sockaddr*>(&address), sizeof(address));
-        }
-        assert(result == 0);
-        return client;
-    }
-
-    void sendAll(const int descriptor, const std::vector<std::byte>& bytes)
-    {
-        std::size_t offset = 0;
-        while (offset < bytes.size())
-        {
-            const ssize_t sent = ::send(descriptor, bytes.data() + offset, bytes.size() - offset, MSG_NOSIGNAL);
-            if (sent == -1 && errno == EINTR)
-            {
-                continue;
-            }
-            assert(sent > 0);
-            offset += static_cast<std::size_t>(sent);
-        }
-    }
-
-    [[nodiscard]] std::vector<std::byte> receiveExact(const int descriptor, const std::size_t byte_count)
-    {
-        std::vector<std::byte> bytes(byte_count);
-        std::size_t offset = 0;
-        while (offset < byte_count)
-        {
-            const ssize_t received = ::recv(descriptor, bytes.data() + offset, byte_count - offset, 0);
-            if (received == -1 && errno == EINTR)
-            {
-                continue;
-            }
-            assert(received > 0);
-            offset += static_cast<std::size_t>(received);
-        }
-        return bytes;
-    }
 
     class MockRequestSink final : public snf::worker::RequestSink
     {
