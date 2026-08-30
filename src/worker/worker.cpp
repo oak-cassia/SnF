@@ -32,6 +32,15 @@ namespace
     {
         return std::chrono::steady_clock::now() - started_at >= maximum_duration;
     }
+
+    [[nodiscard]] bool exceedsByteLimit(
+        const std::uint64_t current,
+        const std::uint64_t addition,
+        const std::uint64_t limit
+    ) noexcept
+    {
+        return addition > limit || current > limit - addition;
+    }
 }
 
 namespace snf::worker
@@ -293,6 +302,7 @@ namespace snf::worker
         }
 
         ActorSlot* slot = _actors->find(key);
+        const std::uint64_t charge = envelope.chargedBytes();
         if (slot != nullptr)
         {
             if (slot->state() == ActorState::Stopping)
@@ -300,19 +310,18 @@ namespace snf::worker
                 return DeliveryResult::Stopping;
             }
 
-            if (slot->mailbox().size() + 1 > _actor_config.max_mailbox_messages_per_actor ||
-                slot->mailbox().chargedBytes() + envelope.charged_bytes > _actor_config.max_mailbox_bytes_per_actor ||
-                _total_mailbox_messages + 1 > _actor_config.max_mailbox_messages_total ||
-                _total_mailbox_bytes + envelope.charged_bytes > _actor_config.max_mailbox_bytes_total)
+            if (slot->mailbox().size() >= _actor_config.max_mailbox_messages_per_actor ||
+                exceedsByteLimit(slot->mailbox().chargedBytes(), charge, _actor_config.max_mailbox_bytes_per_actor) ||
+                _total_mailbox_messages >= _actor_config.max_mailbox_messages_total ||
+                exceedsByteLimit(_total_mailbox_bytes, charge, _actor_config.max_mailbox_bytes_total))
             {
                 return DeliveryResult::MailboxFull;
             }
 
-            _total_mailbox_messages += 1;
-            _total_mailbox_bytes += envelope.charged_bytes;
-
             const bool was_idle = (slot->state() == ActorState::Idle);
             slot->mailbox().push(std::move(envelope));
+            _total_mailbox_messages += 1;
+            _total_mailbox_bytes += charge;
 
             if (was_idle)
             {
@@ -328,10 +337,9 @@ namespace snf::worker
             return DeliveryResult::ActorTableFull;
         }
 
-        if (1 > _actor_config.max_mailbox_messages_per_actor ||
-            envelope.charged_bytes > _actor_config.max_mailbox_bytes_per_actor ||
-            _total_mailbox_messages + 1 > _actor_config.max_mailbox_messages_total ||
-            _total_mailbox_bytes + envelope.charged_bytes > _actor_config.max_mailbox_bytes_total)
+        if (charge > _actor_config.max_mailbox_bytes_per_actor ||
+            _total_mailbox_messages >= _actor_config.max_mailbox_messages_total ||
+            exceedsByteLimit(_total_mailbox_bytes, charge, _actor_config.max_mailbox_bytes_total))
         {
             return DeliveryResult::MailboxFull;
         }
@@ -341,26 +349,6 @@ namespace snf::worker
         {
             return DeliveryResult::ActorTableFull;
         }
-
-        const std::uint32_t charge = envelope.charged_bytes;
-        _total_mailbox_messages += 1;
-        _total_mailbox_bytes += charge;
-
-        struct AccountingRollbackGuard
-        {
-            Worker* worker;
-            std::uint32_t charge;
-            bool armed{true};
-
-            ~AccountingRollbackGuard()
-            {
-                if (armed && worker != nullptr)
-                {
-                    worker->_total_mailbox_messages -= 1;
-                    worker->_total_mailbox_bytes -= charge;
-                }
-            }
-        } guard{this, charge, true};
 
         ActorConstructionResult construction_result;
         try
@@ -379,11 +367,16 @@ namespace snf::worker
             reservation->rollback();
             return DeliveryResult::ConstructionRejected;
         }
+        if (!construction_result.isReady())
+        {
+            throw std::logic_error{"Actor factory returned an invalid Ready result"};
+        }
 
-        guard.armed = false;
         ActorSlot& reserved_slot = reservation->slot();
         reserved_slot.setInstance(std::move(construction_result.instance));
         reserved_slot.mailbox().push(std::move(envelope));
+        _total_mailbox_messages += 1;
+        _total_mailbox_bytes += charge;
         reserved_slot.setState(ActorState::Queued);
 
         const ActorHandle handle = reservation->handle();
@@ -939,7 +932,7 @@ namespace snf::worker
 
                 ActorEnvelope envelope = slot->mailbox().pop();
                 _total_mailbox_messages -= 1;
-                _total_mailbox_bytes -= envelope.charged_bytes;
+                _total_mailbox_bytes -= envelope.chargedBytes();
 
                 const ActorTurnContext context{
                     .activation = slot->activationRef(),
@@ -1505,18 +1498,14 @@ namespace snf::worker
 
     void Worker::runShutdownPhaseB(const TimePoint deadline)
     {
+        bool first_iteration = true;
         while (std::chrono::steady_clock::now() < deadline)
         {
-            const bool actor_quiescent =
-                (_ready_queue == nullptr || _ready_queue->empty()) && (_total_mailbox_messages == 0) && !_inbox_has_more;
-            if (actor_quiescent)
-            {
-                break;
-            }
-
             const auto now = std::chrono::steady_clock::now();
             const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
-            const auto regular_timeout = hasRunnableWork() ? std::chrono::milliseconds(0) : pollTimeout().value_or(remaining);
+            const auto regular_timeout = (first_iteration || hasRunnableWork())
+                ? std::chrono::milliseconds(0)
+                : pollTimeout().value_or(remaining);
             const auto timeout = std::min(regular_timeout, remaining);
             const auto events = _poller.wait(timeout);
 
@@ -1525,6 +1514,14 @@ namespace snf::worker
             expireTimers(std::chrono::steady_clock::now(), _budgets.timers);
             runReadyActors(_budgets.actors);
             flushWrites(_budgets.writes);
+
+            first_iteration = false;
+            const bool actor_quiescent =
+                (_ready_queue == nullptr || _ready_queue->empty()) && (_total_mailbox_messages == 0) && !_inbox_has_more && !_timers_have_due;
+            if (actor_quiescent)
+            {
+                break;
+            }
         }
 
         if (_actors != nullptr)

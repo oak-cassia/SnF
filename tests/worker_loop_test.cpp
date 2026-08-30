@@ -289,13 +289,13 @@ namespace
         assert(port.tryPush(makeEnvelope(1)) == InboxPushResult::Accepted);
 
         // stop 을 먼저 요청하므로 메인 루프 본문은 한 번도 돌지 않는다.
-        // Accepted 된 event 는 셧다운 drain 루프가 반드시 처리해야 한다.
+        // Accepted 된 event 는 resource teardown 전 quiescence phase가 처리한다.
         worker.requestStop();
         worker.run();
 
         assert(handled.load(std::memory_order_acquire) == 1);
-        assert(worker.metrics().inbox_events == 0);
-        assert(worker.metrics().shutdown_inbox_events == 1);
+        assert(worker.metrics().inbox_events == 1);
+        assert(worker.metrics().shutdown_inbox_events == 0);
     }
 
     void test_worker_no_phase_starvation()

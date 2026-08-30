@@ -5,10 +5,12 @@
 #include "snf/worker/identity.hpp"
 #include "snf/worker/worker_event.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -55,37 +57,44 @@ namespace snf::worker
     {
         std::optional<ConnectionRef> connection{};
         snf::protocol::Frame frame{};
-        std::uint32_t charged_bytes{0};
+        std::uint64_t charged_bytes{0};
+
+        // The caller may request a larger logical charge, but it cannot
+        // under-report the memory owned by the concrete Frame payload.
+        [[nodiscard]] std::uint64_t chargedBytes() const noexcept
+        {
+            const auto frame_bytes = static_cast<std::uint64_t>(frame.payload.size()) +
+                                     snf::protocol::FRAME_LENGTH_FIELD_SIZE + snf::protocol::MIN_BODY_SIZE;
+            return std::max<std::uint64_t>(charged_bytes, frame_bytes);
+        }
 
         [[nodiscard]] static ActorEnvelope fromFrame(
             const ConnectionRef connection,
             snf::protocol::Frame&& frame,
-            const std::uint32_t charged_bytes = 0
+            const std::uint64_t charged_bytes = 0
         )
         {
-            const std::uint32_t charge = (charged_bytes != 0)
-                ? charged_bytes
-                : static_cast<std::uint32_t>(frame.payload.size() + snf::protocol::FRAME_LENGTH_FIELD_SIZE + snf::protocol::MIN_BODY_SIZE);
-            return ActorEnvelope{
+            ActorEnvelope envelope{
                 .connection = connection,
                 .frame = std::move(frame),
-                .charged_bytes = charge,
+                .charged_bytes = charged_bytes,
             };
+            envelope.charged_bytes = envelope.chargedBytes();
+            return envelope;
         }
 
         [[nodiscard]] static ActorEnvelope fromFrame(
             snf::protocol::Frame&& frame,
-            const std::uint32_t charged_bytes = 0
+            const std::uint64_t charged_bytes = 0
         )
         {
-            const std::uint32_t charge = (charged_bytes != 0)
-                ? charged_bytes
-                : static_cast<std::uint32_t>(frame.payload.size() + snf::protocol::FRAME_LENGTH_FIELD_SIZE + snf::protocol::MIN_BODY_SIZE);
-            return ActorEnvelope{
+            ActorEnvelope envelope{
                 .connection = std::nullopt,
                 .frame = std::move(frame),
-                .charged_bytes = charge,
+                .charged_bytes = charged_bytes,
             };
+            envelope.charged_bytes = envelope.chargedBytes();
+            return envelope;
         }
 
         [[nodiscard]] bool operator==(const ActorEnvelope&) const noexcept = default;
@@ -113,8 +122,13 @@ namespace snf::worker
 
         void push(ActorEnvelope&& envelope)
         {
-            _charged_bytes += envelope.charged_bytes;
+            const std::uint64_t charge = envelope.chargedBytes();
+            if (charge > std::numeric_limits<std::uint64_t>::max() - _charged_bytes)
+            {
+                throw std::overflow_error{"Mailbox byte accounting overflow"};
+            }
             _messages.push_back(std::move(envelope));
+            _charged_bytes += charge;
         }
 
         [[nodiscard]] ActorEnvelope pop()
@@ -125,7 +139,7 @@ namespace snf::worker
             }
             ActorEnvelope env = std::move(_messages.front());
             _messages.pop_front();
-            _charged_bytes -= env.charged_bytes;
+            _charged_bytes -= env.chargedBytes();
             return env;
         }
 

@@ -160,14 +160,23 @@ namespace snf::worker
         }
 
         const std::size_t index = _free_indices.back();
-        _free_indices.pop_back();
-
         const ActorIncarnation incarnation = nextIncarnation();
+
+        // Allocate the hash node before mutating the slot/free-list. If the
+        // allocation throws, the table remains unchanged and there is no
+        // not-yet-returned Reservation that would need to roll it back.
+        const auto [key_it, inserted] = _key_to_slot.emplace(key, index);
+        if (!inserted)
+        {
+            return std::nullopt;
+        }
+        static_cast<void>(key_it);
+
+        _free_indices.pop_back();
         Slot& slot = _slots[index];
         slot.actor.emplace(key, incarnation, index);
         slot.reserved = true;
         slot.committed = false;
-        _key_to_slot[key] = index;
         ++_reserved_count;
 
         return std::optional<Reservation>{

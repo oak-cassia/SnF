@@ -17,6 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <netinet/in.h>
+#include <optional>
 #include <stdexcept>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -143,6 +144,15 @@ namespace
         SinkMode _mode;
         Worker* _worker;
         std::function<void(ConnectionRef, const Frame&)> _request_callback;
+    };
+
+    class RejectedActorFactory final : public ActorFactory
+    {
+    public:
+        ActorConstructionResult construct(ActorKey) override
+        {
+            return ActorConstructionResult::rejected();
+        }
     };
 
     [[nodiscard]] Frame pingFrame(const std::uint32_t request_id)
@@ -1021,6 +1031,58 @@ namespace
         assert(portOf(rebound_listener.getDescriptor()) == port);
     }
 
+    void test_group_rejects_partial_actor_bootstrap_configuration()
+    {
+        WorkerGroupConfig config;
+        config.worker_count = 1;
+        config.max_workers = 1;
+        config.port = 0;
+        config.budgets = testBudgets();
+        config.network = testNetworkConfig(1);
+        config.actor = WorkerActorConfig{};
+
+        bool missing_factory_threw = false;
+        try
+        {
+            WorkerGroup group{config};
+        }
+        catch (const std::invalid_argument&)
+        {
+            missing_factory_threw = true;
+        }
+        assert(missing_factory_threw);
+
+        config.actor.reset();
+        bool missing_config_threw = false;
+        try
+        {
+            WorkerGroup group{
+                config,
+                WorkerGroup::RequestSinkFactory{},
+                [](WorkerId)
+                {
+                    return std::make_unique<RejectedActorFactory>();
+                },
+            };
+        }
+        catch (const std::invalid_argument&)
+        {
+            missing_config_threw = true;
+        }
+        assert(missing_config_threw);
+
+        config.actor = WorkerActorConfig{};
+        WorkerGroup group{
+            config,
+            WorkerGroup::RequestSinkFactory{},
+            [](WorkerId)
+            {
+                return std::make_unique<RejectedActorFactory>();
+            },
+        };
+        assert(group.worker(0).actorsConfigured());
+    }
+
     // =========================================================================
     // Vertical Slice: TCP Request -> Actor -> Domain Result -> toEffects -> Pong -> Close
     // =========================================================================
@@ -1111,6 +1173,145 @@ namespace
         }
     };
 
+    struct BlockingActorState
+    {
+        std::mutex mutex;
+        std::condition_variable changed;
+        bool dispatch_started{false};
+        bool release_dispatch{false};
+        std::optional<ConnectionRef> connection;
+    };
+
+    class BlockingActor final : public ActorInstance
+    {
+    public:
+        explicit BlockingActor(std::shared_ptr<BlockingActorState> state)
+            : _state(std::move(state))
+        {
+        }
+
+        TurnResult dispatch(ActorEnvelope&& envelope, const ActorTurnContext&) override
+        {
+            std::unique_lock lock{_state->mutex};
+            assert(envelope.connection.has_value());
+            _state->connection = envelope.connection;
+            _state->dispatch_started = true;
+            _state->changed.notify_all();
+            _state->changed.wait(
+                lock,
+                [this]
+                {
+                    return _state->release_dispatch;
+                }
+            );
+            return CompletedTurn{.effects = EffectBatch{}};
+        }
+
+    private:
+        std::shared_ptr<BlockingActorState> _state;
+    };
+
+    class BlockingActorFactory final : public ActorFactory
+    {
+    public:
+        explicit BlockingActorFactory(std::shared_ptr<BlockingActorState> state)
+            : _state(std::move(state))
+        {
+        }
+
+        ActorConstructionResult construct(ActorKey) override
+        {
+            return ActorConstructionResult::ready(std::make_unique<BlockingActor>(_state));
+        }
+
+    private:
+        std::shared_ptr<BlockingActorState> _state;
+    };
+
+    void test_shutdown_applies_accepted_remote_send_before_connection_close()
+    {
+        auto listener = snf::net::create_tcp_listener(0);
+        const std::uint16_t port = portOf(listener.getDescriptor());
+        auto actor_state = std::make_shared<BlockingActorState>();
+
+        ActorForwardingSink sink;
+        BlockingActorFactory factory{actor_state};
+        WorkerActorConfig actor_config{
+            .actor_table_capacity = 2,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+        };
+
+        Worker worker(
+            WorkerId{0},
+            1,
+            testBudgets(),
+            WorkerInboxConfig{},
+            testNetworkConfig(1),
+            sink,
+            actor_config,
+            factory
+        );
+        sink.setWorker(worker);
+        auto source_port = worker.bindInboxSource(WorkerId{0});
+        worker.attachListener(std::move(listener));
+
+        std::thread worker_thread([&worker]() { worker.run(); });
+        auto client = connectClient(port);
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(pingFrame(501)));
+
+        ConnectionRef connection;
+        {
+            std::unique_lock lock{actor_state->mutex};
+            assert(actor_state->changed.wait_for(
+                lock,
+                2s,
+                [&actor_state]
+                {
+                    return actor_state->dispatch_started;
+                }
+            ));
+            assert(actor_state->connection.has_value());
+            connection = *actor_state->connection;
+        }
+
+        const Frame response = pongFrame(502);
+        WorkerEnvelope envelope{
+            .event = RemoteConnectionSend{
+                .connection = connection,
+                .frame = response,
+                .critical = true,
+            },
+            .charged_bytes = remoteSendCharge(response),
+        };
+        assert(source_port.tryPush(std::move(envelope)) == InboxPushResult::Accepted);
+        worker.requestStop();
+        {
+            std::lock_guard lock{actor_state->mutex};
+            actor_state->release_dispatch = true;
+        }
+        actor_state->changed.notify_all();
+
+        const auto encoded_response = snf::protocol::encode_frame(response);
+        const auto received_bytes = receiveExact(client.getDescriptor(), encoded_response.size());
+        snf::protocol::FrameDecoder decoder;
+        const auto decoded = decoder.append(received_bytes);
+        assert(decoded.ok());
+        assert(decoded.frames.size() == 1);
+        assert(decoded.frames.front() == response);
+        assert(receivesEof(client.getDescriptor()));
+
+        worker_thread.join();
+        assert(worker.metrics().inbox_events == 1);
+        assert(worker.metrics().shutdown_inbox_events == 0);
+        assert(worker.metrics().network.sent_frames == 1);
+    }
+
     void test_tcp_request_to_actor_vertical_slice_pong_graceful_close()
     {
         for (int iteration = 0; iteration < 20; ++iteration)
@@ -1187,5 +1388,7 @@ int main()
     test_listener_pauses_until_both_capacity_tables_have_room();
     test_group_bootstrap_binds_each_worker_with_port_zero();
     test_group_bootstrap_rolls_back_listeners_when_sink_factory_throws();
+    test_group_rejects_partial_actor_bootstrap_configuration();
+    test_shutdown_applies_accepted_remote_send_before_connection_close();
     test_tcp_request_to_actor_vertical_slice_pong_graceful_close();
 }

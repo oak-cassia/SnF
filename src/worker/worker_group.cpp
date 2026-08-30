@@ -39,6 +39,10 @@ namespace snf::worker
         {
             throw std::invalid_argument{"Invalid WorkerGroup configuration"};
         }
+        if (config.actor.has_value() != static_cast<bool>(actor_factory_factory))
+        {
+            throw std::invalid_argument{"WorkerGroup actor configuration and factory must be provided together"};
+        }
 
         std::vector<snf::net::UniqueFileDescriptor> listeners;
         listeners.reserve(config.worker_count);

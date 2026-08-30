@@ -259,6 +259,35 @@ namespace
         assert(worker.tryDeliverLocal(key2, makeEnvelope(10)) == DeliveryResult::MailboxFull);
     }
 
+    void test_actor_mailbox_byte_limit_cannot_be_underreported()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 2,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 32,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 32,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+        };
+
+        FunctionalActorFactory factory(nullptr);
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        ActorEnvelope underreported{
+            .connection = std::nullopt,
+            .frame = makeFrame(64),
+            .charged_bytes = 1,
+        };
+        assert(underreported.chargedBytes() > config.max_mailbox_bytes_per_actor);
+        assert(worker.tryDeliverLocal(key, std::move(underreported)) == DeliveryResult::MailboxFull);
+        assert(worker.actorCount() == 0);
+        assert(worker.totalMailboxMessages() == 0);
+        assert(worker.totalMailboxBytes() == 0);
+    }
+
     void test_actor_construction_rejected_rollback_and_retry()
     {
         WorkerActorConfig config{
@@ -337,6 +366,47 @@ namespace
         assert(caught);
 
         // Invariant: slots and mailbox accounting are cleanly rolled back
+        assert(worker.actorCount() == 0);
+        assert(worker.totalMailboxMessages() == 0);
+        assert(worker.totalMailboxBytes() == 0);
+    }
+
+    void test_actor_factory_invalid_ready_result_rolls_back_and_fails_fast()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 2,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+        };
+
+        FunctionalActorFactory factory(
+            [](ActorKey) -> ActorConstructionResult
+            {
+                return ActorConstructionResult{
+                    .status = ActorConstructionResult::Status::Ready,
+                    .instance = nullptr,
+                };
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+
+        bool caught = false;
+        try
+        {
+            static_cast<void>(worker.tryDeliverLocal(key, makeEnvelope(16)));
+        }
+        catch (const std::logic_error&)
+        {
+            caught = true;
+        }
+        assert(caught);
         assert(worker.actorCount() == 0);
         assert(worker.totalMailboxMessages() == 0);
         assert(worker.totalMailboxBytes() == 0);
@@ -1175,8 +1245,9 @@ namespace
         worker.requestStop();
         worker.run();
 
-        // Inbox event was processed in shutdown quiescence loop!
-        assert(worker.metrics().inbox_events == 1 || worker.metrics().shutdown_inbox_events == 1);
+        // The accepted event must be consumed before Phase D tears resources down.
+        assert(worker.metrics().inbox_events == 1);
+        assert(worker.metrics().shutdown_inbox_events == 0);
     }
 
     void test_shutdown_cleans_up_all_resources_after_deadline()
@@ -1267,8 +1338,10 @@ void run_worker_actor_tests()
     test_stale_actor_handle_detection();
     test_nullable_actorslot_commit_instance_contract();
     test_actor_mailbox_limits_per_actor_and_worker_total();
+    test_actor_mailbox_byte_limit_cannot_be_underreported();
     test_actor_construction_rejected_rollback_and_retry();
     test_actor_factory_exception_rollback_and_fail_fast();
+    test_actor_factory_invalid_ready_result_rolls_back_and_fails_fast();
     test_missing_actor_first_message_exact_once();
     test_same_actor_key_construct_called_once();
 
