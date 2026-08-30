@@ -129,6 +129,7 @@ namespace snf::worker
     void Worker::run()
     {
         bindOwnerThread();
+        startDb();
 
         while (!_stop_requested.load(std::memory_order_acquire))
         {
@@ -138,12 +139,64 @@ namespace snf::worker
 
             processPollEvents(events, _budgets.poll);
             drainInbox(_budgets.inbox);
-            expireTimers(std::chrono::steady_clock::now(), _budgets.timers);
+            const auto now = std::chrono::steady_clock::now();
+            expireTimers(now, _budgets.timers);
+            advanceDb(now);
             runReadyActors(_budgets.actors);
             flushWrites(_budgets.writes);
         }
 
         runUnifiedShutdown();
+    }
+
+    void Worker::configureDb(const DbClientConfig& config)
+    {
+        assertOwnerThread();
+        if (_db != nullptr)
+        {
+            throw std::logic_error{"Worker DB can only be configured once"};
+        }
+        if (!isValid(config))
+        {
+            throw std::invalid_argument{"Invalid worker DB configuration"};
+        }
+        _db = std::make_unique<DbClient>(config, *this);
+    }
+
+    bool Worker::dbEnabled() const noexcept
+    {
+        return _db != nullptr;
+    }
+
+    const DbClientMetrics& Worker::dbMetrics() const noexcept
+    {
+        static const DbClientMetrics EMPTY{};
+        return _db == nullptr ? EMPTY : _db->metrics();
+    }
+
+    void Worker::startDb()
+    {
+        if (_db == nullptr || _db_started)
+        {
+            return;
+        }
+        // mysql_init() does the per-thread driver setup, so the handles belong to
+        // the thread that runs the loop, not to whoever built the config.
+        _db->start(_poller);
+        _db_started = true;
+    }
+
+    void Worker::advanceDb(const TimePoint now)
+    {
+        if (_db == nullptr || !_db_started)
+        {
+            return;
+        }
+        // Bounded progress. Whatever is left over keeps hasRunnableWork() true, so
+        // the next iteration continues instead of sleeping in epoll_wait.
+        static_cast<void>(_db->advance(_budgets.db));
+        _db->expireDeadlines(now);
+        _db->maintainConnections(now);
     }
 
     void Worker::requestStop() noexcept
@@ -628,7 +681,8 @@ namespace snf::worker
     bool Worker::hasRunnableWork() const noexcept
     {
         return _inbox_has_more || _timers_have_due || (_read_work_queue != nullptr && !_read_work_queue->empty()) ||
-               (_write_work_queue != nullptr && !_write_work_queue->empty()) || (_ready_queue != nullptr && !_ready_queue->empty());
+               (_write_work_queue != nullptr && !_write_work_queue->empty()) || (_ready_queue != nullptr && !_ready_queue->empty()) ||
+               (_db != nullptr && _db->hasLocalWork());
     }
 
     std::optional<std::chrono::milliseconds> Worker::pollTimeout() const
@@ -669,6 +723,15 @@ namespace snf::worker
             {
                 _wakeup.consume();
                 ++_metrics.wakeups_consumed;
+                continue;
+            }
+
+            if (event.token.kind == PollTargetKind::DbConnection)
+            {
+                if (_db != nullptr)
+                {
+                    _db->onPollEvent(event.token);
+                }
                 continue;
             }
 
@@ -1468,6 +1531,18 @@ namespace snf::worker
         }
     }
 
+    void Worker::completeDb(const AwaitKey key, DbResult result)
+    {
+        assertOwnerThread();
+        static_cast<void>(result);
+
+        // Stage 8C routes this to ActivationLoad and Stage 8E to SuspendedDbCommand.
+        // Until then nothing submits DB work through the worker, so every completion
+        // that reaches here is by definition unmatched.
+        static_cast<void>(key);
+        ++_metrics.actor.stale_completions;
+    }
+
     bool Worker::completeSyntheticCommand(const AwaitKey key, const SyntheticAwaitOutcome outcome)
     {
         if (tryMarkSyntheticCommandReady(key, outcome))
@@ -2243,12 +2318,28 @@ namespace snf::worker
         runShutdownPhaseB(shutdown_deadline);
         runShutdownPhaseC(shutdown_deadline);
         runShutdownPhaseD(shutdown_deadline);
+
+        // Tearing the backend down is a separate, deadline-bounded step. Actor
+        // quiescence above never waits on physical DB progress, so an unresponsive
+        // server cannot hold the worker open.
+        if (_db != nullptr && _db_started)
+        {
+            _db->shutdown(_poller);
+            _db_started = false;
+        }
     }
 
     void Worker::beginShutdownPhaseA()
     {
         _shutting_down = true;
         _network_stopping = true;
+
+        // Stop admitting new DB work first. Completions that are already possible
+        // still arrive while the phases below drain.
+        if (_db != nullptr)
+        {
+            _db->beginShutdown();
+        }
 
         if (_listener_registration)
         {
@@ -2369,7 +2460,9 @@ namespace snf::worker
 
                 processPollEvents(events, _budgets.poll);
                 drainInbox(_budgets.inbox);
-                expireTimers(std::chrono::steady_clock::now(), _budgets.timers);
+                const auto shutdown_now = std::chrono::steady_clock::now();
+                expireTimers(shutdown_now, _budgets.timers);
+                advanceDb(shutdown_now);
                 runReadyActors(_budgets.actors);
                 flushWrites(_budgets.writes);
 

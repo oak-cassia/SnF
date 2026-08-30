@@ -5,6 +5,7 @@
 #include "snf/worker/barrier.hpp"
 #include "snf/worker/budget.hpp"
 #include "snf/worker/connection_table.hpp"
+#include "snf/worker/db_client.hpp"
 #include "snf/worker/connection_work_queue.hpp"
 #include "snf/worker/identity.hpp"
 #include "snf/worker/inbox.hpp"
@@ -60,7 +61,7 @@ namespace snf::worker
         WorkerActorMetrics actor{};
     };
 
-    class Worker final : public TimerAdmission
+    class Worker final : public TimerAdmission, public DbCompletionSink
     {
     public:
         using TimePoint = std::chrono::steady_clock::time_point;
@@ -109,6 +110,16 @@ namespace snf::worker
         void attachBarrier(WorkerQuiescenceBarrier* barrier) noexcept;
 
         void configureActors(const WorkerActorConfig& config, ActorFactory& factory);
+
+        // The MYSQL handles are not created here: mysql_init() performs the
+        // per-thread driver initialisation, so the client only starts connecting
+        // once run() has bound the owner thread.
+        void configureDb(const DbClientConfig& config);
+        [[nodiscard]] bool dbEnabled() const noexcept;
+        [[nodiscard]] const DbClientMetrics& dbMetrics() const noexcept;
+
+        // DbCompletionSink. Owner thread only, and never resumes a coroutine inline.
+        void completeDb(AwaitKey key, DbResult result) override;
 
         // owner Worker thread 전용. The rvalue Frame is consumed by this
         // call, including terminal failures; no result payload is returned.
@@ -171,6 +182,8 @@ namespace snf::worker
             std::uint64_t _id{0};
         };
 
+        void startDb();
+        void advanceDb(TimePoint now);
         void bindOwnerThread() noexcept;
         void assertOwnerThread() const noexcept;
         [[nodiscard]] bool hasRunnableWork() const noexcept;
@@ -266,6 +279,8 @@ namespace snf::worker
 
         std::unique_ptr<ActorTable> _actors;
         std::unique_ptr<ReadyActorQueue> _ready_queue;
+        std::unique_ptr<DbClient> _db;
+        bool _db_started{false};
         ActorFactory* _actor_factory{nullptr};
         WorkerActorConfig _actor_config{};
         OperationIdSource _operation_ids{};

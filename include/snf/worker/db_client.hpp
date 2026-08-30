@@ -68,6 +68,9 @@ namespace snf::worker
         std::size_t max_queued_operations{256};
         std::uint64_t max_queued_bytes{1024ULL * 1024};
         std::chrono::milliseconds operation_timeout{2000};
+        // A refused connect returns immediately, so reopening a slot without a
+        // delay would spin the whole worker while the database is down.
+        std::chrono::milliseconds reconnect_backoff{250};
 
         // Enforced while streaming rather than measured afterwards.
         std::size_t max_result_rows{4096};
@@ -170,6 +173,9 @@ namespace snf::worker
         std::uint64_t queued_timeouts{0};
         std::uint64_t in_flight_timeouts{0};
         std::uint64_t connections_opened{0};
+        // A slot only leaves Connecting when a readiness event routed through the
+        // worker's poller wakes it, so this counter also proves that path works.
+        std::uint64_t connections_ready{0};
         std::uint64_t connections_poisoned{0};
         std::uint64_t stale_poll_events{0};
         std::uint64_t submit_rejections{0};
@@ -209,6 +215,10 @@ namespace snf::worker
         [[nodiscard]] std::size_t queuedCount() const noexcept;
 
         void expireDeadlines(DbTimePoint now);
+
+        // Reopens slots whose reconnect backoff has elapsed. Driven from the worker
+        // loop, never from a timer of its own.
+        void maintainConnections(DbTimePoint now);
 
         // Stops accepting new work. In-flight completions still arrive.
         void beginShutdown() noexcept;

@@ -88,7 +88,8 @@ namespace snf::worker
             return false;
         }
         return config.port != 0 && config.connection_count > 0 && config.max_queued_operations > 0 && config.max_queued_bytes > 0 &&
-               config.operation_timeout > std::chrono::milliseconds::zero() && config.max_result_rows > 0 && config.max_result_bytes > 0;
+               config.operation_timeout > std::chrono::milliseconds::zero() && config.reconnect_backoff >= std::chrono::milliseconds::zero() &&
+               config.max_result_rows > 0 && config.max_result_bytes > 0;
     }
 
     struct DbClient::Impl
@@ -137,6 +138,7 @@ namespace snf::worker
             int registered_fd{-1};
             PollInterest interest{};
             bool runnable{false};
+            DbTimePoint retry_at{};
             std::optional<InFlight> in_flight{std::nullopt};
         };
 
@@ -234,10 +236,9 @@ namespace snf::worker
                 sink.completeDb(victim->key, DbResult{std::move(failure)});
             }
 
-            if (!shutting_down)
-            {
-                openSlot(slot);
-            }
+            // Reopening goes through the same backoff gate as a failed connect so
+            // that a dead database cannot turn poisoning into a hot loop.
+            slot.retry_at = Clock::now();
         }
 
         void syncInterest(Slot& slot)
@@ -376,19 +377,19 @@ namespace snf::worker
                 }
                 if (status == NET_ASYNC_ERROR)
                 {
-                    // Nothing is in flight while connecting; retry on the next pass
-                    // rather than failing an operation that was never started.
+                    // Nothing is in flight while connecting, so no operation fails
+                    // here. A refused connect returns immediately, so the retry has
+                    // to wait: reopening straight away would spin the worker for as
+                    // long as the database is down.
                     closeSlot(slot);
-                    if (!shutting_down)
-                    {
-                        openSlot(slot);
-                    }
+                    slot.retry_at = Clock::now() + config.reconnect_backoff;
                     slot.runnable = false;
                     return false;
                 }
                 syncInterest(slot);
                 slot.state = SlotState::Idle;
                 slot.runnable = true;
+                ++metrics.connections_ready;
                 return true;
             }
 
@@ -783,6 +784,22 @@ namespace snf::worker
                     .message = "timed out in flight",
                 }
             );
+        }
+    }
+
+    void DbClient::maintainConnections(const DbTimePoint now)
+    {
+        if (_impl->shutting_down)
+        {
+            return;
+        }
+        for (Impl::Slot& slot : _impl->slots)
+        {
+            if (slot.state != Impl::SlotState::Closed || slot.retry_at > now)
+            {
+                continue;
+            }
+            _impl->openSlot(slot);
         }
     }
 

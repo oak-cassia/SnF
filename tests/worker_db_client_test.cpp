@@ -9,6 +9,7 @@
 #include "snf/net/tcp_listener.hpp"
 #include "snf/worker/db_client.hpp"
 #include "snf/worker/poller.hpp"
+#include "snf/worker/worker.hpp"
 
 #include "socket_test_support.hpp"
 
@@ -22,6 +23,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace
@@ -235,6 +237,49 @@ namespace
         client.shutdown(poller);
     }
 
+    // The worker owns the DB sockets in its own poller. There is no second polling
+    // loop anywhere: DbClient only adds, modifies and removes registrations.
+    //
+    // Metrics are read after join(), never while the loop runs: the worker thread
+    // owns them and reading them concurrently is a genuine data race.
+    void test_worker_loop_survives_an_unreachable_database()
+    {
+        auto listener = snf::net::create_tcp_listener(0);
+        const std::uint16_t port = snf::test::portOf(listener.getDescriptor());
+
+        snf::worker::Worker worker(snf::worker::WorkerId{0}, 1, snf::worker::WorkerBudgets::defaults(), snf::worker::WorkerInboxConfig{});
+        auto config = stubConfig(port);
+        config.connection_count = 2;
+        worker.configureDb(config);
+        assert(worker.dbEnabled());
+
+        std::thread runner(
+            [&worker]()
+            {
+                worker.run();
+            }
+        );
+
+        std::this_thread::sleep_for(300ms);
+
+        // Shutdown must finish on its own deadline even though the database never
+        // responded: actor quiescence never waits on physical DB progress.
+        const auto stop_started_at = Clock::now();
+        worker.requestStop();
+        runner.join();
+        const auto stop_duration = Clock::now() - stop_started_at;
+
+        assert(worker.dbMetrics().connections_opened >= 2);
+        // The server never answers, so nothing may reach the ready state.
+        assert(worker.dbMetrics().connections_ready == 0);
+        // Alive but not spinning. A loop blocked inside the handshake would show no
+        // iterations at all; a busy loop would show thousands. With nothing runnable
+        // the worker sleeps out its poll timeout, so a handful is exactly right.
+        assert(worker.metrics().loop_iterations >= 2);
+        assert(worker.metrics().loop_iterations < 500);
+        assert(stop_duration < 5s);
+    }
+
     struct MySqlTestConfig
     {
         std::string host;
@@ -289,6 +334,8 @@ namespace
             .operation_timeout = 2000ms,
         };
     }
+
+    void test_worker_connects_through_its_own_poller(const MySqlTestConfig& config);
 
     // Runs the client's loop the way the worker will: poll for readiness, then let
     // the client advance under its budget.
@@ -412,6 +459,29 @@ namespace
         client.shutdown(poller);
     }
 
+    void test_worker_connects_through_its_own_poller(const MySqlTestConfig& config)
+    {
+        snf::worker::Worker worker(snf::worker::WorkerId{0}, 1, snf::worker::WorkerBudgets::defaults(), snf::worker::WorkerInboxConfig{});
+        worker.configureDb(liveConfig(config));
+
+        std::thread runner(
+            [&worker]()
+            {
+                worker.run();
+            }
+        );
+
+        std::this_thread::sleep_for(2s);
+        worker.requestStop();
+        runner.join();
+
+        // A slot only leaves Connecting when a readiness event arrives through
+        // Worker::processPollEvents, so reaching the ready state is what proves the
+        // DbConnection branch is wired into the worker's own poll dispatch.
+        assert(worker.dbMetrics().connections_ready == 2);
+        assert(worker.dbMetrics().connections_poisoned == 0);
+    }
+
     void test_in_flight_timeout_poisons_the_connection(const MySqlTestConfig& config)
     {
         prepareSchema(config);
@@ -445,6 +515,10 @@ namespace
         assert(failure->reached_server);
         assert(client.metrics().in_flight_timeouts == 1);
         assert(client.metrics().connections_poisoned == 1);
+        // Reopening is deferred to the maintenance tick so that a database which is
+        // refusing connections cannot turn poisoning into a hot loop.
+        assert(client.metrics().connections_opened == opened_before);
+        client.maintainConnections(Clock::now());
         assert(client.metrics().connections_opened == opened_before + 1);
 
         client.shutdown(poller);
@@ -475,6 +549,8 @@ int main(const int argc, const char* const* const argv)
         std::cout << "  - test_stale_poll_event_is_ignored PASSED" << std::endl;
         test_shutdown_drains_the_queue();
         std::cout << "  - test_shutdown_drains_the_queue PASSED" << std::endl;
+        test_worker_loop_survives_an_unreachable_database();
+        std::cout << "  - test_worker_loop_survives_an_unreachable_database PASSED" << std::endl;
     }
     else if (mode == "--mysql")
     {
@@ -489,6 +565,8 @@ int main(const int argc, const char* const* const argv)
             std::cout << "Running DbClient contracts (real MySQL)..." << std::endl;
             test_load_player_streams_both_queries(*config);
             std::cout << "  - test_load_player_streams_both_queries PASSED" << std::endl;
+            test_worker_connects_through_its_own_poller(*config);
+            std::cout << "  - test_worker_connects_through_its_own_poller PASSED" << std::endl;
             test_in_flight_timeout_poisons_the_connection(*config);
             std::cout << "  - test_in_flight_timeout_poisons_the_connection PASSED" << std::endl;
         }
