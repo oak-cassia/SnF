@@ -3,6 +3,7 @@
 #include "snf/worker/actor.hpp"
 #include "snf/worker/timer_queue.hpp"
 
+#include <chrono>
 #include <memory>
 
 namespace snf::adapter
@@ -29,6 +30,11 @@ namespace snf::adapter
             _player_load_enabled = enabled;
         }
 
+        void setPlayerSaveInterval(const std::chrono::milliseconds interval) noexcept
+        {
+            _player_save_interval = interval;
+        }
+
         [[nodiscard]] snf::worker::ActorConstructionResult construct(snf::worker::ActorKey key) override;
 
         [[nodiscard]] snf::worker::ActorConstructionResult constructLoaded(snf::worker::ActorKey key, const snf::worker::LoadPlayerResult& loaded)
@@ -37,5 +43,6 @@ namespace snf::adapter
     private:
         snf::worker::TimerAdmission* _timer_admission{nullptr};
         bool _player_load_enabled{false};
+        std::chrono::milliseconds _player_save_interval{std::chrono::seconds{5}};
     };
 }

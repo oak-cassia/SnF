@@ -387,8 +387,8 @@ namespace
             "CREATE TABLE IF NOT EXISTS snf_player_skills ("
             "player_id BIGINT UNSIGNED NOT NULL, skill_id INT UNSIGNED NOT NULL, "
             "PRIMARY KEY (player_id, skill_id)) ENGINE=InnoDB",
-            "DELETE FROM snf_player_skills WHERE player_id IN (900001, 900002)",
-            "DELETE FROM snf_players WHERE player_id IN (900001, 900002)",
+            "DELETE FROM snf_player_skills WHERE player_id IN (900001, 900002, 900003, 900004, 900010)",
+            "DELETE FROM snf_players WHERE player_id IN (900001, 900002, 900003, 900004, 900010)",
             "INSERT INTO snf_players (player_id, handled_command_count, zone_id, position_x, position_y, "
             "currency_balance, purchased_item_count, street_experience, equipped_skill_id) "
             "VALUES (900001, 7, 42, 11, 22, 500, 3, 1200, 2)",
@@ -787,6 +787,148 @@ namespace
         assert(rejected.isRejected());
     }
 
+    // 8F: the actor saves itself. Granting experience dirties the player, the
+    // actor schedules its own one-shot save timer, the save turn suspends on the
+    // await, and the value is in the database afterwards.
+    void test_player_actor_saves_itself_through_a_db_await(const MySqlTestConfig& config)
+    {
+        prepareSchema(config);
+
+        snf::worker::WorkerActorConfig actor_config{};
+        actor_config.actor_table_capacity = 16;
+        actor_config.max_mailbox_messages_per_actor = 8;
+        actor_config.max_mailbox_bytes_per_actor = 64 * 1024;
+        actor_config.max_mailbox_messages_total = 64;
+        actor_config.max_mailbox_bytes_total = 256 * 1024;
+        actor_config.max_turns_per_actor_slice = 8;
+        actor_config.await_timeout = 5s;
+        actor_config.max_concurrent_loading = 4;
+        actor_config.max_application_timer_bytes_total = 1024 * 1024;
+
+        snf::adapter::GameActorFactory factory;
+        factory.setPlayerLoadEnabled(true);
+        // Short enough that the save fires inside the test.
+        factory.setPlayerSaveInterval(50ms);
+
+        snf::worker::Worker worker(
+            snf::worker::WorkerId{0}, 1, snf::worker::WorkerBudgets::defaults(), snf::worker::WorkerInboxConfig{}, actor_config, factory
+        );
+        worker.configureDb(liveConfig(config));
+        factory.setTimerAdmission(worker);
+
+        // Delivered before the loop starts, so the owner thread is still free. The
+        // activation load queues until the connections come up.
+        constexpr std::uint64_t PLAYER_ID = 900010;
+        const snf::worker::ActorKey key{.kind = snf::worker::ActorKind::Player, .entity = PLAYER_ID};
+        auto grant = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ExperienceGrantMessage{
+            .grant =
+                snf::server::StreetExperienceGrant{
+                    .player = snf::server::PlayerId{PLAYER_ID},
+                    .experience = 4242,
+                },
+        });
+        assert(worker.tryDeliverLocal(key, std::move(grant)) == snf::worker::DeliveryResult::Accepted);
+
+        std::thread runner(
+            [&worker]()
+            {
+                worker.run();
+            }
+        );
+
+        // Activation load, the grant turn, the save timer and the transaction.
+        std::this_thread::sleep_for(2s);
+        worker.requestStop();
+        runner.join();
+
+        assert(worker.dbMetrics().commits_acknowledged >= 1);
+        assert(worker.dbMetrics().commits_unknown == 0);
+        assert(worker.dbMetrics().connections_poisoned == 0);
+        assert(worker.metrics().actor.activation_loads_started >= 1);
+
+        // Read the row straight from the server.
+        MYSQL* mysql = ::mysql_init(nullptr);
+        assert(mysql != nullptr);
+        unsigned int ssl_mode = SSL_MODE_DISABLED;
+        static_cast<void>(::mysql_options(mysql, MYSQL_OPT_SSL_MODE, &ssl_mode));
+        bool get_public_key = true;
+        static_cast<void>(::mysql_options(mysql, MYSQL_OPT_GET_SERVER_PUBLIC_KEY, &get_public_key));
+        assert(
+            ::mysql_real_connect(
+                mysql, config.host.c_str(), config.user.c_str(), config.password.c_str(), config.database.c_str(), config.port, nullptr, 0
+            ) != nullptr
+        );
+
+        const std::string experience_query = "SELECT street_experience FROM snf_players WHERE player_id=" + std::to_string(PLAYER_ID);
+        assert(::mysql_real_query(mysql, experience_query.c_str(), experience_query.size()) == 0);
+        MYSQL_RES* result = ::mysql_store_result(mysql);
+        assert(result != nullptr);
+        MYSQL_ROW row = ::mysql_fetch_row(result);
+        assert(row != nullptr);
+        const std::string saved_experience = row[0];
+        ::mysql_free_result(result);
+
+        // The skill rows committed in the same transaction as the player row.
+        const std::string skill_query = "SELECT COUNT(*) FROM snf_player_skills WHERE player_id=" + std::to_string(PLAYER_ID);
+        assert(::mysql_real_query(mysql, skill_query.c_str(), skill_query.size()) == 0);
+        MYSQL_RES* skill_result = ::mysql_store_result(mysql);
+        assert(skill_result != nullptr);
+        MYSQL_ROW skill_row = ::mysql_fetch_row(skill_result);
+        assert(skill_row != nullptr);
+        const std::string skill_count = skill_row[0];
+        ::mysql_free_result(skill_result);
+        ::mysql_close(mysql);
+
+        // The granted experience made it all the way to the database.
+        assert(saved_experience == "4242");
+        assert(skill_count != "0");
+    }
+
+    // The 8A gate left one question open: a full caching_sha2_password handshake on
+    // a server that has not cached this account yet. Resetting the cache forces it.
+    void test_cold_caching_sha2_authentication(const MySqlTestConfig& config)
+    {
+        MYSQL* admin = ::mysql_init(nullptr);
+        assert(admin != nullptr);
+        unsigned int ssl_mode = SSL_MODE_DISABLED;
+        static_cast<void>(::mysql_options(admin, MYSQL_OPT_SSL_MODE, &ssl_mode));
+        bool get_public_key = true;
+        static_cast<void>(::mysql_options(admin, MYSQL_OPT_GET_SERVER_PUBLIC_KEY, &get_public_key));
+        if (::mysql_real_connect(
+                admin, config.host.c_str(), config.user.c_str(), config.password.c_str(), config.database.c_str(), config.port, nullptr, 0
+            ) == nullptr)
+        {
+            ::mysql_close(admin);
+            std::cout << "    cold auth check skipped: cannot connect" << std::endl;
+            return;
+        }
+
+        constexpr std::string_view FLUSH = "FLUSH PRIVILEGES";
+        const bool flushed = ::mysql_real_query(admin, FLUSH.data(), FLUSH.size()) == 0;
+        ::mysql_close(admin);
+        if (!flushed)
+        {
+            // Needs RELOAD, which the test account may not have.
+            std::cout << "    cold auth check skipped: FLUSH PRIVILEGES not permitted" << std::endl;
+            return;
+        }
+
+        // FLUSH PRIVILEGES clears the caching_sha2 cache, so this connect has to go
+        // through the full RSA exchange that GET_SERVER_PUBLIC_KEY enables.
+        RecordingSink sink;
+        snf::worker::Poller poller{16};
+        auto client_config = liveConfig(config);
+        client_config.connection_count = 1;
+        snf::worker::DbClient client{client_config, sink};
+        client.start(poller);
+        pump(client, poller, 3000ms);
+
+        assert(client.metrics().connections_ready == 1);
+        std::cout << "    cold caching_sha2_password full auth: OK" << std::endl;
+
+        client.shutdown(poller);
+    }
+
     void test_in_flight_timeout_poisons_the_connection(const MySqlTestConfig& config)
     {
         prepareSchema(config);
@@ -886,6 +1028,10 @@ int main(const int argc, const char* const* const argv)
             std::cout << "  - test_failed_statement_rolls_back_without_partial_write PASSED" << std::endl;
             test_save_timeout_before_commit_is_failed_before_commit(*config);
             std::cout << "  - test_save_timeout_before_commit_is_failed_before_commit PASSED" << std::endl;
+            test_player_actor_saves_itself_through_a_db_await(*config);
+            std::cout << "  - test_player_actor_saves_itself_through_a_db_await PASSED" << std::endl;
+            test_cold_caching_sha2_authentication(*config);
+            std::cout << "  - test_cold_caching_sha2_authentication PASSED" << std::endl;
         }
     }
     else

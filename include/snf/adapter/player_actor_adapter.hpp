@@ -4,6 +4,8 @@
 #include "snf/game/player_record.hpp"
 #include "snf/worker/actor.hpp"
 
+#include <chrono>
+
 namespace snf::adapter
 {
     class PlayerActorAdapter final : public snf::worker::ActorInstance
@@ -31,12 +33,36 @@ namespace snf::adapter
             return _player;
         }
 
-        [[nodiscard]] snf::worker::TurnResult dispatch(
-            snf::worker::ActorEnvelope&& envelope,
-            const snf::worker::ActorTurnContext& context
-        ) override;
+        void setSaveInterval(const std::chrono::milliseconds interval) noexcept
+        {
+            _save_interval = interval;
+        }
+
+        [[nodiscard]] std::uint64_t committedSaves() const noexcept
+        {
+            return _committed_saves;
+        }
+
+        [[nodiscard]] std::uint64_t unknownCommits() const noexcept
+        {
+            return _unknown_commits;
+        }
+
+        [[nodiscard]] snf::worker::TurnResult dispatch(snf::worker::ActorEnvelope&& envelope, const snf::worker::ActorTurnContext& context) override;
+
+        // Called from the save continuation once the database has answered. Public
+        // because the continuation is a free coroutine, not a member.
+        void onSaveCompleted(const snf::worker::DbResult& result, snf::server::PlayerStateComponentMask cleared);
 
     private:
+        void scheduleSaveIfDirty(snf::worker::EffectBatch& effects, std::chrono::steady_clock::time_point now);
+
         snf::server::Player _player;
+        std::chrono::milliseconds _save_interval{std::chrono::seconds{5}};
+        // Only one save timer may be outstanding. The actor is Suspended for the
+        // duration of the await, so a second save cannot overlap the first.
+        bool _save_scheduled{false};
+        std::uint64_t _committed_saves{0};
+        std::uint64_t _unknown_commits{0};
     };
 }

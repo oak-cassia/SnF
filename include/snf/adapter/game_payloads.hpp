@@ -74,10 +74,26 @@ namespace snf::adapter
         std::uint32_t request_id{0};
         std::vector<std::byte> payload;
     };
+
+    // Wakes a player actor to persist itself. Scheduled as a one-shot timer by the
+    // actor's own turn, so only one can be outstanding at a time.
+    struct PlayerSaveMessage
+    {
+        snf::server::PlayerId player{};
+    };
 }
 
 namespace snf::worker
 {
+    template <> struct ActorPayloadTraits<snf::adapter::PlayerSaveMessage>
+    {
+        static constexpr std::uint32_t TAG = 9;
+        static std::uint64_t calculateCharge(const snf::adapter::PlayerSaveMessage&) noexcept
+        {
+            return sizeof(snf::adapter::PlayerSaveMessage);
+        }
+    };
+
     template <> struct ActorPayloadTraits<snf::adapter::PlayerCommandMessage>
     {
         static constexpr std::uint32_t TAG = 1;
@@ -167,5 +183,6 @@ namespace snf::adapter
         RoomCommandMessage,
         RoomDeadlineMessage,
         RoomTickMessage,
-        PingMessage>;
+        PingMessage,
+        PlayerSaveMessage>;
 }

@@ -51,7 +51,9 @@ namespace snf::adapter
         {
             // No row is a new player, not a failure. The empty actor is what gets
             // persisted the first time it saves.
-            return snf::worker::ActorConstructionResult::ready(std::make_unique<PlayerActorAdapter>(player));
+            auto fresh = std::make_unique<PlayerActorAdapter>(player);
+            fresh->setSaveInterval(_player_save_interval);
+            return snf::worker::ActorConstructionResult::ready(std::move(fresh));
         }
 
         std::vector<snf::server::SkillId> owned_skill_ids;
@@ -84,6 +86,8 @@ namespace snf::adapter
             .skill_loadout = snf::server::SkillLoadout{std::move(owned_skill_ids), snf::server::SkillId{.value = loaded.row.equipped_skill_id}},
         };
 
-        return snf::worker::ActorConstructionResult::ready(std::make_unique<PlayerActorAdapter>(player, record));
+        auto loaded_actor = std::make_unique<PlayerActorAdapter>(player, record);
+        loaded_actor->setSaveInterval(_player_save_interval);
+        return snf::worker::ActorConstructionResult::ready(std::move(loaded_actor));
     }
 }

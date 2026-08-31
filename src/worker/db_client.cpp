@@ -315,11 +315,26 @@ namespace snf::worker
                 return;
             }
 
-            // The driver publishes no wait direction once a call has parked
-            // (net.reading_or_writing reads 0), so readability is the default and
-            // writability is added only while it reports a write in progress.
-            const bool writing = slot.handle->net.reading_or_writing == 2;
-            const PollInterest interest{.read = !writing, .write = writing};
+            // The driver publishes no usable wait direction: net.reading_or_writing
+            // reads 0 on every NOT_READY, a cold caching_sha2_password handshake
+            // included, where it stays 0 across thousands of them. So the direction
+            // comes from the phase instead.
+            //
+            // Connecting is the phase that is not simply waiting for a server
+            // response: the handshake returns NOT_READY repeatedly while it works
+            // through the exchange, and waiting only for readability there stalls
+            // forever. Adding writability makes the loop re-invoke promptly, and the
+            // DB progress budget bounds what that can cost.
+            //
+            // Every other phase is a real wait for the server to answer, so it stays
+            // read-only and an idle connection stays quiet.
+            // Writability is armed only once the server has actually said something.
+            // Before the greeting there is nothing to re-invoke for, and arming it
+            // against a peer that never answers would spin the whole worker on a
+            // socket that is trivially writable.
+            const bool handshaking = slot.state == SlotState::Connecting;
+            const bool greeted = slot.handle->net.pkt_nr != 0;
+            const PollInterest interest{.read = true, .write = handshaking && greeted};
 
             if (slot.registered_fd != descriptor)
             {
