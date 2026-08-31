@@ -136,13 +136,19 @@
 
 종료 조건: DB progress는 Worker poller에서 진행하고 DbClient는 Actor pointer나 coroutine을 소유하지 않는다.
 
-### 9단계 — 선택 adapter
+### 9단계 — 선택 adapter (조건 불충족으로 생략)
 
-- [ ] native async로 교체하지 못한 동기 API 목록이 있을 때만 BlockingAdapterExecutor를 만든다.
-- [ ] immutable job과 `AwaitKey`만 넘기고 completion reservation, saturation과 cancel을 검증한다.
-- [ ] CPU-heavy 작업이 확인될 때만 별도 CpuExecutor를 검토한다.
+- [x] target runtime에 native async로 교체하지 못한 동기 API가 없음을 확인하고
+  `BlockingAdapterExecutor`를 만들지 않는다.
+- [x] executor를 만들지 않으므로 immutable job, `AwaitKey`, completion reservation, saturation과 cancel
+  검증은 적용 대상 없음으로 닫는다.
+- [x] 별도 `CpuExecutor`가 필요한 CPU-heavy 작업은 확인되지 않아 만들지 않는다.
 
-종료 조건: adapter가 없는 build/configuration에서도 core runtime이 완전하다.
+현행 blocking `MySqlPlayerRepository`와 `PlayerPersistenceService`는 선택 adapter로 이전하지 않고
+11단계의 production 경로 전환 뒤 제거한다. TLS 연결이 Worker budget을 깨거나, 동기 file/legacy SDK가
+새로 필요하거나, 신규 runtime 부하 측정에서 CPU-heavy turn이 확인될 때만 이 단계를 다시 연다.
+
+종료 조건: adapter가 없는 build/configuration에서도 core runtime이 완전하다. **충족.**
 
 ### 10단계 — Application workflow 이전
 
