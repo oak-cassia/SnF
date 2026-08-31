@@ -1145,6 +1145,68 @@ namespace snf::worker
                 continue;
             }
 
+            // A suspended DB continuation resumes here, in its own turn. completeDb()
+            // only recorded the result and queued the actor.
+            if (slot->hasBlocked() && std::holds_alternative<SuspendedDbCommand>(*slot->blocked()))
+            {
+                auto& blocked_command = std::get<SuspendedDbCommand>(*slot->blocked());
+                if (!blocked_command.completion.has_value())
+                {
+                    throw std::logic_error{"Queued actor is blocked without a ready completion"};
+                }
+
+                SuspendedDbCommand command = std::move(blocked_command);
+                DbResult completion = std::move(*command.completion);
+                slot->clearBlocked();
+                slot->setState(ActorState::Running);
+
+                ActorTask task = std::move(command.task);
+                ActorTurnScope turn_scope{*this};
+                const auto slice_started_at = std::chrono::steady_clock::now();
+                ++turns_executed;
+                ++_metrics.actor.actor_turns;
+                ++_metrics.actor.resumed_turns;
+
+                const ActorTaskStatus status = task.resume(std::move(completion));
+
+                const auto slice_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - slice_started_at);
+                _metrics.actor.total_slice_duration_ns += static_cast<std::uint64_t>(slice_duration.count());
+                if (slice_duration > _metrics.actor.max_slice_duration)
+                {
+                    _metrics.actor.max_slice_duration = slice_duration;
+                }
+
+                if (status == ActorTaskStatus::Suspended)
+                {
+                    if (!suspendOnDbRequest(*slot, std::move(task)))
+                    {
+                        removeActor(slot->handle(), ActorRemovalReason::ActivationRejected);
+                    }
+                    continue;
+                }
+
+                CompletedTurn completed = task.takeCompleted();
+                task = ActorTask{};
+
+                bool stopped = false;
+                applyEffectBatch(*slot, std::move(completed.effects), stopped, turn_scope.id());
+                if (stopped)
+                {
+                    continue;
+                }
+
+                if (slot->mailbox().empty())
+                {
+                    slot->setState(ActorState::Idle);
+                }
+                else
+                {
+                    slot->setState(ActorState::Queued);
+                    _ready_queue->push(slot->handle());
+                }
+                continue;
+            }
+
             // Check if this slot has a ready suspended continuation
             if (slot->hasBlocked() && std::holds_alternative<SyntheticSuspendedCommand>(*slot->blocked()))
             {
@@ -1319,6 +1381,20 @@ namespace snf::worker
                 {
                     auto& suspended_turn = std::get<SuspendedTurn>(result);
                     ActorTask task = std::move(suspended_turn.task);
+
+                    // A handler that suspended on DbAwait left its request behind.
+                    // Everything else is the Stage 5 synthetic await.
+                    if (task.hasDbRequest())
+                    {
+                        ++_metrics.actor.suspended_turns;
+                        if (!suspendOnDbRequest(*slot, std::move(task)))
+                        {
+                            removeActor(slot->handle(), ActorRemovalReason::ActivationRejected);
+                        }
+                        suspended = true;
+                        break;
+                    }
+
                     const OperationId op = _operation_ids.next();
                     const AwaitKey await_key{
                         .actor = slot->key(),
@@ -1548,15 +1624,28 @@ namespace snf::worker
             return;
         }
 
+        // Which blocked kind is present decides which staleness this is, so the
+        // dispatch happens before any state check. A command completion that arrives
+        // after a timeout already queued the actor is stale against the command
+        // counter, not the activation one.
         ActorSlot* slot = _actors->find(key.actor);
-        if (slot == nullptr || slot->state() != ActorState::Loading || !slot->hasBlocked())
+        if (slot == nullptr || !slot->hasBlocked())
         {
-            ++_metrics.actor.stale_activation_completions;
+            ++_metrics.actor.stale_completions;
             return;
         }
-        if (!std::holds_alternative<ActivationLoad>(*slot->blocked()))
+
+        if (std::holds_alternative<SuspendedDbCommand>(*slot->blocked()))
         {
-            // Stage 8E adds the SuspendedDbCommand branch. Anything else is stale.
+            if (!tryMarkDbCommandReady(key, std::move(result)))
+            {
+                ++_metrics.actor.stale_completions;
+            }
+            return;
+        }
+
+        if (!std::holds_alternative<ActivationLoad>(*slot->blocked()) || slot->state() != ActorState::Loading)
+        {
             ++_metrics.actor.stale_activation_completions;
             return;
         }
@@ -1627,6 +1716,122 @@ namespace snf::worker
         }
         ++_metrics.actor.stale_completions;
         return false;
+    }
+
+    // Turns a DbAwait suspension into a submitted request. Returns false when the
+    // turn suspended without asking for anything, which is a handler bug.
+    bool Worker::suspendOnDbRequest(ActorSlot& slot, ActorTask task)
+    {
+        assertOwnerThread();
+        auto request = task.takeDbRequest();
+        if (!request.has_value())
+        {
+            ++_metrics.actor.activation_load_failures;
+            return false;
+        }
+
+        const AwaitKey await_key{
+            .actor = slot.key(),
+            .incarnation = slot.incarnation(),
+            .operation = _operation_ids.next(),
+        };
+        const auto deadline = std::chrono::steady_clock::now() + _actor_config.await_timeout;
+
+        if (!_timers.tryReserve())
+        {
+            // No timeout slot means no bounded wait, so the handler is resumed with
+            // an overload result rather than left waiting forever.
+            slot.setBlocked(SuspendedDbCommand{
+                .key = await_key,
+                .deadline = deadline,
+                .task = std::move(task),
+                .completion = DbResult{DbFailure{.kind = DbFailureKind::Overloaded, .reached_server = false, .message = "no timeout slot"}},
+            });
+            slot.setState(ActorState::Queued);
+            _ready_queue->push(slot.handle());
+            return true;
+        }
+
+        std::optional<DbResult> immediate_failure;
+        if (_db == nullptr || _shutting_down)
+        {
+            immediate_failure = DbResult{DbFailure{.kind = DbFailureKind::Overloaded, .reached_server = false, .message = "no database"}};
+        }
+        else
+        {
+            const auto submitted = _db->tryStart(await_key, std::move(*request), deadline);
+            if (submitted.status == DbSubmitStatus::Rejected)
+            {
+                immediate_failure = DbResult{DbFailure{.kind = DbFailureKind::Overloaded, .reached_server = false, .message = "db admission"}};
+            }
+            else if (submitted.status == DbSubmitStatus::CompletedInline)
+            {
+                immediate_failure = std::move(submitted.inline_result);
+            }
+        }
+
+        if (immediate_failure.has_value())
+        {
+            // Nothing is waiting on the wire, so the timeout slot goes straight back
+            // and the handler is resumed on the next turn instead of suspending.
+            _timers.releaseReservation();
+            slot.setBlocked(SuspendedDbCommand{
+                .key = await_key,
+                .deadline = deadline,
+                .task = std::move(task),
+                .completion = std::move(immediate_failure),
+            });
+            slot.setState(ActorState::Queued);
+            _ready_queue->push(slot.handle());
+            return true;
+        }
+
+        slot.setBlocked(SuspendedDbCommand{
+            .key = await_key,
+            .deadline = deadline,
+            .task = std::move(task),
+        });
+        slot.setState(ActorState::Suspended);
+        _timers.commitReserved(deadline, AwaitTimeout{await_key});
+        return true;
+    }
+
+    bool Worker::tryMarkDbCommandReady(const AwaitKey key, DbResult result)
+    {
+        assertOwnerThread();
+        if (!actorsConfigured())
+        {
+            return false;
+        }
+
+        ActorSlot* slot = _actors->find(key.actor);
+        if (slot == nullptr || slot->state() != ActorState::Suspended || !slot->hasBlocked())
+        {
+            return false;
+        }
+        if (!std::holds_alternative<SuspendedDbCommand>(*slot->blocked()))
+        {
+            return false;
+        }
+
+        auto& command = std::get<SuspendedDbCommand>(*slot->blocked());
+        if (!acceptsCompletion(key, command.key))
+        {
+            return false;
+        }
+        // A completion that arrives after the timeout already stored one is late and
+        // must not overwrite it.
+        if (command.completion.has_value())
+        {
+            return false;
+        }
+
+        // Record and queue. Resuming the coroutine here would violate INV-13; the
+        // next actor turn does it.
+        command.completion = std::move(result);
+        slot->setState(ActorState::Queued);
+        _ready_queue->push(slot->handle());
+        return true;
     }
 
     bool Worker::tryMarkSyntheticCommandReady(const AwaitKey key, const SyntheticAwaitOutcome outcome)
@@ -2143,6 +2348,23 @@ namespace snf::worker
                         ++_metrics.actor.stale_await_timeouts;
                     }
                 }
+                else if (std::holds_alternative<SuspendedDbCommand>(*slot->blocked()))
+                {
+                    // The actor proceeds on the timeout. A DB completion that lands
+                    // afterwards finds a completion already stored and is discarded.
+                    const bool marked = tryMarkDbCommandReady(
+                        key,
+                        DbResult{DbFailure{
+                            .kind = DbFailureKind::TimedOut,
+                            .reached_server = true,
+                            .message = "await timeout",
+                        }}
+                    );
+                    if (!marked)
+                    {
+                        ++_metrics.actor.stale_await_timeouts;
+                    }
+                }
                 else if (std::holds_alternative<ActivationLoad>(*slot->blocked()))
                 {
                     // Screen the identity here so a stale timer is counted against the timer
@@ -2514,6 +2736,23 @@ namespace snf::worker
                 if (!command.completion.has_value())
                 {
                     command.completion = SyntheticAwaitOutcome::Cancelled;
+                    slot->setState(ActorState::Queued);
+                    _ready_queue->push(slot->handle());
+                    ++_metrics.actor.cancelled_blocked_actors;
+                    any_cancelled = true;
+                }
+            }
+            else if (std::holds_alternative<SuspendedDbCommand>(*slot->blocked()))
+            {
+                auto& command = std::get<SuspendedDbCommand>(*slot->blocked());
+                if (!command.completion.has_value())
+                {
+                    // Logical cancel. It does not wait for the database to answer.
+                    command.completion = DbResult{DbFailure{
+                        .kind = DbFailureKind::ConnectionLost,
+                        .reached_server = true,
+                        .message = "cancelled by shutdown",
+                    }};
                     slot->setState(ActorState::Queued);
                     _ready_queue->push(slot->handle());
                     ++_metrics.actor.cancelled_blocked_actors;

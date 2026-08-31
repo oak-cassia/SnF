@@ -5,8 +5,8 @@
 #include "snf/worker/barrier.hpp"
 #include "snf/worker/budget.hpp"
 #include "snf/worker/connection_table.hpp"
-#include "snf/worker/db_client.hpp"
 #include "snf/worker/connection_work_queue.hpp"
+#include "snf/worker/db_client.hpp"
 #include "snf/worker/identity.hpp"
 #include "snf/worker/inbox.hpp"
 #include "snf/worker/poll_registration.hpp"
@@ -232,6 +232,8 @@ namespace snf::worker
         // raise stale_await_timeouts instead. Step 8's completeDb() takes over this role.
         bool completeSyntheticCommand(AwaitKey key, SyntheticAwaitOutcome outcome);
         [[nodiscard]] bool tryMarkSyntheticCommandReady(AwaitKey key, SyntheticAwaitOutcome outcome);
+        [[nodiscard]] bool tryMarkDbCommandReady(AwaitKey key, DbResult result);
+        [[nodiscard]] bool suspendOnDbRequest(ActorSlot& slot, ActorTask task);
         [[nodiscard]] DeliveryResult beginActivationLoad(ActorKey key, ActorEnvelope&& first_message);
         void completeSyntheticActivation(AwaitKey key, SyntheticActivationOutcome outcome);
         void removeActor(ActorHandle handle, ActorRemovalReason reason);

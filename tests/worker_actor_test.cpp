@@ -1,3 +1,4 @@
+#include "snf/net/tcp_listener.hpp"
 #include "snf/net/unique_file_descriptor.hpp"
 #include "snf/protocol/frame_codec.hpp"
 #include "snf/worker/actor.hpp"
@@ -6,6 +7,8 @@
 #include "snf/worker/worker_group.hpp"
 
 #include <atomic>
+#include <netinet/in.h>
+
 #include <cassert>
 #include <chrono>
 #include <condition_variable>
@@ -37,6 +40,21 @@ namespace snf::worker
         static bool completeSyntheticCommand(Worker& worker, const AwaitKey key, const SyntheticAwaitOutcome outcome)
         {
             return worker.completeSyntheticCommand(key, outcome);
+        }
+
+        static void completeDb(Worker& worker, const AwaitKey key, DbResult result)
+        {
+            worker.completeDb(key, std::move(result));
+        }
+
+        static std::optional<AwaitKey> suspendedDbKey(Worker& worker, const ActorKey key)
+        {
+            auto* slot = worker._actors->find(key);
+            if (slot == nullptr || !slot->hasBlocked() || !std::holds_alternative<SuspendedDbCommand>(*slot->blocked()))
+            {
+                return std::nullopt;
+            }
+            return std::get<SuspendedDbCommand>(*slot->blocked()).key;
         }
 
         static DeliveryResult beginActivationLoad(Worker& worker, const ActorKey key, ActorEnvelope&& first_message)
@@ -1622,6 +1640,15 @@ namespace
         co_return CompletedTurn{.effects = EffectBatch{}};
     }
 
+    ActorTask makeDbAwaitingTask(std::atomic<int>& step, std::optional<DbResult>& observed)
+    {
+        step = 1;
+        auto result = co_await DbAwait{.request = LoadPlayerRequest{.player_id = 4242}};
+        observed = std::move(result);
+        step = 2;
+        co_return CompletedTurn{.effects = EffectBatch{}};
+    }
+
     class SuspendingActor final : public ActorInstance
     {
     public:
@@ -1730,6 +1757,159 @@ namespace
         std::atomic<int>& _step;
         TeardownOrder& _order;
     };
+
+    // 8E: completeDb() records the result and queues the actor. The coroutine is
+    // resumed by the next actor turn, never inside the completion.
+    void test_db_await_resumes_on_the_next_turn_not_inside_complete_db()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 30s,
+        };
+
+        std::atomic<int> step{0};
+        std::optional<DbResult> observed;
+
+        FunctionalActorFactory factory(
+            [&step, &observed](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<SuspendingActor>(
+                    [&step, &observed]()
+                    {
+                        return makeDbAwaitingTask(step, observed);
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+
+        // A listener nobody accepts: the client stays mid-handshake, so the request
+        // is admitted to the queue and the actor genuinely suspends.
+        auto listener = snf::net::create_tcp_listener(0);
+        sockaddr_in address{};
+        socklen_t address_size = sizeof(address);
+        assert(::getsockname(listener.getDescriptor(), reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
+
+        DbClientConfig db_config{};
+        db_config.host_ip = "127.0.0.1";
+        db_config.port = ntohs(address.sin_port);
+        db_config.user = "snf";
+        db_config.password = "snf";
+        db_config.database = "snf_test";
+        db_config.ssl_mode = DbSslMode::Disabled;
+        db_config.connection_count = 1;
+        worker.configureDb(db_config);
+
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(step.load() == 1);
+        assert(worker.metrics().actor.suspended_turns == 1);
+        assert(WorkerActorTestAccess::slot(worker, key)->state() == ActorState::Suspended);
+
+        const auto await_key = WorkerActorTestAccess::suspendedDbKey(worker, key);
+        assert(await_key.has_value());
+
+        WorkerActorTestAccess::completeDb(worker, *await_key, DbResult{LoadPlayerResult{.found = false}});
+
+        // Recorded and queued, but not resumed: the handler has not run again.
+        assert(step.load() == 1);
+        assert(!observed.has_value());
+        assert(WorkerActorTestAccess::slot(worker, key)->state() == ActorState::Queued);
+
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+
+        assert(step.load() == 2);
+        assert(observed.has_value());
+        assert(std::holds_alternative<LoadPlayerResult>(*observed));
+        assert(worker.metrics().actor.resumed_turns == 1);
+    }
+
+    // 8E: once a timeout has stored a completion, the database answer that arrives
+    // afterwards is stale and must not overwrite it.
+    void test_late_db_completion_after_timeout_is_stale()
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 2000ms,
+            .await_timeout = 1ms,
+        };
+
+        std::atomic<int> step{0};
+        std::optional<DbResult> observed;
+
+        FunctionalActorFactory factory(
+            [&step, &observed](ActorKey) -> ActorConstructionResult
+            {
+                auto actor = std::make_unique<SuspendingActor>(
+                    [&step, &observed]()
+                    {
+                        return makeDbAwaitingTask(step, observed);
+                    }
+                );
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+
+        auto listener = snf::net::create_tcp_listener(0);
+        sockaddr_in address{};
+        socklen_t address_size = sizeof(address);
+        assert(::getsockname(listener.getDescriptor(), reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
+
+        DbClientConfig db_config{};
+        db_config.host_ip = "127.0.0.1";
+        db_config.port = ntohs(address.sin_port);
+        db_config.user = "snf";
+        db_config.password = "snf";
+        db_config.database = "snf_test";
+        db_config.ssl_mode = DbSslMode::Disabled;
+        db_config.connection_count = 1;
+        worker.configureDb(db_config);
+
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+        assert(WorkerActorTestAccess::slot(worker, key)->state() == ActorState::Suspended);
+
+        const auto await_key = WorkerActorTestAccess::suspendedDbKey(worker, key);
+        assert(await_key.has_value());
+
+        // The await timeout fires first and stores its own completion.
+        std::this_thread::sleep_for(5ms);
+        WorkerActorTestAccess::expireTimers(worker, std::chrono::steady_clock::now(), WorkerBudgets::defaults().timers);
+        assert(WorkerActorTestAccess::slot(worker, key)->state() == ActorState::Queued);
+
+        const auto stale_before = worker.metrics().actor.stale_completions;
+        WorkerActorTestAccess::completeDb(worker, *await_key, DbResult{LoadPlayerResult{.found = true}});
+        assert(worker.metrics().actor.stale_completions == stale_before + 1);
+
+        WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
+
+        // The handler saw the timeout, not the late answer.
+        assert(step.load() == 2);
+        assert(observed.has_value());
+        const auto* failure = std::get_if<DbFailure>(&*observed);
+        assert(failure != nullptr);
+        assert(failure->kind == DbFailureKind::TimedOut);
+    }
 
     void test_suspended_actor_does_not_dispatch_next_mailbox_command()
     {
@@ -4027,6 +4207,8 @@ void run_worker_actor_tests()
     test_10000_actors_deterministic_execution();
 
     // 5A Tests
+    test_db_await_resumes_on_the_next_turn_not_inside_complete_db();
+    test_late_db_completion_after_timeout_is_stale();
     test_suspended_actor_does_not_dispatch_next_mailbox_command();
     test_completion_does_not_inline_resume_only_in_actor_phase();
     test_duplicate_completion_dropped();

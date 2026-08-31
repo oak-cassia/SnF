@@ -2,8 +2,8 @@
 
 #include "snf/protocol/frame.hpp"
 #include "snf/worker/actor_envelope.hpp"
-#include "snf/worker/db_client.hpp"
 #include "snf/worker/connection.hpp"
+#include "snf/worker/db_client.hpp"
 #include "snf/worker/identity.hpp"
 #include "snf/worker/timer_queue.hpp"
 #include "snf/worker/worker_event.hpp"
@@ -252,6 +252,14 @@ namespace snf::worker
     {
     };
 
+    // How a handler asks for a database round trip. The request travels out with the
+    // suspension and the result comes back on resume, so the handler never touches
+    // the client and the client never holds the coroutine.
+    struct DbAwait
+    {
+        DbRequest request;
+    };
+
     enum class ActorTaskStatus : std::uint8_t
     {
         Suspended = 0,
@@ -268,6 +276,8 @@ namespace snf::worker
         {
             std::variant<std::monostate, CompletedTurn, std::exception_ptr> result{};
             std::optional<SyntheticAwaitOutcome> await_outcome{std::nullopt};
+            std::optional<DbRequest> db_request{std::nullopt};
+            std::optional<DbResult> db_result{std::nullopt};
 
             ActorTask get_return_object() noexcept;
 
@@ -322,6 +332,43 @@ namespace snf::worker
                     }
                 };
                 return Awaiter{*this};
+            }
+
+            auto await_transform(DbAwait awaitable)
+            {
+                struct Awaiter
+                {
+                    promise_type& promise;
+                    DbRequest request;
+
+                    bool await_ready() const noexcept
+                    {
+                        return false;
+                    }
+
+                    void await_suspend(std::coroutine_handle<promise_type>)
+                    {
+                        // The worker picks this up after the turn suspends and submits
+                        // it; there is no path from here to the client.
+                        promise.db_request = std::move(request);
+                    }
+
+                    DbResult await_resume()
+                    {
+                        if (std::holds_alternative<std::exception_ptr>(promise.result))
+                        {
+                            std::rethrow_exception(std::get<std::exception_ptr>(promise.result));
+                        }
+                        if (!promise.db_result.has_value())
+                        {
+                            throw std::logic_error{"ActorTask resumed without a DB result"};
+                        }
+                        DbResult result = std::move(*promise.db_result);
+                        promise.db_result.reset();
+                        return result;
+                    }
+                };
+                return Awaiter{*this, std::move(awaitable.request)};
             }
         };
 
@@ -379,6 +426,48 @@ namespace snf::worker
                 throw std::logic_error{"Cannot resume invalid or finished ActorTask"};
             }
 
+            _handle.resume();
+
+            auto& promise = _handle.promise();
+            if (std::holds_alternative<std::exception_ptr>(promise.result))
+            {
+                std::rethrow_exception(std::get<std::exception_ptr>(promise.result));
+            }
+
+            return _handle.done() ? ActorTaskStatus::Completed : ActorTaskStatus::Suspended;
+        }
+
+        [[nodiscard]] bool hasDbRequest() const noexcept
+        {
+            return _handle && _handle.promise().db_request.has_value();
+        }
+
+        // Set by a suspension on DbAwait. Taking it hands the request to the worker,
+        // which is the only thing allowed to submit it.
+        [[nodiscard]] std::optional<DbRequest> takeDbRequest()
+        {
+            if (!_handle)
+            {
+                return std::nullopt;
+            }
+            auto& promise = _handle.promise();
+            if (!promise.db_request.has_value())
+            {
+                return std::nullopt;
+            }
+            DbRequest request = std::move(*promise.db_request);
+            promise.db_request.reset();
+            return request;
+        }
+
+        [[nodiscard]] ActorTaskStatus resume(DbResult result)
+        {
+            if (!_handle || _handle.done())
+            {
+                throw std::logic_error{"Cannot resume invalid or finished ActorTask"};
+            }
+
+            _handle.promise().db_result = std::move(result);
             _handle.resume();
 
             auto& promise = _handle.promise();
@@ -456,6 +545,14 @@ namespace snf::worker
         std::optional<SyntheticAwaitOutcome> completion{std::nullopt};
     };
 
+    struct SuspendedDbCommand
+    {
+        AwaitKey key;
+        TimePoint deadline;
+        ActorTask task;
+        std::optional<DbResult> completion{std::nullopt};
+    };
+
     struct ActivationLoad
     {
         AwaitKey key;
@@ -470,7 +567,7 @@ namespace snf::worker
         Cancelled,
     };
 
-    using BlockedTask = std::variant<SyntheticSuspendedCommand, ActivationLoad>;
+    using BlockedTask = std::variant<SyntheticSuspendedCommand, SuspendedDbCommand, ActivationLoad>;
 
     class ActorInstance
     {
