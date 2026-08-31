@@ -4,7 +4,7 @@
 > 이 문서의 입장·복귀·보상 결과는 전환 중 보존한다. `reactor`, `RouteCoordinator`, 별도 completion
 > channel과 service 이름은 현행 구현 설명일 뿐 새 구조의 권한이 아니다. 새 실행 주체는
 > [Unified Worker Runtime](./architecture/unified-worker-runtime.md)의 ownership와 workflow 우선순위에 따라
-> [개발 로드맵 10단계](./development-roadmap.md)에서 결정한다.
+> [개발 로드맵 11단계](./development-roadmap.md)의 Application workflow 이전에서 결정한다.
 >
 > 범위: 한 프로세스 안에서 Player를 `ZoneActor`에서 `RoomActor`로 옮기고, 전투가 끝나면 되돌리는
 > 상태 전이

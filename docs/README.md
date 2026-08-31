@@ -19,7 +19,8 @@
 | [Player 상태 소유권](./player-state-ownership-contract.md) | domain/persistence 계약 | Player authority는 보존하고 persistence 실행은 Worker-local native async DB가 기본 |
 | [Projectile Skill](./projectile-skill-contract.md) | 콘텐츠 계약 | 런타임 전환과 독립적인 게임 규칙 |
 | [Room 부하 측정](./room-load-measurement.md) | 역사적 baseline | legacy Reactor/Outbound 구조의 수치이며 새 구조 승인 수치가 아님 |
-| [개발 로드맵](./development-roadmap.md) | 전환 순서 | Unified Worker Runtime 전환을 현재 최우선 작업으로 관리 |
+| [개발 로드맵](./development-roadmap.md) | 전환 순서 | Unified Worker Runtime의 14절 단계 번호와 산출물을 그대로 따라 진행 상태와 세부 작업을 관리 |
 
 문서가 충돌하면 target runtime 구조와 실행 경계는 Unified Worker Runtime 문서가 우선하고, wire와
-gameplay 의미는 해당 domain 계약이 우선한다.
+gameplay 의미는 해당 domain 계약이 우선한다. 개발 로드맵은 기준 문서의 단계를 세분화할 수 있지만 단계
+번호, 순서와 완료 기준을 다시 정의하지 않는다.

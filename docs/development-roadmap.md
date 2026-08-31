@@ -3,6 +3,8 @@
 > 현재 우선순위: **Unified Worker Runtime 전환**
 > 목표 구조: [Unified Worker Runtime 아키텍처](./architecture/unified-worker-runtime.md)
 > 원칙: wire/gameplay 의미와 기존 검증 가능한 동작을 보존하면서 실행 경계를 단계적으로 교체한다.
+> 단계 번호와 산출물은 목표 구조 문서의 [14. 구현 전환 순서](./architecture/unified-worker-runtime.md#14-구현-전환-순서)를
+> 따른다. 이 문서는 각 단계의 세부 작업과 진행 상태만 관리하며 기준 문서의 순서나 완료 기준을 바꾸지 않는다.
 
 ## 1. 전환 전 기준
 
@@ -150,27 +152,36 @@
 
 종료 조건: adapter가 없는 build/configuration에서도 core runtime이 완전하다. **충족.**
 
-### 10단계 — Application workflow 이전
+### 10단계 — metrics, watchdog, shutdown과 load test
+
+- [ ] Worker/Actor/Inbox/DB/Connection/Timer/Completion의 bounded counter, gauge, high-water mark와 latency
+  snapshot을 추가한다.
+- [ ] event-loop phase별 budget 소진과 progress 시각을 기록하고, Worker stall을 검출하는 watchdog을
+  구현한다. watchdog 자체는 Worker를 block하거나 owner object를 cross-thread로 읽지 않는다.
+- [ ] graceful shutdown의 phase, absolute deadline, 남은 resource와 forced cleanup을 계측하고 장시간
+  publication/DB/connection 부하에서 검증한다.
+- [ ] client I/O, hot Actor, 느린 DB와 slow consumer를 동시에 주입하는 bounded load scenario를 만든다.
+- [ ] Debug, ASan·UBSan, TSan, TCP/MySQL integration과 shutdown race를 통과한다.
+- [ ] 4절의 품질 게이트별 재현 명령, 설정, 측정값과 판정을 기록한다.
+
+종료 조건: 신규 Worker runtime test path에서 target architecture의 품질 게이트를 관측할 수 있고 모두
+통과한다. Application workflow와 production 전환 뒤에는 11단계에서 같은 게이트를 다시 실행한다.
+
+### 11단계 — Application workflow 이전, production 전환과 legacy 제거
 
 - [ ] Room entry/return과 cross-zone transition의 natural owner를 결정한다.
 - [ ] natural domain owner가 있으면 explicit Actor state + correlation ID로 구현한다.
 - [ ] 독립 lifecycle이 실제 필요한 흐름만 Coordinator Actor로 만든다.
 - [ ] Actor-to-Actor mailbox 응답을 suspended coroutine이 기다리게 하지 않는다.
 - [ ] disconnect, timeout, compensation과 shutdown terminal을 기존 contract와 대조한다.
-
-종료 조건: 별도 WorkflowTable 없이 모든 accepted transition이 성공, 명시적 실패, close 또는 cancel로 끝난다.
-
-### 11단계 — 운영 검증과 legacy 제거
-
-- [ ] Worker/Actor/Inbox/DB/Connection/Timer/Completion metric을 추가한다.
-- [ ] client I/O, hot Actor, 느린 DB와 slow consumer를 동시에 부하한다.
-- [ ] Debug, ASan·UBSan, TSan, TCP/MySQL integration과 shutdown race를 통과한다.
 - [ ] production server의 connection/game request 경로를 신규 Worker로 100% 전환한다.
+- [ ] 전환된 production 경로에서 10단계의 load scenario와 전체 품질 게이트를 다시 통과한다.
 - [ ] 전환 뒤 ActorRuntime, Binding, shared Outbound와 legacy completion 코드를 제거한다.
 - [ ] 루트 README를 목표 구조의 실제 코드 링크와 새 측정값으로 갱신한다.
 
-종료 조건: target architecture의 품질 게이트를 모두 통과하고 README가 더 이상 legacy 배너를 필요로 하지
-않는다.
+종료 조건: 별도 WorkflowTable 없이 모든 accepted transition이 성공, 명시적 실패, close 또는 cancel로
+끝나고, 신규 경로가 production traffic의 100% authority를 가진다. target architecture의 전체 품질 게이트를
+통과하며 README가 더 이상 legacy 배너를 필요로 하지 않는다.
 
 ## 4. 품질 게이트
 
@@ -184,6 +195,10 @@
 | Fairness | 지속 부하에서도 모든 event-loop phase가 반복 실행됨 |
 | Shutdown | hard deadline 안에 coroutine/resource leak 없이 종료 |
 | Behavior parity | 보존 대상으로 정한 protocol, gameplay와 failure outcome의 회귀 없음 |
+
+10단계에서는 신규 Worker runtime test path로 모든 게이트를 측정하고 통과시킨다. 11단계의 Application
+workflow 이전과 production 경로 전환이 끝나면 같은 표를 전체 TCP/MySQL 경로에서 다시 실행한 뒤 legacy를
+제거한다.
 
 ## 5. 전환 중 열지 않는 작업
 

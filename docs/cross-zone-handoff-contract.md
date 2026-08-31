@@ -4,7 +4,7 @@
 > epoch, stale 방어와 실패 보상은 보존한다. `reactor`, `RouteCoordinator`와
 > `ZoneTransitionChannel`은 현행 구현 이름이며 목표 구조가 아니다. 새 owner와 message flow는
 > [Unified Worker Runtime](./architecture/unified-worker-runtime.md)과
-> [개발 로드맵 10단계](./development-roadmap.md)에서 확정한다.
+> [개발 로드맵 11단계](./development-roadmap.md)의 Application workflow 이전에서 확정한다.
 >
 > 범위: 한 프로세스 안의 두 `ZoneActor` 사이에서 Player를 옮기는 상태 전이
 
