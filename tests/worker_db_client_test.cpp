@@ -487,6 +487,164 @@ namespace
         assert(worker.dbMetrics().connections_poisoned == 0);
     }
 
+    [[nodiscard]] snf::worker::SavePlayerRequest saveRequest(const std::uint64_t player_id, std::vector<std::uint32_t> skills)
+    {
+        return snf::worker::SavePlayerRequest{
+            .player_id = player_id,
+            .handled_command_count = 11,
+            .has_location = true,
+            .zone_id = 3,
+            .position_x = -7,
+            .position_y = 9,
+            .currency_balance = 640,
+            .purchased_item_count = 2,
+            .street_experience = 1500,
+            .equipped_skill_id = 1,
+            .owned_skill_ids = std::move(skills),
+        };
+    }
+
+    void pumpUntil(snf::worker::DbClient& client, snf::worker::Poller& poller, const RecordingSink& sink, const std::size_t completions)
+    {
+        const auto deadline = Clock::now() + 10s;
+        while (sink.completions.size() < completions && Clock::now() < deadline)
+        {
+            pump(client, poller, 50ms);
+        }
+    }
+
+    // 8F: the whole transaction commits as one operation and the saved row reads
+    // back through the load path.
+    void test_save_player_commits_as_one_operation(const MySqlTestConfig& config)
+    {
+        prepareSchema(config);
+
+        RecordingSink sink;
+        snf::worker::Poller poller{16};
+        snf::worker::DbClient client{liveConfig(config), sink};
+        client.start(poller);
+        pump(client, poller, 2000ms);
+
+        const auto deadline = Clock::now() + 8s;
+        assert(client.tryStart(awaitKey(900002, 1), saveRequest(900002, {1, 2, 3}), deadline).status == snf::worker::DbSubmitStatus::Pending);
+        pumpUntil(client, poller, sink, 1);
+
+        assert(sink.completions.size() == 1);
+        const auto* saved = std::get_if<snf::worker::SavePlayerResult>(&sink.completions[0].result);
+        assert(saved != nullptr);
+        assert(saved->outcome == snf::worker::SaveOutcome::Committed);
+        assert(client.metrics().commits_acknowledged == 1);
+        assert(client.metrics().commits_unknown == 0);
+        assert(client.metrics().connections_poisoned == 0);
+
+        // Read it back: the row and the full skill set landed together.
+        assert(
+            client.tryStart(awaitKey(900002, 2), snf::worker::LoadPlayerRequest{.player_id = 900002}, deadline).status ==
+            snf::worker::DbSubmitStatus::Pending
+        );
+        pumpUntil(client, poller, sink, 2);
+
+        const auto* loaded = std::get_if<snf::worker::LoadPlayerResult>(&sink.completions[1].result);
+        assert(loaded != nullptr);
+        assert(loaded->found);
+        assert(loaded->row.handled_command_count == 11);
+        assert(loaded->row.has_location);
+        assert(loaded->row.position_x == -7);
+        assert(loaded->row.street_experience == 1500);
+        assert(loaded->owned_skill_ids.size() == 3);
+
+        client.shutdown(poller);
+    }
+
+    // 8F: a statement failing inside the transaction rolls back, and nothing from
+    // the transaction survives. The player row must not be there on its own.
+    void test_failed_statement_rolls_back_without_partial_write(const MySqlTestConfig& config)
+    {
+        prepareSchema(config);
+
+        RecordingSink sink;
+        snf::worker::Poller poller{16};
+        snf::worker::DbClient client{liveConfig(config), sink};
+        client.start(poller);
+        pump(client, poller, 2000ms);
+
+        const auto deadline = Clock::now() + 8s;
+        // Two identical skill ids collide on the (player_id, skill_id) primary key,
+        // so the insert fails after the row upsert has already been applied.
+        assert(client.tryStart(awaitKey(900003, 1), saveRequest(900003, {4, 4}), deadline).status == snf::worker::DbSubmitStatus::Pending);
+        pumpUntil(client, poller, sink, 1);
+
+        assert(sink.completions.size() == 1);
+        const auto* saved = std::get_if<snf::worker::SavePlayerResult>(&sink.completions[0].result);
+        assert(saved != nullptr);
+        assert(saved->outcome == snf::worker::SaveOutcome::FailedBeforeCommit);
+        assert(client.metrics().rollbacks == 1);
+        assert(client.metrics().commits_acknowledged == 0);
+        assert(client.metrics().commits_unknown == 0);
+        // The rollback was acknowledged, so the connection is still good.
+        assert(client.metrics().connections_poisoned == 0);
+
+        // The upsert must have been rolled back with the rest of the transaction.
+        assert(
+            client.tryStart(awaitKey(900003, 2), snf::worker::LoadPlayerRequest{.player_id = 900003}, deadline).status ==
+            snf::worker::DbSubmitStatus::Pending
+        );
+        pumpUntil(client, poller, sink, 2);
+
+        const auto* loaded = std::get_if<snf::worker::LoadPlayerResult>(&sink.completions[1].result);
+        assert(loaded != nullptr);
+        assert(!loaded->found);
+
+        client.shutdown(poller);
+    }
+
+    // 8F: an in-flight timeout before COMMIT was dispatched is known not to have
+    // applied, because dropping the connection discards the transaction.
+    void test_save_timeout_before_commit_is_failed_before_commit(const MySqlTestConfig& config)
+    {
+        prepareSchema(config);
+
+        RecordingSink sink;
+        snf::worker::Poller poller{16};
+        auto client_config = liveConfig(config);
+        client_config.connection_count = 1;
+        snf::worker::DbClient client{client_config, sink};
+        client.start(poller);
+        pump(client, poller, 2000ms);
+
+        assert(client.tryStart(awaitKey(900004, 1), saveRequest(900004, {1}), Clock::now() - 1ms).status == snf::worker::DbSubmitStatus::Pending);
+        assert(client.inFlightCount() == 1);
+        client.expireDeadlines(Clock::now());
+
+        assert(sink.completions.size() == 1);
+        const auto* saved = std::get_if<snf::worker::SavePlayerResult>(&sink.completions[0].result);
+        assert(saved != nullptr);
+        assert(saved->outcome == snf::worker::SaveOutcome::FailedBeforeCommit);
+        assert(client.metrics().commits_unknown == 0);
+        assert(client.metrics().connections_poisoned == 1);
+
+        client.shutdown(poller);
+    }
+
+    void test_save_rejects_an_empty_loadout()
+    {
+        auto listener = snf::net::create_tcp_listener(0);
+        const std::uint16_t port = snf::test::portOf(listener.getDescriptor());
+
+        RecordingSink sink;
+        snf::worker::Poller poller{16};
+        snf::worker::DbClient client{stubConfig(port), sink};
+        client.start(poller);
+
+        // Same rejection the blocking repository makes, applied at admission so no
+        // blocked state is ever created for it.
+        const auto rejected = client.tryStart(awaitKey(1, 1), saveRequest(1, {}), Clock::now() + 10s);
+        assert(rejected.status == snf::worker::DbSubmitStatus::Rejected);
+        assert(client.queuedCount() == 0);
+
+        client.shutdown(poller);
+    }
+
     // The Stage 8 vertical slice, end to end over a real socket:
     //   ping arrives for a player that has no actor
     //   -> Loading, LoadPlayer submitted
@@ -700,6 +858,8 @@ int main(const int argc, const char* const* const argv)
         std::cout << "  - test_worker_loop_survives_an_unreachable_database PASSED" << std::endl;
         test_loaded_row_becomes_player_state();
         std::cout << "  - test_loaded_row_becomes_player_state PASSED" << std::endl;
+        test_save_rejects_an_empty_loadout();
+        std::cout << "  - test_save_rejects_an_empty_loadout PASSED" << std::endl;
     }
     else if (mode == "--mysql")
     {
@@ -720,6 +880,12 @@ int main(const int argc, const char* const* const argv)
             std::cout << "  - test_in_flight_timeout_poisons_the_connection PASSED" << std::endl;
             test_player_activation_loads_from_the_database(*config);
             std::cout << "  - test_player_activation_loads_from_the_database PASSED" << std::endl;
+            test_save_player_commits_as_one_operation(*config);
+            std::cout << "  - test_save_player_commits_as_one_operation PASSED" << std::endl;
+            test_failed_statement_rolls_back_without_partial_write(*config);
+            std::cout << "  - test_failed_statement_rolls_back_without_partial_write PASSED" << std::endl;
+            test_save_timeout_before_commit_is_failed_before_commit(*config);
+            std::cout << "  - test_save_timeout_before_commit_is_failed_before_commit PASSED" << std::endl;
         }
     }
     else

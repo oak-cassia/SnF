@@ -76,6 +76,43 @@ namespace
                std::to_string(player_id) + " LIMIT " + std::to_string(MAX_PLAYER_ROWS);
     }
 
+    [[nodiscard]] std::string playerUpsert(const snf::worker::SavePlayerRequest& request)
+    {
+        const std::string zone = request.has_location ? std::to_string(request.zone_id) : "NULL";
+        const std::string position_x = request.has_location ? std::to_string(request.position_x) : "NULL";
+        const std::string position_y = request.has_location ? std::to_string(request.position_y) : "NULL";
+        return "INSERT INTO snf_players (player_id, handled_command_count, zone_id, "
+               "position_x, position_y, currency_balance, purchased_item_count, street_experience, equipped_skill_id) VALUES (" +
+               std::to_string(request.player_id) + "," + std::to_string(request.handled_command_count) + "," + zone + "," + position_x + "," +
+               position_y + "," + std::to_string(request.currency_balance) + "," + std::to_string(request.purchased_item_count) + "," +
+               std::to_string(request.street_experience) + "," + std::to_string(request.equipped_skill_id) +
+               ") ON DUPLICATE KEY UPDATE "
+               "handled_command_count=VALUES(handled_command_count), "
+               "zone_id=VALUES(zone_id), position_x=VALUES(position_x), "
+               "position_y=VALUES(position_y), currency_balance=VALUES(currency_balance), "
+               "purchased_item_count=VALUES(purchased_item_count), "
+               "street_experience=VALUES(street_experience), equipped_skill_id=VALUES(equipped_skill_id)";
+    }
+
+    [[nodiscard]] std::string playerSkillDelete(const std::uint64_t player_id)
+    {
+        return "DELETE FROM snf_player_skills WHERE player_id=" + std::to_string(player_id);
+    }
+
+    [[nodiscard]] std::string playerSkillInsert(const snf::worker::SavePlayerRequest& request)
+    {
+        std::string sql = "INSERT INTO snf_player_skills (player_id, skill_id) VALUES ";
+        for (std::size_t index = 0; index < request.owned_skill_ids.size(); ++index)
+        {
+            if (index != 0)
+            {
+                sql += ',';
+            }
+            sql += '(' + std::to_string(request.player_id) + ',' + std::to_string(request.owned_skill_ids[index]) + ')';
+        }
+        return sql;
+    }
+
     [[nodiscard]] std::string playerSkillSelect(const std::uint64_t player_id)
     {
         return "SELECT skill_id FROM snf_player_skills WHERE player_id=" + std::to_string(player_id) + " ORDER BY skill_id LIMIT " +
@@ -118,6 +155,14 @@ namespace snf::worker
         {
             PlayerRow,
             PlayerSkills,
+            // The save transaction, in the order the blocking repository runs it.
+            SaveIsolation,
+            SaveBegin,
+            SaveUpsert,
+            SaveDeleteSkills,
+            SaveInsertSkills,
+            SaveCommit,
+            SaveRollback,
         };
 
         struct InFlight
@@ -129,6 +174,9 @@ namespace snf::worker
             LoadPlayerResult result{};
             std::size_t rows{0};
             std::uint64_t bytes{0};
+            // Set the moment the COMMIT driver call is started. From here on the
+            // outcome cannot be narrowed to success or failure by observation.
+            bool commit_dispatched{false};
         };
 
         struct Queued
@@ -243,7 +291,11 @@ namespace snf::worker
             if (victim.has_value())
             {
                 ++metrics.operations_failed;
-                sink.completeDb(victim->key, DbResult{std::move(failure)});
+                if (std::holds_alternative<SavePlayerRequest>(victim->request) && victim->commit_dispatched)
+                {
+                    ++metrics.commits_unknown;
+                }
+                sink.completeDb(victim->key, failureResultFor(*victim, std::move(failure)));
             }
 
             // Reopening goes through the same backoff gate as a failed connect so
@@ -312,13 +364,56 @@ namespace snf::worker
 
         [[nodiscard]] std::string currentSql(const InFlight& in_flight) const
         {
-            const auto& load = std::get<LoadPlayerRequest>(in_flight.request);
-            return in_flight.stage == Stage::PlayerRow ? playerSelect(load.player_id) : playerSkillSelect(load.player_id);
+            if (const auto* load = std::get_if<LoadPlayerRequest>(&in_flight.request))
+            {
+                return in_flight.stage == Stage::PlayerRow ? playerSelect(load->player_id) : playerSkillSelect(load->player_id);
+            }
+
+            const auto& save = std::get<SavePlayerRequest>(in_flight.request);
+            switch (in_flight.stage)
+            {
+            case Stage::SaveIsolation:
+                return "SET TRANSACTION ISOLATION LEVEL READ COMMITTED";
+            case Stage::SaveBegin:
+                return "START TRANSACTION";
+            case Stage::SaveUpsert:
+                return playerUpsert(save);
+            case Stage::SaveDeleteSkills:
+                return playerSkillDelete(save.player_id);
+            case Stage::SaveInsertSkills:
+                return playerSkillInsert(save);
+            case Stage::SaveCommit:
+                return "COMMIT";
+            case Stage::SaveRollback:
+                return "ROLLBACK";
+            default:
+                break;
+            }
+            return "ROLLBACK";
         }
 
         [[nodiscard]] std::size_t stageRowLimit(const InFlight& in_flight) const noexcept
         {
             return in_flight.stage == Stage::PlayerRow ? MAX_PLAYER_ROWS : MAX_PLAYER_SKILL_ROWS;
+        }
+
+        [[nodiscard]] static bool isSaveStage(const Stage stage) noexcept
+        {
+            return stage >= Stage::SaveIsolation;
+        }
+
+        // The result a failure produces depends on how far the transaction got.
+        [[nodiscard]] static DbResult failureResultFor(const InFlight& in_flight, DbFailure failure)
+        {
+            if (!std::holds_alternative<SavePlayerRequest>(in_flight.request))
+            {
+                return DbResult{std::move(failure)};
+            }
+            // Dropping the connection discards an uncommitted transaction, so
+            // anything before COMMIT was dispatched is known not to have applied.
+            return DbResult{SavePlayerResult{
+                .outcome = in_flight.commit_dispatched ? SaveOutcome::CommitOutcomeUnknown : SaveOutcome::FailedBeforeCommit,
+            }};
         }
 
         void beginStageQuery(Slot& slot)
@@ -330,10 +425,12 @@ namespace snf::worker
 
         void assign(Slot& slot, Queued&& queued)
         {
+            const bool is_save = std::holds_alternative<SavePlayerRequest>(queued.request);
             slot.in_flight = InFlight{
                 .key = queued.key,
                 .request = std::move(queued.request),
                 .deadline = queued.deadline,
+                .stage = is_save ? Stage::SaveIsolation : Stage::PlayerRow,
             };
             ++metrics.operations_started;
             beginStageQuery(slot);
@@ -414,7 +511,15 @@ namespace snf::worker
 
             case SlotState::Querying:
             {
-                const std::string sql = currentSql(*slot.in_flight);
+                InFlight& in_flight = *slot.in_flight;
+                // Set before the call, not after: once the driver has been asked to
+                // send COMMIT there is no way to prove it did not reach the server.
+                if (in_flight.stage == Stage::SaveCommit)
+                {
+                    in_flight.commit_dispatched = true;
+                }
+
+                const std::string sql = currentSql(in_flight);
                 const net_async_status status = ::mysql_real_query_nonblocking(slot.handle, sql.c_str(), sql.size());
                 if (status == NET_ASYNC_NOT_READY)
                 {
@@ -424,8 +529,19 @@ namespace snf::worker
                 }
                 if (status == NET_ASYNC_ERROR)
                 {
+                    if (isSaveStage(in_flight.stage))
+                    {
+                        onSaveStatementFailed(slot, ::mysql_error(slot.handle));
+                        return false;
+                    }
                     failOperation(slot, DbFailureKind::QueryFailed, ::mysql_error(slot.handle));
                     return false;
+                }
+
+                // A statement with no result set has nothing to stream.
+                if (::mysql_field_count(slot.handle) == 0)
+                {
+                    return advanceStage(slot);
                 }
 
                 // Streaming retrieval: rows are checked against the caps as they
@@ -512,26 +628,108 @@ namespace snf::worker
                     return false;
                 }
 
-                InFlight& in_flight = *slot.in_flight;
-                if (in_flight.stage == Stage::PlayerRow)
-                {
-                    if (!in_flight.result.found)
-                    {
-                        // No row means no player. The skills query would be noise.
-                        finish(slot, DbResult{std::move(in_flight.result)});
-                        return true;
-                    }
-                    in_flight.stage = Stage::PlayerSkills;
-                    in_flight.rows = 0;
-                    beginStageQuery(slot);
-                    return true;
-                }
-
-                finish(slot, DbResult{std::move(in_flight.result)});
-                return true;
+                return advanceStage(slot);
             }
             }
             return false;
+        }
+
+        // Moves to the next statement of the operation, or finishes it.
+        [[nodiscard]] bool advanceStage(Slot& slot)
+        {
+            InFlight& in_flight = *slot.in_flight;
+            switch (in_flight.stage)
+            {
+            case Stage::PlayerRow:
+                if (!in_flight.result.found)
+                {
+                    // No row means no player, and the skills query would be noise.
+                    finish(slot, DbResult{std::move(in_flight.result)});
+                    return true;
+                }
+                in_flight.stage = Stage::PlayerSkills;
+                in_flight.rows = 0;
+                beginStageQuery(slot);
+                return true;
+
+            case Stage::PlayerSkills:
+                finish(slot, DbResult{std::move(in_flight.result)});
+                return true;
+
+            case Stage::SaveIsolation:
+                in_flight.stage = Stage::SaveBegin;
+                beginStageQuery(slot);
+                return true;
+            case Stage::SaveBegin:
+                in_flight.stage = Stage::SaveUpsert;
+                beginStageQuery(slot);
+                return true;
+            case Stage::SaveUpsert:
+                in_flight.stage = Stage::SaveDeleteSkills;
+                beginStageQuery(slot);
+                return true;
+            case Stage::SaveDeleteSkills:
+                in_flight.stage = Stage::SaveInsertSkills;
+                beginStageQuery(slot);
+                return true;
+            case Stage::SaveInsertSkills:
+                in_flight.stage = Stage::SaveCommit;
+                beginStageQuery(slot);
+                return true;
+
+            case Stage::SaveCommit:
+                ++metrics.commits_acknowledged;
+                finish(slot, DbResult{SavePlayerResult{.outcome = SaveOutcome::Committed}});
+                return true;
+
+            case Stage::SaveRollback:
+                // The rollback was acknowledged, so the uncommitted work is gone and
+                // the connection is still usable.
+                ++metrics.rollbacks;
+                finish(slot, DbResult{SavePlayerResult{.outcome = SaveOutcome::FailedBeforeCommit}});
+                return true;
+            }
+            return false;
+        }
+
+        // A statement inside the transaction failed. A failed statement does not
+        // roll the transaction back on its own, so an explicit ROLLBACK is sent.
+        void onSaveStatementFailed(Slot& slot, std::string message)
+        {
+            InFlight& in_flight = *slot.in_flight;
+
+            if (in_flight.commit_dispatched)
+            {
+                // COMMIT was already on its way. Whether it applied cannot be
+                // established from here.
+                ++metrics.commits_unknown;
+                ++metrics.operations_failed;
+                std::optional<InFlight> victim = std::move(slot.in_flight);
+                slot.in_flight.reset();
+                closeSlot(slot);
+                slot.retry_at = Clock::now();
+                sink.completeDb(victim->key, DbResult{SavePlayerResult{.outcome = SaveOutcome::CommitOutcomeUnknown}});
+                return;
+            }
+
+            if (in_flight.stage == Stage::SaveRollback)
+            {
+                // The rollback itself could not be confirmed. Dropping the
+                // connection discards the transaction, which reaches the same
+                // meaning by a different route.
+                ++metrics.operations_failed;
+                std::optional<InFlight> victim = std::move(slot.in_flight);
+                slot.in_flight.reset();
+                closeSlot(slot);
+                slot.retry_at = Clock::now();
+                ++metrics.connections_poisoned;
+                sink.completeDb(victim->key, DbResult{SavePlayerResult{.outcome = SaveOutcome::FailedBeforeCommit}});
+                return;
+            }
+
+            static_cast<void>(message);
+            in_flight.stage = Stage::SaveRollback;
+            beginStageQuery(slot);
         }
 
         [[nodiscard]] static bool consumeRow(InFlight& in_flight, MYSQL_RES* result, MYSQL_ROW row, const unsigned int columns)
@@ -655,6 +853,17 @@ namespace snf::worker
         {
             ++_impl->metrics.submit_rejections;
             return DbSubmitResult{.status = DbSubmitStatus::Rejected};
+        }
+
+        if (const auto* save = std::get_if<SavePlayerRequest>(&request))
+        {
+            // Same rejection the blocking repository makes, and the row cap the
+            // shape promises.
+            if (save->owned_skill_ids.empty() || save->owned_skill_ids.size() > MAX_PLAYER_SKILL_ROWS)
+            {
+                ++_impl->metrics.submit_rejections;
+                return DbSubmitResult{.status = DbSubmitStatus::Rejected};
+            }
         }
 
         for (Impl::Slot& slot : _impl->slots)
@@ -864,16 +1073,23 @@ namespace snf::worker
         {
             if (slot.in_flight.has_value())
             {
-                const AwaitKey key = slot.in_flight->key;
+                const Impl::InFlight victim = std::move(*slot.in_flight);
                 slot.in_flight.reset();
                 ++_impl->metrics.operations_failed;
+                if (std::holds_alternative<SavePlayerRequest>(victim.request) && victim.commit_dispatched)
+                {
+                    ++_impl->metrics.commits_unknown;
+                }
                 _impl->sink.completeDb(
-                    key,
-                    DbResult{DbFailure{
-                        .kind = DbFailureKind::ConnectionLost,
-                        .reached_server = true,
-                        .message = "worker is shutting down",
-                    }}
+                    victim.key,
+                    Impl::failureResultFor(
+                        victim,
+                        DbFailure{
+                            .kind = DbFailureKind::ConnectionLost,
+                            .reached_server = true,
+                            .message = "worker is shutting down",
+                        }
+                    )
                 );
             }
             _impl->closeSlot(slot);

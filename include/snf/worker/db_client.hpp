@@ -90,7 +90,28 @@ namespace snf::worker
         std::uint64_t player_id{0};
     };
 
-    using DbRequest = std::variant<LoadPlayerRequest>;
+    // One logical operation covering the whole transaction, exactly as the blocking
+    // repository does it: the player row upsert and the full replacement of the
+    // skill set commit together or not at all. Splitting this into separate requests
+    // would let the loadout drift from the row it belongs to.
+    struct SavePlayerRequest
+    {
+        std::uint64_t player_id{0};
+        std::uint64_t handled_command_count{0};
+        bool has_location{false};
+        std::uint64_t zone_id{0};
+        std::int32_t position_x{0};
+        std::int32_t position_y{0};
+        std::uint64_t currency_balance{0};
+        std::uint64_t purchased_item_count{0};
+        std::uint64_t street_experience{0};
+        std::uint32_t equipped_skill_id{0};
+        // Must be non-empty, matching the existing repository's rejection of an
+        // empty loadout.
+        std::vector<std::uint32_t> owned_skill_ids{};
+    };
+
+    using DbRequest = std::variant<LoadPlayerRequest, SavePlayerRequest>;
 
     struct LoadedPlayerRow
     {
@@ -139,7 +160,28 @@ namespace snf::worker
         std::string message{};
     };
 
-    using DbResult = std::variant<LoadPlayerResult, DbFailure>;
+    // A COMMIT whose answer never arrived is its own outcome. Folding it into
+    // failure would invite a retry that duplicates a mutation the server already
+    // applied.
+    enum class SaveOutcome : std::uint8_t
+    {
+        // The server acknowledged the COMMIT.
+        Committed = 0,
+        // The transaction failed before COMMIT was dispatched, and the uncommitted
+        // work is known to be gone: either ROLLBACK was acknowledged, or the
+        // connection was dropped, which discards it.
+        FailedBeforeCommit = 1,
+        // The COMMIT driver call was started and no acknowledgement came back. The
+        // transaction may or may not have been applied. Never retried automatically.
+        CommitOutcomeUnknown = 2,
+    };
+
+    struct SavePlayerResult
+    {
+        SaveOutcome outcome{SaveOutcome::FailedBeforeCommit};
+    };
+
+    using DbResult = std::variant<LoadPlayerResult, SavePlayerResult, DbFailure>;
 
     enum class DbSubmitStatus : std::uint8_t
     {
@@ -182,6 +224,9 @@ namespace snf::worker
         std::uint64_t stale_poll_events{0};
         std::uint64_t submit_rejections{0};
         std::uint64_t budget_yields{0};
+        std::uint64_t commits_acknowledged{0};
+        std::uint64_t commits_unknown{0};
+        std::uint64_t rollbacks{0};
     };
 
     // Worker-local. Every MYSQL handle is created, used and destroyed on the owner
