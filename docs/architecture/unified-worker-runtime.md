@@ -449,6 +449,19 @@ concrete payload의 non-zero tag uniqueness를 compile time에 검증하고, env
 type identity를 함께 확인한다. `chargedBytes()`는 owned dynamic capacity를 포함하는 overflow-safe,
 conservative logical memory charge다.
 
+저장처럼 여러 statement로 이루어진 mutation은 하나의 logical operation이다. 하나의 connection, 하나의
+deadline, 하나의 `AwaitKey`, 하나의 completion으로 진행하고 중간 단계는 Actor에게 보이지 않는다. COMMIT
+결과는 세 가지다.
+
+| 결과 | 의미 |
+| --- | --- |
+| `Committed` | 서버가 COMMIT을 확인했다 |
+| `FailedBeforeCommit` | COMMIT 이전에 실패했고 미커밋 변경이 확실히 폐기됐다 |
+| `CommitOutcomeUnknown` | COMMIT 드라이버 호출을 시작한 뒤 확인을 받지 못했다 |
+
+Unknown 구간은 전송 완료가 아니라 **드라이버 호출 시작**부터다. 어느 바이트까지 도달했는지 애플리케이션이
+추정하지 않는다. Unknown은 지표로 올리고 자동 retry하지 않는다.
+
 강한 일관성이 필요한 작업은 Actor aggregate state, DB transaction, idempotency key, request/ack 또는
 실제 요구가 있는 durable outbox로 해결한다. `EffectBatch` 자체는 transaction이 아니다.
 
@@ -524,6 +537,32 @@ retry는 금지하고 idempotent operation 또는 idempotency key가 있을 때�
 
 Native DB driver의 acquire, DNS, connect, TLS/auth, submit, partial read/write, result fetch, cancel과
 reconnect 전체 경로가 non-blocking이어야 한다. hidden synchronous fallback은 허용하지 않는다.
+
+8단계 conformance 게이트가 MySQL 8.4와 libmysqlclient 21.2에서 실측한 결과는 다음과 같다.
+
+| 항목 | 실측 |
+| --- | --- |
+| async API | `mysql_*_nonblocking`. socket은 `MYSQL::net.fd` |
+| 대기 방향 힌트 | **없다.** `net.reading_or_writing`은 모든 `NOT_READY`에서 0이다 |
+| TLS handshake | connect 한 호출이 스레드를 약 8ms 점유한다. `ssl_mode=DISABLED`면 약 100us |
+| DNS | connect 안에서 동기 호출된다 |
+| streaming | `mysql_use_result()` + `mysql_fetch_row_nonblocking()`으로 가능하다 |
+| cancel | 별도 control connection의 server-side KILL만 가능하다 |
+
+여기서 나온 계약은 다음과 같다.
+
+- `ssl_mode`는 설정에서 명시한다. client 기본값이 `PREFERRED`라 명시하지 않으면 connect마다 TLS 비용을
+  조용히 지불한다.
+- host는 IP만 받는다. 호스트명 해석은 startup 1회로 loop 밖에서 한다.
+- poll interest는 phase에서 나온다. server greeting을 받은 뒤의 handshake 구간에만 writability를 함께
+  걸고, 나머지 phase는 read-only다. greeting 이전에 writability를 걸면 응답 없는 서버에서 Worker가
+  spin한다.
+- SELECT는 streaming으로 받고 row/byte 상한을 fetch 도중에 강제한다. 조기 중단은 `Commands out of sync`를
+  피하기 위해 connection을 폐기한다.
+- DB event 하나의 progress는 step/row/byte/duration으로 bound한다.
+- timeout은 queued와 in-flight를 구분한다. queued는 connection을 건드리지 않는다.
+- `mysql_library_init/end`의 owner는 WorkerGroup이 아니라 application이며, `MYSQL*` 생성은 owner
+  Worker thread에서 한다.
 
 async는 처리 용량을 무한으로 만들지 않는다. connection, in-flight, queued count와 request/result byte를
 함께 제한한다.

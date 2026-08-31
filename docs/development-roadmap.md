@@ -123,11 +123,16 @@
 
 ### 8단계 — Native async DB
 
-- [ ] production DB driver의 acquire, DNS, connect, TLS/auth, query, fetch, cancel과 reconnect가 모두
+- [x] production DB driver의 acquire, DNS, connect, TLS/auth, query, fetch, cancel과 reconnect가 모두
   non-blocking인지 conformance test로 증명한다.
-- [ ] Worker-local DbClient, DbInFlight와 `completeDb()`를 구현한다.
-- [ ] `Rejected/CompletedInline/Pending` submit 계약과 DB-local capacity를 적용한다.
-- [ ] Player activation/load/save 의미를 새 DB 경로에 맞게 확정한다.
+- [x] Worker-local DbClient, DbInFlight와 `completeDb()`를 구현한다.
+- [x] `Rejected/CompletedInline/Pending` submit 계약과 DB-local capacity를 적용한다.
+- [x] Player activation/load/save 의미를 새 DB 경로에 맞게 확정한다.
+- [x] result를 streaming fetch로 받고 row/byte 상한을 fetch 도중에 강제한다.
+- [x] DB event 하나의 progress를 step/row/byte/duration으로 bound한다.
+- [x] queued timeout은 connection을 유지하고 in-flight timeout만 connection을 폐기한다.
+- [x] `SavePlayer`의 COMMIT 결과를 Committed/FailedBeforeCommit/CommitOutcomeUnknown으로 구분하고
+  자동 retry를 금지한다.
 
 종료 조건: DB progress는 Worker poller에서 진행하고 DbClient는 Actor pointer나 coroutine을 소유하지 않는다.
 
