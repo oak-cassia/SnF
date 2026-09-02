@@ -239,6 +239,7 @@ namespace snf::worker
         // progress word below is published either way.
         ThreadExecutionSample execution_sample{};
         bool execution_sample_valid = false;
+        TimePoint measured_at = now;
         if (_budgets.sample_phase_execution)
         {
             execution_sample_valid = sampleThreadExecution(execution_sample);
@@ -246,12 +247,19 @@ namespace snf::worker
             {
                 ++_metrics.thread_execution_sample_failures;
             }
+            // Read the wall clock adjacent to the CPU counters. The call site
+            // captures `now` before this syscall, so measuring residence from it
+            // leaves the CPU interval shifted past the wall interval: time the
+            // process loses inside that gap is then credited to the phase as CPU
+            // without appearing in its wall time, which reported more CPU than
+            // wall for the same sample.
+            measured_at = std::chrono::steady_clock::now();
         }
 
         if (_phase_entered_at != TimePoint{})
         {
             WorkerPhaseMetrics& previous = _metrics.phases[static_cast<std::size_t>(_current_phase)];
-            const auto wall_residence = std::chrono::duration_cast<std::chrono::nanoseconds>(now - _phase_entered_at);
+            const auto wall_residence = std::chrono::duration_cast<std::chrono::nanoseconds>(measured_at - _phase_entered_at);
             if (execution_sample_valid && _phase_execution_sample_valid && execution_sample.cpu_time >= _phase_execution_entered_at.cpu_time &&
                 execution_sample.voluntary_context_switches >= _phase_execution_entered_at.voluntary_context_switches &&
                 execution_sample.involuntary_context_switches >= _phase_execution_entered_at.involuntary_context_switches)
@@ -281,16 +289,16 @@ namespace snf::worker
         WorkerPhaseMetrics& next = _metrics.phases[static_cast<std::size_t>(phase)];
         if (next.last_entered != TimePoint{})
         {
-            next.max_entry_gap = std::max(next.max_entry_gap, std::chrono::duration_cast<std::chrono::nanoseconds>(now - next.last_entered));
+            next.max_entry_gap = std::max(next.max_entry_gap, std::chrono::duration_cast<std::chrono::nanoseconds>(measured_at - next.last_entered));
         }
-        next.last_entered = now;
+        next.last_entered = measured_at;
         ++next.entries;
 
         _current_phase = phase;
-        _phase_entered_at = now;
+        _phase_entered_at = measured_at;
         _phase_execution_entered_at = execution_sample;
         _phase_execution_sample_valid = execution_sample_valid;
-        _progress.publish(phase, now);
+        _progress.publish(phase, measured_at);
     }
 
     void Worker::sampleGauges() noexcept

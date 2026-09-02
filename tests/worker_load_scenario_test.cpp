@@ -21,12 +21,14 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <ostream>
 #include <poll.h>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
 #include <thread>
+#include <time.h>
 #include <unistd.h>
 #include <vector>
 
@@ -305,27 +307,185 @@ namespace
         return offset == bytes.size();
     }
 
-    void assertActiveLoopBounds(const WorkerMetrics& metrics, const WorkerBudgets& budgets)
+    // An independent witness for how much time the whole process loses to
+    // something other than the Worker. It only sleeps and reads the clock, so any
+    // gap beyond its sleep interval is time the process was not running at all.
+    //
+    // Stage 10 calibration measured this environment losing 2.8-23.3 ms in a
+    // single gap, and once crediting a sleeping thread with 6.87 ms of CPU across
+    // a 10.04 ms gap. A phase outlier can therefore be pure environment stall
+    // even though the phase shows CPU ~= wall and no context switch, so the
+    // active-phase bounds are judged against the witness rather than widened.
+    class EnvironmentWitness final
+    {
+    public:
+        static constexpr auto SLEEP_INTERVAL = 1ms;
+        // A 1 ms sleep that returns within 2 ms is normal wakeup latency.
+        static constexpr auto QUIET_GAP = 2ms;
+        // Most that a single environment stall may excuse. Calibration measured
+        // 2.8-23.3 ms over 16 runs, so this covers what was observed without
+        // growing large enough to hide a real block.
+        static constexpr auto SLACK_CAP = 30ms;
+        // Past QUIET_GAP + SLACK_CAP the window proves nothing about the Worker,
+        // so it is retried rather than passed or failed.
+        static constexpr auto UNUSABLE_GAP = QUIET_GAP + SLACK_CAP;
+
+        void start()
+        {
+            _thread = std::thread(
+                [this]
+                {
+                    run();
+                }
+            );
+        }
+
+        void stop()
+        {
+            _stop.store(true, std::memory_order_release);
+            if (_thread.joinable())
+            {
+                _thread.join();
+            }
+        }
+
+        [[nodiscard]] std::chrono::nanoseconds maxGap() const noexcept
+        {
+            return std::chrono::nanoseconds{_max_gap_ns.load(std::memory_order_relaxed)};
+        }
+
+        // CPU credited to this thread across its longest gap. It only slept, so a
+        // non-trivial value here is proof that CPU accounting counts time the
+        // thread was not running.
+        [[nodiscard]] std::chrono::nanoseconds cpuDuringMaxGap() const noexcept
+        {
+            return std::chrono::nanoseconds{_max_gap_cpu_ns.load(std::memory_order_relaxed)};
+        }
+
+        [[nodiscard]] std::uint64_t samples() const noexcept
+        {
+            return _samples.load(std::memory_order_relaxed);
+        }
+
+        [[nodiscard]] std::uint64_t gapsOver(const std::chrono::milliseconds bound) const noexcept
+        {
+            const auto limit = std::chrono::duration_cast<std::chrono::nanoseconds>(bound).count();
+            return limit >= 10000000 ? _gaps_over_10ms.load(std::memory_order_relaxed) : _gaps_over_2ms.load(std::memory_order_relaxed);
+        }
+
+        // How much of an active-phase overshoot this run cannot attribute to the
+        // Worker. Zero on a quiet host, so the thresholds stay authoritative.
+        [[nodiscard]] std::chrono::nanoseconds slack() const noexcept
+        {
+            const auto gap = maxGap();
+            const auto quiet = std::chrono::duration_cast<std::chrono::nanoseconds>(QUIET_GAP);
+            const auto cap = std::chrono::duration_cast<std::chrono::nanoseconds>(SLACK_CAP);
+            return gap > quiet ? std::min(gap - quiet, cap) : std::chrono::nanoseconds::zero();
+        }
+
+        // False means the host stalled so much that this window cannot judge the
+        // Worker either way. The caller retries instead of concluding.
+        [[nodiscard]] bool usable() const noexcept
+        {
+            return samples() > 0 && maxGap() < UNUSABLE_GAP;
+        }
+
+    private:
+        [[nodiscard]] static std::int64_t threadCpuNs() noexcept
+        {
+            timespec now{};
+            if (::clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now) != 0)
+            {
+                return 0;
+            }
+            return static_cast<std::int64_t>(now.tv_sec) * 1000000000LL + now.tv_nsec;
+        }
+
+        void run() noexcept
+        {
+            auto previous = Clock::now();
+            auto previous_cpu = threadCpuNs();
+            while (!_stop.load(std::memory_order_acquire))
+            {
+                const auto now = Clock::now();
+                const auto now_cpu = threadCpuNs();
+                const auto gap = std::chrono::duration_cast<std::chrono::nanoseconds>(now - previous).count();
+                if (gap > _max_gap_ns.load(std::memory_order_relaxed))
+                {
+                    _max_gap_ns.store(gap, std::memory_order_relaxed);
+                    _max_gap_cpu_ns.store(now_cpu - previous_cpu, std::memory_order_relaxed);
+                }
+                if (gap > std::chrono::duration_cast<std::chrono::nanoseconds>(QUIET_GAP).count())
+                {
+                    _gaps_over_2ms.fetch_add(1, std::memory_order_relaxed);
+                }
+                if (gap > 10000000)
+                {
+                    _gaps_over_10ms.fetch_add(1, std::memory_order_relaxed);
+                }
+                _samples.fetch_add(1, std::memory_order_relaxed);
+                previous = now;
+                previous_cpu = now_cpu;
+                std::this_thread::sleep_for(SLEEP_INTERVAL);
+            }
+        }
+
+        std::atomic<bool> _stop{false};
+        std::atomic<std::int64_t> _max_gap_ns{0};
+        std::atomic<std::int64_t> _max_gap_cpu_ns{0};
+        std::atomic<std::uint64_t> _samples{0};
+        std::atomic<std::uint64_t> _gaps_over_2ms{0};
+        std::atomic<std::uint64_t> _gaps_over_10ms{0};
+        std::thread _thread;
+    };
+
+    void reportEnvironmentWitness(std::ostream& out, const EnvironmentWitness& witness)
+    {
+        out << "envwitness.samples=" << witness.samples() << ",max_gap_ns=" << witness.maxGap().count()
+            << ",cpu_during_max_gap_ns=" << witness.cpuDuringMaxGap().count() << ",gaps_over_2ms=" << witness.gapsOver(2ms)
+            << ",gaps_over_10ms=" << witness.gapsOver(10ms) << ",slack_ns=" << witness.slack().count() << '\n';
+    }
+
+    // Returns false when the window was too noisy to judge; the caller retries.
+    [[nodiscard]] bool assertActiveLoopBounds(const WorkerMetrics& metrics, const WorkerBudgets& budgets, const EnvironmentWitness& witness)
     {
         constexpr auto multiplier = GATE_MULTIPLIER;
         // The CPU residence bound is the primary blocking gate, so a run with the
         // opt-in sampling left off would satisfy it with zeros. Refuse that.
         assert(budgets.sample_phase_execution);
         assert(metrics.thread_execution_sample_failures == 0);
+        assert(witness.samples() > 0);
+        if (!witness.usable())
+        {
+            std::cerr << "active-loop bounds not judged, environment window unusable: witness_max_gap_ns=" << witness.maxGap().count()
+                      << " limit_ns=" << std::chrono::nanoseconds{EnvironmentWitness::UNUSABLE_GAP}.count() << '\n';
+            return false;
+        }
+        // Time the whole process lost. Zero on a quiet host, so the thresholds
+        // below stay authoritative there; never widened by hand.
+        const auto slack = witness.slack();
         const auto phase_sum = budgets.poll.max_duration + budgets.inbox.max_duration + budgets.timers.max_duration + budgets.db.max_duration +
                                budgets.actors.max_duration + budgets.writes.max_duration;
         const auto fairness = (phase_sum + budgets.max_poll_timeout) * multiplier;
         std::chrono::nanoseconds observed_cpu_total{0};
-        const auto phase_limit = [&metrics, &observed_cpu_total, fairness](const WorkerPhase phase, const std::chrono::nanoseconds cpu_threshold)
+        const auto phase_limit =
+            [&metrics, &observed_cpu_total, fairness, slack](const WorkerPhase phase, const std::chrono::nanoseconds cpu_threshold)
         {
             const auto& observed = metrics.phases[static_cast<std::size_t>(phase)];
             assert(observed.entries > 0);
-            if (observed.max_cpu_residence >= cpu_threshold)
+            // A phase overshoot is only attributable to the Worker up to the time
+            // the witness proves the whole process lost. The witness measured that
+            // in this same run, so a quiet host leaves the threshold untouched and
+            // a real Worker block still fails: a Worker that blocks on its own
+            // does not stop the witness thread.
+            const auto cpu_bound = cpu_threshold + slack;
+            if (observed.max_cpu_residence >= cpu_bound)
             {
                 std::cerr << "phase CPU bound exceeded: phase=" << static_cast<std::size_t>(phase)
-                          << " cpu_residence_ns=" << observed.max_cpu_residence.count() << " threshold_ns=" << cpu_threshold.count() << '\n';
+                          << " cpu_residence_ns=" << observed.max_cpu_residence.count() << " threshold_ns=" << cpu_threshold.count()
+                          << " environment_slack_ns=" << slack.count() << '\n';
             }
-            assert(observed.max_cpu_residence < cpu_threshold);
+            assert(observed.max_cpu_residence < cpu_bound);
             observed_cpu_total += observed.max_cpu_residence;
             if constexpr (CONTEXT_SWITCH_GATE_AUTHORITATIVE)
             {
@@ -334,7 +494,7 @@ namespace
                 // Keeping it loose here is deliberate - scheduler preemption alone
                 // reaches ~130 ms of wall time with no blocking at all.
                 assert(observed.voluntary_context_switches == 0);
-                assert(observed.max_residence < fairness);
+                assert(observed.max_residence < fairness + slack);
             }
             else
             {
@@ -342,7 +502,7 @@ namespace
                 // voluntary switch count is no longer a product signal. Wall time is
                 // the only blocking evidence left, and the fairness bound (up to
                 // 2.12 s under TSan) is useless for that, so bound it separately.
-                const auto wall_threshold = cpu_threshold + WorkerGateThresholds::SANITIZER_ACTIVE_WALL_SLACK;
+                const auto wall_threshold = cpu_threshold + WorkerGateThresholds::SANITIZER_ACTIVE_WALL_SLACK + slack;
                 if (observed.max_residence >= wall_threshold)
                 {
                     std::cerr << "phase wall bound exceeded: phase=" << static_cast<std::size_t>(phase)
@@ -351,7 +511,7 @@ namespace
                               << " threshold_ns=" << std::chrono::nanoseconds{wall_threshold}.count() << '\n';
                 }
                 assert(observed.max_residence < wall_threshold);
-                assert(observed.max_residence < fairness);
+                assert(observed.max_residence < fairness + slack);
             }
         };
         phase_limit(WorkerPhase::Poll, budgets.poll.max_duration * multiplier + WorkerGateThresholds::POLL_ITEM_ALLOWANCE);
@@ -369,21 +529,22 @@ namespace
         assert(poll_wait.entries > 0);
         if constexpr (CONTEXT_SWITCH_GATE_AUTHORITATIVE)
         {
-            assert(poll_wait.max_residence < budgets.max_poll_timeout * 2);
+            assert(poll_wait.max_residence < budgets.max_poll_timeout * 2 + slack);
         }
         else
         {
             // pollTimeout() is bounded by max_poll_timeout, so a healthy PollWait
             // returns within it plus reschedule delay. Under sanitizers a 124 ms
             // late reschedule was measured, hence the same slack as active phases.
-            assert(poll_wait.max_residence < budgets.max_poll_timeout * 2 + WorkerGateThresholds::SANITIZER_ACTIVE_WALL_SLACK);
+            assert(poll_wait.max_residence < budgets.max_poll_timeout * 2 + WorkerGateThresholds::SANITIZER_ACTIVE_WALL_SLACK + slack);
         }
 
         for (const WorkerPhase phase :
              {WorkerPhase::Poll, WorkerPhase::Inbox, WorkerPhase::Timers, WorkerPhase::Db, WorkerPhase::Actors, WorkerPhase::Writes})
         {
-            assert(metrics.phases[static_cast<std::size_t>(phase)].max_entry_gap < fairness);
+            assert(metrics.phases[static_cast<std::size_t>(phase)].max_entry_gap < fairness + slack);
         }
+        return true;
     }
 
     void assertCleanShutdown(const WorkerMetrics& metrics)
@@ -411,7 +572,87 @@ namespace
         assert(metrics.actor.forced_blocked_destructions == 0);
     }
 
-    void runSingleWorkerLoad(const bool mysql)
+    // Negative control for the witness rule. A Worker that burns CPU inside one
+    // phase must still break the bound the gate applies, including the largest
+    // slack the witness can ever grant. Without this, "threshold + measured
+    // environment slack" would be an unfalsifiable way to pass.
+    void assertRealPhaseBlockingStillBreaksTheBound()
+    {
+        const auto burnThreadCpu = [](const std::chrono::nanoseconds target)
+        {
+            const auto threadCpu = []
+            {
+                timespec now{};
+                ::clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
+                return std::chrono::seconds{now.tv_sec} + std::chrono::nanoseconds{now.tv_nsec};
+            };
+            const auto deadline = threadCpu() + target;
+            volatile std::uint64_t sink = 0;
+            while (threadCpu() < deadline)
+            {
+                for (int index = 0; index < 4096; ++index)
+                {
+                    sink = sink + static_cast<std::uint64_t>(index);
+                }
+            }
+            static_cast<void>(sink);
+        };
+
+        WorkerBudgets budgets = WorkerBudgets::defaults();
+        budgets.sample_phase_execution = true;
+        Worker worker(WorkerId{0}, 1, budgets, WorkerInboxConfig{});
+        std::atomic<bool> handled{false};
+        worker.setEventHandler(
+            [&handled, &burnThreadCpu](WorkerEvent&&)
+            {
+                burnThreadCpu(150ms);
+                handled.store(true, std::memory_order_release);
+            }
+        );
+        auto port = worker.bindInboxSource(WorkerId{0});
+
+        EnvironmentWitness witness;
+        witness.start();
+        std::thread runner(
+            [&worker]
+            {
+                worker.run();
+            }
+        );
+        assert(
+            port.tryPush(WorkerEnvelope{
+                .event =
+                    RemoteConnectionClose{
+                        .connection = ConnectionRef{ConnectionId{1}, ConnectionGeneration{1}, WorkerId{0}},
+                        .reason = CloseReason::Shutdown,
+                    },
+                .charged_bytes = 16,
+            }) == InboxPushResult::Accepted
+        );
+        const auto deadline = Clock::now() + 5s;
+        while (!handled.load(std::memory_order_acquire) && Clock::now() < deadline)
+        {
+            std::this_thread::sleep_for(1ms);
+        }
+        assert(handled.load(std::memory_order_acquire));
+        worker.requestStop();
+        runner.join();
+        witness.stop();
+
+        const auto& inbox = worker.metrics().phases[static_cast<std::size_t>(WorkerPhase::Inbox)];
+        const auto threshold = budgets.inbox.max_duration * GATE_MULTIPLIER + WorkerGateThresholds::INBOX_ITEM_ALLOWANCE;
+        const auto largest_possible_slack = std::chrono::duration_cast<std::chrono::nanoseconds>(EnvironmentWitness::SLACK_CAP);
+        std::cerr << "negative_control.inbox_cpu_ns=" << inbox.max_cpu_residence.count() << ",threshold_ns=" << threshold.count()
+                  << ",witness_slack_ns=" << witness.slack().count() << ",slack_cap_ns=" << largest_possible_slack.count() << '\n';
+        assert(inbox.max_cpu_residence > threshold + largest_possible_slack);
+        // The block was the Worker's own, so it must not have stalled the witness
+        // into excusing it.
+        assert(witness.slack() < largest_possible_slack);
+    }
+
+    // Returns false when the environment window was unusable, so the caller can
+    // re-roll it. Every non-timing assertion still runs unconditionally.
+    [[nodiscard]] bool runSingleWorkerLoad(const bool mysql)
     {
         snf::net::UniqueFileDescriptor stalled_db_listener;
         DbClientConfig db_config;
@@ -581,6 +822,8 @@ namespace
             }
         );
 
+        EnvironmentWitness witness;
+        witness.start();
         WorkerWatchdog watchdog(WorkerWatchdogConfig{}, budgets, {{.worker = WorkerId{0}, .progress = &worker.progress()}});
         watchdog.start();
         std::thread runner(
@@ -621,6 +864,7 @@ namespace
         worker.requestStop();
         runner.join();
         watchdog.stop();
+        witness.stop();
 
         assert(!probe_failed.load(std::memory_order_acquire));
         assert(probe_sent.load(std::memory_order_relaxed) > 0);
@@ -631,11 +875,12 @@ namespace
         const WorkerMetrics& metrics = worker.metrics();
         const DbClientMetrics& db = worker.dbMetrics();
         std::cerr << "worker_report.context_switch_gate_authoritative=" << CONTEXT_SWITCH_GATE_AUTHORITATIVE << '\n';
+        reportEnvironmentWitness(std::cerr, witness);
         snf::test::printWorkerReport(std::cerr, metrics, db);
         assert(metrics.network.protocol_errors == 0);
         assert(metrics.network.invariant_violations == 0);
         assert(metrics.thread_execution_sample_failures == 0);
-        assertActiveLoopBounds(metrics, budgets);
+        const bool judged = assertActiveLoopBounds(metrics, budgets, witness);
 
         assert(metrics.high_water_marks.sampled_connections <= network.table.capacity);
         assert(metrics.high_water_marks.sampled_actors <= actors.actor_table_capacity);
@@ -666,11 +911,13 @@ namespace
         }
         assertCleanShutdown(metrics);
         std::cout << "worker_report.context_switch_gate_authoritative=" << CONTEXT_SWITCH_GATE_AUTHORITATIVE << '\n';
+        reportEnvironmentWitness(std::cout, witness);
         snf::test::printWorkerReport(std::cout, metrics, db);
         std::cout << "worker_report.watchdog=samples:" << watchdog.metrics().samples_taken.load(std::memory_order_relaxed)
                   << ",active_stalls:" << watchdog.metrics().active_stall_episodes.load(std::memory_order_relaxed)
                   << ",shutdown_stalls:" << watchdog.metrics().shutdown_stall_episodes.load(std::memory_order_relaxed)
                   << ",longest_ns:" << watchdog.metrics().longest_stall_ns.load(std::memory_order_relaxed) << '\n';
+        return judged;
     }
 
     using CrossRegistry = ActorPayloadRegistry<snf::load_test::CrossMessage>;
@@ -798,5 +1045,22 @@ int main(const int argc, char** argv)
     }
 
     runWorkerGroupPressure();
-    runSingleWorkerLoad(mode == "--mysql");
+    assertRealPhaseBlockingStillBreaksTheBound();
+
+    // The active-loop bounds can only be judged in a window the environment did
+    // not stall through. Re-roll the window, never the thresholds: inside a usable
+    // window the bounds are exact, and a Worker that blocks on its own fails every
+    // attempt because it does not stall the witness thread.
+    constexpr int MAX_ATTEMPTS = 3;
+    for (int attempt = 1; attempt <= MAX_ATTEMPTS; ++attempt)
+    {
+        if (runSingleWorkerLoad(mode == "--mysql"))
+        {
+            std::cout << "load_scenario.judged_on_attempt=" << attempt << '\n';
+            return 0;
+        }
+        std::cerr << "load_scenario.attempt=" << attempt << " was unusable, re-rolling the environment window\n";
+    }
+    std::cerr << "load_scenario: no usable environment window in " << MAX_ATTEMPTS << " attempts; host is too noisy to judge the active loop\n";
+    return 1;
 }
