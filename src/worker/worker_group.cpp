@@ -4,7 +4,9 @@
 #include "snf/net/tcp_listener.hpp"
 #include "snf/net/unique_file_descriptor.hpp"
 
+#include <algorithm>
 #include <arpa/inet.h>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <netinet/in.h>
@@ -31,10 +33,12 @@ namespace snf::worker
     WorkerGroup::WorkerGroup(
         const WorkerGroupConfig& config,
         RequestSinkFactory request_sink_factory,
-        ActorFactoryFactory actor_factory_factory
+        ActorFactoryFactory actor_factory_factory,
+        WorkerWatchdog::StallHandler watchdog_handler
     )
         : _config(config)
         , _barrier(config.worker_count)
+        , _thread_exited(std::make_unique<std::atomic<bool>[]>(config.worker_count))
     {
         if (!isValid(config))
         {
@@ -44,6 +48,12 @@ namespace snf::worker
         {
             throw std::invalid_argument{"WorkerGroup actor configuration and factory must be provided together"};
         }
+
+        for (std::uint16_t index = 0; index < config.worker_count; ++index)
+        {
+            _thread_exited[index].store(false, std::memory_order_relaxed);
+        }
+        _join_overruns.reserve(config.worker_count);
 
         std::vector<snf::net::UniqueFileDescriptor> listeners;
         listeners.reserve(config.worker_count);
@@ -108,6 +118,23 @@ namespace snf::worker
                 _workers[source]->bindRemoteTarget(WorkerId{target}, std::move(port));
             }
         }
+
+        if (config.watchdog)
+        {
+            std::vector<WorkerWatchdogTarget> targets;
+            targets.reserve(_workers.size());
+            for (const auto& worker : _workers)
+            {
+                targets.push_back(WorkerWatchdogTarget{.worker = worker->id(), .progress = &worker->progress()});
+            }
+            _watchdog = std::make_unique<WorkerWatchdog>(*config.watchdog, config.budgets, std::move(targets), std::move(watchdog_handler));
+        }
+
+        for (const auto& worker : _workers)
+        {
+            _group_shutdown_budget = std::max(_group_shutdown_budget, worker->configuredShutdownTimeout());
+        }
+        _group_shutdown_budget += std::chrono::duration_cast<std::chrono::nanoseconds>(config.group_shutdown_grace);
     }
 
     WorkerGroup::~WorkerGroup()
@@ -136,6 +163,10 @@ namespace snf::worker
                     }
                 );
             }
+            if (_watchdog)
+            {
+                _watchdog->start();
+            }
         }
         catch (...)
         {
@@ -152,12 +183,17 @@ namespace snf::worker
             return;
         }
 
+        observeThreadExitDeadline();
         for (std::thread& thread : _threads)
         {
             if (thread.joinable())
             {
                 thread.join();
             }
+        }
+        if (_watchdog)
+        {
+            _watchdog->stop();
         }
         _threads.clear();
         _started = false;
@@ -182,6 +218,9 @@ namespace snf::worker
 
     void WorkerGroup::requestStop() noexcept
     {
+        const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        std::int64_t unset = 0;
+        static_cast<void>(_stop_requested_at_ns.compare_exchange_strong(unset, now_ns, std::memory_order_acq_rel, std::memory_order_acquire));
         _barrier.arm();
         for (const auto& worker : _workers)
         {
@@ -202,6 +241,16 @@ namespace snf::worker
     const Worker& WorkerGroup::worker(const std::size_t index) const noexcept
     {
         return *_workers[index];
+    }
+
+    const WorkerWatchdogMetrics* WorkerGroup::watchdogMetrics() const noexcept
+    {
+        return _watchdog == nullptr ? nullptr : &_watchdog->metrics();
+    }
+
+    std::span<const WorkerJoinOverrun> WorkerGroup::joinOverruns() const noexcept
+    {
+        return _join_overruns;
     }
 
     bool WorkerGroup::isRunning() const noexcept
@@ -227,6 +276,79 @@ namespace snf::worker
             }
             requestStop();
         }
+        _thread_exited[index].store(true, std::memory_order_release);
+        _exit_cv.notify_all();
+    }
+
+    bool WorkerGroup::allStartedThreadsExited() const noexcept
+    {
+        for (std::size_t index = 0; index < _threads.size(); ++index)
+        {
+            if (!_thread_exited[index].load(std::memory_order_acquire))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    std::chrono::steady_clock::time_point WorkerGroup::stopRequestedAt() const noexcept
+    {
+        const std::int64_t value = _stop_requested_at_ns.load(std::memory_order_acquire);
+        return std::chrono::steady_clock::time_point{std::chrono::nanoseconds{value}};
+    }
+
+    void WorkerGroup::observeThreadExitDeadline() noexcept
+    {
+        if (_stop_requested_at_ns.load(std::memory_order_acquire) == 0)
+        {
+            requestStop();
+        }
+
+        const auto deadline = stopRequestedAt() + _group_shutdown_budget;
+        {
+            std::unique_lock lock{_exit_mutex};
+            static_cast<void>(_exit_cv.wait_until(
+                lock,
+                deadline,
+                [this]
+                {
+                    return allStartedThreadsExited();
+                }
+            ));
+        }
+
+        if (allStartedThreadsExited())
+        {
+            return;
+        }
+
+        const auto observed_at = std::chrono::steady_clock::now();
+        for (std::size_t index = 0; index < _threads.size(); ++index)
+        {
+            if (_thread_exited[index].load(std::memory_order_acquire))
+            {
+                continue;
+            }
+
+            const WorkerProgress::Sample sample = _workers[index]->progress().sample();
+            const auto stuck_for = sample.entered_at == WorkerProgress::TimePoint{} || observed_at <= sample.entered_at
+                                       ? std::chrono::nanoseconds::zero()
+                                       : std::chrono::duration_cast<std::chrono::nanoseconds>(observed_at - sample.entered_at);
+            _join_overruns.push_back(WorkerJoinOverrun{
+                .worker = _workers[index]->id(),
+                .phase = sample.phase,
+                .stuck_for = stuck_for,
+            });
+            if (_watchdog)
+            {
+                _watchdog->notifyHandler(WorkerStallReport{
+                    .worker = _workers[index]->id(),
+                    .phase = sample.phase,
+                    .stuck_for = stuck_for,
+                });
+            }
+        }
     }
 
     void WorkerGroup::stopAndJoinStartedThreads() noexcept
@@ -237,12 +359,17 @@ namespace snf::worker
         }
 
         requestStop();
+        observeThreadExitDeadline();
         for (std::thread& thread : _threads)
         {
             if (thread.joinable())
             {
                 thread.join();
             }
+        }
+        if (_watchdog)
+        {
+            _watchdog->stop();
         }
         _threads.clear();
         _started = false;

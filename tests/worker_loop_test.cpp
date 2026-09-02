@@ -14,9 +14,9 @@ namespace
 
     using Clock = std::chrono::steady_clock;
 
-    // 실행 중인 Worker 를 관측하는 유일하게 안전한 방법이다.
     // WorkerMetrics 는 plain counter 라 owner thread 밖에서 읽으면 data race 이므로,
-    // 핸들러가 세우는 atomic 을 본다.
+    // 이 테스트의 작업 완료 여부는 핸들러가 세우는 atomic 을 본다. Worker lifecycle과
+    // 현재 phase만 필요할 때는 cross-thread safe한 progress()를 사용한다.
     //
     // stop 후 join 한 뒤 metrics 만 확인하면 셧다운 drain 루프가 같은 일을 하기 때문에
     // 메인 루프가 실제로 동작했는지 구분할 수 없다. 그래서 stop 전에 관측한다.

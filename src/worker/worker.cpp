@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <system_error>
 #include <thread>
@@ -129,21 +130,34 @@ namespace snf::worker
     void Worker::run()
     {
         bindOwnerThread();
+        enterPhase(WorkerPhase::Starting, std::chrono::steady_clock::now());
         startDb();
 
         while (!_stop_requested.load(std::memory_order_acquire))
         {
             ++_metrics.loop_iterations;
             const auto timeout = hasRunnableWork() ? std::chrono::milliseconds(0) : pollTimeout();
+            enterPhase(WorkerPhase::PollWait, std::chrono::steady_clock::now());
             const auto events = _poller.wait(timeout);
 
+            const auto active_iteration_started_at = std::chrono::steady_clock::now();
+            enterPhase(WorkerPhase::Poll, active_iteration_started_at);
             processPollEvents(events, _budgets.poll);
+            enterPhase(WorkerPhase::Inbox, std::chrono::steady_clock::now());
             drainInbox(_budgets.inbox);
             const auto now = std::chrono::steady_clock::now();
+            enterPhase(WorkerPhase::Timers, now);
             expireTimers(now, _budgets.timers);
+            enterPhase(WorkerPhase::Db, std::chrono::steady_clock::now());
             advanceDb(now);
+            enterPhase(WorkerPhase::Actors, std::chrono::steady_clock::now());
             runReadyActors(_budgets.actors);
+            enterPhase(WorkerPhase::Writes, std::chrono::steady_clock::now());
             flushWrites(_budgets.writes);
+            _metrics.loop_iteration_ns.record(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - active_iteration_started_at)
+            );
+            sampleGauges();
         }
 
         runUnifiedShutdown();
@@ -160,6 +174,7 @@ namespace snf::worker
         {
             throw std::invalid_argument{"Invalid worker DB configuration"};
         }
+        _db_shutdown_timeout = config.shutdown_timeout;
         _db = std::make_unique<DbClient>(config, *this);
     }
 
@@ -194,9 +209,121 @@ namespace snf::worker
         }
         // Bounded progress. Whatever is left over keeps hasRunnableWork() true, so
         // the next iteration continues instead of sleeping in epoll_wait.
+        const std::uint64_t budget_yields_before = _db->metrics().budget_yields;
         static_cast<void>(_db->advance(_budgets.db));
+        _metrics.phases[static_cast<std::size_t>(WorkerPhase::Db)].budget_stops += _db->metrics().budget_yields - budget_yields_before;
         _db->expireDeadlines(now);
         _db->maintainConnections(now);
+    }
+
+    bool Worker::sampleThreadExecution(ThreadExecutionSample& sample) noexcept
+    {
+        rusage usage{};
+        if (::getrusage(RUSAGE_THREAD, &usage) != 0)
+        {
+            return false;
+        }
+
+        const auto user_time = std::chrono::seconds{usage.ru_utime.tv_sec} + std::chrono::microseconds{usage.ru_utime.tv_usec};
+        const auto system_time = std::chrono::seconds{usage.ru_stime.tv_sec} + std::chrono::microseconds{usage.ru_stime.tv_usec};
+        sample.cpu_time = std::chrono::duration_cast<std::chrono::nanoseconds>(user_time + system_time);
+        sample.voluntary_context_switches = usage.ru_nvcsw < 0 ? 0 : static_cast<std::uint64_t>(usage.ru_nvcsw);
+        sample.involuntary_context_switches = usage.ru_nivcsw < 0 ? 0 : static_cast<std::uint64_t>(usage.ru_nivcsw);
+        return true;
+    }
+
+    void Worker::enterPhase(const WorkerPhase phase, const TimePoint now) noexcept
+    {
+        ThreadExecutionSample execution_sample{};
+        const bool execution_sample_valid = sampleThreadExecution(execution_sample);
+        if (!execution_sample_valid)
+        {
+            ++_metrics.thread_execution_sample_failures;
+        }
+
+        if (_phase_entered_at != TimePoint{})
+        {
+            WorkerPhaseMetrics& previous = _metrics.phases[static_cast<std::size_t>(_current_phase)];
+            const auto wall_residence = std::chrono::duration_cast<std::chrono::nanoseconds>(now - _phase_entered_at);
+            if (execution_sample_valid && _phase_execution_sample_valid && execution_sample.cpu_time >= _phase_execution_entered_at.cpu_time &&
+                execution_sample.voluntary_context_switches >= _phase_execution_entered_at.voluntary_context_switches &&
+                execution_sample.involuntary_context_switches >= _phase_execution_entered_at.involuntary_context_switches)
+            {
+                const auto cpu_residence = execution_sample.cpu_time - _phase_execution_entered_at.cpu_time;
+                const std::uint64_t voluntary_switches =
+                    execution_sample.voluntary_context_switches - _phase_execution_entered_at.voluntary_context_switches;
+                const std::uint64_t involuntary_switches =
+                    execution_sample.involuntary_context_switches - _phase_execution_entered_at.involuntary_context_switches;
+                previous.max_cpu_residence = std::max(previous.max_cpu_residence, cpu_residence);
+                previous.voluntary_context_switches += voluntary_switches;
+                previous.involuntary_context_switches += involuntary_switches;
+                if (wall_residence > previous.max_residence)
+                {
+                    previous.max_wall_residence_cpu = cpu_residence;
+                    previous.max_wall_residence_voluntary_context_switches = voluntary_switches;
+                    previous.max_wall_residence_involuntary_context_switches = involuntary_switches;
+                }
+            }
+            else if (execution_sample_valid && _phase_execution_sample_valid)
+            {
+                ++_metrics.thread_execution_sample_failures;
+            }
+            previous.max_residence = std::max(previous.max_residence, wall_residence);
+        }
+
+        WorkerPhaseMetrics& next = _metrics.phases[static_cast<std::size_t>(phase)];
+        if (next.last_entered != TimePoint{})
+        {
+            next.max_entry_gap = std::max(next.max_entry_gap, std::chrono::duration_cast<std::chrono::nanoseconds>(now - next.last_entered));
+        }
+        next.last_entered = now;
+        ++next.entries;
+
+        _current_phase = phase;
+        _phase_entered_at = now;
+        _phase_execution_entered_at = execution_sample;
+        _phase_execution_sample_valid = execution_sample_valid;
+        _progress.publish(phase, now);
+    }
+
+    void Worker::sampleGauges() noexcept
+    {
+        WorkerGaugeSnapshot& gauges = _metrics.gauges;
+        gauges.connections = _connections == nullptr ? 0 : _connections->activeCount();
+        gauges.actors = _actors == nullptr ? 0 : _actors->activeCount();
+        gauges.loading = _loading_count;
+        gauges.ready_actors = _ready_queue == nullptr ? 0 : _ready_queue->size();
+        gauges.mailbox_messages_total = _total_mailbox_messages;
+        gauges.mailbox_bytes_total = _total_mailbox_bytes;
+        gauges.timer_entries = _timers.size();
+        gauges.application_timer_bytes = _timers.applicationTimerBytes();
+        gauges.db_queued_operations = _db == nullptr ? 0 : _db->queuedCount();
+        gauges.db_queued_bytes = _db == nullptr ? 0 : _db->queuedBytes();
+        gauges.db_in_flight = _db == nullptr ? 0 : _db->inFlightCount();
+
+        WorkerHighWaterMarks& high_water = _metrics.high_water_marks;
+        high_water.sampled_connections = std::max(high_water.sampled_connections, gauges.connections);
+        high_water.sampled_actors = std::max(high_water.sampled_actors, gauges.actors);
+        high_water.sampled_loading = std::max(high_water.sampled_loading, gauges.loading);
+        high_water.sampled_ready_actors = std::max(high_water.sampled_ready_actors, gauges.ready_actors);
+        high_water.sampled_mailbox_messages_total = std::max(high_water.sampled_mailbox_messages_total, gauges.mailbox_messages_total);
+        high_water.sampled_mailbox_bytes_total = std::max(high_water.sampled_mailbox_bytes_total, gauges.mailbox_bytes_total);
+        high_water.sampled_timer_entries = std::max(high_water.sampled_timer_entries, gauges.timer_entries);
+        high_water.sampled_application_timer_bytes = std::max(high_water.sampled_application_timer_bytes, gauges.application_timer_bytes);
+
+        if ((_metrics.loop_iterations & 63U) == 0 || _shutting_down)
+        {
+            gauges.inbox_queued_bytes = _inbox.approximateQueuedBytes();
+            high_water.sampled_inbox_queued_bytes = std::max(high_water.sampled_inbox_queued_bytes, gauges.inbox_queued_bytes);
+        }
+
+        if (_db != nullptr)
+        {
+            const DbClientMetrics& db_metrics = _db->metrics();
+            high_water.db_queued_operations = std::max(high_water.db_queued_operations, db_metrics.queued_operations_high_water);
+            high_water.db_queued_bytes = std::max(high_water.db_queued_bytes, db_metrics.queued_bytes_high_water);
+            high_water.db_in_flight = std::max(high_water.db_in_flight, db_metrics.in_flight_high_water);
+        }
     }
 
     void Worker::requestStop() noexcept
@@ -302,6 +429,25 @@ namespace snf::worker
             }
         }
         return false;
+    }
+
+    std::size_t Worker::blockedActorCount() const noexcept
+    {
+        if (_actors == nullptr)
+        {
+            return 0;
+        }
+
+        std::size_t count = 0;
+        for (const ActorHandle handle : _actors->activeHandles())
+        {
+            const ActorSlot* slot = _actors->find(handle);
+            if (slot != nullptr && slot->hasBlocked())
+            {
+                ++count;
+            }
+        }
+        return count;
     }
 
     SendResult Worker::send(const ConnectionRef connection, snf::protocol::Frame&& frame, const bool critical)
@@ -669,6 +815,19 @@ namespace snf::worker
         return _metrics;
     }
 
+    const WorkerProgress& Worker::progress() const noexcept
+    {
+        return _progress;
+    }
+
+    std::chrono::nanoseconds Worker::configuredShutdownTimeout() const noexcept
+    {
+        const auto actor_or_connection_timeout =
+            (_actors != nullptr) ? _actor_config.worker_shutdown_timeout
+                                 : (networkEnabled() ? _network_config.table.limits.close_drain_deadline : std::chrono::milliseconds{2000});
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(actor_or_connection_timeout + _db_shutdown_timeout);
+    }
+
     WorkerId Worker::id() const noexcept
     {
         return _id;
@@ -719,10 +878,12 @@ namespace snf::worker
         const auto started_at = std::chrono::steady_clock::now();
         std::size_t processed = 0;
         std::size_t accepted = 0;
+        bool budget_exhausted = false;
         for (const PollEvent& event : events)
         {
             if (processed >= budget.max_poll_events || budgetExpired(started_at, budget.max_duration))
             {
+                budget_exhausted = true;
                 break;
             }
             ++processed;
@@ -811,6 +972,16 @@ namespace snf::worker
         {
             processReadQueue(budget, started_at);
         }
+        else
+        {
+            budget_exhausted = true;
+        }
+
+        if (budget_exhausted)
+        {
+            ++_metrics.poll_budget_stops;
+            ++_metrics.phases[static_cast<std::size_t>(WorkerPhase::Poll)].budget_stops;
+        }
     }
 
     void Worker::processReadQueue(const IoBudget& budget, const TimePoint phase_started_at)
@@ -872,6 +1043,8 @@ namespace snf::worker
         if (phase_budget_exhausted)
         {
             ++_metrics.network.read_budget_stops;
+            ++_metrics.poll_budget_stops;
+            ++_metrics.phases[static_cast<std::size_t>(WorkerPhase::Poll)].budget_stops;
         }
     }
 
@@ -958,6 +1131,8 @@ namespace snf::worker
             {
                 bytes_read += static_cast<std::uint64_t>(received);
                 slot->decoder().push(std::span<const std::byte>{receive_buffer.data(), static_cast<std::size_t>(received)});
+                _metrics.high_water_marks.connection_read_buffer_bytes =
+                    std::max(_metrics.high_water_marks.connection_read_buffer_bytes, slot->bufferedByteCount());
                 continue;
             }
 
@@ -990,7 +1165,6 @@ namespace snf::worker
         }
 
         const std::size_t accept_limit = std::min(_network_config.max_accepts_per_poll, budget.max_accepts);
-
         while (accepted < accept_limit)
         {
             if (budgetExpired(phase_started_at, budget.max_duration))
@@ -1090,6 +1264,7 @@ namespace snf::worker
         if (res.budget_exhausted)
         {
             ++_metrics.inbox_budget_stops;
+            ++_metrics.phases[static_cast<std::size_t>(WorkerPhase::Inbox)].budget_stops;
         }
     }
 
@@ -1109,6 +1284,7 @@ namespace snf::worker
         if (res.budget_exhausted)
         {
             ++_metrics.timer_budget_stops;
+            ++_metrics.phases[static_cast<std::size_t>(WorkerPhase::Timers)].budget_stops;
         }
     }
 
@@ -1171,6 +1347,7 @@ namespace snf::worker
 
                 const auto slice_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - slice_started_at);
                 _metrics.actor.total_slice_duration_ns += static_cast<std::uint64_t>(slice_duration.count());
+                _metrics.actor.turn_slice_ns.record(slice_duration);
                 if (slice_duration > _metrics.actor.max_slice_duration)
                 {
                     _metrics.actor.max_slice_duration = slice_duration;
@@ -1244,6 +1421,7 @@ namespace snf::worker
 
                 const auto slice_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - slice_started_at);
                 _metrics.actor.total_slice_duration_ns += static_cast<std::uint64_t>(slice_duration.count());
+                _metrics.actor.turn_slice_ns.record(slice_duration);
                 if (slice_duration > _metrics.actor.max_slice_duration)
                 {
                     _metrics.actor.max_slice_duration = slice_duration;
@@ -1455,6 +1633,7 @@ namespace snf::worker
 
             const auto slice_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - slice_started_at);
             _metrics.actor.total_slice_duration_ns += static_cast<std::uint64_t>(slice_duration.count());
+            _metrics.actor.turn_slice_ns.record(slice_duration);
             if (slice_duration > _metrics.actor.max_slice_duration)
             {
                 _metrics.actor.max_slice_duration = slice_duration;
@@ -1486,6 +1665,7 @@ namespace snf::worker
         if (phase_budget_exhausted)
         {
             ++_metrics.actor.budget_stops;
+            ++_metrics.phases[static_cast<std::size_t>(WorkerPhase::Actors)].budget_stops;
         }
     }
 
@@ -2239,6 +2419,7 @@ namespace snf::worker
         if (phase_budget_exhausted)
         {
             ++_metrics.network.write_budget_stops;
+            ++_metrics.phases[static_cast<std::size_t>(WorkerPhase::Writes)].budget_stops;
         }
     }
 
@@ -2331,6 +2512,10 @@ namespace snf::worker
             {
                 ++_metrics.network.close_deadline_expirations;
                 forceClose(handle, CloseReason::Timeout);
+            }
+            else
+            {
+                ++_metrics.network.stale_close_deadlines;
             }
             return;
         }
@@ -2465,6 +2650,9 @@ namespace snf::worker
         {
             return result;
         }
+
+        _metrics.high_water_marks.connection_write_queued_bytes =
+            std::max(_metrics.high_water_marks.connection_write_queued_bytes, slot->queuedWriteBytes());
 
         if (!slot->writeQueued() && !slot->waitingEpollout() && !enqueueWrite(*slot))
         {
@@ -2630,21 +2818,77 @@ namespace snf::worker
         const auto shutdown_timeout = (_actors != nullptr)
                                           ? _actor_config.worker_shutdown_timeout
                                           : (networkEnabled() ? _network_config.table.limits.close_drain_deadline : std::chrono::seconds(2));
-        const auto shutdown_deadline = std::chrono::steady_clock::now() + shutdown_timeout;
+        const TimePoint shutdown_started_at = std::chrono::steady_clock::now();
+        const TimePoint shutdown_deadline = shutdown_started_at + shutdown_timeout;
+        WorkerShutdownMetrics& shutdown = _metrics.shutdown;
+        shutdown.actor_configured_timeout = std::chrono::duration_cast<std::chrono::nanoseconds>(shutdown_timeout);
+        shutdown.db_configured_timeout = std::chrono::duration_cast<std::chrono::nanoseconds>(_db_shutdown_timeout);
 
+        const TimePoint phase_a_started_at = std::chrono::steady_clock::now();
+        enterPhase(WorkerPhase::ShutdownA, phase_a_started_at);
         beginShutdownPhaseA();
+        captureShutdownPhase(shutdown.phase_a, phase_a_started_at, shutdown_deadline);
+
+        const TimePoint phase_b_started_at = std::chrono::steady_clock::now();
+        enterPhase(WorkerPhase::ShutdownB, phase_b_started_at);
         runShutdownPhaseB(shutdown_deadline);
+        captureShutdownPhase(shutdown.phase_b, phase_b_started_at, shutdown_deadline);
+
+        const TimePoint phase_c_started_at = std::chrono::steady_clock::now();
+        enterPhase(WorkerPhase::ShutdownC, phase_c_started_at);
         runShutdownPhaseC(shutdown_deadline);
+        captureShutdownPhase(shutdown.phase_c, phase_c_started_at, shutdown_deadline);
+
+        const TimePoint phase_d_started_at = std::chrono::steady_clock::now();
+        enterPhase(WorkerPhase::ShutdownD, phase_d_started_at);
         runShutdownPhaseD(shutdown_deadline);
+        captureShutdownPhase(shutdown.phase_d, phase_d_started_at, shutdown_deadline);
+
+        const TimePoint actor_phases_finished_at = std::chrono::steady_clock::now();
+        shutdown.actor_phases_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(actor_phases_finished_at - shutdown_started_at);
+        shutdown.actor_deadline_exceeded =
+            shutdown.phase_a.deadline_hit || shutdown.phase_b.deadline_hit || shutdown.phase_c.deadline_hit || shutdown.phase_d.deadline_hit;
 
         // Tearing the backend down is a separate, deadline-bounded step. Actor
         // quiescence above never waits on physical DB progress, so an unresponsive
         // server cannot hold the worker open.
         if (_db != nullptr && _db_started)
         {
-            _db->shutdown(_poller);
+            const TimePoint db_started_at = std::chrono::steady_clock::now();
+            const TimePoint db_deadline = db_started_at + _db_shutdown_timeout;
+            shutdown.db_deadline_exceeded = _db->shutdown(_poller, db_deadline);
+            shutdown.db_shutdown_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - db_started_at);
             _db_started = false;
         }
+        sampleGauges();
+        shutdown.final_resources = captureResourceSnapshot();
+        shutdown.total_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - shutdown_started_at);
+        enterPhase(WorkerPhase::Stopped, std::chrono::steady_clock::now());
+    }
+
+    WorkerResourceSnapshot Worker::captureResourceSnapshot() const noexcept
+    {
+        return WorkerResourceSnapshot{
+            .connections = _connections == nullptr ? 0 : _connections->activeCount(),
+            .actors = _actors == nullptr ? 0 : _actors->activeCount(),
+            .blocked_actors = blockedActorCount(),
+            .loading = _loading_count,
+            .inbox_bytes = _inbox.approximateQueuedBytes(),
+            .timer_entries = _timers.size(),
+            .application_timer_bytes = _timers.applicationTimerBytes(),
+            .db_in_flight = _db == nullptr ? 0 : _db->inFlightCount(),
+            .db_queued = _db == nullptr ? 0 : _db->queuedCount(),
+        };
+    }
+
+    void Worker::captureShutdownPhase(WorkerShutdownPhaseRecord& record, const TimePoint entered_at, const TimePoint deadline) noexcept
+    {
+        const TimePoint finished_at = std::chrono::steady_clock::now();
+        record.entered = true;
+        record.duration = std::chrono::duration_cast<std::chrono::nanoseconds>(finished_at - entered_at);
+        record.deadline_hit = finished_at >= deadline;
+        sampleGauges();
+        record.remaining = captureResourceSnapshot();
     }
 
     void Worker::beginShutdownPhaseA()
@@ -2994,6 +3238,7 @@ namespace snf::worker
         if (networkEnabled())
         {
             const auto handles = _connections->activeHandles();
+            _metrics.shutdown.forced_connection_closes += handles.size();
             for (const ConnectionHandle handle : handles)
             {
                 forceClose(handle, CloseReason::Timeout);
@@ -3003,10 +3248,12 @@ namespace snf::worker
         if (_actors != nullptr)
         {
             const auto handles = _actors->activeHandles();
+            _metrics.shutdown.forced_actor_removals += handles.size();
             for (const auto handle : handles)
             {
                 removeActor(handle, ActorRemovalReason::ShutdownForced);
             }
+            _metrics.shutdown.forced_ready_queue_drops += _ready_queue->size();
             _ready_queue->clear();
         }
 

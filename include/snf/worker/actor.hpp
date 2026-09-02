@@ -5,6 +5,7 @@
 #include "snf/worker/connection.hpp"
 #include "snf/worker/db_client.hpp"
 #include "snf/worker/identity.hpp"
+#include "snf/worker/latency_histogram.hpp"
 #include "snf/worker/timer_queue.hpp"
 #include "snf/worker/worker_event.hpp"
 
@@ -710,5 +711,6 @@ namespace snf::worker
         std::uint64_t cancelled_application_timers{0};
         std::uint64_t total_slice_duration_ns{0};
         std::chrono::nanoseconds max_slice_duration{0};
+        LatencyHistogram turn_slice_ns{};
     };
 }

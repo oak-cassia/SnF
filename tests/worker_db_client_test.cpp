@@ -111,6 +111,10 @@ namespace
         config = stubConfig(3306);
         config.connection_count = 0;
         assert(!snf::worker::isValid(config));
+
+        config = stubConfig(3306);
+        config.shutdown_timeout = 0ms;
+        assert(!snf::worker::isValid(config));
     }
 
     void test_queue_admission_and_rejection()
@@ -146,7 +150,7 @@ namespace
         assert(client.metrics().submit_rejections == 1);
         assert(sink.completions.empty());
 
-        client.shutdown(poller);
+        static_cast<void>(client.shutdown(poller, Clock::now()));
     }
 
     void test_queued_timeout_leaves_the_connection_alone()
@@ -181,7 +185,7 @@ namespace
         assert(client.metrics().connections_poisoned == 0);
         assert(client.metrics().connections_opened == opened_before);
 
-        client.shutdown(poller);
+        static_cast<void>(client.shutdown(poller, Clock::now()));
     }
 
     void test_stale_poll_event_is_ignored()
@@ -206,7 +210,7 @@ namespace
 
         assert(client.metrics().stale_poll_events == stale_before + 3);
 
-        client.shutdown(poller);
+        static_cast<void>(client.shutdown(poller, Clock::now()));
     }
 
     void test_shutdown_drains_the_queue()
@@ -239,7 +243,7 @@ namespace
             client.tryStart(awaitKey(3, 3), snf::worker::LoadPlayerRequest{.player_id = 3}, deadline).status == snf::worker::DbSubmitStatus::Rejected
         );
 
-        client.shutdown(poller);
+        static_cast<void>(client.shutdown(poller, Clock::now()));
     }
 
     // The worker owns the DB sockets in its own poller. There is no second polling
@@ -255,6 +259,7 @@ namespace
         snf::worker::Worker worker(snf::worker::WorkerId{0}, 1, snf::worker::WorkerBudgets::defaults(), snf::worker::WorkerInboxConfig{});
         auto config = stubConfig(port);
         config.connection_count = 2;
+        config.shutdown_timeout = 50ms;
         worker.configureDb(config);
         assert(worker.dbEnabled());
 
@@ -283,6 +288,13 @@ namespace
         assert(worker.metrics().loop_iterations >= 2);
         assert(worker.metrics().loop_iterations < 500);
         assert(stop_duration < 5s);
+        const auto& shutdown = worker.metrics().shutdown;
+        assert(!shutdown.actor_deadline_exceeded);
+        assert(shutdown.db_deadline_exceeded);
+        assert(shutdown.db_configured_timeout == 50ms);
+        assert(shutdown.db_shutdown_duration >= 40ms);
+        assert(shutdown.final_resources.db_in_flight == 0);
+        assert(shutdown.final_resources.db_queued == 0);
     }
 
     struct MySqlTestConfig
@@ -461,7 +473,7 @@ namespace
         assert(client.metrics().operations_completed == 2);
         assert(client.metrics().connections_poisoned == 0);
 
-        client.shutdown(poller);
+        static_cast<void>(client.shutdown(poller, Clock::now()));
     }
 
     void test_worker_connects_through_its_own_poller(const MySqlTestConfig& config)
@@ -553,7 +565,7 @@ namespace
         assert(loaded->row.street_experience == 1500);
         assert(loaded->owned_skill_ids.size() == 3);
 
-        client.shutdown(poller);
+        static_cast<void>(client.shutdown(poller, Clock::now()));
     }
 
     // 8F: a statement failing inside the transaction rolls back, and nothing from
@@ -595,7 +607,7 @@ namespace
         assert(loaded != nullptr);
         assert(!loaded->found);
 
-        client.shutdown(poller);
+        static_cast<void>(client.shutdown(poller, Clock::now()));
     }
 
     // 8F: an in-flight timeout before COMMIT was dispatched is known not to have
@@ -623,7 +635,7 @@ namespace
         assert(client.metrics().commits_unknown == 0);
         assert(client.metrics().connections_poisoned == 1);
 
-        client.shutdown(poller);
+        static_cast<void>(client.shutdown(poller, Clock::now()));
     }
 
     void test_save_rejects_an_empty_loadout()
@@ -642,7 +654,7 @@ namespace
         assert(rejected.status == snf::worker::DbSubmitStatus::Rejected);
         assert(client.queuedCount() == 0);
 
-        client.shutdown(poller);
+        static_cast<void>(client.shutdown(poller, Clock::now()));
     }
 
     // The Stage 8 vertical slice, end to end over a real socket:
@@ -926,7 +938,7 @@ namespace
         assert(client.metrics().connections_ready == 1);
         std::cout << "    cold caching_sha2_password full auth: OK" << std::endl;
 
-        client.shutdown(poller);
+        static_cast<void>(client.shutdown(poller, Clock::now()));
     }
 
     void test_in_flight_timeout_poisons_the_connection(const MySqlTestConfig& config)
@@ -968,7 +980,7 @@ namespace
         client.maintainConnections(Clock::now());
         assert(client.metrics().connections_opened == opened_before + 1);
 
-        client.shutdown(poller);
+        static_cast<void>(client.shutdown(poller, Clock::now()));
     }
 }
 

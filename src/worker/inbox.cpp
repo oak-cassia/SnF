@@ -199,6 +199,26 @@ namespace snf::worker
         return true;
     }
 
+    std::uint64_t WorkerInbox::approximateQueuedBytes() const noexcept
+    {
+        std::uint64_t total = 0;
+        for (std::uint16_t i = 0; i < _worker_count; ++i)
+        {
+            total += _lanes[i].approximateQueuedBytes();
+        }
+        return total;
+    }
+
+    std::uint64_t WorkerInbox::maxQueuedBytesTotal() const noexcept
+    {
+        std::uint64_t total = 0;
+        for (std::uint16_t i = 0; i < _worker_count; ++i)
+        {
+            total += _lanes[i].maxQueuedBytes();
+        }
+        return total;
+    }
+
     std::uint16_t WorkerInbox::workerCount() const noexcept
     {
         return _worker_count;

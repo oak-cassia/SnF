@@ -7,6 +7,7 @@
 #include "snf/worker/connection_table.hpp"
 #include "snf/worker/inbox.hpp"
 #include "snf/worker/poll_token.hpp"
+#include "snf/worker/watchdog.hpp"
 
 #include <chrono>
 #include <cstddef>
@@ -34,6 +35,7 @@ namespace snf::worker
         std::uint64_t rejected_requests{0};
         std::uint64_t stale_poll_events{0};
         std::uint64_t stale_work_items{0};
+        std::uint64_t stale_close_deadlines{0};
         std::uint64_t misrouted_events{0};
         std::uint64_t invariant_violations{0};
         std::uint64_t soft_limit_sends{0};
@@ -79,13 +81,16 @@ namespace snf::worker
         WorkerInboxConfig inbox{};
         WorkerNetworkConfig network{};
         std::optional<WorkerActorConfig> actor{};
+        std::optional<WorkerWatchdogConfig> watchdog{};
+        std::chrono::milliseconds group_shutdown_grace{1000};
     };
 
     [[nodiscard]] inline bool isValid(const WorkerGroupConfig& config) noexcept
     {
         return config.worker_count > 0 && config.worker_count <= WorkerQuiescenceBarrier::MAX_WORKERS && config.max_workers > 0 &&
-               config.worker_count <= config.max_workers && config.inbox.max_workers > 0 &&
-               config.worker_count <= config.inbox.max_workers && config.inbox.max_bytes_per_worker > 0 && isValid(config.budgets) &&
-               isValid(config.network) && (!config.actor || isValid(*config.actor));
+               config.worker_count <= config.max_workers && config.inbox.max_workers > 0 && config.worker_count <= config.inbox.max_workers &&
+               config.inbox.max_bytes_per_worker > 0 && isValid(config.budgets) && isValid(config.network) &&
+               (!config.actor || isValid(*config.actor)) && (!config.watchdog || isValid(*config.watchdog)) &&
+               config.group_shutdown_grace >= std::chrono::milliseconds::zero();
     }
 }

@@ -135,8 +135,8 @@ namespace snf::worker
             return false;
         }
         return config.port != 0 && config.connection_count > 0 && config.max_queued_operations > 0 && config.max_queued_bytes > 0 &&
-               config.operation_timeout > std::chrono::milliseconds::zero() && config.reconnect_backoff >= std::chrono::milliseconds::zero() &&
-               config.max_result_rows > 0 && config.max_result_bytes > 0;
+               config.operation_timeout > std::chrono::milliseconds::zero() && config.shutdown_timeout > std::chrono::milliseconds::zero() &&
+               config.reconnect_backoff >= std::chrono::milliseconds::zero() && config.max_result_rows > 0 && config.max_result_bytes > 0;
     }
 
     struct DbClient::Impl
@@ -170,6 +170,7 @@ namespace snf::worker
             AwaitKey key;
             DbRequest request;
             DbTimePoint deadline;
+            DbTimePoint submitted_at;
             Stage stage{Stage::PlayerRow};
             LoadPlayerResult result{};
             std::size_t rows{0};
@@ -184,6 +185,8 @@ namespace snf::worker
             AwaitKey key;
             DbRequest request;
             DbTimePoint deadline;
+            DbTimePoint submitted_at;
+            std::uint64_t footprint{0};
         };
 
         struct Slot
@@ -215,10 +218,94 @@ namespace snf::worker
         DbCompletionSink& sink;
         std::vector<Slot> slots;
         std::deque<Queued> queue;
+        std::uint64_t queued_bytes{0};
         Poller* poller{nullptr};
         std::uint64_t next_generation{1};
         bool shutting_down{false};
         DbClientMetrics metrics{};
+
+        void recordOperationTerminal(const DbTimePoint submitted_at) noexcept
+        {
+            metrics.operation_latency_ns.record(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - submitted_at));
+#ifndef NDEBUG
+            assert(metrics.operation_latency_ns.count() == metrics.operations_completed + metrics.operations_failed);
+#endif
+        }
+
+        [[nodiscard]] static std::uint64_t queuedFootprint(const DbRequest& request) noexcept
+        {
+            constexpr std::uint64_t base = sizeof(DbRequest);
+            const auto* save = std::get_if<SavePlayerRequest>(&request);
+            if (save == nullptr)
+            {
+                return base;
+            }
+
+            constexpr std::uint64_t element_size = sizeof(std::uint32_t);
+            const std::uint64_t capacity = save->owned_skill_ids.capacity();
+            if (capacity > (std::numeric_limits<std::uint64_t>::max() - base) / element_size)
+            {
+                return std::numeric_limits<std::uint64_t>::max();
+            }
+            return base + capacity * element_size;
+        }
+
+        void assertQueueAccounting() const noexcept
+        {
+#ifndef NDEBUG
+            std::uint64_t total = 0;
+            for (const Queued& queued : queue)
+            {
+                assert(queued.footprint <= std::numeric_limits<std::uint64_t>::max() - total);
+                total += queued.footprint;
+            }
+            assert(total == queued_bytes);
+#endif
+        }
+
+        void addQueuedBytes(const std::uint64_t footprint) noexcept
+        {
+            assert(footprint <= config.max_queued_bytes);
+            assert(queued_bytes <= config.max_queued_bytes - footprint);
+            queued_bytes += footprint;
+        }
+
+        void removeQueuedBytes(const std::uint64_t footprint) noexcept
+        {
+            assert(queued_bytes >= footprint);
+            queued_bytes -= footprint;
+        }
+
+        void updateQueueHighWater() noexcept
+        {
+            metrics.queued_operations_high_water = std::max(metrics.queued_operations_high_water, queue.size());
+            metrics.queued_bytes_high_water = std::max(metrics.queued_bytes_high_water, queued_bytes);
+        }
+
+        void updateInFlightHighWater() noexcept
+        {
+            const auto count = static_cast<std::size_t>(std::count_if(
+                slots.begin(),
+                slots.end(),
+                [](const Slot& slot)
+                {
+                    return slot.in_flight.has_value();
+                }
+            ));
+            metrics.in_flight_high_water = std::max(metrics.in_flight_high_water, count);
+        }
+
+        [[nodiscard]] bool hasAsyncShutdownWork() const noexcept
+        {
+            return std::any_of(
+                slots.begin(),
+                slots.end(),
+                [](const Slot& slot)
+                {
+                    return slot.state == SlotState::Connecting || slot.in_flight.has_value() || slot.result != nullptr;
+                }
+            );
+        }
 
         [[nodiscard]] PollToken tokenFor(const Slot& slot) const noexcept
         {
@@ -264,7 +351,16 @@ namespace snf::worker
             }
             if (slot.registered_fd != -1 && poller != nullptr)
             {
-                poller->remove(slot.registered_fd);
+                try
+                {
+                    poller->remove(slot.registered_fd);
+                }
+                catch (...)
+                {
+                    // The async driver may close its socket while reporting a
+                    // terminal connect/query error. epoll has already discarded
+                    // that fd in this case, so teardown remains idempotent.
+                }
                 slot.registered_fd = -1;
                 slot.interest = PollInterest{};
             }
@@ -291,6 +387,7 @@ namespace snf::worker
             if (victim.has_value())
             {
                 ++metrics.operations_failed;
+                recordOperationTerminal(victim->submitted_at);
                 if (std::holds_alternative<SavePlayerRequest>(victim->request) && victim->commit_dispatched)
                 {
                     ++metrics.commits_unknown;
@@ -358,10 +455,12 @@ namespace snf::worker
         {
             assert(slot.in_flight.has_value());
             const AwaitKey key = slot.in_flight->key;
+            const DbTimePoint submitted_at = slot.in_flight->submitted_at;
             slot.in_flight.reset();
             slot.state = SlotState::Idle;
             slot.runnable = true; // may be able to pick up queued work without a poll
             ++metrics.operations_completed;
+            recordOperationTerminal(submitted_at);
             sink.completeDb(key, std::move(result));
         }
 
@@ -445,9 +544,12 @@ namespace snf::worker
                 .key = queued.key,
                 .request = std::move(queued.request),
                 .deadline = queued.deadline,
+                .submitted_at = queued.submitted_at,
                 .stage = is_save ? Stage::SaveIsolation : Stage::PlayerRow,
             };
             ++metrics.operations_started;
+            metrics.queue_wait_ns.record(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - queued.submitted_at));
+            updateInFlightHighWater();
             beginStageQuery(slot);
         }
 
@@ -464,7 +566,9 @@ namespace snf::worker
                     continue;
                 }
                 Queued queued = std::move(queue.front());
+                removeQueuedBytes(queued.footprint);
                 queue.pop_front();
+                assertQueueAccounting();
                 assign(slot, std::move(queued));
             }
         }
@@ -723,6 +827,7 @@ namespace snf::worker
                 slot.in_flight.reset();
                 closeSlot(slot);
                 slot.retry_at = Clock::now();
+                recordOperationTerminal(victim->submitted_at);
                 sink.completeDb(victim->key, DbResult{SavePlayerResult{.outcome = SaveOutcome::CommitOutcomeUnknown}});
                 return;
             }
@@ -738,6 +843,7 @@ namespace snf::worker
                 closeSlot(slot);
                 slot.retry_at = Clock::now();
                 ++metrics.connections_poisoned;
+                recordOperationTerminal(victim->submitted_at);
                 sink.completeDb(victim->key, DbResult{SavePlayerResult{.outcome = SaveOutcome::FailedBeforeCommit}});
                 return;
             }
@@ -881,6 +987,8 @@ namespace snf::worker
             }
         }
 
+        const DbTimePoint submitted_at = Clock::now();
+
         for (Impl::Slot& slot : _impl->slots)
         {
             if (slot.state == Impl::SlotState::Idle && !slot.in_flight.has_value())
@@ -891,13 +999,17 @@ namespace snf::worker
                         .key = key,
                         .request = std::move(request),
                         .deadline = deadline,
+                        .submitted_at = submitted_at,
+                        .footprint = 0,
                     }
                 );
                 return DbSubmitResult{.status = DbSubmitStatus::Pending};
             }
         }
 
-        if (_impl->queue.size() >= _impl->config.max_queued_operations)
+        const std::uint64_t footprint = Impl::queuedFootprint(request);
+        if (_impl->queue.size() >= _impl->config.max_queued_operations || footprint > _impl->config.max_queued_bytes ||
+            _impl->queued_bytes > _impl->config.max_queued_bytes - footprint)
         {
             ++_impl->metrics.submit_rejections;
             return DbSubmitResult{.status = DbSubmitStatus::Rejected};
@@ -907,7 +1019,12 @@ namespace snf::worker
             .key = key,
             .request = std::move(request),
             .deadline = deadline,
+            .submitted_at = submitted_at,
+            .footprint = footprint,
         });
+        _impl->addQueuedBytes(footprint);
+        _impl->updateQueueHighWater();
+        _impl->assertQueueAccounting();
         return DbSubmitResult{.status = DbSubmitStatus::Pending};
     }
 
@@ -995,6 +1112,11 @@ namespace snf::worker
         return _impl->queue.size();
     }
 
+    std::uint64_t DbClient::queuedBytes() const noexcept
+    {
+        return _impl->queued_bytes;
+    }
+
     void DbClient::expireDeadlines(const DbTimePoint now)
     {
         // A queued request never reached the server, so its connection is fine and
@@ -1008,9 +1130,13 @@ namespace snf::worker
                 continue;
             }
             const AwaitKey key = it->key;
+            const DbTimePoint submitted_at = it->submitted_at;
+            _impl->removeQueuedBytes(it->footprint);
             it = _impl->queue.erase(it);
+            _impl->assertQueueAccounting();
             ++_impl->metrics.queued_timeouts;
             ++_impl->metrics.operations_failed;
+            _impl->recordOperationTerminal(submitted_at);
             _impl->sink.completeDb(
                 key,
                 DbResult{DbFailure{
@@ -1062,8 +1188,12 @@ namespace snf::worker
         while (!_impl->queue.empty())
         {
             const AwaitKey key = _impl->queue.front().key;
+            const DbTimePoint submitted_at = _impl->queue.front().submitted_at;
+            _impl->removeQueuedBytes(_impl->queue.front().footprint);
             _impl->queue.pop_front();
+            _impl->assertQueueAccounting();
             ++_impl->metrics.operations_failed;
+            _impl->recordOperationTerminal(submitted_at);
             _impl->sink.completeDb(
                 key,
                 DbResult{DbFailure{
@@ -1080,10 +1210,39 @@ namespace snf::worker
         return _impl->shutting_down;
     }
 
-    void DbClient::shutdown(Poller& poller)
+    bool DbClient::shutdown(Poller& poller, const DbTimePoint deadline)
     {
-        _impl->shutting_down = true;
+        beginShutdown();
         _impl->poller = &poller;
+
+        bool deadline_hit = false;
+        while (_impl->hasAsyncShutdownWork())
+        {
+            const DbTimePoint now = Clock::now();
+            if (now >= deadline)
+            {
+                deadline_hit = true;
+                break;
+            }
+
+            static_cast<void>(advance(WorkerBudgets::defaults().db));
+            expireDeadlines(Clock::now());
+            if (!_impl->hasAsyncShutdownWork())
+            {
+                break;
+            }
+
+            const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - Clock::now());
+            const auto timeout = std::min(std::chrono::milliseconds{10}, std::max(std::chrono::milliseconds::zero(), remaining));
+            for (const PollEvent& event : poller.wait(timeout))
+            {
+                if (event.token.kind == PollTargetKind::DbConnection)
+                {
+                    onPollEvent(event.token);
+                }
+            }
+        }
+
         for (Impl::Slot& slot : _impl->slots)
         {
             if (slot.in_flight.has_value())
@@ -1091,6 +1250,7 @@ namespace snf::worker
                 const Impl::InFlight victim = std::move(*slot.in_flight);
                 slot.in_flight.reset();
                 ++_impl->metrics.operations_failed;
+                _impl->recordOperationTerminal(victim.submitted_at);
                 if (std::holds_alternative<SavePlayerRequest>(victim.request) && victim.commit_dispatched)
                 {
                     ++_impl->metrics.commits_unknown;
@@ -1110,6 +1270,7 @@ namespace snf::worker
             _impl->closeSlot(slot);
         }
         _impl->poller = nullptr;
+        return deadline_hit;
     }
 
     const DbClientMetrics& DbClient::metrics() const noexcept

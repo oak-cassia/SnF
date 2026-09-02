@@ -4,6 +4,8 @@
 #include "snf/worker/worker.hpp"
 #include "snf/worker/worker_group.hpp"
 
+#include "socket_test_support.hpp"
+
 #include <arpa/inet.h>
 #include <cassert>
 #include <cerrno>
@@ -19,6 +21,7 @@
 #include <netinet/in.h>
 #include <optional>
 #include <stdexcept>
+#include <string_view>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <thread>
@@ -31,6 +34,10 @@ namespace
     using namespace snf::worker;
     using snf::protocol::Frame;
     using snf::protocol::MessageType;
+    using snf::test::connectClient;
+    using snf::test::portOf;
+    using snf::test::receiveExact;
+    using snf::test::sendAll;
 
     enum class SinkMode
     {
@@ -183,77 +190,6 @@ namespace
         return count;
     }
 
-    [[nodiscard]] std::uint16_t portOf(const int descriptor)
-    {
-        sockaddr_in address{};
-        socklen_t address_size = sizeof(address);
-        assert(::getsockname(descriptor, reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
-        return ntohs(address.sin_port);
-    }
-
-    void setReceiveTimeout(const int descriptor)
-    {
-        timeval timeout{.tv_sec = 2, .tv_usec = 0};
-        assert(::setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0);
-    }
-
-    [[nodiscard]] snf::net::UniqueFileDescriptor connectClient(const std::uint16_t port, const int receive_buffer_size = 0)
-    {
-        const int descriptor = ::socket(AF_INET, SOCK_STREAM, 0);
-        assert(descriptor != -1);
-        snf::net::UniqueFileDescriptor client{descriptor};
-        setReceiveTimeout(descriptor);
-        if (receive_buffer_size > 0)
-        {
-            assert(::setsockopt(descriptor, SOL_SOCKET, SO_RCVBUF, &receive_buffer_size, sizeof(receive_buffer_size)) == 0);
-        }
-
-        sockaddr_in address{};
-        address.sin_family = AF_INET;
-        address.sin_port = htons(port);
-        assert(::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1);
-
-        int result = ::connect(descriptor, reinterpret_cast<const sockaddr*>(&address), sizeof(address));
-        while (result == -1 && errno == EINTR)
-        {
-            result = ::connect(descriptor, reinterpret_cast<const sockaddr*>(&address), sizeof(address));
-        }
-        assert(result == 0);
-        return client;
-    }
-
-    void sendAll(const int descriptor, const std::vector<std::byte>& bytes)
-    {
-        std::size_t offset = 0;
-        while (offset < bytes.size())
-        {
-            const ssize_t sent = ::send(descriptor, bytes.data() + offset, bytes.size() - offset, MSG_NOSIGNAL);
-            if (sent == -1 && errno == EINTR)
-            {
-                continue;
-            }
-            assert(sent > 0);
-            offset += static_cast<std::size_t>(sent);
-        }
-    }
-
-    [[nodiscard]] std::vector<std::byte> receiveExact(const int descriptor, const std::size_t byte_count)
-    {
-        std::vector<std::byte> bytes(byte_count);
-        std::size_t offset = 0;
-        while (offset < byte_count)
-        {
-            const ssize_t received = ::recv(descriptor, bytes.data() + offset, byte_count - offset, 0);
-            if (received == -1 && errno == EINTR)
-            {
-                continue;
-            }
-            assert(received > 0);
-            offset += static_cast<std::size_t>(received);
-        }
-        return bytes;
-    }
-
     [[nodiscard]] bool receivesEof(const int descriptor)
     {
         std::byte byte{};
@@ -351,6 +287,10 @@ namespace
         assert(owner_worker.metrics().network.graceful_closes == 1);
         assert(owner_worker.metrics().network.immediate_closes == 0);
         assert(owner_worker.metrics().network.write_budget_stops >= 1);
+        assert(owner_worker.metrics().high_water_marks.connection_read_buffer_bytes >= encoded_request.size());
+        assert(owner_worker.metrics().high_water_marks.connection_write_queued_bytes >= encoded_response.size());
+        assert(owner_worker.metrics().high_water_marks.sampled_connections >= 1);
+        assert(owner_worker.metrics().gauges.connections == 0);
     }
 
     void test_eagain_waits_for_epollout_and_resumes_in_order()
@@ -918,6 +858,7 @@ namespace
         assert(state->close_reasons[0] == CloseReason::Application);
         assert(state->close_reasons[1] == CloseReason::Timeout);
         assert(worker.metrics().network.close_deadline_expirations == 1);
+        assert(worker.metrics().network.stale_close_deadlines == 1);
         assert(worker.metrics().network.epollout_waits >= 1);
     }
 
@@ -1130,14 +1071,12 @@ namespace
 
 namespace snf::worker
 {
-    template <>
-    struct ActorPayloadTraits<IntegrationPingPayload>
+    template <> struct ActorPayloadTraits<IntegrationPingPayload>
     {
         static constexpr std::uint32_t TAG = 1;
         static std::uint64_t calculateCharge(const IntegrationPingPayload& p) noexcept
         {
-            return static_cast<std::uint64_t>(p.frame.payload.size()) +
-                   snf::protocol::FRAME_LENGTH_FIELD_SIZE + snf::protocol::MIN_BODY_SIZE;
+            return static_cast<std::uint64_t>(p.frame.payload.size()) + snf::protocol::FRAME_LENGTH_FIELD_SIZE + snf::protocol::MIN_BODY_SIZE;
         }
     };
 }
@@ -1272,21 +1211,17 @@ namespace
             .worker_shutdown_timeout = 2000ms,
         };
 
-        Worker worker(
-            WorkerId{0},
-            1,
-            testBudgets(),
-            WorkerInboxConfig{},
-            testNetworkConfig(1),
-            sink,
-            actor_config,
-            factory
-        );
+        Worker worker(WorkerId{0}, 1, testBudgets(), WorkerInboxConfig{}, testNetworkConfig(1), sink, actor_config, factory);
         sink.setWorker(worker);
         auto source_port = worker.bindInboxSource(WorkerId{0});
         worker.attachListener(std::move(listener));
 
-        std::thread worker_thread([&worker]() { worker.run(); });
+        std::thread worker_thread(
+            [&worker]()
+            {
+                worker.run();
+            }
+        );
         auto client = connectClient(port);
         sendAll(client.getDescriptor(), snf::protocol::encode_frame(pingFrame(501)));
 
@@ -1307,11 +1242,12 @@ namespace
 
         const Frame response = pongFrame(502);
         WorkerEnvelope envelope{
-            .event = RemoteConnectionSend{
-                .connection = connection,
-                .frame = response,
-                .critical = true,
-            },
+            .event =
+                RemoteConnectionSend{
+                    .connection = connection,
+                    .frame = response,
+                    .critical = true,
+                },
             .charged_bytes = remoteSendCharge(response),
         };
         assert(source_port.tryPush(std::move(envelope)) == InboxPushResult::Accepted);
@@ -1358,20 +1294,16 @@ namespace
                 .worker_shutdown_timeout = 2000ms,
             };
 
-            Worker worker(
-                WorkerId{0},
-                1,
-                testBudgets(),
-                WorkerInboxConfig{},
-                testNetworkConfig(1),
-                sink,
-                actor_config,
-                factory
-            );
+            Worker worker(WorkerId{0}, 1, testBudgets(), WorkerInboxConfig{}, testNetworkConfig(1), sink, actor_config, factory);
             sink.setWorker(worker);
             worker.attachListener(std::move(listener));
 
-            std::thread worker_thread([&]() { worker.run(); });
+            std::thread worker_thread(
+                [&]()
+                {
+                    worker.run();
+                }
+            );
 
             auto client = connectClient(port);
             sendAll(client.getDescriptor(), snf::protocol::encode_frame(pingFrame(42)));
@@ -1399,8 +1331,15 @@ namespace
     }
 }
 
-int main()
+int main(const int argc, char** argv)
 {
+    if (argc == 2 && std::string_view{argv[1]} == "--slow-consumer")
+    {
+        test_eagain_waits_for_epollout_and_resumes_in_order();
+        test_slow_consumer_hard_limit_closes_only_that_connection();
+        return 0;
+    }
+    assert(argc == 1);
     test_worker_round_trip_and_graceful_write_drain();
     test_eagain_waits_for_epollout_and_resumes_in_order();
     test_decode_frame_budget_requeues_buffered_frames();

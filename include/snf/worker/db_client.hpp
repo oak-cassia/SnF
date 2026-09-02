@@ -2,6 +2,7 @@
 
 #include "snf/worker/budget.hpp"
 #include "snf/worker/identity.hpp"
+#include "snf/worker/latency_histogram.hpp"
 #include "snf/worker/poll_token.hpp"
 
 #include <chrono>
@@ -66,8 +67,15 @@ namespace snf::worker
 
         std::size_t connection_count{2};
         std::size_t max_queued_operations{256};
+        // Sum of sizeof(DbRequest) and every queued request's owned dynamic
+        // allocation. SavePlayerRequest skill storage is charged by capacity(), not
+        // size(), because this is a heap-memory bound rather than a logical payload
+        // bound. Deque node overhead is fixed by max_queued_operations.
         std::uint64_t max_queued_bytes{1024ULL * 1024};
         std::chrono::milliseconds operation_timeout{2000};
+        // Bounds the asynchronous connect/query/fetch/cancel progress attempted
+        // during Worker shutdown. Final driver teardown happens after this budget.
+        std::chrono::milliseconds shutdown_timeout{1000};
         // A refused connect returns immediately, so reopening a slot without a
         // delay would spin the whole worker while the database is down.
         std::chrono::milliseconds reconnect_backoff{250};
@@ -227,6 +235,11 @@ namespace snf::worker
         std::uint64_t commits_acknowledged{0};
         std::uint64_t commits_unknown{0};
         std::uint64_t rollbacks{0};
+        std::size_t queued_operations_high_water{0};
+        std::uint64_t queued_bytes_high_water{0};
+        std::size_t in_flight_high_water{0};
+        LatencyHistogram operation_latency_ns{};
+        LatencyHistogram queue_wait_ns{};
     };
 
     // Worker-local. Every MYSQL handle is created, used and destroyed on the owner
@@ -260,6 +273,7 @@ namespace snf::worker
         [[nodiscard]] bool hasLocalWork() const noexcept;
         [[nodiscard]] std::size_t inFlightCount() const noexcept;
         [[nodiscard]] std::size_t queuedCount() const noexcept;
+        [[nodiscard]] std::uint64_t queuedBytes() const noexcept;
 
         void expireDeadlines(DbTimePoint now);
 
@@ -271,9 +285,11 @@ namespace snf::worker
         void beginShutdown() noexcept;
         [[nodiscard]] bool shuttingDown() const noexcept;
 
-        // Owner thread only. Closes handles and releases the thread-local driver
-        // state. Safe to call more than once.
-        void shutdown(Poller& poller);
+        // Owner thread only. Async progress stops at deadline; handles are then
+        // force-closed and the final driver teardown runs outside that budget.
+        // Returns true when live async state had to be forced at the deadline.
+        // Safe to call more than once.
+        bool shutdown(Poller& poller, DbTimePoint deadline);
 
         [[nodiscard]] const DbClientMetrics& metrics() const noexcept;
 

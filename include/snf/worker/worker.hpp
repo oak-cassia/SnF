@@ -11,11 +11,13 @@
 #include "snf/worker/inbox.hpp"
 #include "snf/worker/poll_registration.hpp"
 #include "snf/worker/poller.hpp"
+#include "snf/worker/progress.hpp"
 #include "snf/worker/request_sink.hpp"
 #include "snf/worker/timer_queue.hpp"
 #include "snf/worker/wakeup.hpp"
 #include "snf/worker/worker_network.hpp"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -39,15 +41,117 @@ namespace snf::worker
         ShutdownForced,
     };
 
+    struct WorkerGaugeSnapshot
+    {
+        std::size_t connections{0};
+        std::size_t actors{0};
+        std::size_t loading{0};
+        std::size_t ready_actors{0};
+        std::size_t mailbox_messages_total{0};
+        std::uint64_t mailbox_bytes_total{0};
+        std::size_t timer_entries{0};
+        std::uint64_t application_timer_bytes{0};
+        std::uint64_t inbox_queued_bytes{0};
+        std::size_t db_queued_operations{0};
+        std::uint64_t db_queued_bytes{0};
+        std::size_t db_in_flight{0};
+    };
+
+    struct WorkerHighWaterMarks
+    {
+        // Updated at the mutation site, so transient peaks are not lost.
+        std::size_t connection_read_buffer_bytes{0};
+        std::size_t connection_write_queued_bytes{0};
+        std::size_t db_queued_operations{0};
+        std::uint64_t db_queued_bytes{0};
+        std::size_t db_in_flight{0};
+
+        // Sampled once per loop iteration. A value that rises and falls inside one
+        // phase can therefore be missed; admission tests remain the capacity proof.
+        std::size_t sampled_connections{0};
+        std::size_t sampled_actors{0};
+        std::size_t sampled_loading{0};
+        std::size_t sampled_ready_actors{0};
+        std::size_t sampled_mailbox_messages_total{0};
+        std::uint64_t sampled_mailbox_bytes_total{0};
+        std::size_t sampled_timer_entries{0};
+        std::uint64_t sampled_application_timer_bytes{0};
+
+        // Cross-thread lane counters are sampled every 64 loop iterations.
+        std::uint64_t sampled_inbox_queued_bytes{0};
+    };
+
+    struct WorkerPhaseMetrics
+    {
+        std::uint64_t entries{0};
+        std::uint64_t budget_stops{0};
+        // Wall time includes scheduler descheduling. CPU time and voluntary
+        // context switches distinguish actual owner-thread work/blocking from
+        // involuntary preemption; wall time remains the fairness/stall bound.
+        std::chrono::nanoseconds max_residence{0};
+        std::chrono::nanoseconds max_cpu_residence{0};
+        std::chrono::nanoseconds max_entry_gap{0};
+        std::uint64_t voluntary_context_switches{0};
+        std::uint64_t involuntary_context_switches{0};
+        // Attribution for the same sample that established max_residence.
+        std::chrono::nanoseconds max_wall_residence_cpu{0};
+        std::uint64_t max_wall_residence_voluntary_context_switches{0};
+        std::uint64_t max_wall_residence_involuntary_context_switches{0};
+        // Owner-thread bookkeeping. Reports should use the durations above.
+        std::chrono::steady_clock::time_point last_entered{};
+    };
+
+    struct WorkerResourceSnapshot
+    {
+        std::size_t connections{0};
+        std::size_t actors{0};
+        std::size_t blocked_actors{0};
+        std::size_t loading{0};
+        std::uint64_t inbox_bytes{0};
+        std::size_t timer_entries{0};
+        std::uint64_t application_timer_bytes{0};
+        std::size_t db_in_flight{0};
+        std::size_t db_queued{0};
+    };
+
+    struct WorkerShutdownPhaseRecord
+    {
+        bool entered{false};
+        std::chrono::nanoseconds duration{0};
+        bool deadline_hit{false};
+        WorkerResourceSnapshot remaining{};
+    };
+
+    struct WorkerShutdownMetrics
+    {
+        std::chrono::nanoseconds actor_configured_timeout{0};
+        std::chrono::nanoseconds actor_phases_duration{0};
+        std::chrono::nanoseconds db_configured_timeout{0};
+        std::chrono::nanoseconds db_shutdown_duration{0};
+        std::chrono::nanoseconds total_duration{0};
+        bool actor_deadline_exceeded{false};
+        bool db_deadline_exceeded{false};
+        WorkerShutdownPhaseRecord phase_a{};
+        WorkerShutdownPhaseRecord phase_b{};
+        WorkerShutdownPhaseRecord phase_c{};
+        WorkerShutdownPhaseRecord phase_d{};
+        WorkerResourceSnapshot final_resources{};
+        std::uint64_t forced_connection_closes{0};
+        std::uint64_t forced_actor_removals{0};
+        std::uint64_t forced_ready_queue_drops{0};
+    };
+
     struct WorkerMetrics
     {
         std::uint64_t loop_iterations{0};
         std::uint64_t poll_events{0};
+        std::uint64_t poll_budget_stops{0};
         std::uint64_t wakeups_consumed{0};
         std::uint64_t inbox_events{0};
         std::uint64_t inbox_budget_stops{0};
         std::uint64_t timers_fired{0};
         std::uint64_t timer_budget_stops{0};
+        std::uint64_t thread_execution_sample_failures{0};
 
         // 셧다운 drain 루프가 처리한 양은 별도로 센다.
         // 이렇게 나누지 않으면 "메인 루프가 일했다"는 사실을 테스트가 증명할 수 없다.
@@ -59,6 +163,11 @@ namespace snf::worker
 
         WorkerNetworkMetrics network{};
         WorkerActorMetrics actor{};
+        WorkerGaugeSnapshot gauges{};
+        WorkerHighWaterMarks high_water_marks{};
+        std::array<WorkerPhaseMetrics, WORKER_PHASE_COUNT> phases{};
+        LatencyHistogram loop_iteration_ns{};
+        WorkerShutdownMetrics shutdown{};
     };
 
     class Worker final : public TimerAdmission, public DbCompletionSink
@@ -163,9 +272,24 @@ namespace snf::worker
         // - 실행 중 외부 thread 호출 금지 (TSan data race 방지)
         [[nodiscard]] const WorkerMetrics& metrics() const noexcept;
 
+        // progress() is the only Worker observation API that is safe from any
+        // thread while run() is active. It does not publish any other Worker data.
+        [[nodiscard]] const WorkerProgress& progress() const noexcept;
+
+        // Immutable after startup. WorkerGroup uses the sum of the actor/
+        // connection budget and the optional DB budget as its join deadline base.
+        [[nodiscard]] std::chrono::nanoseconds configuredShutdownTimeout() const noexcept;
+
         [[nodiscard]] WorkerId id() const noexcept;
 
     private:
+        struct ThreadExecutionSample
+        {
+            std::chrono::nanoseconds cpu_time{0};
+            std::uint64_t voluntary_context_switches{0};
+            std::uint64_t involuntary_context_switches{0};
+        };
+
         class ActorTurnScope final
         {
         public:
@@ -184,6 +308,9 @@ namespace snf::worker
 
         void startDb();
         void advanceDb(TimePoint now);
+        void sampleGauges() noexcept;
+        [[nodiscard]] static bool sampleThreadExecution(ThreadExecutionSample& sample) noexcept;
+        void enterPhase(WorkerPhase phase, TimePoint now) noexcept;
         void bindOwnerThread() noexcept;
         void assertOwnerThread() const noexcept;
         [[nodiscard]] bool hasRunnableWork() const noexcept;
@@ -239,6 +366,7 @@ namespace snf::worker
         void removeActor(ActorHandle handle, ActorRemovalReason reason);
         MailboxUsage discardMailbox(ActorSlot& slot);
         [[nodiscard]] bool hasBlockedActors() const noexcept;
+        [[nodiscard]] std::size_t blockedActorCount() const noexcept;
 
         friend struct WorkerActorTestAccess;
 
@@ -248,6 +376,8 @@ namespace snf::worker
         void runShutdownPhaseB(TimePoint deadline);
         void runShutdownPhaseC(TimePoint deadline);
         void runShutdownPhaseD(TimePoint deadline);
+        void captureShutdownPhase(WorkerShutdownPhaseRecord& record, TimePoint entered_at, TimePoint deadline) noexcept;
+        [[nodiscard]] WorkerResourceSnapshot captureResourceSnapshot() const noexcept;
 
         WorkerId _id;
         std::uint16_t _worker_count;
@@ -259,7 +389,12 @@ namespace snf::worker
         WorkerQuiescenceBarrier* _barrier{nullptr};
         std::atomic<bool> _stop_requested{false};
         std::thread::id _owner_thread{};
-        WorkerMetrics _metrics{};    // owner thread 전용 plain counter
+        WorkerMetrics _metrics{};   // owner thread 전용 plain counter
+        WorkerProgress _progress{}; // cross-thread 관측 가능한 packed atomic
+        WorkerPhase _current_phase{WorkerPhase::Starting};
+        TimePoint _phase_entered_at{};
+        ThreadExecutionSample _phase_execution_entered_at{};
+        bool _phase_execution_sample_valid{false};
         bool _inbox_has_more{false}; // hasRunnableWork() 계산용
         bool _timers_have_due{false};
         EventHandler _event_handler{};
@@ -283,6 +418,7 @@ namespace snf::worker
         std::unique_ptr<ReadyActorQueue> _ready_queue;
         std::unique_ptr<DbClient> _db;
         bool _db_started{false};
+        std::chrono::milliseconds _db_shutdown_timeout{0};
         ActorFactory* _actor_factory{nullptr};
         WorkerActorConfig _actor_config{};
         OperationIdSource _operation_ids{};

@@ -49,6 +49,21 @@ namespace snf::worker
         std::chrono::nanoseconds max_duration;
     };
 
+    // Stage 10 quality-gate constants. Budgets are checked between indivisible
+    // items, so each phase gets one explicit single-item overshoot allowance.
+    struct WorkerGateThresholds
+    {
+        static constexpr std::size_t DEBUG_MULTIPLIER = 8;
+        static constexpr std::size_t ASAN_UBSAN_MULTIPLIER = 20;
+        static constexpr std::size_t TSAN_MULTIPLIER = 40;
+        static constexpr std::chrono::microseconds POLL_ITEM_ALLOWANCE{500};
+        static constexpr std::chrono::microseconds INBOX_ITEM_ALLOWANCE{500};
+        static constexpr std::chrono::microseconds TIMER_ITEM_ALLOWANCE{500};
+        static constexpr std::chrono::microseconds DB_ITEM_ALLOWANCE{500};
+        static constexpr std::chrono::milliseconds ACTOR_ITEM_ALLOWANCE{2};
+        static constexpr std::chrono::microseconds WRITE_ITEM_ALLOWANCE{500};
+    };
+
     // 시간 측정은 steady_clock::now()를 phase 시작에 한 번 읽고 이후 64개마다 다시 읽는다.
     // 항목마다 now()를 부르면 그 자체가 비용이 되기 때문이다.
     struct WorkerBudgets

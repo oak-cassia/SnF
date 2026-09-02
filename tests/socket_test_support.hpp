@@ -23,7 +23,7 @@ namespace snf::test
         return ntohs(address.sin_port);
     }
 
-    [[nodiscard]] inline snf::net::UniqueFileDescriptor connectClient(const std::uint16_t port)
+    [[nodiscard]] inline snf::net::UniqueFileDescriptor connectClient(const std::uint16_t port, const int receive_buffer_size = 0)
     {
         const int descriptor = ::socket(AF_INET, SOCK_STREAM, 0);
         assert(descriptor != -1);
@@ -31,6 +31,10 @@ namespace snf::test
 
         timeval timeout{.tv_sec = 2, .tv_usec = 0};
         assert(::setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0);
+        if (receive_buffer_size > 0)
+        {
+            assert(::setsockopt(descriptor, SOL_SOCKET, SO_RCVBUF, &receive_buffer_size, sizeof(receive_buffer_size)) == 0);
+        }
 
         sockaddr_in address{};
         address.sin_family = AF_INET;

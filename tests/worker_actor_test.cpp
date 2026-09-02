@@ -765,6 +765,10 @@ namespace
 
         // All 35 messages processed across multiple slices
         assert(worker.metrics().actor.actor_turns == 35);
+        const auto latency = worker.metrics().actor.turn_slice_ns.snapshot();
+        assert(latency.count >= 2);
+        assert(latency.sum == worker.metrics().actor.total_slice_duration_ns);
+        assert(latency.max == static_cast<std::uint64_t>(worker.metrics().actor.max_slice_duration.count()));
         assert(worker.totalMailboxMessages() == 0);
     }
 
@@ -1177,6 +1181,52 @@ namespace
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start);
         // Shutdown should finish well within a reasonable tolerance around the deadline
         assert(elapsed < 400ms);
+        const auto& shutdown = worker.metrics().shutdown;
+        assert(shutdown.phase_a.entered);
+        assert(shutdown.phase_b.entered);
+        assert(shutdown.phase_c.entered);
+        assert(shutdown.phase_d.entered);
+        assert(!shutdown.actor_deadline_exceeded);
+        assert(shutdown.actor_phases_duration <= shutdown.actor_configured_timeout);
+        assert(shutdown.phase_d.remaining.connections == 0);
+        assert(shutdown.phase_d.remaining.actors == 0);
+        assert(shutdown.phase_d.remaining.blocked_actors == 0);
+        assert(shutdown.phase_d.remaining.loading == 0);
+        assert(shutdown.phase_d.remaining.inbox_bytes == 0);
+        assert(shutdown.phase_d.remaining.application_timer_bytes == 0);
+    }
+
+    void test_shutdown_records_deadline_and_forced_actor_cleanup()
+    {
+        WorkerActorConfig actor_config{
+            .actor_table_capacity = 5,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 1024,
+            .max_turns_per_actor_slice = 30,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 0ms,
+        };
+
+        FunctionalActorFactory factory(nullptr);
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, actor_config, factory);
+        const ActorKey key{.kind = ActorKind::Player, .entity = 99};
+        assert(worker.tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        // A slot already in Stopping is intentionally left for Phase D. This
+        // makes forced cleanup deterministic without sleeping or racing a turn.
+        WorkerActorTestAccess::slot(worker, key)->setState(ActorState::Stopping);
+
+        worker.requestStop();
+        worker.run();
+
+        const auto& shutdown = worker.metrics().shutdown;
+        assert(shutdown.phase_b.deadline_hit);
+        assert(shutdown.actor_deadline_exceeded);
+        assert(shutdown.forced_actor_removals > 0);
+        assert(shutdown.forced_ready_queue_drops > 0);
+        assert(shutdown.phase_d.remaining.actors == 0);
+        assert(shutdown.phase_d.remaining.blocked_actors == 0);
     }
 
     void test_shutdown_external_deliver_closed_internal_tell_allowed()
@@ -2109,16 +2159,24 @@ namespace
         const auto& blocked = WorkerActorTestAccess::blocked(worker, key);
         assert(blocked.has_value());
         const AwaitKey real_key = std::get<SyntheticSuspendedCommand>(*blocked).key;
+        const ActorState state_before = WorkerActorTestAccess::slot(worker, key)->state();
+        const std::size_t mailbox_before = WorkerActorTestAccess::slot(worker, key)->mailbox().size();
 
         // Stale operation id -> rejected
         const AwaitKey bad_op{real_key.actor, real_key.incarnation, OperationId{999}};
         assert(!WorkerActorTestAccess::completeSyntheticCommand(worker, bad_op, SyntheticAwaitOutcome::Completed));
         assert(worker.metrics().actor.stale_completions == 1);
+        assert(WorkerActorTestAccess::slot(worker, key)->state() == state_before);
+        assert(WorkerActorTestAccess::slot(worker, key)->mailbox().size() == mailbox_before);
+        assert(std::get<SyntheticSuspendedCommand>(*WorkerActorTestAccess::blocked(worker, key)).key == real_key);
 
         // Stale incarnation -> rejected
         const AwaitKey bad_inc{real_key.actor, ActorIncarnation{999}, real_key.operation};
         assert(!WorkerActorTestAccess::completeSyntheticCommand(worker, bad_inc, SyntheticAwaitOutcome::Completed));
         assert(worker.metrics().actor.stale_completions == 2);
+        assert(WorkerActorTestAccess::slot(worker, key)->state() == state_before);
+        assert(WorkerActorTestAccess::slot(worker, key)->mailbox().size() == mailbox_before);
+        assert(std::get<SyntheticSuspendedCommand>(*WorkerActorTestAccess::blocked(worker, key)).key == real_key);
 
         // Real key succeeds and leaves the stale counter alone
         assert(WorkerActorTestAccess::completeSyntheticCommand(worker, real_key, SyntheticAwaitOutcome::Completed));
@@ -2902,8 +2960,11 @@ namespace
         assert(WorkerActorTestAccess::slot(worker, key)->state() == ActorState::Queued);
 
         // 2. Late timeout fires after deadline
+        const std::size_t mailbox_before = WorkerActorTestAccess::slot(worker, key)->mailbox().size();
         WorkerActorTestAccess::expireTimers(worker, std::chrono::steady_clock::now() + 100ms, WorkerBudgets::defaults().timers);
         assert(worker.metrics().actor.stale_await_timeouts == 1);
+        assert(WorkerActorTestAccess::slot(worker, key)->state() == ActorState::Queued);
+        assert(WorkerActorTestAccess::slot(worker, key)->mailbox().size() == mailbox_before);
 
         // 3. Resumed turn completes with original Completed outcome
         WorkerActorTestAccess::runReadyActors(worker, WorkerBudgets::defaults().actors);
@@ -3888,6 +3949,10 @@ namespace
         invalid_group_config.inbox.max_workers = 33;
         assert(!isValid(invalid_group_config));
 
+        invalid_group_config = WorkerGroupConfig{};
+        invalid_group_config.group_shutdown_grace = -1ms;
+        assert(!isValid(invalid_group_config));
+
         WorkerQuiescenceBarrier barrier(2);
         assert(!barrier.armed());
         assert(!barrier.snapshot().armed);
@@ -4076,6 +4141,79 @@ namespace
         assert(w1.metrics().shutdown_barrier_timeouts == 0);
     }
 
+    void test_worker_group_observes_exit_deadline_before_joining()
+    {
+        const WorkerActorConfig actor_config{
+            .actor_table_capacity = 4,
+            .max_mailbox_messages_per_actor = 4,
+            .max_mailbox_bytes_per_actor = 1024,
+            .max_mailbox_messages_total = 8,
+            .max_mailbox_bytes_total = 2048,
+            .max_turns_per_actor_slice = 4,
+            .placement_seed = 0,
+            .worker_shutdown_timeout = 0ms,
+        };
+        const WorkerGroupConfig group_config{
+            .worker_count = 1,
+            .max_workers = 32,
+            .port = 0,
+            .budgets = WorkerBudgets::defaults(),
+            .inbox = WorkerInboxConfig{},
+            .network = WorkerNetworkConfig{},
+            .actor = actor_config,
+            .watchdog = WorkerWatchdogConfig{.sample_interval = 5ms, .phase_stall_threshold = 5s},
+            .group_shutdown_grace = 20ms,
+        };
+
+        std::atomic<bool> entered{false};
+        std::atomic<std::uint64_t> diagnostic_callbacks{0};
+        auto factory_factory = [&entered](WorkerId) -> std::unique_ptr<ActorFactory>
+        {
+            return std::make_unique<FunctionalActorFactory>(
+                [&entered](ActorKey) -> ActorConstructionResult
+                {
+                    return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(
+                        [&entered](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
+                        {
+                            entered.store(true, std::memory_order_release);
+                            std::this_thread::sleep_for(250ms);
+                            return CompletedTurn{.effects = EffectBatch{}};
+                        }
+                    ));
+                }
+            );
+        };
+
+        WorkerGroup group(
+            group_config,
+            {},
+            factory_factory,
+            [&diagnostic_callbacks](const WorkerStallReport&)
+            {
+                diagnostic_callbacks.fetch_add(1, std::memory_order_relaxed);
+            }
+        );
+        const ActorKey key{.kind = ActorKind::Player, .entity = 1};
+        assert(WorkerGroupTestAccess::worker(group, 0).tryDeliverLocal(key, makeEnvelope(16)) == DeliveryResult::Accepted);
+        group.start();
+
+        const auto entered_deadline = Clock::now() + 2s;
+        while (!entered.load(std::memory_order_acquire) && Clock::now() < entered_deadline)
+        {
+            std::this_thread::sleep_for(1ms);
+        }
+        assert(entered.load(std::memory_order_acquire));
+
+        group.requestStop();
+        group.join();
+
+        assert(group.joinOverruns().size() == 1);
+        assert(group.joinOverruns().front().worker == WorkerId{0});
+        assert(group.joinOverruns().front().phase == WorkerPhase::Actors);
+        assert(group.joinOverruns().front().stuck_for >= 10ms);
+        assert(diagnostic_callbacks.load(std::memory_order_relaxed) == 1);
+    }
+
     void test_worker_group_quiescence_with_suspended_actors_logical_cancel()
     {
         const WorkerActorConfig actor_config{
@@ -4200,6 +4338,7 @@ void run_worker_actor_tests()
     test_all_four_effects_ordering_and_continue_after_failure();
 
     test_shutdown_single_absolute_deadline_unification();
+    test_shutdown_records_deadline_and_forced_actor_cleanup();
     test_shutdown_external_deliver_closed_internal_tell_allowed();
     test_shutdown_processes_accepted_inbox_events_in_quiescence_loop();
     test_shutdown_cleans_up_all_resources_after_deadline();
@@ -4255,5 +4394,6 @@ void run_worker_actor_tests()
     test_barrier_unit_contracts();
     test_barrier_note_published_increments_epoch_even_when_already_active();
     test_worker_group_cross_worker_tell_exact_accounting_and_quiescence();
+    test_worker_group_observes_exit_deadline_before_joining();
     test_worker_group_quiescence_with_suspended_actors_logical_cancel();
 }
