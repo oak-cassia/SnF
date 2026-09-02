@@ -105,6 +105,23 @@ runtime **test path**에서 관측 가능하게 만들고 모두 통과시킨 �
 | 3 | phase 전환마다 `getrusage(RUSAGE_THREAD)` syscall이 production hot path에 상주했다. 이 값은 게이트 증명용이다 | `WorkerBudgets::sample_phase_execution`으로 **opt-in(기본 off)**. gate 실행만 켠다. packed progress word와 watchdog은 `steady_clock`만 읽으므로 항상 켜 둔다. load gate는 flag가 켜졌는지와 active CPU 합계 > 0을 먼저 검사해 "0으로 통과"를 막는다 | D1, D4, 10G |
 | 4 | `DbClient::shutdown()`이 공유 poller에서 non-DB 이벤트를 버리는 순서 의존이 숨은 전제였다 | phase D가 연결을 force-close·deregister한 **뒤에만** 호출해야 한다는 계약을 헤더와 호출부에 명시 | 10E |
 | 5 | `WorkerGaugeSnapshot::inbox_queued_bytes`만 64-loop sampled인데 이름이 exact처럼 보였다 | `sampled_inbox_queued_bytes`로 rename + 주석. `poll_budget_stops`는 "stop event 횟수"라는 의미를 주석으로 고정 | 10A |
+| 6 | ASan 반복 실행에서 active phase CPU residence가 약 10% 확률로 threshold를 넘었다(Poll 45.135 ms, Timers 9.249 ms) | 원인까지 조사해 **환경 freeze가 thread CPU로 계상되는 것**임을 확인하고, threshold 대신 (1) 계측 구간 정합성, (2) 환경 증인 기반 판정, (3) negative control을 도입 | D4, 10G, 10H |
+
+**6라운드 — active phase CPU tail 조사 결과**
+
+threshold는 바꾸지 않았다. 조사·증거·상수 근거는
+[리포트 §10](./worker-runtime-quality-gates.md)에 전부 기록했다. 요약:
+
+- worst active phase는 항상 **분할 불가능한 단일 항목 1개**와 같았다(Actors phase 6.6947 ms ≈ actor turn
+  6.6810 ms). 같은 경로의 p50은 90~147 us다. 항목을 반복해 오래 돈 것이 아니다.
+- 아무 일도 하지 않는 witness thread가 단일 gap 2.8~23.3 ms를 관측했고, 한 번은 10.04 ms gap 동안
+  **CPU 6.87 ms를 계상받았다**. 이 환경은 실행하지 않은 시간을 thread CPU로 계상한다.
+- outlier는 Poll/Timers/Actors/Writes에 무작위로 떨어졌고, `ru_nvcsw`/`ru_nivcsw`는 0이었다.
+- 판정: 계획의 두 번째 갈래(분할 불가능한 단일 연산). 원인은 ASan allocator가 아니라 컨테이너/VM freeze이며
+  ASan은 확률 증폭기다.
+- 계약: active phase 상한 = `threshold + min(max(witness_max_gap - 2 ms, 0), 30 ms)`. gap이 32 ms를 넘으면
+  그 window는 판정 불가로 보고 최대 3회 window만 다시 굴린다. threshold는 굴리지 않는다.
+- negative control: Inbox에서 150 ms CPU를 태우면 `threshold + SLACK_CAP`도 반드시 초과한다(실측 150.550 ms).
 
 ---
 

@@ -1,6 +1,6 @@
 # 10단계 Worker runtime 품질 게이트 리포트
 
-> 문서 상태: **최종 — Stage 10 GO** (§10에 완료 후 리뷰 수정과 미해결 항목 1건)
+> 문서 상태: **최종 — Stage 10 GO** (§10에 완료 후 리뷰 수정 6건, §11에 남은 한계)
 >
 > calibration: 2026-09-01 / 최종 gate 실행일: 2026-09-02 / 리뷰 수정 재실행: 2026-09-02
 >
@@ -145,6 +145,7 @@ Db phase에 섞이므로, unavailable backend라는 같은 의미를 bounded 상
 | active `max_entry_gap` | phase starvation | fairness threshold 미만 |
 | PollWait wall residence | poll timeout의 직접 안전망 | Debug `max_poll_timeout * 2` 미만, sanitizer는 `+ 400 ms` |
 | watchdog wall time | 명백한 active/shutdown stall | active episode 0; shutdown은 deadline 계측과 분리 |
+| environment witness | 아무 일도 하지 않는 독립 thread가 잃은 시간. Worker 귀속 가능한 상한을 정한다 | gap ≤ 2 ms면 slack 0; 32 ms 초과면 그 window는 판정 불가 |
 
 Actor turn의 wall histogram `actor.turn_slice_ns`는 분포 관측용으로 유지한다. correctness는 다른 active phase와
 동일하게 Actors phase의 CPU residence와 voluntary switch로 판정하므로 scheduler 선점 false positive가 Actor에만
@@ -191,6 +192,10 @@ slack의 근거는 calibration에서 실측한 **non-blocking wall 팽창의 최
 | Writes | 0.5 ms | 4.5 ms | 10.5 ms | 20.5 ms |
 | fairness | — | 424 ms | 1060 ms | 2120 ms |
 
+모든 active phase 상한에는 §10에서 정한 **환경 증인 slack**이 더해진다.
+`실제 상한 = 표의 값 + min(max(witness_max_gap - 2 ms, 0), 30 ms)`이며, 조용한 호스트에서는 0이라 표의 값이
+그대로 상한이다.
+
 sanitizer preset에서 실제로 검사하는 active-phase wall 상한은 다음과 같다. Debug 열은 해당 없음이다.
 
 | phase | ASan/UBSan wall | TSan wall |
@@ -235,7 +240,7 @@ wall 130.059 ms, 같은 wall sample의 CPU 10.012 ms, voluntary 0, involuntary 5
 | 게이트 | 명령 | 지표 | 측정값 | 판정 |
 | --- | --- | --- | --- | --- |
 | Thread ownership | TSan `-L worker`, Debug full | TSan report, owner assertion | TSan 실행 8 PASS/3 MySQL SKIP, race 0 | PASS |
-| No Worker blocking | Debug calibration/load, deterministic block tests | active CPU, `ru_nvcsw`, PollWait wall, watchdog | active voluntary 전 phase 0, CPU 전 phase 상한 미만, PollWait 56.061 ms < 100 ms, active stall 0 | PASS |
+| No Worker blocking | Debug calibration/load, deterministic block tests | active CPU, `ru_nvcsw`, PollWait wall, watchdog, environment witness | active voluntary 전 phase 0, CPU 전 phase 상한 미만, PollWait 56.061 ms < 100 ms, active stall 0, negative control이 150 ms block을 검출 | PASS |
 | Memory bound | ASan/UBSan `-L worker`, Debug load | admission rejection + exact/sampled HWM | read 12,318 B, write 28,742 B, DB 8 ops/832 B, submit rejection 52; cap 초과 0 | PASS |
 | Single await state | Debug `snf_worker_tests` | `ActorSlot::blocked`, timeout/completion transition | 중복 continuation/deadline source 0, deterministic transition PASS | PASS |
 | Stale safety | Debug worker/DB/network tests | generation/incarnation/operation/late timeout 상태 불변 | stale 주입 뒤 mutation 0, counter 기대값 일치 | PASS |
@@ -249,7 +254,7 @@ wall 130.059 ms, 같은 wall sample의 CPU 10.012 ms, voluntary 0, involuntary 5
 | --- | --- |
 | Debug load repeat | 5/5 PASS |
 | Debug full CTest | 17 등록, 13 PASS, MySQL 4 SKIP, 실패 0 |
-| ASan/UBSan worker label | 11 등록, 8 PASS, MySQL 3 SKIP, sanitizer 오류/leak 0 (반복 실행은 §10의 미해결 항목 참고) |
+| ASan/UBSan worker label | 11 등록, 8 PASS, MySQL 3 SKIP, sanitizer 오류/leak 0 |
 | TSan worker label | 11 등록, 8 PASS, MySQL 3 SKIP, race 0 (`halt_on_error=1`) |
 
 ## 6. 대표 load 측정값
@@ -350,26 +355,100 @@ gate와 production application workflow의 동일 gate 재실행은 11단계 완
 수정 후 재실행: Debug full CTest 17 등록 / 13 PASS / MySQL 4 SKIP / 실패 0, Debug `-L worker` 11 등록 8 PASS,
 TSan `-L worker` 8 PASS + `snf_worker_load_stub` 반복 3/3 PASS(race 0), ASan/UBSan `-L worker` 8 PASS.
 
-### 미해결 — ASan Poll phase CPU residence의 tail
+### 해결 — active phase CPU residence의 tail은 환경 freeze였다
 
-`ctest --preset asan-ubsan -R snf_worker_load_stub --repeat until-fail:N`을 돌리면 낮은 확률로 Poll phase의
-`max_cpu_residence`가 45.135 ms까지 튀어 ASan CPU threshold 10.5 ms를 넘고 게이트가 실패한다. 관측값:
+`ctest --preset asan-ubsan -R snf_worker_load_stub --repeat until-fail:N`이 약 10% 확률로 실패했다. 처음 관측한
+sample은 Poll phase의 `max_cpu_residence` 45.135 ms(threshold 10.5 ms)였고, 이후 Timers 9.249 ms(threshold
+5.5 ms)도 관측됐다. threshold를 건드리지 않고 원인까지 확인했다.
 
-| 실행 형태 | 결과 |
+#### 조사 방법
+
+1. 바이너리를 직접 반복 실행하는 재현 채널을 만들고 실패 런의 전체 report를 보존했다.
+2. **아무 일도 하지 않는 독립 witness thread**(1 ms sleep + clock 읽기)를 붙여 프로세스 전체가 잃은 시간을 쟀다.
+3. phase별 독립 최댓값 대신 **같은 sample의 wall/CPU 원값**을 stderr로 덤프했다.
+4. `getrusage` CPU와 `CLOCK_THREAD_CPUTIME_ID` CPU를 나란히 측정해 계측원끼리 비교했다.
+5. phase 시간을 **분할 불가능한 단일 항목**(actor turn, frame)까지 귀속시켰다.
+
+#### 증거
+
+| # | 관측 | 의미 |
+| --- | --- | --- |
+| 1 | 16개 런 전부에서 worst Actors phase ≈ **단일 actor turn 1회** (run14: phase 6.6947 ms / turn 6.6810 ms, run15: 6.0267 / 5.8856) | phase가 항목을 반복해 오래 돈 것이 아니다. 항목 **1개**가 길었다 |
+| 2 | 같은 코드 경로의 actor turn p50 = 90~147 us, p99 = 459~524 us | outlier는 작업량 차이가 아니라 동일 작업의 45~50배 팽창이다 |
+| 3 | witness thread가 단일 gap 2.8~23.3 ms 관측, 1 ms sleep의 약 46%가 2 ms 초과 | 프로세스가 수 ms 단위로 아예 실행되지 않는 구간이 상시 존재한다 |
+| 4 | run12: witness가 10.04 ms gap 동안 **CPU 6.87 ms를 계상받았다**(sleep만 했다) | 이 환경은 **실행하지 않은 시간을 thread CPU로 계상**한다 |
+| 5 | 16개 런 전부에서 witness max gap ≥ worst active phase wall이고 둘이 함께 증감 (gap 23.3 → phase 6.03, gap 2.8 → phase 0.68) | phase outlier의 상한이 환경 stall이다 |
+| 6 | outlier가 Poll / Timers / Actors / Writes 전부에서 번갈아 나타났다 | 특정 코드 경로와 무관하다 |
+| 7 | outlier sample의 `ru_nvcsw` = `ru_nivcsw` = 0 | guest는 context switch조차 기록하지 않는다 |
+| 8 | 한 sample에서 Writes wall 0.26 ms인데 CPU 7.44 ms (`getrusage`와 `CLOCK_THREAD_CPUTIME_ID`가 일치) | 단일 thread에서 불가능한 값이다. 계측 구간 정합성 문제가 따로 있었다 |
+| 9 | 전체 실행에서 frame 1,086개 / Poll phase 967회 ≈ phase당 1.1개 | Poll이 45 ms 동안 항목을 반복 처리했을 수 없다 |
+
+#### 판정
+
+계획이 정의한 두 갈래 중 **두 번째**다 — 우리 코드가 분할할 수 없는 단일 연산이 원인이다. 다만 그 단일 연산이
+느린 것이 아니라, **컨테이너/VM이 프로세스를 수~수십 ms 멈추고 guest가 그 시간을 실행 중이던 thread의 CPU로
+계상한다.** stall이 어느 phase의 어느 항목에 떨어지는지는 무작위이므로 실패 phase도 무작위였다. ASan은 원인이
+아니라 확률 증폭기다(전 구간을 약 20배 늘려 stall이 active phase에 떨어질 확률을 높인다). 증거 1·9가
+"bounded check 없이 오래 도는 루프" 가설을 직접 배제한다.
+
+#### 수정
+
+threshold와 allowance는 **바꾸지 않았다.** 대신 두 가지를 고쳤다.
+
+1. **계측 구간 정합성** — `enterPhase`가 wall을 CPU counter 바로 옆에서 읽는다. 이전에는 call site의 `now`가
+   `getrusage` 호출보다 앞서 캡처되어 CPU 구간이 wall 구간보다 뒤로 밀렸고, 그 틈에 떨어진 stall이 wall에는
+   안 보이면서 CPU로만 계상됐다(증거 8). 이 읽기는 `sample_phase_execution`이 켜진 gate 실행에만 추가된다.
+2. **환경 증인 기반 판정** — active phase 상한을 `threshold + 이 런에서 실측한 slack`으로 본다.
+   `slack = min(max(witness_max_gap - 2 ms, 0), 30 ms)`이며 조용한 호스트에서는 0이므로 threshold가 그대로
+   권위를 갖는다. `witness_max_gap`이 32 ms를 넘으면 그 window는 **판정 불가**로 보고 최대 3회까지 window만
+   다시 굴린다. threshold를 다시 굴리는 것이 아니다. 3회 모두 판정 불가면 호스트가 너무 시끄럽다고 실패한다.
+
+| 상수 | 값 | 근거 |
+| --- | ---: | --- |
+| `QUIET_GAP` | 2 ms | witness는 1 ms sleep이므로 2 ms까지는 정상 wakeup latency |
+| `SLACK_CAP` | 30 ms | calibration 16런 실측 최대 gap 23.3 ms를 덮되 실제 block을 가릴 만큼 크지 않다 |
+| `UNUSABLE_GAP` | 32 ms | `QUIET_GAP + SLACK_CAP`. 초과 window는 판정 불가 |
+| `MAX_ATTEMPTS` | 3 | window 재시도 횟수 |
+
+이 규칙이 자기충족적으로 통과하는 장치가 되지 않도록 **negative control**을 함께 넣었다. Inbox phase에서
+150 ms CPU를 태우는 Worker는 witness가 부여할 수 있는 **최대 slack(30 ms)까지 더한 상한도 반드시 초과**해야
+한다. 실측: `inbox_cpu = 150.550 ms`, `threshold = 5.5 ms`, 그 순간의 `witness_slack = 0.299 ms`. Worker가
+스스로 block하면 witness thread는 멈추지 않으므로 slack이 커지지 않는다는 것도 같은 테스트가 확인한다.
+
+부수적으로, 이번 실측은 기존 allowance 선택을 **지지**한다. ASan에서 단일 actor turn의 p99는 459~524 us이고
+`ACTOR_ITEM_ALLOWANCE`는 2 ms다.
+
+#### 반복 안정성 재확인
+
+| preset | 명령 | 결과 |
+| --- | --- | --- |
+| Debug | `ctest --preset debug -R '^snf_worker_load_stub$' --repeat until-fail:6` | 6/6 PASS |
+| Debug | `ctest --preset debug` 전체 | 17 등록, 13 PASS, MySQL 4 SKIP, 실패 0 |
+| ASan/UBSan | `ctest --preset asan-ubsan -R '^snf_worker_load_stub$' --repeat until-fail:10` | 10/10 PASS |
+| ASan/UBSan | `ctest --preset asan-ubsan -L worker` | 11 등록, 8 PASS, MySQL 3 SKIP |
+| TSan | `ctest --preset tsan -R '^snf_worker_load_stub$' --repeat until-fail:6` | 6/6 PASS |
+| TSan | `TSAN_OPTIONS=halt_on_error=1 ctest --preset tsan -L worker` | 11 등록, 8 PASS, MySQL 3 SKIP, race 0 |
+
+수정 전 ASan은 약 20회 중 2회 실패했다. 수정 후 ASan load는 **연속 30회 PASS**했다(ctest 반복 10회 + 바이너리
+직접 20회). 이전 실패율 10%가 그대로였다면 30회 연속 통과 확률은 약 4%다. 20회 직접 실행에서 관측한 값:
+
+| 항목 | 값 |
 | --- | --- |
-| 바이너리 직접 실행 12회 | 전부 PASS, Poll `max_cpu_residence` 1.00~1.37 ms |
-| `ctest --repeat until-fail:3` | 3번째 iteration에서 실패 |
-| `ctest --repeat until-fail:5` | 3번째 iteration에서 실패 |
-| `ctest --repeat until-fail:6` | 6/6 PASS |
-| 합계 | 약 20회 실행 중 2회 실패 (약 10%) |
-| 실패 sample | Poll wall 45.174 ms / CPU 45.135 ms / involuntary 1, 같은 실행의 `Starting` CPU 5.566 ms |
+| 실패 | 0 |
+| window 재시도가 필요한 런 | 0 (전부 첫 attempt에서 판정) |
+| 부여된 slack | 0.50 ~ 22.996 ms (중앙값 약 0.8 ms) |
+| worst active phase CPU | 0.594 ~ 4.510 ms (threshold 5.5 ~ 22 ms) |
 
-wall ≈ CPU이므로 blocking이 아니라 실제 on-CPU 소비이고, 같은 실행의 `Starting` phase까지 평소의 18배로
-느렸다는 점은 프로세스 전체가 느려진 구간(호스트/VM 경합 또는 ASan runtime의 일괄 작업)을 가리킨다. Poll
-phase의 시간 예산은 frame·recv마다 검사되므로 분할 불가능한 한 항목이 45 ms를 쓸 구조가 아니다.
+slack 최댓값 22.996 ms는 calibration에서 witness가 측정한 최대 gap 23.3 ms와 일치한다. 즉 `SLACK_CAP = 30 ms`는
+관측된 환경 stall을 덮고, 그 위에서도 worst active phase CPU는 threshold를 넘지 않았다.
 
-**threshold를 올리지 않았다.** 게이트를 통과시키려고 CPU 상한을 조정하는 것은 이 게이트의 1차 증거를 무력화한다.
-따라서 현재 상태를 이렇게 기록한다: ASan preset의 `-L worker`는 단발 실행에서 PASS이며 **반복 실행에서
-repeat-stable하지 않다.** 후속으로 필요한 것은 (1) 45 ms 구간의 실제 소비 지점 확인(phase 내 하위 구간 계측
-또는 perf), (2) 그 결과에 따라 원인 수정 또는 근거를 갖춘 별도 calibration 커밋이며, threshold 변경은 그
-근거가 나온 뒤에만 한다.
+## 11. 남은 한계
+
+- **MySQL 미측정.** §9의 4개 등록과 재현 명령이 그대로 남는다.
+- **`max_accepts_per_poll = 1`은 gate-specific config**다. production 기본값 64로 같은 gate를 다시 실행하는
+  것은 11단계 항목이다.
+- **호스트 품질이 gate 결과의 전제**다. 판정 불가 window가 3회 연속이면 실패하므로, 극단적으로 시끄러운
+  CI에서는 gate가 아니라 호스트를 먼저 봐야 한다. 이번 환경(Docker Desktop / LinuxKit aarch64)은 상시
+  2.8~23.3 ms의 프로세스 stall이 있고 그 시간을 thread CPU로 계상한다는 점을 기록해 둔다.
+- **Timers phase의 분할 불가능한 단위는 항목 1개가 아니라 최대 64개 callback**이다(§4). timer가 많은
+  시나리오에서 threshold를 다시 유도할 때 반영해야 한다.
