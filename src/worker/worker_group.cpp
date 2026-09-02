@@ -276,7 +276,15 @@ namespace snf::worker
             }
             requestStop();
         }
-        _thread_exited[index].store(true, std::memory_order_release);
+        // The join deadline predicate is published under _exit_mutex. Storing it
+        // outside the lock would let the flag land while join() holds the mutex
+        // between evaluating the predicate and blocking, and that notify_all()
+        // would be lost: a group that shut down instantly would still keep join()
+        // waiting for the whole group budget.
+        {
+            const std::lock_guard lock{_exit_mutex};
+            _thread_exited[index].store(true, std::memory_order_release);
+        }
         _exit_cv.notify_all();
     }
 

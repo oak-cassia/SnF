@@ -14,6 +14,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -4214,6 +4215,37 @@ namespace
         assert(diagnostic_callbacks.load(std::memory_order_relaxed) == 1);
     }
 
+    // The exit flag is the join predicate, and it is published under the same
+    // mutex the join wait uses. Publishing it outside that mutex loses the
+    // notification when it lands while join() holds the lock between evaluating
+    // the predicate and blocking, and join() then sleeps for the entire group
+    // budget even though every worker already returned. A five second grace makes
+    // the two outcomes unmistakable: a deadline-driven join cannot finish quickly.
+    void test_worker_group_join_wakes_on_thread_exit_instead_of_the_deadline()
+    {
+        WorkerGroupConfig group_config{};
+        group_config.worker_count = 2;
+        group_config.port = 0;
+        group_config.group_shutdown_grace = 5000ms;
+
+        WorkerGroup group(group_config);
+        group.start();
+        std::this_thread::sleep_for(20ms);
+
+        group.requestStop();
+        const auto started_at = Clock::now();
+        group.join();
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started_at);
+
+        if (elapsed >= 1000ms)
+        {
+            std::cerr << "group join did not wake on the exit flag: elapsed_ms=" << elapsed.count() << '\n';
+        }
+        assert(elapsed < 1000ms);
+        assert(group.joinOverruns().empty());
+        assert(!group.isRunning());
+    }
+
     void test_worker_group_quiescence_with_suspended_actors_logical_cancel()
     {
         const WorkerActorConfig actor_config{
@@ -4395,5 +4427,6 @@ void run_worker_actor_tests()
     test_barrier_note_published_increments_epoch_even_when_already_active();
     test_worker_group_cross_worker_tell_exact_accounting_and_quiescence();
     test_worker_group_observes_exit_deadline_before_joining();
+    test_worker_group_join_wakes_on_thread_exit_instead_of_the_deadline();
     test_worker_group_quiescence_with_suspended_actors_logical_cancel();
 }

@@ -234,11 +234,18 @@ namespace snf::worker
 
     void Worker::enterPhase(const WorkerPhase phase, const TimePoint now) noexcept
     {
+        // Opt-in: one getrusage(RUSAGE_THREAD) syscall per phase transition is
+        // gate instrumentation, not something production has to pay for. The
+        // progress word below is published either way.
         ThreadExecutionSample execution_sample{};
-        const bool execution_sample_valid = sampleThreadExecution(execution_sample);
-        if (!execution_sample_valid)
+        bool execution_sample_valid = false;
+        if (_budgets.sample_phase_execution)
         {
-            ++_metrics.thread_execution_sample_failures;
+            execution_sample_valid = sampleThreadExecution(execution_sample);
+            if (!execution_sample_valid)
+            {
+                ++_metrics.thread_execution_sample_failures;
+            }
         }
 
         if (_phase_entered_at != TimePoint{})
@@ -313,8 +320,8 @@ namespace snf::worker
 
         if ((_metrics.loop_iterations & 63U) == 0 || _shutting_down)
         {
-            gauges.inbox_queued_bytes = _inbox.approximateQueuedBytes();
-            high_water.sampled_inbox_queued_bytes = std::max(high_water.sampled_inbox_queued_bytes, gauges.inbox_queued_bytes);
+            gauges.sampled_inbox_queued_bytes = _inbox.approximateQueuedBytes();
+            high_water.sampled_inbox_queued_bytes = std::max(high_water.sampled_inbox_queued_bytes, gauges.sampled_inbox_queued_bytes);
         }
 
         if (_db != nullptr)
@@ -2852,6 +2859,10 @@ namespace snf::worker
         // Tearing the backend down is a separate, deadline-bounded step. Actor
         // quiescence above never waits on physical DB progress, so an unresponsive
         // server cannot hold the worker open.
+        //
+        // This must stay after phase D: DbClient::shutdown() polls the shared
+        // poller for its own sockets and discards every other event, which is only
+        // safe once phase D has force-closed and deregistered the connections.
         if (_db != nullptr && _db_started)
         {
             const TimePoint db_started_at = std::chrono::steady_clock::now();

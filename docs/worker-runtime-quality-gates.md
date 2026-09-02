@@ -1,8 +1,8 @@
 # 10단계 Worker runtime 품질 게이트 리포트
 
-> 문서 상태: **최종 — Stage 10 GO**
+> 문서 상태: **최종 — Stage 10 GO** (§10에 완료 후 리뷰 수정과 미해결 항목 1건)
 >
-> calibration: 2026-09-01 / 최종 gate 실행일: 2026-09-02
+> calibration: 2026-09-01 / 최종 gate 실행일: 2026-09-02 / 리뷰 수정 재실행: 2026-09-02
 >
 > 측정 대상: `refactor/archetecture`의 신규 Worker runtime test path
 >
@@ -96,7 +96,7 @@ Db phase에 섞이므로, unavailable backend라는 같은 의미를 bounded 상
 | write soft / hard | 32 KiB / 64 KiB |
 | close drain deadline | 500 ms |
 | poll registration capacity | 65 |
-| load `max_accepts_per_poll` | 1 |
+| load `max_accepts_per_poll` | 1 (**gate-specific**, production default 64) |
 | receive chunk | 16 KiB |
 | server `SO_SNDBUF` 요청값 | 4096 |
 
@@ -126,6 +126,7 @@ Db phase에 섞이므로, unavailable backend라는 같은 의미를 bounded 상
 | DB result cap | 4096 rows / 4 MiB |
 | DB SSL | disabled |
 | watchdog | sample 10 ms, active phase 500 ms, PollWait derived 700 ms |
+| `budgets.sample_phase_execution` | load/gate **on**, 기본값 **off** (production은 syscall 없이 progress + watchdog만 유지) |
 | load WorkerGroup | 2 Workers, 128 messages, 8 hops/message |
 | group shutdown grace | load 500 ms; `WorkerGroupConfig` 기본값 1000 ms |
 | load group shutdown budget | Worker 2000 ms + DB 0 ms + grace 500 ms = 2500 ms |
@@ -139,9 +140,10 @@ Db phase에 섞이므로, unavailable backend라는 같은 의미를 bounded 상
 | thread CPU residence | owner thread가 실제 실행한 active phase 비용 | phase correctness threshold 미만 |
 | voluntary context switch (`ru_nvcsw`) | sleep, futex wait, blocking syscall 등 owner thread의 실제 양보 | 일반 Debug active phase 합계 0 |
 | involuntary context switch (`ru_nivcsw`) | scheduler 선점 진단 | 실패 조건이 아님; wall 증가 원인 귀속에 사용 |
-| active wall residence | scheduler 지연까지 포함한 장기 정지 보조 안전망 | fairness threshold 미만 |
+| active wall residence | scheduler 지연까지 포함한 장기 정지 보조 안전망 | Debug: fairness threshold 미만 |
+| sanitizer active-wall bound | voluntary 신호가 없는 preset에서 유일하게 남는 blocking 증거 | ASan/TSan: `CPU threshold + 400 ms` 미만 |
 | active `max_entry_gap` | phase starvation | fairness threshold 미만 |
-| PollWait wall residence | poll timeout의 직접 안전망 | 일반 Debug에서 `max_poll_timeout * 2` 미만 |
+| PollWait wall residence | poll timeout의 직접 안전망 | Debug `max_poll_timeout * 2` 미만, sanitizer는 `+ 400 ms` |
 | watchdog wall time | 명백한 active/shutdown stall | active episode 0; shutdown은 deadline 계측과 분리 |
 
 Actor turn의 wall histogram `actor.turn_slice_ns`는 분포 관측용으로 유지한다. correctness는 다른 active phase와
@@ -155,12 +157,29 @@ Poll 3회, Actors 2회의 voluntary switch가 이 runtime 때문에 재현됐다
 pass/fail 권위는 일반 Debug에 두고 sanitizer에서는 값을 그대로 출력하되 진단값으로 취급한다. sanitizer의
 active CPU/wall fairness, functional assertion, sanitizer 오류는 계속 gate다. TSan suppression은 사용하지 않았다.
 
+다만 `ru_nvcsw`를 진단으로 내리면 sanitizer preset에는 blocking 증거가 CPU residence 하나만 남고, wall 상한이
+fairness(TSan 2.12초)뿐이 된다. 그 상태에서는 2초짜리 동기 blocking이 CPU를 쓰지 않는다는 이유로 통과할 수
+있다. 그래서 sanitizer에는 fairness와 **별개의 active-phase wall 상한**을 둔다.
+
 ### 고정 threshold
 
 ```text
-active CPU correctness = phase budget * preset multiplier + single-item allowance
-active wall fairness = (모든 phase budget 합 + max poll timeout) * preset multiplier
+active CPU correctness    = phase budget * preset multiplier + single-item allowance
+active wall fairness      = (모든 phase budget 합 + max poll timeout) * preset multiplier
+sanitizer active-wall     = active CPU correctness + SANITIZER_ACTIVE_WALL_SLACK
+SANITIZER_ACTIVE_WALL_SLACK = max_poll_timeout * 8 = 400 ms
 ```
+
+`single_item_allowance`의 전제는 phase마다 다르다. poll/inbox/writes의 시간 상한은 항목마다
+`steady_clock::now()`를 읽으므로 초과 단위가 실제로 1개다. 반면 `TimerQueue::expire`는 callback 64개마다
+clock을 읽으므로 Timers phase의 분할 불가능한 단위는 최대 64개 callback이다. 이번 load 시나리오는 Timers
+CPU가 0~0.276 ms라 이 차이가 게이트에 드러나지 않았지만, timer가 많은 시나리오에서 threshold를 다시 유도할
+때는 이 granularity를 반영해야 한다.
+
+slack의 근거는 calibration에서 실측한 **non-blocking wall 팽창의 최댓값**이다. 의도적 same-CPU 선점 sample이
+130.059 ms, ASan의 늦은 재스케줄 sample이 123.990 ms였으므로 400 ms는 약 3배 여유이며, TSan fairness(2120 ms)
+대비 5배 이상 타이트하다. 이 상한은 sanitizer preset에만 적용하고 Debug는 `ru_nvcsw == 0`이 직접 증거이므로
+느슨한 fairness 안전망을 유지한다 — Debug에서 이 상한을 쓰면 위의 130 ms 선점 sample이 거짓 실패가 된다.
 
 | phase | allowance | Debug K=8 | ASan/UBSan K=20 | TSan K=40 |
 | --- | ---: | ---: | ---: | ---: |
@@ -171,6 +190,18 @@ active wall fairness = (모든 phase budget 합 + max poll timeout) * preset mul
 | Actors | 2 ms | 10 ms | 22 ms | 42 ms |
 | Writes | 0.5 ms | 4.5 ms | 10.5 ms | 20.5 ms |
 | fairness | — | 424 ms | 1060 ms | 2120 ms |
+
+sanitizer preset에서 실제로 검사하는 active-phase wall 상한은 다음과 같다. Debug 열은 해당 없음이다.
+
+| phase | ASan/UBSan wall | TSan wall |
+| --- | ---: | ---: |
+| Poll | 410.5 ms | 420.5 ms |
+| Inbox | 405.5 ms | 410.5 ms |
+| Timers | 405.5 ms | 410.5 ms |
+| Db | 410.5 ms | 420.5 ms |
+| Actors | 422 ms | 442 ms |
+| Writes | 410.5 ms | 420.5 ms |
+| PollWait | 500 ms | 500 ms |
 
 calibration → 측정 확인 → threshold 고정 → 공식 gate 순서로 실행했다. calibration 뒤 threshold와 multiplier는
 변경하지 않았다.
@@ -218,7 +249,7 @@ wall 130.059 ms, 같은 wall sample의 CPU 10.012 ms, voluntary 0, involuntary 5
 | --- | --- |
 | Debug load repeat | 5/5 PASS |
 | Debug full CTest | 17 등록, 13 PASS, MySQL 4 SKIP, 실패 0 |
-| ASan/UBSan worker label | 11 등록, 8 PASS, MySQL 3 SKIP, sanitizer 오류/leak 0 |
+| ASan/UBSan worker label | 11 등록, 8 PASS, MySQL 3 SKIP, sanitizer 오류/leak 0 (반복 실행은 §10의 미해결 항목 참고) |
 | TSan worker label | 11 등록, 8 PASS, MySQL 3 SKIP, race 0 (`halt_on_error=1`) |
 
 ## 6. 대표 load 측정값
@@ -291,3 +322,54 @@ MySQL 환경변수가 제공되지 않아 다음 4개 `SKIP_RETURN_CODE 77` 등�
 
 MySQL을 제외하기로 한 합의 범위에서 8개 품질 게이트는 모두 PASS다. 따라서 Stage 10은 **GO**다. 실제 MySQL
 gate와 production application workflow의 동일 gate 재실행은 11단계 완료 조건으로 남는다.
+
+## 10. 완료 후 리뷰에서 수정한 것
+
+계획의 5라운드 리뷰 항목이다. 상세 계약은
+[최종 계획의 5라운드 표](./stage-10-quality-gate-plan.md)에 있다.
+
+1. **`WorkerGroup` join의 lost wakeup (correctness).** worker thread가 exit flag를 `_exit_mutex` 밖에서
+   store하고 notify했다. flag가 `join()`이 predicate를 평가한 뒤 block하기 전 구간에 도착하면 그
+   `notify_all()`이 유실되고, 모든 worker가 이미 반환했는데도 `join()`이 group budget 전체(load 설정에서
+   2500 ms, 기본 설정에서 2000 ms 이상)를 기다린다. flag를 join wait와 같은 mutex 아래에서 publish하도록
+   고쳤고, grace 5000 ms 그룹이 1000 ms 안에 join되는 것을 확인하는
+   `test_worker_group_join_wakes_on_thread_exit_instead_of_the_deadline`을 추가했다. deadline으로 깨우는
+   구현은 이 테스트를 통과할 수 없다.
+2. **sanitizer active-phase wall 상한 추가.** §4에 근거와 값을 기록했다. 이전에는 ASan/TSan에서 wall 상한이
+   fairness(TSan 2120 ms)뿐이라 CPU를 쓰지 않는 2초짜리 blocking이 통과할 수 있었다.
+3. **phase CPU/context-switch 계측을 opt-in으로 전환.** `WorkerBudgets::sample_phase_execution`은 기본
+   `false`이고 gate 실행만 켠다. 이전에는 phase 전환마다 `getrusage(RUSAGE_THREAD)` syscall이 production
+   경로에 그대로 있었다. progress word와 watchdog은 `steady_clock`만 읽으므로 영향이 없고, 운영 stall 관측은
+   그대로 유지된다. flag가 꺼진 채 gate를 돌려 "0으로 통과"하는 것을 막기 위해 load test가 flag와 active CPU
+   합계 > 0을 먼저 검사하고, `test_phase_execution_sampling_is_opt_in`이 두 방향을 모두 고정한다.
+4. **`DbClient::shutdown()`의 순서 의존 명시.** 공유 poller에서 non-DB 이벤트를 버리므로 phase D가 연결을
+   force-close·deregister한 뒤에만 호출할 수 있다. 헤더와 호출부에 계약으로 적었다.
+5. **이름/의미 정리.** `WorkerGaugeSnapshot::sampled_inbox_queued_bytes` rename(64-loop sampled임을 이름에
+   드러냄), `poll_budget_stops`는 iteration당 1회가 아니라 stop event 횟수라는 주석.
+
+수정 후 재실행: Debug full CTest 17 등록 / 13 PASS / MySQL 4 SKIP / 실패 0, Debug `-L worker` 11 등록 8 PASS,
+TSan `-L worker` 8 PASS + `snf_worker_load_stub` 반복 3/3 PASS(race 0), ASan/UBSan `-L worker` 8 PASS.
+
+### 미해결 — ASan Poll phase CPU residence의 tail
+
+`ctest --preset asan-ubsan -R snf_worker_load_stub --repeat until-fail:N`을 돌리면 낮은 확률로 Poll phase의
+`max_cpu_residence`가 45.135 ms까지 튀어 ASan CPU threshold 10.5 ms를 넘고 게이트가 실패한다. 관측값:
+
+| 실행 형태 | 결과 |
+| --- | --- |
+| 바이너리 직접 실행 12회 | 전부 PASS, Poll `max_cpu_residence` 1.00~1.37 ms |
+| `ctest --repeat until-fail:3` | 3번째 iteration에서 실패 |
+| `ctest --repeat until-fail:5` | 3번째 iteration에서 실패 |
+| `ctest --repeat until-fail:6` | 6/6 PASS |
+| 합계 | 약 20회 실행 중 2회 실패 (약 10%) |
+| 실패 sample | Poll wall 45.174 ms / CPU 45.135 ms / involuntary 1, 같은 실행의 `Starting` CPU 5.566 ms |
+
+wall ≈ CPU이므로 blocking이 아니라 실제 on-CPU 소비이고, 같은 실행의 `Starting` phase까지 평소의 18배로
+느렸다는 점은 프로세스 전체가 느려진 구간(호스트/VM 경합 또는 ASan runtime의 일괄 작업)을 가리킨다. Poll
+phase의 시간 예산은 frame·recv마다 검사되므로 분할 불가능한 한 항목이 45 ms를 쓸 구조가 아니다.
+
+**threshold를 올리지 않았다.** 게이트를 통과시키려고 CPU 상한을 조정하는 것은 이 게이트의 1차 증거를 무력화한다.
+따라서 현재 상태를 이렇게 기록한다: ASan preset의 `-L worker`는 단발 실행에서 PASS이며 **반복 실행에서
+repeat-stable하지 않다.** 후속으로 필요한 것은 (1) 45 ms 구간의 실제 소비 지점 확인(phase 내 하위 구간 계측
+또는 perf), (2) 그 결과에 따라 원인 수정 또는 근거를 갖춘 별도 calibration 커밋이며, threshold 변경은 그
+근거가 나온 뒤에만 한다.

@@ -140,7 +140,7 @@ namespace
         assert(metrics.loop_iterations >= 65);
         assert(metrics.high_water_marks.sampled_inbox_queued_bytes >= 1);
         assert(metrics.high_water_marks.sampled_inbox_queued_bytes <= 128);
-        assert(metrics.gauges.inbox_queued_bytes == 0);
+        assert(metrics.gauges.sampled_inbox_queued_bytes == 0);
         assert(metrics.gauges.connections == 0);
         assert(metrics.gauges.actors == 0);
         assert(metrics.gauges.timer_entries == 0);

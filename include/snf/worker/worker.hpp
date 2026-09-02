@@ -51,7 +51,9 @@ namespace snf::worker
         std::uint64_t mailbox_bytes_total{0};
         std::size_t timer_entries{0};
         std::uint64_t application_timer_bytes{0};
-        std::uint64_t inbox_queued_bytes{0};
+        // Refreshed every 64 loop iterations and at every shutdown phase
+        // boundary, unlike every other field here, which is exact for the sample.
+        std::uint64_t sampled_inbox_queued_bytes{0};
         std::size_t db_queued_operations{0};
         std::uint64_t db_queued_bytes{0};
         std::size_t db_in_flight{0};
@@ -145,6 +147,8 @@ namespace snf::worker
     {
         std::uint64_t loop_iterations{0};
         std::uint64_t poll_events{0};
+        // Number of budget-stop events, not iterations: one poll phase can stop on
+        // the event count and then again on the shared phase duration.
         std::uint64_t poll_budget_stops{0};
         std::uint64_t wakeups_consumed{0};
         std::uint64_t inbox_events{0};

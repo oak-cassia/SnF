@@ -116,6 +116,7 @@ namespace
     void test_watchdog_reports_zero_stalls_for_an_idle_worker()
     {
         WorkerBudgets budgets = WorkerBudgets::defaults();
+        budgets.sample_phase_execution = true;
         Worker worker(WorkerId{0}, 1, budgets, WorkerInboxConfig{});
         WorkerWatchdog watchdog(testConfig(), budgets, {{.worker = WorkerId{0}, .progress = &worker.progress()}});
         watchdog.start();
@@ -138,6 +139,7 @@ namespace
     void test_watchdog_fires_once_on_a_blocking_event_handler()
     {
         WorkerBudgets budgets = WorkerBudgets::defaults();
+        budgets.sample_phase_execution = true;
         Worker worker(WorkerId{0}, 1, budgets, WorkerInboxConfig{});
         std::atomic<bool> entered{false};
         std::atomic<bool> completed{false};
@@ -201,6 +203,7 @@ namespace
     void test_watchdog_attributes_a_blocking_turn_to_the_actor_phase()
     {
         WorkerBudgets budgets = WorkerBudgets::defaults();
+        budgets.sample_phase_execution = true;
         std::atomic<bool> entered{false};
         std::atomic<bool> completed{false};
         BlockingActorFactory factory(entered, completed);

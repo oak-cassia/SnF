@@ -171,7 +171,8 @@
 - [x] 4절의 품질 게이트별 재현 명령, 설정, 측정값과 판정을 기록한다.
 
 종료 조건: 신규 Worker runtime test path에서 target architecture의 품질 게이트를 관측할 수 있고 모두
-통과한다. 이번 완료 범위는 **TCP 통과 / MySQL 미측정 및 재현 명령 기록**이다. Application workflow와
+통과한다. 이번 완료 범위는 **TCP 통과 / MySQL 미측정 및 재현 명령 기록**이다. 완료 후 리뷰에서 고친 3건과
+미해결 1건(ASan Poll phase CPU residence의 tail)은 리포트 §10에 기록했다. Application workflow와
 production 전환 뒤에는 11단계에서 실제 MySQL을 포함해 같은 게이트를 다시 실행한다. **충족.**
 
 ### 11단계 — Application workflow 이전, production 전환과 legacy 제거
@@ -195,7 +196,7 @@ production 전환 뒤에는 11단계에서 실제 MySQL을 포함해 같은 게�
 | 게이트 | 통과 조건 |
 | --- | --- |
 | Thread ownership | TSAN과 owner assertion에서 cross-thread mutable access 0건 |
-| No Worker blocking | active phase CPU residence가 correctness 상한 미만이고 Debug voluntary context switch 0건. active wall/fairness와 watchdog wall stall도 상한 준수 |
+| No Worker blocking | active phase CPU residence가 correctness 상한 미만이고 Debug voluntary context switch 0건. sanitizer preset은 fairness와 별개의 active-phase wall 상한을 지킨다. active wall/fairness와 watchdog wall stall도 상한 준수 |
 | Memory bound | inbox, mailbox, ActorTable, Loading, timer, DB queue와 buffers가 설정 상한을 넘지 않음 |
 | Single await state | continuation/deadline을 `ActorSlot.blocked` 밖에 중복 저장하지 않음 |
 | Stale safety | stale event가 state mutation을 만들지 않음 |

@@ -308,10 +308,15 @@ namespace
     void assertActiveLoopBounds(const WorkerMetrics& metrics, const WorkerBudgets& budgets)
     {
         constexpr auto multiplier = GATE_MULTIPLIER;
+        // The CPU residence bound is the primary blocking gate, so a run with the
+        // opt-in sampling left off would satisfy it with zeros. Refuse that.
+        assert(budgets.sample_phase_execution);
+        assert(metrics.thread_execution_sample_failures == 0);
         const auto phase_sum = budgets.poll.max_duration + budgets.inbox.max_duration + budgets.timers.max_duration + budgets.db.max_duration +
                                budgets.actors.max_duration + budgets.writes.max_duration;
         const auto fairness = (phase_sum + budgets.max_poll_timeout) * multiplier;
-        const auto phase_limit = [&metrics, fairness](const WorkerPhase phase, const std::chrono::nanoseconds cpu_threshold)
+        std::chrono::nanoseconds observed_cpu_total{0};
+        const auto phase_limit = [&metrics, &observed_cpu_total, fairness](const WorkerPhase phase, const std::chrono::nanoseconds cpu_threshold)
         {
             const auto& observed = metrics.phases[static_cast<std::size_t>(phase)];
             assert(observed.entries > 0);
@@ -321,11 +326,33 @@ namespace
                           << " cpu_residence_ns=" << observed.max_cpu_residence.count() << " threshold_ns=" << cpu_threshold.count() << '\n';
             }
             assert(observed.max_cpu_residence < cpu_threshold);
+            observed_cpu_total += observed.max_cpu_residence;
             if constexpr (CONTEXT_SWITCH_GATE_AUTHORITATIVE)
             {
+                // Debug: the voluntary switch count is the blocking signal, so wall
+                // time only has to stay inside the loose long-stall safety net.
+                // Keeping it loose here is deliberate - scheduler preemption alone
+                // reaches ~130 ms of wall time with no blocking at all.
                 assert(observed.voluntary_context_switches == 0);
+                assert(observed.max_residence < fairness);
             }
-            assert(observed.max_residence < fairness);
+            else
+            {
+                // Sanitizers: the runtime takes its own owner-thread locks, so the
+                // voluntary switch count is no longer a product signal. Wall time is
+                // the only blocking evidence left, and the fairness bound (up to
+                // 2.12 s under TSan) is useless for that, so bound it separately.
+                const auto wall_threshold = cpu_threshold + WorkerGateThresholds::SANITIZER_ACTIVE_WALL_SLACK;
+                if (observed.max_residence >= wall_threshold)
+                {
+                    std::cerr << "phase wall bound exceeded: phase=" << static_cast<std::size_t>(phase)
+                              << " wall_residence_ns=" << observed.max_residence.count()
+                              << " wall_max_cpu_ns=" << observed.max_wall_residence_cpu.count()
+                              << " threshold_ns=" << std::chrono::nanoseconds{wall_threshold}.count() << '\n';
+                }
+                assert(observed.max_residence < wall_threshold);
+                assert(observed.max_residence < fairness);
+            }
         };
         phase_limit(WorkerPhase::Poll, budgets.poll.max_duration * multiplier + WorkerGateThresholds::POLL_ITEM_ALLOWANCE);
         phase_limit(WorkerPhase::Inbox, budgets.inbox.max_duration * multiplier + WorkerGateThresholds::INBOX_ITEM_ALLOWANCE);
@@ -334,11 +361,22 @@ namespace
         phase_limit(WorkerPhase::Actors, budgets.actors.max_duration * multiplier + WorkerGateThresholds::ACTOR_ITEM_ALLOWANCE);
         phase_limit(WorkerPhase::Writes, budgets.writes.max_duration * multiplier + WorkerGateThresholds::WRITE_ITEM_ALLOWANCE);
 
+        // Zero CPU across every active phase would mean the bounds above proved
+        // nothing, whatever the flag says.
+        assert(observed_cpu_total > std::chrono::nanoseconds::zero());
+
         const auto poll_wait = metrics.phases[static_cast<std::size_t>(WorkerPhase::PollWait)];
         assert(poll_wait.entries > 0);
         if constexpr (CONTEXT_SWITCH_GATE_AUTHORITATIVE)
         {
             assert(poll_wait.max_residence < budgets.max_poll_timeout * 2);
+        }
+        else
+        {
+            // pollTimeout() is bounded by max_poll_timeout, so a healthy PollWait
+            // returns within it plus reschedule delay. Under sanitizers a 124 ms
+            // late reschedule was measured, hence the same slack as active phases.
+            assert(poll_wait.max_residence < budgets.max_poll_timeout * 2 + WorkerGateThresholds::SANITIZER_ACTIVE_WALL_SLACK);
         }
 
         for (const WorkerPhase phase :
@@ -400,7 +438,10 @@ namespace
             };
         }
 
-        const WorkerBudgets budgets = WorkerBudgets::defaults();
+        // Gate run: turn the per-phase CPU/context-switch sampling on. It is off in
+        // production, where the packed progress word and the watchdog suffice.
+        WorkerBudgets budgets = WorkerBudgets::defaults();
+        budgets.sample_phase_execution = true;
         const WorkerNetworkConfig network = loadNetworkConfig();
         const WorkerActorConfig actors = loadActorConfig();
         RoutingSink sink;
@@ -695,6 +736,7 @@ namespace
         }
 
         WorkerGroupConfig config{};
+        config.budgets.sample_phase_execution = true;
         config.worker_count = 2;
         config.port = 0;
         config.actor = actors;

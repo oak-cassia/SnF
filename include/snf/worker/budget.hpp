@@ -62,10 +62,20 @@ namespace snf::worker
         static constexpr std::chrono::microseconds DB_ITEM_ALLOWANCE{500};
         static constexpr std::chrono::milliseconds ACTOR_ITEM_ALLOWANCE{2};
         static constexpr std::chrono::microseconds WRITE_ITEM_ALLOWANCE{500};
+        // Sanitizer presets lose the voluntary-context-switch signal, because the
+        // ASan/TSan runtimes take their own locks on the owner thread. Wall time is
+        // then the only blocking signal left, and the fairness bound is far too
+        // loose for it. This slack is added to the CPU correctness threshold to get
+        // a sanitizer-only active-phase wall bound: 400 ms is max_poll_timeout * 8,
+        // about three times the worst non-blocking wall inflation measured during
+        // calibration (a 130 ms same-CPU preemption sample and a 124 ms late
+        // ASan reschedule), and five times tighter than the TSan fairness bound.
+        static constexpr std::chrono::milliseconds SANITIZER_ACTIVE_WALL_SLACK{400};
     };
 
-    // 시간 측정은 steady_clock::now()를 phase 시작에 한 번 읽고 이후 64개마다 다시 읽는다.
-    // 항목마다 now()를 부르면 그 자체가 비용이 되기 때문이다.
+    // 시간 상한의 clock 읽기 빈도는 phase마다 다르다. poll/inbox/writes는 항목마다
+    // steady_clock::now()를 읽고, TimerQueue::expire만 callback 64개마다 읽는다.
+    // 후자에서는 분할 불가능한 단위가 항목 1개가 아니라 최대 64개다.
     struct WorkerBudgets
     {
         IoBudget poll;
@@ -75,6 +85,12 @@ namespace snf::worker
         ByteTimeBudget writes;
         DbProgressBudget db;
         std::chrono::milliseconds max_poll_timeout;
+        // Off by default. Sampling getrusage(RUSAGE_THREAD) on every phase
+        // transition costs one syscall per transition, and only the Stage 10
+        // quality gates need the per-phase CPU and context-switch attribution.
+        // The packed progress word and the watchdog stay on either way: they read
+        // steady_clock only, so live stall detection does not depend on this.
+        bool sample_phase_execution{false};
 
         [[nodiscard]] static constexpr WorkerBudgets defaults() noexcept
         {

@@ -96,6 +96,16 @@ runtime **test path**에서 관측 가능하게 만들고 모두 통과시킨 �
 | 6 | sanitizer가 삽입한 allocator/synchronization과 늦은 재스케줄을 product blocking으로 오인했다 | raw OS scheduling gate의 권위는 Debug에 두고 sanitizer에서는 출력은 유지하되 진단값으로 분리. CPU/wall fairness, 기능 assert와 sanitizer 오류는 계속 gate | D4, 10G |
 | 7 | MySQL skip 등록 수를 3개로 기록했다 | CMake의 실제 `SKIP_RETURN_CODE 77` **4개**를 이름까지 기록하고 이번 라운드는 MySQL 미측정으로 종료 | 10H |
 
+**5라운드 — 완료 후 리뷰 반영**
+
+| # | 문제 | 최종 계약 | 위치 |
+| --- | --- | --- | --- |
+| 1 | `WorkerGroup`의 exit flag를 `_exit_mutex` 밖에서 store하고 notify해 lost wakeup이 가능했다. 정상 종료인데도 `join()`이 group budget 전체를 기다릴 수 있다 | exit flag를 **join wait와 같은 mutex 아래에서 publish**하고, `join()`이 deadline이 아니라 flag로 깨는 것을 확인하는 deterministic test를 추가 | 10F |
+| 2 | `ru_nvcsw`를 sanitizer에서 진단으로 내린 결과, ASan/TSan에는 wall 상한이 fairness(TSan 2.12초)뿐이라 2초짜리 동기 blocking이 통과할 수 있었다 | sanitizer preset에만 **fairness와 별개의 active-phase wall 상한** `CPU threshold + SANITIZER_ACTIVE_WALL_SLACK(400 ms)`을 추가. Debug는 `ru_nvcsw == 0`이 직접 증거이므로 느슨한 fairness 안전망 유지 | D4, 10G |
+| 3 | phase 전환마다 `getrusage(RUSAGE_THREAD)` syscall이 production hot path에 상주했다. 이 값은 게이트 증명용이다 | `WorkerBudgets::sample_phase_execution`으로 **opt-in(기본 off)**. gate 실행만 켠다. packed progress word와 watchdog은 `steady_clock`만 읽으므로 항상 켜 둔다. load gate는 flag가 켜졌는지와 active CPU 합계 > 0을 먼저 검사해 "0으로 통과"를 막는다 | D1, D4, 10G |
+| 4 | `DbClient::shutdown()`이 공유 poller에서 non-DB 이벤트를 버리는 순서 의존이 숨은 전제였다 | phase D가 연결을 force-close·deregister한 **뒤에만** 호출해야 한다는 계약을 헤더와 호출부에 명시 | 10E |
+| 5 | `WorkerGaugeSnapshot::inbox_queued_bytes`만 64-loop sampled인데 이름이 exact처럼 보였다 | `sampled_inbox_queued_bytes`로 rename + 주석. `poll_budget_stops`는 "stop event 횟수"라는 의미를 주석으로 고정 | 10A |
+
 ---
 
 ## 사전 확인 사항 (계획에 영향을 준 사실)

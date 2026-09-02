@@ -289,6 +289,12 @@ namespace snf::worker
         // force-closed and the final driver teardown runs outside that budget.
         // Returns true when live async state had to be forced at the deadline.
         // Safe to call more than once.
+        //
+        // Ordering requirement: this waits on the shared Worker poller and drops
+        // every event that is not a DbConnection, so it must run after the Worker
+        // has closed and deregistered its other poll targets. Worker shutdown
+        // phase D does exactly that, which is why calling this from the middle of
+        // an active loop would silently swallow connection readiness.
         bool shutdown(Poller& poller, DbTimePoint deadline);
 
         [[nodiscard]] const DbClientMetrics& metrics() const noexcept;

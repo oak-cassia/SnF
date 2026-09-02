@@ -40,6 +40,15 @@ namespace
     using Clock = std::chrono::steady_clock;
     using namespace snf::worker;
 
+    // Per-phase CPU and context-switch attribution is opt-in, so every test that
+    // reads those fields has to ask for it explicitly.
+    [[nodiscard]] WorkerBudgets executionSampledBudgets() noexcept
+    {
+        WorkerBudgets budgets = WorkerBudgets::defaults();
+        budgets.sample_phase_execution = true;
+        return budgets;
+    }
+
     template <class Predicate> [[nodiscard]] bool waitUntil(Predicate predicate, const std::chrono::milliseconds timeout)
     {
         const auto deadline = Clock::now() + timeout;
@@ -125,7 +134,7 @@ namespace
 
     void test_running_worker_progress_is_cross_thread_observable()
     {
-        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{});
+        Worker worker(WorkerId{0}, 1, executionSampledBudgets(), WorkerInboxConfig{});
         std::thread runner(
             [&worker]
             {
@@ -158,7 +167,7 @@ namespace
 
     void test_phase_residence_and_other_phase_entry_gap_track_a_blocking_handler()
     {
-        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{});
+        Worker worker(WorkerId{0}, 1, executionSampledBudgets(), WorkerInboxConfig{});
         std::atomic<bool> handled{false};
         worker.setEventHandler(
             [&handled](WorkerEvent&&)
@@ -228,7 +237,7 @@ namespace
 
     void test_cpu_spin_increases_phase_cpu_residence_without_voluntary_switch()
     {
-        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{});
+        Worker worker(WorkerId{0}, 1, executionSampledBudgets(), WorkerInboxConfig{});
         std::atomic<bool> handled{false};
         worker.setEventHandler(
             [&handled](WorkerEvent&&)
@@ -270,6 +279,59 @@ namespace
         assert(inbox.voluntary_context_switches == 0);
     }
 
+    // The same spin with the flag left at its default. Wall residence and the
+    // progress word keep working; only the getrusage-derived fields stay empty. A
+    // regression that always samples, or one that never does, breaks this.
+    void test_phase_execution_sampling_is_opt_in()
+    {
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{});
+        assert(!WorkerBudgets::defaults().sample_phase_execution);
+        std::atomic<bool> handled{false};
+        worker.setEventHandler(
+            [&handled](WorkerEvent&&)
+            {
+                burnThreadCpu(20ms);
+                handled.store(true, std::memory_order_release);
+            }
+        );
+        auto port = worker.bindInboxSource(WorkerId{0});
+        std::thread runner(
+            [&worker]
+            {
+                worker.run();
+            }
+        );
+
+        assert(waitUntil(
+            [&worker]
+            {
+                return worker.progress().sample().phase == WorkerPhase::PollWait;
+            },
+            2s
+        ));
+        assert(port.tryPush(envelope()) == InboxPushResult::Accepted);
+        assert(waitUntil(
+            [&handled]
+            {
+                return handled.load(std::memory_order_acquire);
+            },
+            2s
+        ));
+
+        worker.requestStop();
+        runner.join();
+
+        const auto& inbox = worker.metrics().phases[static_cast<std::size_t>(WorkerPhase::Inbox)];
+        assert(inbox.entries > 0);
+        assert(inbox.max_residence >= 15ms);
+        assert(inbox.max_cpu_residence == std::chrono::nanoseconds::zero());
+        assert(inbox.max_wall_residence_cpu == std::chrono::nanoseconds::zero());
+        assert(inbox.voluntary_context_switches == 0);
+        assert(inbox.involuntary_context_switches == 0);
+        assert(worker.metrics().thread_execution_sample_failures == 0);
+        assert(worker.progress().sample().phase == WorkerPhase::Stopped);
+    }
+
     void test_involuntary_scheduler_preemption_separates_wall_and_cpu_residence()
     {
         const int cpu = firstAllowedCpu();
@@ -306,7 +368,7 @@ namespace
             2s
         ));
 
-        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{});
+        Worker worker(WorkerId{0}, 1, executionSampledBudgets(), WorkerInboxConfig{});
         std::atomic<bool> handled{false};
         worker.setEventHandler(
             [&](WorkerEvent&&)
@@ -370,5 +432,6 @@ void run_worker_progress_tests()
     test_running_worker_progress_is_cross_thread_observable();
     test_phase_residence_and_other_phase_entry_gap_track_a_blocking_handler();
     test_cpu_spin_increases_phase_cpu_residence_without_voluntary_switch();
+    test_phase_execution_sampling_is_opt_in();
     test_involuntary_scheduler_preemption_separates_wall_and_cpu_residence();
 }
