@@ -62,15 +62,14 @@ namespace snf::worker
         static constexpr std::chrono::microseconds DB_ITEM_ALLOWANCE{500};
         static constexpr std::chrono::milliseconds ACTOR_ITEM_ALLOWANCE{2};
         static constexpr std::chrono::microseconds WRITE_ITEM_ALLOWANCE{500};
-        // Sanitizer presets lose the voluntary-context-switch signal, because the
-        // ASan/TSan runtimes take their own locks on the owner thread. Wall time is
-        // then the only blocking signal left, and the fairness bound is far too
-        // loose for it. This slack is added to the CPU correctness threshold to get
-        // a sanitizer-only active-phase wall bound: 400 ms is max_poll_timeout * 8,
-        // about three times the worst non-blocking wall inflation measured during
-        // calibration (a 130 ms same-CPU preemption sample and a 124 ms late
-        // ASan reschedule), and five times tighter than the TSan fairness bound.
-        static constexpr std::chrono::milliseconds SANITIZER_ACTIVE_WALL_SLACK{400};
+        // PollWait is a blocking wait by design, so its wall time cannot separate
+        // waiting from blocking and needs a fixed allowance on top of the poll
+        // timeout. 400 ms is max_poll_timeout * 8, about three times the worst
+        // late reschedule measured during calibration (a 124 ms ASan PollWait
+        // sample). Active phases do NOT get this: there the environment witness
+        // supplies a per-run measured allowance instead, which keeps a real
+        // blocking wait inside an active phase detectable.
+        static constexpr std::chrono::milliseconds SANITIZER_POLL_WAIT_SLACK{400};
     };
 
     // 시간 상한의 clock 읽기 빈도는 phase마다 다르다. poll/inbox/writes는 항목마다

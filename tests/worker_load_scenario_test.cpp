@@ -502,7 +502,10 @@ namespace
                 // voluntary switch count is no longer a product signal. Wall time is
                 // the only blocking evidence left, and the fairness bound (up to
                 // 2.12 s under TSan) is useless for that, so bound it separately.
-                const auto wall_threshold = cpu_threshold + WorkerGateThresholds::SANITIZER_ACTIVE_WALL_SLACK + slack;
+                // The allowance is the witness-measured stall, nothing blunter: a
+                // fixed hundreds-of-milliseconds slack here would let a real
+                // blocking wait inside an active phase pass.
+                const auto wall_threshold = cpu_threshold + slack;
                 if (observed.max_residence >= wall_threshold)
                 {
                     std::cerr << "phase wall bound exceeded: phase=" << static_cast<std::size_t>(phase)
@@ -536,7 +539,7 @@ namespace
             // pollTimeout() is bounded by max_poll_timeout, so a healthy PollWait
             // returns within it plus reschedule delay. Under sanitizers a 124 ms
             // late reschedule was measured, hence the same slack as active phases.
-            assert(poll_wait.max_residence < budgets.max_poll_timeout * 2 + WorkerGateThresholds::SANITIZER_ACTIVE_WALL_SLACK + slack);
+            assert(poll_wait.max_residence < budgets.max_poll_timeout * 2 + WorkerGateThresholds::SANITIZER_POLL_WAIT_SLACK + slack);
         }
 
         for (const WorkerPhase phase :
@@ -648,6 +651,78 @@ namespace
         // The block was the Worker's own, so it must not have stalled the witness
         // into excusing it.
         assert(witness.slack() < largest_possible_slack);
+    }
+
+    // The other half of the negative control. Burning CPU is not what the
+    // "no Worker blocking" gate is really about: a blocking wait consumes no CPU,
+    // so the CPU bound cannot see it at all. This proves the wall bound catches a
+    // real wait, and that the environment slack does not hide it.
+    void assertRealPhaseSleepStillBreaksTheWallBound()
+    {
+        WorkerBudgets budgets = WorkerBudgets::defaults();
+        budgets.sample_phase_execution = true;
+        Worker worker(WorkerId{0}, 1, budgets, WorkerInboxConfig{});
+        std::atomic<bool> handled{false};
+        worker.setEventHandler(
+            [&handled](WorkerEvent&&)
+            {
+                // A genuine blocking wait on the owner thread, which is exactly
+                // what the target architecture forbids.
+                std::this_thread::sleep_for(150ms);
+                handled.store(true, std::memory_order_release);
+            }
+        );
+        auto port = worker.bindInboxSource(WorkerId{0});
+
+        EnvironmentWitness witness;
+        witness.start();
+        std::thread runner(
+            [&worker]
+            {
+                worker.run();
+            }
+        );
+        assert(
+            port.tryPush(WorkerEnvelope{
+                .event =
+                    RemoteConnectionClose{
+                        .connection = ConnectionRef{ConnectionId{1}, ConnectionGeneration{1}, WorkerId{0}},
+                        .reason = CloseReason::Shutdown,
+                    },
+                .charged_bytes = 16,
+            }) == InboxPushResult::Accepted
+        );
+        const auto deadline = Clock::now() + 5s;
+        while (!handled.load(std::memory_order_acquire) && Clock::now() < deadline)
+        {
+            std::this_thread::sleep_for(1ms);
+        }
+        assert(handled.load(std::memory_order_acquire));
+        worker.requestStop();
+        runner.join();
+        witness.stop();
+
+        const auto& inbox = worker.metrics().phases[static_cast<std::size_t>(WorkerPhase::Inbox)];
+        const auto cpu_threshold = budgets.inbox.max_duration * GATE_MULTIPLIER + WorkerGateThresholds::INBOX_ITEM_ALLOWANCE;
+        const auto largest_possible_slack = std::chrono::duration_cast<std::chrono::nanoseconds>(EnvironmentWitness::SLACK_CAP);
+        std::cerr << "negative_control_sleep.inbox_wall_ns=" << inbox.max_residence.count() << ",inbox_cpu_ns=" << inbox.max_cpu_residence.count()
+                  << ",cpu_threshold_ns=" << cpu_threshold.count() << ",voluntary=" << inbox.voluntary_context_switches
+                  << ",witness_slack_ns=" << witness.slack().count() << ",slack_cap_ns=" << largest_possible_slack.count() << '\n';
+
+        // The wait shows up in wall time and breaks the sanitizer active-phase
+        // wall bound even with the largest slack the witness could ever grant.
+        assert(inbox.max_residence > std::chrono::milliseconds{100});
+        assert(inbox.max_residence > cpu_threshold + largest_possible_slack);
+        // It consumes almost no CPU, so the CPU bound alone would have passed it.
+        // That is why the wall bound and the voluntary switch count exist.
+        assert(inbox.max_cpu_residence < cpu_threshold);
+        // The Worker blocked on its own, so the witness thread kept running and
+        // cannot excuse it.
+        assert(witness.slack() < largest_possible_slack);
+        if constexpr (CONTEXT_SWITCH_GATE_AUTHORITATIVE)
+        {
+            assert(inbox.voluntary_context_switches > 0);
+        }
     }
 
     // Returns false when the environment window was unusable, so the caller can
@@ -1046,6 +1121,7 @@ int main(const int argc, char** argv)
 
     runWorkerGroupPressure();
     assertRealPhaseBlockingStillBreaksTheBound();
+    assertRealPhaseSleepStillBreaksTheWallBound();
 
     // The active-loop bounds can only be judged in a window the environment did
     // not stall through. Re-roll the window, never the thresholds: inside a usable
