@@ -101,7 +101,7 @@ runtime **test path**에서 관측 가능하게 만들고 모두 통과시킨 �
 | # | 문제 | 최종 계약 | 위치 |
 | --- | --- | --- | --- |
 | 1 | `WorkerGroup`의 exit flag를 `_exit_mutex` 밖에서 store하고 notify해 lost wakeup이 가능했다. 정상 종료인데도 `join()`이 group budget 전체를 기다릴 수 있다 | exit flag를 **join wait와 같은 mutex 아래에서 publish**하고, `join()`이 deadline이 아니라 flag로 깨는 것을 확인하는 deterministic test를 추가 | 10F |
-| 2 | `ru_nvcsw`를 sanitizer에서 진단으로 내린 결과, ASan/TSan에는 wall 상한이 fairness(TSan 2.12초)뿐이라 2초짜리 동기 blocking이 통과할 수 있었다 | sanitizer preset에만 **fairness와 별개의 active-phase wall 상한** `CPU threshold + SANITIZER_ACTIVE_WALL_SLACK(400 ms)`을 추가. Debug는 `ru_nvcsw == 0`이 직접 증거이므로 느슨한 fairness 안전망 유지 | D4, 10G |
+| 2 | `ru_nvcsw`를 sanitizer에서 진단으로 내린 결과, ASan/TSan에는 wall 상한이 fairness(TSan 2.12초)뿐이라 2초짜리 동기 blocking이 통과할 수 있었다 | sanitizer preset에만 **fairness와 별개의 active-phase wall 상한**을 추가. 6라운드에서 이 상한을 `CPU threshold + witness slack`으로 조였고, 고정 400 ms는 설계상 blocking wait인 PollWait 전용(`SANITIZER_POLL_WAIT_SLACK`)으로 분리했다. Debug는 `ru_nvcsw == 0`이 직접 증거이므로 느슨한 fairness 안전망 유지 | D4, 10G |
 | 3 | phase 전환마다 `getrusage(RUSAGE_THREAD)` syscall이 production hot path에 상주했다. 이 값은 게이트 증명용이다 | `WorkerBudgets::sample_phase_execution`으로 **opt-in(기본 off)**. gate 실행만 켠다. packed progress word와 watchdog은 `steady_clock`만 읽으므로 항상 켜 둔다. load gate는 flag가 켜졌는지와 active CPU 합계 > 0을 먼저 검사해 "0으로 통과"를 막는다 | D1, D4, 10G |
 | 4 | `DbClient::shutdown()`이 공유 poller에서 non-DB 이벤트를 버리는 순서 의존이 숨은 전제였다 | phase D가 연결을 force-close·deregister한 **뒤에만** 호출해야 한다는 계약을 헤더와 호출부에 명시 | 10E |
 | 5 | `WorkerGaugeSnapshot::inbox_queued_bytes`만 64-loop sampled인데 이름이 exact처럼 보였다 | `sampled_inbox_queued_bytes`로 rename + 주석. `poll_budget_stops`는 "stop event 횟수"라는 의미를 주석으로 고정 | 10A |
@@ -121,7 +121,11 @@ threshold는 바꾸지 않았다. 조사·증거·상수 근거는
   ASan은 확률 증폭기다.
 - 계약: active phase 상한 = `threshold + min(max(witness_max_gap - 2 ms, 0), 30 ms)`. gap이 32 ms를 넘으면
   그 window는 판정 불가로 보고 최대 3회 window만 다시 굴린다. threshold는 굴리지 않는다.
-- negative control: Inbox에서 150 ms CPU를 태우면 `threshold + SLACK_CAP`도 반드시 초과한다(실측 150.550 ms).
+- negative control 2개. CPU spin: Inbox에서 150 ms CPU를 태우면 `threshold + SLACK_CAP`도 반드시 초과한다.
+  **blocking wait**: Inbox에서 `sleep_for(150 ms)`하면 wall 153.968 ms인데 **CPU는 0.154 ms**라 CPU 상한만으로는
+  통과한다. 따라서 sanitizer의 active phase wall 상한은 고정 slack 없이 `CPU threshold + witness slack`으로
+  두고, Debug는 `ru_nvcsw > 0`으로 잡는다. `SANITIZER_POLL_WAIT_SLACK(400 ms)`은 설계상 blocking wait인
+  PollWait 전용으로 분리했다.
 
 ---
 

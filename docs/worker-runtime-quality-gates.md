@@ -167,8 +167,10 @@ fairness(TSan 2.12초)뿐이 된다. 그 상태에서는 2초짜리 동기 block
 ```text
 active CPU correctness    = phase budget * preset multiplier + single-item allowance
 active wall fairness      = (모든 phase budget 합 + max poll timeout) * preset multiplier
-sanitizer active-wall     = active CPU correctness + SANITIZER_ACTIVE_WALL_SLACK
-SANITIZER_ACTIVE_WALL_SLACK = max_poll_timeout * 8 = 400 ms
+sanitizer active-wall     = active CPU correctness + environment witness slack
+sanitizer PollWait wall   = max_poll_timeout * 2 + SANITIZER_POLL_WAIT_SLACK + witness slack
+SANITIZER_POLL_WAIT_SLACK = max_poll_timeout * 8 = 400 ms
+environment witness slack = min(max(witness_max_gap - 2 ms, 0), 30 ms)     -- §10
 ```
 
 `single_item_allowance`의 전제는 phase마다 다르다. poll/inbox/writes의 시간 상한은 항목마다
@@ -177,10 +179,15 @@ clock을 읽으므로 Timers phase의 분할 불가능한 단위는 최대 64개
 CPU가 0~0.276 ms라 이 차이가 게이트에 드러나지 않았지만, timer가 많은 시나리오에서 threshold를 다시 유도할
 때는 이 granularity를 반영해야 한다.
 
-slack의 근거는 calibration에서 실측한 **non-blocking wall 팽창의 최댓값**이다. 의도적 same-CPU 선점 sample이
-130.059 ms, ASan의 늦은 재스케줄 sample이 123.990 ms였으므로 400 ms는 약 3배 여유이며, TSan fairness(2120 ms)
-대비 5배 이상 타이트하다. 이 상한은 sanitizer preset에만 적용하고 Debug는 `ru_nvcsw == 0`이 직접 증거이므로
-느슨한 fairness 안전망을 유지한다 — Debug에서 이 상한을 쓰면 위의 130 ms 선점 sample이 거짓 실패가 된다.
+sanitizer의 active phase wall 상한은 **고정 slack을 쓰지 않는다.** 초안은 `+400 ms`였는데, §10의 sleep
+negative control이 그 값에서는 active phase 안의 **실제 blocking wait 150 ms가 통과한다**는 것을 보여줬다.
+대신 같은 런에서 실측한 witness slack만 더한다.
+
+`SANITIZER_POLL_WAIT_SLACK`은 **PollWait 전용**으로 남긴다. PollWait은 설계상 blocking wait이라 wall이
+blocking과 waiting을 구분하지 못하며, calibration의 ASan PollWait 늦은 재스케줄 sample이 123.990 ms였으므로
+400 ms(= `max_poll_timeout * 8`)는 약 3배 여유다. Debug의 active phase wall은 `ru_nvcsw == 0`이 직접 증거이므로
+느슨한 fairness 안전망을 유지한다 — Debug에 타이트한 상한을 쓰면 calibration의 130.059 ms 선점 sample이 거짓
+실패가 된다.
 
 | phase | allowance | Debug K=8 | ASan/UBSan K=20 | TSan K=40 |
 | --- | ---: | ---: | ---: | ---: |
@@ -192,21 +199,23 @@ slack의 근거는 calibration에서 실측한 **non-blocking wall 팽창의 최
 | Writes | 0.5 ms | 4.5 ms | 10.5 ms | 20.5 ms |
 | fairness | — | 424 ms | 1060 ms | 2120 ms |
 
-모든 active phase 상한에는 §10에서 정한 **환경 증인 slack**이 더해진다.
+모든 phase 상한에는 §10에서 정한 **환경 증인 slack**이 더해진다.
 `실제 상한 = 표의 값 + min(max(witness_max_gap - 2 ms, 0), 30 ms)`이며, 조용한 호스트에서는 0이라 표의 값이
 그대로 상한이다.
 
-sanitizer preset에서 실제로 검사하는 active-phase wall 상한은 다음과 같다. Debug 열은 해당 없음이다.
+sanitizer preset의 **active phase wall 상한은 CPU threshold와 같고**, 여기에 witness slack만 더한다. 고정
+slack을 쓰지 않는 이유는 §10의 sleep negative control이 보여준다: 수백 ms짜리 고정 slack을 두면 active phase
+안의 **실제 blocking wait 150 ms가 통과**한다.
 
-| phase | ASan/UBSan wall | TSan wall |
-| --- | ---: | ---: |
-| Poll | 410.5 ms | 420.5 ms |
-| Inbox | 405.5 ms | 410.5 ms |
-| Timers | 405.5 ms | 410.5 ms |
-| Db | 410.5 ms | 420.5 ms |
-| Actors | 422 ms | 442 ms |
-| Writes | 410.5 ms | 420.5 ms |
-| PollWait | 500 ms | 500 ms |
+| phase | ASan/UBSan wall | TSan wall | 근거 |
+| --- | ---: | ---: | --- |
+| Poll / Db / Writes | 10.5 ms | 20.5 ms | CPU threshold와 동일 + witness slack |
+| Inbox / Timers | 5.5 ms | 10.5 ms | 같음 |
+| Actors | 22 ms | 42 ms | 같음 |
+| PollWait | 500 ms | 500 ms | 설계상 blocking wait이므로 wall이 blocking과 waiting을 구분하지 못한다. `max_poll_timeout * 2 + SANITIZER_POLL_WAIT_SLACK(400 ms)` |
+
+`SANITIZER_POLL_WAIT_SLACK`은 **PollWait 전용**이다. calibration에서 관측한 ASan PollWait 124 ms 늦은
+재스케줄의 약 3배이며, active phase에는 적용하지 않는다.
 
 calibration → 측정 확인 → threshold 고정 → 공식 gate 순서로 실행했다. calibration 뒤 threshold와 multiplier는
 변경하지 않았다.
@@ -410,10 +419,27 @@ threshold와 allowance는 **바꾸지 않았다.** 대신 두 가지를 고쳤�
 | `UNUSABLE_GAP` | 32 ms | `QUIET_GAP + SLACK_CAP`. 초과 window는 판정 불가 |
 | `MAX_ATTEMPTS` | 3 | window 재시도 횟수 |
 
-이 규칙이 자기충족적으로 통과하는 장치가 되지 않도록 **negative control**을 함께 넣었다. Inbox phase에서
-150 ms CPU를 태우는 Worker는 witness가 부여할 수 있는 **최대 slack(30 ms)까지 더한 상한도 반드시 초과**해야
-한다. 실측: `inbox_cpu = 150.550 ms`, `threshold = 5.5 ms`, 그 순간의 `witness_slack = 0.299 ms`. Worker가
-스스로 block하면 witness thread는 멈추지 않으므로 slack이 커지지 않는다는 것도 같은 테스트가 확인한다.
+이 규칙이 자기충족적으로 통과하는 장치가 되지 않도록 **negative control 2개**를 넣었다. 둘 다 witness가 부여할
+수 있는 **최대 slack(30 ms)까지 더한 상한도 반드시 초과**해야 한다. Worker가 스스로 block하면 witness thread는
+멈추지 않으므로 slack이 커지지 않는다는 것도 두 테스트가 함께 확인한다.
+
+| control | 주입 | 무엇을 증명하는가 |
+| --- | --- | --- |
+| CPU spin | Inbox handler에서 150 ms **CPU 소비** | CPU 상한이 실제 CPU 초과를 잡는다 |
+| **blocking wait** | Inbox handler에서 `sleep_for(150 ms)` | **CPU 상한만으로는 blocking을 못 잡는다.** wall 상한과 voluntary switch가 잡는다 |
+
+preset별 실측:
+
+| preset | CPU spin `inbox_cpu` | sleep `inbox_wall` | sleep `inbox_cpu` | sleep `ru_nvcsw` | CPU threshold | witness slack |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Debug | 150.090 ms | 150.782 ms | **0.027 ms** | 1 | 2.5 ms | 0.446 ms |
+| ASan/UBSan | 150.262 ms | 153.968 ms | **0.154 ms** | 1 | 5.5 ms | 0.440 ms |
+| TSan | 150.034 ms | 152.079 ms | **0.021 ms** | 1 | 10.5 ms | 0.244 ms |
+
+sleep control이 중요한 이유: blocking wait는 CPU를 쓰지 않으므로 `inbox_cpu = 0.154 ms`로 CPU 상한(5.5 ms)을
+**통과한다.** 그래서 (1) active phase wall 상한을 CPU threshold + witness slack으로 타이트하게 유지하고
+(2) Debug에서 `ru_nvcsw > 0`을 확인한다. 이 control은 고정 slack을 쓰면 안 되는 이유이기도 하다 — 이전 초안의
+400 ms 고정 slack에서는 이 150 ms blocking wait가 그대로 통과했다.
 
 부수적으로, 이번 실측은 기존 allowance 선택을 **지지**한다. ASan에서 단일 actor turn의 p99는 459~524 us이고
 `ACTOR_ITEM_ALLOWANCE`는 2 ms다.
@@ -429,18 +455,22 @@ threshold와 allowance는 **바꾸지 않았다.** 대신 두 가지를 고쳤�
 | TSan | `ctest --preset tsan -R '^snf_worker_load_stub$' --repeat until-fail:6` | 6/6 PASS |
 | TSan | `TSAN_OPTIONS=halt_on_error=1 ctest --preset tsan -L worker` | 11 등록, 8 PASS, MySQL 3 SKIP, race 0 |
 
-수정 전 ASan은 약 20회 중 2회 실패했다. 수정 후 ASan load는 **연속 30회 PASS**했다(ctest 반복 10회 + 바이너리
-직접 20회). 이전 실패율 10%가 그대로였다면 30회 연속 통과 확률은 약 4%다. 20회 직접 실행에서 관측한 값:
+수정 전 ASan은 약 20회 중 2회(약 10%) 실패했고 재현이 가능했다. **수정 후 같은 실패는 30회 실행에서
+재현되지 않았다**(ctest 반복 10회 + 바이너리 직접 20회). 이전 실패율이 그대로였다면 30회 연속 통과 확률은
+약 4%다. 다만 이것은 **flaky가 완전히 제거됐다는 증명이 아니다** — 근본 원인이 호스트 stall이므로, 충분히
+시끄러운 호스트에서는 판정 불가 window가 3회 연속 나와 실패할 수 있다. 20회 직접 실행에서 관측한 값:
 
-| 항목 | 값 |
-| --- | --- |
-| 실패 | 0 |
-| window 재시도가 필요한 런 | 0 (전부 첫 attempt에서 판정) |
-| 부여된 slack | 0.50 ~ 22.996 ms (중앙값 약 0.8 ms) |
-| worst active phase CPU | 0.594 ~ 4.510 ms (threshold 5.5 ~ 22 ms) |
+아래는 **최종 구성**(active phase wall 상한을 조인 뒤)으로 다시 측정한 값이다.
 
-slack 최댓값 22.996 ms는 calibration에서 witness가 측정한 최대 gap 23.3 ms와 일치한다. 즉 `SLACK_CAP = 30 ms`는
-관측된 환경 stall을 덮고, 그 위에서도 worst active phase CPU는 threshold를 넘지 않았다.
+| 항목 | ASan/UBSan 20회 | TSan 8회 |
+| --- | --- | --- |
+| 실패 | 0 | 0 |
+| window 재시도가 필요한 런 | 0 (전부 첫 attempt에서 판정) | 0 |
+| 부여된 slack 최댓값 | 14.800 ms | 7.023 ms |
+| worst active phase wall 최댓값 | 6.891 ms | 0.598 ms |
+
+calibration에서 witness가 측정한 최대 gap은 23.3 ms였고 최종 구성에서 부여된 slack 최댓값은 14.8 ms다. 즉
+`SLACK_CAP = 30 ms`는 관측된 환경 stall을 덮고, 그 위에서도 worst active phase는 threshold를 넘지 않았다.
 
 ## 11. 남은 한계
 
