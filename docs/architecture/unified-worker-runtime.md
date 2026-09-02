@@ -685,7 +685,8 @@ WorkerInbox와 poller는 completion producer가 종료될 때까지 살아 있�
 단일 64-bit atomic에 저장한다. 성공한 remote enqueue는 target bit를 clear하고 target이 이미 active여도
 epoch를 증가시킨다. Worker는 empty scan 전에 읽은 epoch가 그대로일 때만 quiescence를 commit한다.
 shutdown 한 번에 30-bit epoch가 소진되면 wrap하지 않고 abort하여 forced cleanup으로 전환한다.
-watchdog, 장시간 shutdown 부하와 운영 품질 검증은 10단계의 책임으로 남긴다.
+watchdog, 장시간 shutdown 부하와 test-path 품질 검증은 10단계에서 완료했다. 실제 MySQL과 production
+application workflow를 포함한 동일 gate 재실행은 11단계에 남긴다.
 
 ## 14. 구현 전환 순서
 
@@ -700,7 +701,7 @@ watchdog, 장시간 shutdown 부하와 운영 품질 검증은 10단계의 책�
 | 7 | `toEffects` overload와 ordered EffectBatch | effect order와 failure test |
 | 8 | Worker-local DbClient와 `completeDb` | driver conformance와 stale test |
 | 9 | 선택 blocking/CPU adapter | saturation과 cancel test |
-| 10 | metrics, watchdog, shutdown과 load test | 품질 게이트 통과 |
+| 10 | metrics, watchdog, shutdown과 load test | test path 품질 게이트 통과(TCP 통과, MySQL 미측정 명시) — 완료 |
 | 11 | legacy ActorRuntime/Binding/Outbound hop 제거 | 신규 경로 100% 전환 |
 
 기존 책임은 다음처럼 이동한다.

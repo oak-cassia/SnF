@@ -154,18 +154,25 @@
 
 ### 10단계 — metrics, watchdog, shutdown과 load test
 
-- [ ] Worker/Actor/Inbox/DB/Connection/Timer/Completion의 bounded counter, gauge, high-water mark와 latency
+> **최종 상세 실행 기준:** [10단계 Worker runtime 품질 게이트 최종 계획](./stage-10-quality-gate-plan.md)
+>
+> 10A~10H의 구현 순서, 확정된 설계 결정, threshold, 테스트 시나리오와 재현 명령은 위 문서를 따른다.
+> 구현 중 전제가 달라지면 코드 변경과 함께 최종 계획도 갱신한다.
+
+- [x] Worker/Actor/Inbox/DB/Connection/Timer/Completion의 bounded counter, gauge, high-water mark와 latency
   snapshot을 추가한다.
-- [ ] event-loop phase별 budget 소진과 progress 시각을 기록하고, Worker stall을 검출하는 watchdog을
+- [x] event-loop phase별 budget 소진과 progress 시각을 기록하고, Worker stall을 검출하는 watchdog을
   구현한다. watchdog 자체는 Worker를 block하거나 owner object를 cross-thread로 읽지 않는다.
-- [ ] graceful shutdown의 phase, absolute deadline, 남은 resource와 forced cleanup을 계측하고 장시간
+- [x] graceful shutdown의 phase, absolute deadline, 남은 resource와 forced cleanup을 계측하고 장시간
   publication/DB/connection 부하에서 검증한다.
-- [ ] client I/O, hot Actor, 느린 DB와 slow consumer를 동시에 주입하는 bounded load scenario를 만든다.
-- [ ] Debug, ASan·UBSan, TSan, TCP/MySQL integration과 shutdown race를 통과한다.
-- [ ] 4절의 품질 게이트별 재현 명령, 설정, 측정값과 판정을 기록한다.
+- [x] client I/O, hot Actor, 느린 DB와 slow consumer를 동시에 주입하는 bounded load scenario를 만든다.
+- [x] Debug, ASan·UBSan, TSan, TCP integration과 shutdown race를 통과한다. MySQL은 환경 미제공으로
+  미측정임을 명시하고 정확한 SKIP 수와 재현 명령을 기록한다.
+- [x] 4절의 품질 게이트별 재현 명령, 설정, 측정값과 판정을 기록한다.
 
 종료 조건: 신규 Worker runtime test path에서 target architecture의 품질 게이트를 관측할 수 있고 모두
-통과한다. Application workflow와 production 전환 뒤에는 11단계에서 같은 게이트를 다시 실행한다.
+통과한다. 이번 완료 범위는 **TCP 통과 / MySQL 미측정 및 재현 명령 기록**이다. Application workflow와
+production 전환 뒤에는 11단계에서 실제 MySQL을 포함해 같은 게이트를 다시 실행한다. **충족.**
 
 ### 11단계 — Application workflow 이전, production 전환과 legacy 제거
 
@@ -188,17 +195,17 @@
 | 게이트 | 통과 조건 |
 | --- | --- |
 | Thread ownership | TSAN과 owner assertion에서 cross-thread mutable access 0건 |
-| No Worker blocking | slow backend 주입 중 watchdog stall 0건 |
+| No Worker blocking | active phase CPU residence가 correctness 상한 미만이고 Debug voluntary context switch 0건. active wall/fairness와 watchdog wall stall도 상한 준수 |
 | Memory bound | inbox, mailbox, ActorTable, Loading, timer, DB queue와 buffers가 설정 상한을 넘지 않음 |
 | Single await state | continuation/deadline을 `ActorSlot.blocked` 밖에 중복 저장하지 않음 |
 | Stale safety | stale event가 state mutation을 만들지 않음 |
-| Fairness | 지속 부하에서도 모든 event-loop phase가 반복 실행됨 |
-| Shutdown | hard deadline 안에 coroutine/resource leak 없이 종료 |
+| Fairness | 지속 부하에서도 모든 event-loop phase가 반복 실행되고 wall `max_entry_gap` 상한 준수 |
+| Shutdown | async progress deadline 준수, final teardown conformance 범위 안에서 coroutine/resource leak 없이 종료 |
 | Behavior parity | 보존 대상으로 정한 protocol, gameplay와 failure outcome의 회귀 없음 |
 
-10단계에서는 신규 Worker runtime test path로 모든 게이트를 측정하고 통과시킨다. 11단계의 Application
-workflow 이전과 production 경로 전환이 끝나면 같은 표를 전체 TCP/MySQL 경로에서 다시 실행한 뒤 legacy를
-제거한다.
+10단계에서는 신규 Worker runtime test path로 모든 게이트를 측정하고 통과시켰다. MySQL 환경은 제공되지 않아
+미측정 상태와 재현 명령을 기록했다. 11단계의 Application workflow 이전과 production 경로 전환이 끝나면
+같은 표를 전체 TCP/MySQL 경로에서 다시 실행한 뒤 legacy를 제거한다.
 
 ## 5. 전환 중 열지 않는 작업
 

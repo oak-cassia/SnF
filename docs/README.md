@@ -20,6 +20,8 @@
 | [Projectile Skill](./projectile-skill-contract.md) | 콘텐츠 계약 | 런타임 전환과 독립적인 게임 규칙 |
 | [Room 부하 측정](./room-load-measurement.md) | 역사적 baseline | legacy Reactor/Outbound 구조의 수치이며 새 구조 승인 수치가 아님 |
 | [개발 로드맵](./development-roadmap.md) | 전환 순서 | Unified Worker Runtime의 14절 단계 번호와 산출물을 그대로 따라 진행 상태와 세부 작업을 관리 |
+| [10단계 Worker runtime 품질 게이트 최종 계획](./stage-10-quality-gate-plan.md) | 확정 실행 계획 | 10A~10H 구현 순서, 계측·watchdog·shutdown·load test 설계와 품질 게이트 판정 기준 |
+| [10단계 Worker runtime 품질 게이트 리포트](./worker-runtime-quality-gates.md) | 실행 증거 | preset별 결과, load 원본 측정값, 현재 판정과 미측정 한계 |
 
 문서가 충돌하면 target runtime 구조와 실행 경계는 Unified Worker Runtime 문서가 우선하고, wire와
 gameplay 의미는 해당 domain 계약이 우선한다. 개발 로드맵은 기준 문서의 단계를 세분화할 수 있지만 단계
