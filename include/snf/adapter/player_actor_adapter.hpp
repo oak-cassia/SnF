@@ -54,10 +54,27 @@ namespace snf::adapter
         // because the continuation is a free coroutine, not a member.
         void onSaveCompleted(const snf::worker::DbResult& result, snf::server::PlayerStateComponentMask cleared);
 
+        // The connection this player is authenticated on, if any.
+        [[nodiscard]] std::optional<snf::worker::ConnectionRef> boundConnection() const noexcept
+        {
+            return _bound_connection;
+        }
+
+        [[nodiscard]] std::uint64_t authenticationConflicts() const noexcept
+        {
+            return _authentication_conflicts;
+        }
+
     private:
         void scheduleSaveIfDirty(snf::worker::EffectBatch& effects, std::chrono::steady_clock::time_point now);
+        [[nodiscard]] std::optional<snf::worker::EffectBatch> rejectConflictingAuthentication(
+            const std::optional<snf::worker::ConnectionRef>& connection
+        );
 
         snf::server::Player _player;
+        // player -> connection. The sink owns connection -> player.
+        std::optional<snf::worker::ConnectionRef> _bound_connection{std::nullopt};
+        std::uint64_t _authentication_conflicts{0};
         std::chrono::milliseconds _save_interval{std::chrono::seconds{5}};
         // Only one save timer may be outstanding. The actor is Suspended for the
         // duration of the await, so a second save cannot overlap the first.

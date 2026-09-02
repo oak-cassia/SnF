@@ -609,6 +609,34 @@ namespace
         assert(worker.metrics().actor.cancelled_application_timers >= 1);
     }
 
+    [[nodiscard]] snf::protocol::Frame authenticateFrame(const std::uint32_t request_id, const std::uint64_t player)
+    {
+        std::vector<std::byte> payload(8);
+        for (std::size_t index = 0; index < payload.size(); ++index)
+        {
+            payload[index] = static_cast<std::byte>((player >> (8 * (7 - index))) & 0xFFULL);
+        }
+        return snf::protocol::Frame{
+            .type = snf::protocol::MessageType::Authenticate,
+            .request_id = request_id,
+            .payload = std::move(payload),
+        };
+    }
+
+    [[nodiscard]] snf::protocol::Frame authenticatedFrame(const std::uint32_t request_id, const std::uint64_t player)
+    {
+        std::vector<std::byte> payload(8);
+        for (std::size_t index = 0; index < payload.size(); ++index)
+        {
+            payload[index] = static_cast<std::byte>((player >> (8 * (7 - index))) & 0xFFULL);
+        }
+        return snf::protocol::Frame{
+            .type = snf::protocol::MessageType::Authenticated,
+            .request_id = request_id,
+            .payload = std::move(payload),
+        };
+    }
+
     void test_ping_request_sink_vertical_slice()
     {
         snf::worker::WorkerActorConfig actor_config{
@@ -659,6 +687,10 @@ namespace
             }
         );
         auto client = connectClient(port);
+
+        // Before authentication the sink answers Ping itself. That it allocates no
+        // actor is asserted in worker_session_test, where the Worker can be
+        // stopped before WorkerMetrics is read.
         sendAll(client.getDescriptor(), snf::protocol::encode_frame(ping_frame));
 
         const snf::protocol::Frame expected_pong{
@@ -673,16 +705,47 @@ namespace
         assert(decoded.frames.size() == 1);
         assert(decoded.frames.front() == expected_pong);
 
+        // After authentication the same frame reaches the PlayerActor, so the
+        // domain sees the command and the vertical slice covers socket, actor,
+        // effect and socket write.
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(authenticateFrame(4242, 7)));
+        const auto encoded_authenticated = receiveExact(client.getDescriptor(), snf::protocol::encode_frame(authenticatedFrame(4242, 7)).size());
+        snf::protocol::FrameDecoder authenticated_decoder;
+        const auto authenticated = authenticated_decoder.append(encoded_authenticated);
+        assert(authenticated.ok());
+        assert(authenticated.frames.size() == 1);
+        assert(authenticated.frames.front() == authenticatedFrame(4242, 7));
+
+        const snf::protocol::Frame second_ping{
+            .type = snf::protocol::MessageType::Ping,
+            .request_id = 1235,
+            .payload = {std::byte{0xBE}, std::byte{0xEF}},
+        };
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(second_ping));
+        const snf::protocol::Frame expected_second_pong{
+            .type = snf::protocol::MessageType::Pong,
+            .request_id = second_ping.request_id,
+            .payload = second_ping.payload,
+        };
+        const auto encoded_second = receiveExact(client.getDescriptor(), snf::protocol::encode_frame(expected_second_pong).size());
+        snf::protocol::FrameDecoder second_decoder;
+        const auto second = second_decoder.append(encoded_second);
+        assert(second.ok());
+        assert(second.frames.size() == 1);
+        assert(second.frames.front() == expected_second_pong);
+
         worker.requestStop();
         th.join();
 
-        // The request crossed the actual socket, actor, effect, and socket-write path.
-        assert(worker.metrics().network.received_frames == 1);
-        assert(worker.metrics().network.sent_frames == 1);
-        assert(worker.metrics().actor.actor_turns >= 1);
+        assert(worker.metrics().network.received_frames == 3);
+        assert(worker.metrics().network.sent_frames == 3);
+        assert(worker.metrics().actor.actor_turns >= 2);
         assert(worker.metrics().actor.effect_send_failures == 0);
+        assert(request_sink.sessionCount() == 0);
     }
 }
+
+void run_worker_session_tests();
 
 int main()
 {
@@ -723,6 +786,9 @@ int main()
 
     test_ping_request_sink_vertical_slice();
     std::cout << "  - test_ping_request_sink_vertical_slice PASSED" << std::endl;
+
+    run_worker_session_tests();
+    std::cout << "  - run_worker_session_tests PASSED" << std::endl;
 
     std::cout << "All Stage 7 tests passed successfully!" << std::endl;
     return 0;

@@ -330,6 +330,7 @@ if(BUILD_TESTING)
 
     add_executable(snf_worker_adapter_tests
         tests/worker_adapter_test.cpp
+        tests/worker_session_test.cpp
     )
     target_link_libraries(snf_worker_adapter_tests
         PRIVATE

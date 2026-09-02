@@ -18,6 +18,14 @@ namespace snf::worker
     // A request is consumed exactly once. Implementations must not retain a
     // reference to the Frame after tryPost returns. Rejected is terminal for
     // the connection; Worker never retries the moved request.
+    //
+    // Ownership: one instance per Worker. Every call runs on that Worker's owner
+    // thread, so an implementation may keep plain, non-atomic per-connection
+    // state. WorkerGroup guarantees this by calling its factory once per worker
+    // index, but a caller that constructs Workers directly must not pass the same
+    // sink to two of them: mutable state inside it would then be shared across
+    // threads without synchronisation. Implementations that keep such state
+    // should pin the owner thread in a debug assertion.
     class RequestSink
     {
     public:

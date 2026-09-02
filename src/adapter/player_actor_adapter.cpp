@@ -64,6 +64,30 @@ namespace snf::adapter
         });
     }
 
+    // The player -> connection half of the session identity. The sink owns the
+    // other half and cannot answer this question: the connection it is looking at
+    // may not be the one this player is already bound to, and that connection can
+    // belong to a different Worker. This is the legacy PlayerConflict outcome,
+    // decided where the binding actually lives.
+    std::optional<snf::worker::EffectBatch> PlayerActorAdapter::rejectConflictingAuthentication(
+        const std::optional<snf::worker::ConnectionRef>& connection
+    )
+    {
+        if (!connection.has_value() || !_bound_connection.has_value() || *_bound_connection == *connection)
+        {
+            return std::nullopt;
+        }
+
+        ++_authentication_conflicts;
+        snf::worker::EffectBatch effects;
+        effects.push(snf::worker::CloseConnectionEffect{
+            .connection = *connection,
+            .reason = snf::worker::CloseReason::Application,
+            .graceful = true,
+        });
+        return effects;
+    }
+
     void PlayerActorAdapter::onSaveCompleted(const snf::worker::DbResult& result, const snf::server::PlayerStateComponentMask cleared)
     {
         _save_scheduled = false;
@@ -125,6 +149,14 @@ namespace snf::adapter
         if (envelope.is<PlayerCommandMessage>())
         {
             auto msg = envelope.take<PlayerCommandMessage>();
+            if (std::holds_alternative<snf::server::AuthenticateCommand>(msg.command))
+            {
+                if (auto conflict = rejectConflictingAuthentication(msg.connection))
+                {
+                    return snf::worker::CompletedTurn{.effects = std::move(*conflict)};
+                }
+                _bound_connection = msg.connection;
+            }
             const auto result = _player.handle(msg.command);
             const PlayerTurnContext turn_ctx{
                 .connection = msg.connection,
