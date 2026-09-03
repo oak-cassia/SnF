@@ -1075,6 +1075,62 @@ namespace
         harness.stop();
         assert(harness.metrics().network.protocol_errors == 0);
     }
+    void test_reconnect_restores_last_zone_position()
+    {
+        SessionHarness harness;
+
+        auto client1 = connectClient(harness.port());
+        authenticate(client1.getDescriptor(), 1, 200);
+
+        const auto size_0 = zoneReplyEncodedSize(0);
+
+        // Enter zone 100 at position (10, 20)
+        sendAll(client1.getDescriptor(), snf::protocol::encode_frame(enterZoneFrame(2, 100, 10, 20)));
+        const auto entered1 = receiveFrame(client1.getDescriptor(), size_0);
+        assert(entered1.type == snf::protocol::MessageType::ZoneEntered);
+        assert(entered1.request_id == 2);
+        assert(readBigEndianSigned32(entered1.payload, 17) == 10);
+        assert(readBigEndianSigned32(entered1.payload, 21) == 20);
+
+        // Move to (55, 66)
+        sendAll(client1.getDescriptor(), snf::protocol::encode_frame(moveFrame(3, 55, 66)));
+        const auto moved = receiveFrame(client1.getDescriptor(), size_0);
+        assert(moved.type == snf::protocol::MessageType::Moved);
+        assert(moved.request_id == 3);
+        assert(readBigEndianSigned32(moved.payload, 17) == 55);
+        assert(readBigEndianSigned32(moved.payload, 21) == 66);
+
+        // Disconnect client 1
+        client1.init();
+
+        // Wait until session is released
+        const auto release_deadline = Clock::now() + 2s;
+        while (harness.sink().sessionCount() != 0 && Clock::now() < release_deadline)
+        {
+            std::this_thread::sleep_for(1ms);
+        }
+        assert(harness.sink().sessionCount() == 0);
+
+        // Reconnect client as player 200
+        auto client1_reconnected = connectClient(harness.port());
+        authenticate(client1_reconnected.getDescriptor(), 1, 200);
+
+        // Client requests enter zone 100 with dummy position (0, 0)
+        sendAll(client1_reconnected.getDescriptor(), snf::protocol::encode_frame(enterZoneFrame(4, 100, 0, 0)));
+        const auto re_entered = receiveFrame(client1_reconnected.getDescriptor(), size_0);
+        assert(re_entered.type == snf::protocol::MessageType::ZoneEntered);
+        assert(re_entered.request_id == 4);
+        assert(re_entered.payload[0] == static_cast<std::byte>(snf::server::ZoneCommandStatus::Applied));
+        // Location R1: position restored to (55, 66), not (0, 0)
+        assert(readBigEndianSigned32(re_entered.payload, 17) == 55);
+        assert(readBigEndianSigned32(re_entered.payload, 21) == 66);
+
+        client1_reconnected.init();
+        waitForSessionsReleased(harness);
+        harness.stop();
+        assert(harness.metrics().network.protocol_errors == 0);
+    }
+
 }
 
 #define SNF_RUN_SESSION_TEST(fn)                                                                                                                     \
@@ -1106,4 +1162,5 @@ void run_worker_session_tests()
     SNF_RUN_SESSION_TEST(test_enter_zone_zero_closes_connection_without_worker_exception);
     SNF_RUN_SESSION_TEST(test_malformed_zone_payloads_never_reach_an_actor);
     SNF_RUN_SESSION_TEST(test_implicit_leave_on_disconnect_removes_player_from_zone);
+    SNF_RUN_SESSION_TEST(test_reconnect_restores_last_zone_position);
 }
