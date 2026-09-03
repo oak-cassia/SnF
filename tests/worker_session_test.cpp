@@ -627,6 +627,24 @@ namespace
         return decoded.frames.front();
     }
 
+    [[nodiscard]] snf::protocol::Frame receiveDecodedFrame(const int descriptor)
+    {
+        const auto length_bytes = receiveExact(descriptor, snf::protocol::FRAME_LENGTH_FIELD_SIZE);
+        const auto body_size = readBigEndian32(length_bytes, 0);
+        const auto body_bytes = receiveExact(descriptor, body_size);
+
+        std::vector<std::byte> frame_bytes;
+        frame_bytes.reserve(snf::protocol::FRAME_LENGTH_FIELD_SIZE + body_size);
+        frame_bytes.insert(frame_bytes.end(), length_bytes.begin(), length_bytes.end());
+        frame_bytes.insert(frame_bytes.end(), body_bytes.begin(), body_bytes.end());
+
+        snf::protocol::FrameDecoder decoder;
+        const auto decoded = decoder.append(frame_bytes);
+        assert(decoded.ok());
+        assert(decoded.frames.size() == 1);
+        return decoded.frames.front();
+    }
+
     void authenticate(const int descriptor, const std::uint32_t request_id, const std::uint64_t player)
     {
         sendAll(descriptor, snf::protocol::encode_frame(authenticateFrame(request_id, player)));
@@ -1032,14 +1050,23 @@ namespace
         }
         assert(harness.sink().sessionCount() == 1);
 
-        // Allow worker turn to process the implicit LeaveZoneCommand on ZoneActor
-        std::this_thread::sleep_for(20ms);
-
-        // Client 2 moves; visible_count must now be 0 because client 1 left the zone.
-        sendAll(client2.getDescriptor(), snf::protocol::encode_frame(moveFrame(3, 11, 11)));
-        const auto moved2 = receiveFrame(client2.getDescriptor(), size_0);
-        assert(moved2.type == snf::protocol::MessageType::Moved);
-        assert(readBigEndian16(moved2.payload, 25) == 0);
+        // Poll Move until the ZoneActor has processed the implicit LeaveZone and visible_count drops to 0.
+        std::uint16_t visible_count = 1;
+        std::uint32_t move_request_id = 3;
+        while (Clock::now() < deadline)
+        {
+            sendAll(client2.getDescriptor(), snf::protocol::encode_frame(moveFrame(move_request_id, 11, 11)));
+            const auto moved = receiveDecodedFrame(client2.getDescriptor());
+            assert(moved.type == snf::protocol::MessageType::Moved);
+            assert(moved.request_id == move_request_id);
+            visible_count = readBigEndian16(moved.payload, 25);
+            if (visible_count == 0)
+            {
+                break;
+            }
+            ++move_request_id;
+        }
+        assert(visible_count == 0);
 
         client2.init();
         waitForSessionsReleased(harness);
