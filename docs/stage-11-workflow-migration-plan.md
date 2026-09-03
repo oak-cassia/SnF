@@ -87,28 +87,35 @@ mailbox full / 용량 초과   → Rejected  (overload는 연결 종료가 맞�
 `tcp_server_integration_test.cpp`의 시나리오를 worker 경로용으로 복제하고, legacy 테스트는 11J까지 그대로
 돌린다. 두 경로가 같은 시나리오를 통과하는 것이 parity의 정의다.
 
-### D6. 순서: 서빙 → workflow → 전환 → 게이트 → 제거
+### D6. 순서: 단일 도메인 서빙(11A~11C) → PlayerActor Workflow 기반(11E) → Room/Battle 프레임 공개(11D) → 전환 → 게이트 → 제거
 
-11H에서 런타임 authority를 한 번에 바꾸되 legacy 코드는 11I 통과 전까지 rollback 가능한 상태로 남긴다.
-포트를 분리해 legacy와 Worker를 동시에 production authority로 두지 않는다. 상태·DB·세션 authority가 두
-군데가 되면 전환 검증이 불가능해진다.
+11D와 11E의 실행 순서를 교체한다. `RoomJoin` 결과가 `RoomActor`에서 직접 클라이언트로 전달되면 `PlayerActor`가
+입장 성공 여부를 모르게 되고, `BattleStart`에는 요청자 정보가 없어 `PlayerActor`의 `InRoom(room)` 검증 없이
+직접 라우팅하면 타 방 전투를 시작할 수 있으며, `RoomLeave`는 0바이트 payload여서 `PlayerActor`가 authoritative
+room 상태를 갖지 않으면 대상을 결정할 수 없다.
+
+따라서 임시/낙관적 `_current_room` 상태를 두지 않고, **11E(PlayerActor workflow 및 Zone/Room 응답 채널)를
+먼저 구축한 뒤 11D(Room/Battle 외부 프레임 공개)를 진행**한다.
+- 모든 Room/Battle 외부 요청은 반드시 `PlayerActor`를 통과한다.
+- 클라이언트가 보낸 room id를 검증 없이 `RoomActorKey`로 사용하지 않는다.
+- 11D와 11E가 모두 끝나 테스트 증거가 확보될 때까지 Room/Battle 경로는 완료로 표시하지 않는다.
 
 ## 서브 스텝
 
-### Phase 1 — 서빙 격차 (production 미변경)
+### Phase 1 — 단일 도메인 서빙 격차 (production 미변경)
 
 | 스텝 | 커밋 | 닫는 테스트 |
 | --- | --- | --- |
 | 11A | `feat(adapter): bind sessions and authenticate on the worker path` | 신규 `tests/worker_session_test.cpp` |
 | 11B | `feat(adapter): route player commands to the owning PlayerActor` | Purchase / EquipSkill |
 | 11C | `feat(adapter): route zone commands and AOI results` | EnterZone / Move / LeaveZone |
-| 11D | `feat(adapter): route room and battle commands` | RoomJoin / BattleStart / UseSkill / SetMoveIntent / RoomLeave |
 
-### Phase 2 — Workflow
+### Phase 2 — Workflow와 Room/Battle 라우팅
 
 | 스텝 | 커밋 | 닫는 테스트 |
 | --- | --- | --- |
 | 11E | `feat(adapter): own room entry and return in the PlayerActor workflow state` | room 계약 §3·§4, Zone→Player 응답 채널 기반 (a) location R1/R3 복원, (b) tell 실패 롤백·실패 프레임 |
+| 11D | `feat(adapter): route room and battle commands through the PlayerActor` | RoomJoin / BattleStart / UseSkill / SetMoveIntent / RoomLeave |
 | 11F | `feat(adapter): own cross-zone transition in the same workflow state` | cross-zone 계약 §3·§4 |
 | 11G | `test(adapter): match failure, disconnect and shutdown terminals to the contracts` | room §5·§6 + cross-zone §5·§6, 계약 조항별 대조표 |
 
@@ -126,7 +133,7 @@ mailbox full / 용량 초과   → Rejected  (overload는 연결 종료가 맞�
 | 11J | `refactor: remove the legacy ActorRuntime, bindings and shared outbound` | `snf_runtime` + `snf_server_runtime` legacy + `Distribution` + 테스트 17개. `snf_game`은 유지 |
 | 11K | `docs: retarget the README and close stage 11` | README 배너 제거, 실제 코드 링크와 새 측정값 |
 
-의존: 11A→11B·11C·11D → 11E→11F→11G → 11H→11I→11J→11K.
+의존: 11A → 11B → 11C → 11E → 11D → 11F → 11G → 11H → 11I → 11J → 11K.
 
 ## 진행 상황
 
@@ -135,7 +142,8 @@ mailbox full / 용량 초과   → Rejected  (overload는 연결 종료가 맞�
 | 11A | **완료** | 아래 "11A 결과" 참고 |
 | 11B | **완료** | 아래 "11B 결과" 참고 |
 | 11C | **완료** | 아래 "11C 결과" 참고 |
-| 11D~11K | 미착수 | |
+| 11E | 진행 중 | PlayerActor workflow 및 응답 채널 (11D 선행) |
+| 11D, 11F~11K | 미착수 | |
 
 ### 11A 결과
 
