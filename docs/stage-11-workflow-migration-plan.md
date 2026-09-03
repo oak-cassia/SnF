@@ -214,25 +214,37 @@ Unauthenticated
   throw(`invariant_violations == 0`)를 방지한다.
 - 연결 종료 시 `PlayerConnectionClosedMessage`에서 `_current_zone`이 있으면 암묵적 `LeaveZoneCommand`를
   전달하여 Zone participant에서 제거됨을 후속 Move의 AOI `visible_count == 0`으로 고정했다.
-- debug, tsan, asan-ubsan 전체 테스트가 깨끗하게 통과했다.
+- 테스트 결과: Debug 17개 중 13 PASS / 4 SKIP (MySQL), TSan worker 비-MySQL 8개를 5회 연속 PASS / 3 SKIP (MySQL), ASan-UBSan worker 8 PASS / 3 SKIP (MySQL). MySQL 실측은 계획대로 11I에서 수행.
 
 #### 알려진 격차 (11E에서 수정)
 
-`applyEffectBatch`는 tell 실패 시 `effect_tell_failures`만 올리고(`worker.cpp:1759`), effect는 turn이 반환된
-뒤 적용되므로 adapter가 실패를 관측할 수 없다. 반면 route state(`_route_epoch`, `_current_zone`)는 tell 전에
-커밋된다.
+1. **`TellActorEffect` 실패 시 route state 롤백 미처리**
+   `applyEffectBatch`는 tell 실패 시 `effect_tell_failures`만 올리고(`worker.cpp:1759`), effect는 turn이 반환된
+   뒤 적용되므로 adapter가 실패를 관측할 수 없다. 반면 route state(`_route_epoch`, `_current_zone`)는 tell 전에
+   커밋된다.
+   Zone mailbox / remote inbox / actor table 포화 시:
+   - `EnterZone`: `_route_epoch += 1`, `_current_zone = zone`이 커밋되지만 `TellActorEffect`가 조용히 실패하면
+     Player는 들어간 적 없는 zone에 있다고 믿고, client는 응답을 받지 못한다.
+   - `LeaveZone`: `_current_zone.reset()`이 커밋되지만 `TellActorEffect`가 조용히 실패하면 Zone에 participant가
+     남는다 (재입장 시 epoch이 더 커서 re-seat되므로 피해는 작다).
+   legacy는 이 지점에서 명시적으로 롤백했다(`rollbackEnter`, `protocol_gateway.cpp:289`).
 
-Zone mailbox / remote inbox / actor table 포화 시:
-- `EnterZone`: `_route_epoch += 1`, `_current_zone = zone`이 커밋되지만 `TellActorEffect`가 조용히 실패하면
-  Player는 들어간 적 없는 zone에 있다고 믿고, client는 응답을 받지 못한다.
-- `LeaveZone`: `_current_zone.reset()`이 커밋되지만 `TellActorEffect`가 조용히 실패하면 Zone에 participant가
-  남는다 (재입장 시 epoch이 더 커서 re-seat되므로 피해는 작다).
+2. **Location R1 / R3 미반영**
+   - **R1 (재입장 위치 복원, `protocol_gateway.cpp:255`)**: 플레이어가 연결 해제 후 동일 Zone에 재입장할 때
+     클라이언트가 보낸 임의 좌표 대신 서버에 저장된 마지막 유효 위치(`last_location.position`)를 복원하는 규칙.
+   - **R3 (영속 복귀지점, `room-entry-handoff-contract.md:49`)**: PlayerActor가 dirty 상태를 DB에 플러시할 때
+     최근 머문 Zone/좌표가 `PlayerRecord.last_location`으로 영속화되어, 액터 패시베이션 후 활성화 시 복구되는 규칙.
+   - **원인**: 11C 현재 `ZoneResult`는 ZoneActor에서 클라이언트로 직접 unicast되므로 PlayerActor를 거치지 않는다.
+     따라서 `Player::last_location` 갱신, DB 영속화, 재활성화 복원이 동작하지 않는다.
 
-legacy는 이 지점에서 명시적으로 롤백했다(`rollbackEnter`, `protocol_gateway.cpp:289`). adapter는 실패를
-관측할 수 없으므로 제대로 고치려면 **Zone→Player 응답 채널**이 필요하다(forward 시 timer를 걸고 ack가 없으면
-롤백 + 실패 프레임). 그 채널은 11E가 transition correlation을 위해 이미 만들 예정이고, 11C 유보 결정(location
-R1/R3)과 같은 채널이다. 두 번 만들지 않고 11E에서 함께 닫는다. 과부하에서만 발생하고 11C의 정상 경로는
-정확하므로 부채로 남긴다. 11I 게이트 재실행에서 과부하를 실제로 주입하면 이 격차가 드러날 수 있다.
+**11E 해결 방안 및 검증 기준**:
+adapter가 실패를 관측하고 location을 갱신하려면 **Zone→Player 응답 채널**이 필수적이다. 이 채널은 11E가
+transition correlation을 위해 이미 만들 예정이므로, 11E에서 한 번에 만들어 다음을 함께 닫는다:
+- (a) Zone 결과 수신 시 `Player::last_location` 갱신 및 DB 영속화 (`test_player_persists_zone_location_on_save`)
+- (b) 재접속 후 재입장 시 이전 위치 복원 (`test_reconnect_restores_last_zone_position`)
+- (c) Zone tell 실패 시 timer 기반 timeout 검출 후 route state 롤백 및 에러 응답 프레임 발송
+과부하 및 위치 복원 외에 11C의 정상 경로는 정확하므로 부채로 남기며, 11I 게이트 재실행에서 과부하 주입 시
+관측될 수 있다.
 
 ## 검증
 

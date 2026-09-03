@@ -1043,17 +1043,19 @@ namespace
         client1.init();
 
         // Wait until client 1 session is released in sink
-        const auto deadline = Clock::now() + 2s;
-        while (harness.sink().sessionCount() != 1 && Clock::now() < deadline)
+        const auto release_deadline = Clock::now() + 2s;
+        while (harness.sink().sessionCount() != 1 && Clock::now() < release_deadline)
         {
             std::this_thread::sleep_for(1ms);
         }
         assert(harness.sink().sessionCount() == 1);
 
         // Poll Move until the ZoneActor has processed the implicit LeaveZone and visible_count drops to 0.
+        // The polling deadline is separated from the session release wait to prevent cascaded timeout exhaustion.
+        const auto aoi_deadline = Clock::now() + 2s;
         std::uint16_t visible_count = 1;
         std::uint32_t move_request_id = 3;
-        while (Clock::now() < deadline)
+        while (Clock::now() < aoi_deadline)
         {
             sendAll(client2.getDescriptor(), snf::protocol::encode_frame(moveFrame(move_request_id, 11, 11)));
             const auto moved = receiveDecodedFrame(client2.getDescriptor());
