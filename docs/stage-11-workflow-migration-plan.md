@@ -142,8 +142,9 @@ room 상태를 갖지 않으면 대상을 결정할 수 없다.
 | 11A | **완료** | 아래 "11A 결과" 참고 |
 | 11B | **완료** | 아래 "11B 결과" 참고 |
 | 11C | **완료** | 아래 "11C 결과" 참고 |
-| 11E | 진행 중 | PlayerActor workflow 및 응답 채널 (11D 선행) |
-| 11D, 11F~11K | 미착수 | |
+| 11E | **완료** | 아래 "11E 결과" 참고 |
+| 11D | **완료** | 아래 "11D 결과" 참고 |
+| 11F~11K | 미착수 | |
 
 ### 11A 결과
 
@@ -253,6 +254,33 @@ transition correlation을 위해 이미 만들 예정이므로, 11E에서 한 �
 - (c) Zone tell 실패 시 timer 기반 timeout 검출 후 route state 롤백 및 에러 응답 프레임 발송
 과부하 및 위치 복원 외에 11C의 정상 경로는 정확하므로 부채로 남기며, 11I 게이트 재실행에서 과부하 주입 시
 관측될 수 있다.
+
+### 11E 결과
+
+- **Actor 응답 채널 구성**:
+  - `GameActorPayloadRegistry`에 `ZoneOutcomeMessage`(12), `RoomOutcomeMessage`(13), `PlayerWorkflowTimeoutMessage`(14), `PlayerRoomRequestMessage`(15)를 등록했다.
+  - `ZoneActorAdapter` 및 `RoomActorAdapter`의 `toEffects`에 `WorkflowReplyTo` 응답 채널 및 audience 대상 `RoomOutcomeMessage` 브로드캐스트를 연결했다.
+- **11C 알려진 격차 해소**:
+  - Zone tell 및 비동기 처리 실패 시 `TimerAdmission::tryReserve`로 사전 예약된 타이머 기반 timeout(5s)으로 미확정 route를 롤백하고 연결을 유지한다 (`test_zone_tell_timeout_rolls_back_unconfirmed_route`, `test_zone_timeout_cleans_up_zone_participant`).
+  - Stale epoch/correlation 응답을 무시해 레이스를 방지한다 (`test_stale_correlation_and_epoch_ignored`).
+- **Location R1 / R3 복원**:
+  - Zone 입장/이동 및 Room 복귀 시 `Player::setLastLocation`을 갱신하고 DB flush 시 영속화한다 (`test_player_persists_zone_location_on_save`).
+  - 재접속 후 재입장 시 클라이언트의 임의 좌표 대신 서버의 마지막 유효 위치를 복원한다 (`test_reconnect_restores_last_zone_position`).
+- **Room 입장/복귀 Saga 및 보상 트랜잭션**:
+  - PlayerActor `WorkflowState`(`StableRoute`, `EnteringRoute`, `InRoomRoute`, `ReturningRoute`)를 도입하여 Room 입장 시 `JoinRoom` → `LeaveZone` 순서로 안전하게 전이한다.
+  - Room 거절 시 Zone route를 유지하며 (`test_room_join_refusal_keeps_zone_route`), Zone leave 실패 시 `LeaveRoom` 보상 트랜잭션을 실행하고 좌석을 반환한다 (`test_room_join_zone_leave_failure_compensates_and_keeps_zone_route`).
+  - 전투 종료(`BattleCleared`, `BattleFailed`) 시 `RoomTerminalNotification`을 통해 `ReturningRoute`로 전이하고 새 route epoch으로 Zone에 복귀한다 (`test_room_terminal_outcome_initiates_return_saga`).
+
+### 11D 결과
+
+- **Wire 프레임 5종 라우팅**:
+  - `GameRequestSink`에 `RoomJoin`(17), `BattleStart`(19), `RoomLeave`(22), `UseSkill`(25), `SetMoveIntent`(30) wire frame의 디코더 및 PlayerActor 라우팅(`postRoomRequest`)을 구현했다.
+  - 불필요한 payload나 규격 외의 프레임은 sink 단계에서 거절(`RequestPostResult::Invalid`)되어 액터 턴을 소모하지 않는다 (`test_malformed_room_payloads_rejected`).
+- **Authoritative 상태 검증**:
+  - 클라이언트가 임의의 room id를 전달하더라도 PlayerActor가 `InRoom` 상태와 room 일치 여부를 검증하므로, 타 방의 전투를 시작하거나 스킬/이동을 주입할 수 없다 (`test_battle_start_only_allowed_when_in_room`).
+  - `InRoom` 상태 중 수신된 Zone 프레임(`Move` 등)은 `ZoneCommandStatus::InRoom`으로 안전하게 거절되며 세션 연결이 유지된다.
+- **E2E TCP 세션 검증**:
+  - `worker_session_test.cpp`를 통해 정상 입장/퇴장 왕복 (`test_room_join_and_leave_over_session`), 전투 라이프사이클 및 스킬/이동 (`test_battle_lifecycle_over_session`), 전투 종료 후 unsolicited `ReturnedToZone` 수신 및 Zone 복귀 (`test_boss_defeat_or_timeout_returns_to_zone_over_session`), Room 0 입장 시 안전한 종료 (`test_room_join_zero_closes_connection`)를 검증했다.
 
 ## 검증
 

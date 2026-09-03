@@ -18,7 +18,7 @@ namespace snf::adapter
                 // built before the load completes.
                 return snf::worker::ActorConstructionResult::needsLoad();
             }
-            auto player_actor = std::make_unique<PlayerActorAdapter>(snf::server::PlayerId{key.entity});
+            auto player_actor = std::make_unique<PlayerActorAdapter>(snf::server::PlayerId{key.entity}, _timer_admission);
             return snf::worker::ActorConstructionResult::ready(std::move(player_actor));
         }
         case snf::worker::ActorKind::Zone:
@@ -28,7 +28,7 @@ namespace snf::adapter
         }
         case snf::worker::ActorKind::Room:
         {
-            auto room_actor = std::make_unique<RoomActorAdapter>(snf::server::RoomId{key.entity}, _timer_admission);
+            auto room_actor = std::make_unique<RoomActorAdapter>(snf::server::RoomId{key.entity}, _timer_admission, _room_config);
             return snf::worker::ActorConstructionResult::ready(std::move(room_actor));
         }
         default:
@@ -51,7 +51,7 @@ namespace snf::adapter
         {
             // No row is a new player, not a failure. The empty actor is what gets
             // persisted the first time it saves.
-            auto fresh = std::make_unique<PlayerActorAdapter>(player);
+            auto fresh = std::make_unique<PlayerActorAdapter>(player, _timer_admission);
             fresh->setSaveInterval(_player_save_interval);
             return snf::worker::ActorConstructionResult::ready(std::move(fresh));
         }
@@ -67,7 +67,7 @@ namespace snf::adapter
         if (loaded.row.has_location)
         {
             last_location = snf::server::PlayerLocation{
-                .zone = snf::server::ZoneId{loaded.row.zone_id},
+                .zone = snf::server::ZoneId{.value = loaded.row.zone_id},
                 .position =
                     snf::server::ZonePosition{
                         .x = loaded.row.position_x,
@@ -86,7 +86,7 @@ namespace snf::adapter
             .skill_loadout = snf::server::SkillLoadout{std::move(owned_skill_ids), snf::server::SkillId{.value = loaded.row.equipped_skill_id}},
         };
 
-        auto loaded_actor = std::make_unique<PlayerActorAdapter>(player, record);
+        auto loaded_actor = std::make_unique<PlayerActorAdapter>(player, record, _timer_admission);
         loaded_actor->setSaveInterval(_player_save_interval);
         return snf::worker::ActorConstructionResult::ready(std::move(loaded_actor));
     }

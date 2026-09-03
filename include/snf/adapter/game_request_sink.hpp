@@ -61,6 +61,7 @@ namespace snf::adapter
 
         using PlayerCommandDecoder = std::optional<snf::server::PlayerCommand> (*)(const std::vector<std::byte>&);
         using ZoneRequestDecoder = std::optional<ZoneRequest> (*)(const std::vector<std::byte>&);
+        using RoomRequestDecoder = std::optional<RoomRequest> (*)(const std::vector<std::byte>&);
 
         [[nodiscard]] snf::worker::RequestPostResult postAuthenticate(snf::worker::ConnectionRef connection, const snf::protocol::Frame& frame);
         [[nodiscard]] snf::worker::RequestPostResult postPing(snf::worker::ConnectionRef connection, snf::protocol::Frame&& frame);
@@ -73,6 +74,11 @@ namespace snf::adapter
             snf::worker::ConnectionRef connection,
             const snf::protocol::Frame& frame,
             ZoneRequestDecoder decoder
+        );
+        [[nodiscard]] snf::worker::RequestPostResult postRoomRequest(
+            snf::worker::ConnectionRef connection,
+            const snf::protocol::Frame& frame,
+            RoomRequestDecoder decoder
         );
 
         // Keyed by connection id, but the generation is stored and verified on

@@ -98,7 +98,13 @@ namespace
     {
     public:
         SessionHarness()
+            : SessionHarness(snf::server::RoomConfig{})
         {
+        }
+
+        explicit SessionHarness(const snf::server::RoomConfig& room_config)
+        {
+            _factory.setRoomConfig(room_config);
             _worker = std::make_unique<snf::worker::Worker>(
                 snf::worker::WorkerId{0},
                 1,
@@ -606,6 +612,98 @@ namespace
         };
     }
 
+    [[nodiscard]] snf::protocol::Frame roomJoinFrame(const std::uint32_t request_id, const std::uint64_t room_id)
+    {
+        std::vector<std::byte> payload;
+        payload.reserve(8);
+        for (std::size_t index = 0; index < 8; ++index)
+        {
+            payload.push_back(static_cast<std::byte>((room_id >> (8 * (7 - index))) & 0xFFULL));
+        }
+        return snf::protocol::Frame{
+            .type = snf::protocol::MessageType::RoomJoin,
+            .request_id = request_id,
+            .payload = std::move(payload),
+        };
+    }
+
+    [[nodiscard]] snf::protocol::Frame battleStartFrame(const std::uint32_t request_id, const std::uint64_t room_id)
+    {
+        std::vector<std::byte> payload;
+        payload.reserve(8);
+        for (std::size_t index = 0; index < 8; ++index)
+        {
+            payload.push_back(static_cast<std::byte>((room_id >> (8 * (7 - index))) & 0xFFULL));
+        }
+        return snf::protocol::Frame{
+            .type = snf::protocol::MessageType::BattleStart,
+            .request_id = request_id,
+            .payload = std::move(payload),
+        };
+    }
+
+    [[nodiscard]] snf::protocol::Frame roomLeaveFrame(const std::uint32_t request_id)
+    {
+        return snf::protocol::Frame{
+            .type = snf::protocol::MessageType::RoomLeave,
+            .request_id = request_id,
+            .payload = {},
+        };
+    }
+
+    [[nodiscard]] snf::protocol::Frame useSkillFrame(
+        const std::uint32_t request_id,
+        const std::uint64_t room_id,
+        const std::uint32_t skill_id,
+        const std::uint64_t sequence
+    )
+    {
+        std::vector<std::byte> payload;
+        payload.reserve(20);
+        for (std::size_t index = 0; index < 8; ++index)
+        {
+            payload.push_back(static_cast<std::byte>((room_id >> (8 * (7 - index))) & 0xFFULL));
+        }
+        for (std::size_t index = 0; index < 4; ++index)
+        {
+            payload.push_back(static_cast<std::byte>((skill_id >> (8 * (3 - index))) & 0xFFU));
+        }
+        for (std::size_t index = 0; index < 8; ++index)
+        {
+            payload.push_back(static_cast<std::byte>((sequence >> (8 * (7 - index))) & 0xFFULL));
+        }
+        return snf::protocol::Frame{
+            .type = snf::protocol::MessageType::UseSkill,
+            .request_id = request_id,
+            .payload = std::move(payload),
+        };
+    }
+
+    [[nodiscard]] snf::protocol::Frame setMoveIntentFrame(
+        const std::uint32_t request_id,
+        const std::uint64_t room_id,
+        const std::uint8_t direction,
+        const std::uint64_t sequence
+    )
+    {
+        std::vector<std::byte> payload;
+        payload.reserve(17);
+        for (std::size_t index = 0; index < 8; ++index)
+        {
+            payload.push_back(static_cast<std::byte>((room_id >> (8 * (7 - index))) & 0xFFULL));
+        }
+        payload.push_back(static_cast<std::byte>(direction));
+        for (std::size_t index = 0; index < 8; ++index)
+        {
+            payload.push_back(static_cast<std::byte>((sequence >> (8 * (7 - index))) & 0xFFULL));
+        }
+        return snf::protocol::Frame{
+            .type = snf::protocol::MessageType::SetMoveIntent,
+            .request_id = request_id,
+            .payload = std::move(payload),
+        };
+    }
+
     [[nodiscard]] std::size_t zoneReplyEncodedSize(const std::size_t visible_count = 0)
     {
         constexpr std::size_t FIXED_PAYLOAD = 27;
@@ -1075,6 +1173,7 @@ namespace
         harness.stop();
         assert(harness.metrics().network.protocol_errors == 0);
     }
+
     void test_reconnect_restores_last_zone_position()
     {
         SessionHarness harness;
@@ -1131,6 +1230,249 @@ namespace
         assert(harness.metrics().network.protocol_errors == 0);
     }
 
+    void test_room_join_and_leave_over_session()
+    {
+        SessionHarness harness;
+
+        auto client = connectClient(harness.port());
+        authenticate(client.getDescriptor(), 1, 301);
+
+        const auto size_0 = zoneReplyEncodedSize(0);
+
+        // Enter zone 100 at position (10, 20)
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(enterZoneFrame(2, 100, 10, 20)));
+        const auto entered = receiveFrame(client.getDescriptor(), size_0);
+        assert(entered.type == snf::protocol::MessageType::ZoneEntered);
+        assert(entered.request_id == 2);
+
+        // Join room 1
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(roomJoinFrame(3, 1)));
+        const auto joined = receiveDecodedFrame(client.getDescriptor());
+        assert(joined.type == snf::protocol::MessageType::RoomJoined);
+        assert(joined.request_id == 3);
+        assert(joined.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::Applied));
+        assert(joined.payload[1] == static_cast<std::byte>(snf::server::RoomPhase::Waiting));
+        assert(readBigEndian64(joined.payload, 2) == 1);
+
+        // Send Move while in room: receives InRoom status, connection kept alive
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(moveFrame(4, 50, 50)));
+        const auto moved_in_room = receiveDecodedFrame(client.getDescriptor());
+        assert(moved_in_room.type == snf::protocol::MessageType::Moved);
+        assert(moved_in_room.request_id == 4);
+        assert(moved_in_room.payload[0] == static_cast<std::byte>(snf::server::ZoneCommandStatus::InRoom));
+
+        // Leave room
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(roomLeaveFrame(5)));
+        const auto returned = receiveDecodedFrame(client.getDescriptor());
+        assert(returned.type == snf::protocol::MessageType::ReturnedToZone);
+        assert(readBigEndian64(returned.payload, 0) == 100);
+        assert(readBigEndianSigned32(returned.payload, 8) == 10);
+        assert(readBigEndianSigned32(returned.payload, 12) == 20);
+
+        // Can move in zone 100 again!
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(moveFrame(6, 15, 25)));
+        const auto moved_after = receiveFrame(client.getDescriptor(), size_0);
+        assert(moved_after.type == snf::protocol::MessageType::Moved);
+        assert(moved_after.request_id == 6);
+        assert(moved_after.payload[0] == static_cast<std::byte>(snf::server::ZoneCommandStatus::Applied));
+        assert(readBigEndianSigned32(moved_after.payload, 17) == 15);
+        assert(readBigEndianSigned32(moved_after.payload, 21) == 25);
+
+        client.init();
+        waitForSessionsReleased(harness);
+        harness.stop();
+        assert(harness.metrics().network.protocol_errors == 0);
+    }
+
+    [[nodiscard]] snf::protocol::Frame receiveNextNonDigestFrame(const int descriptor)
+    {
+        while (true)
+        {
+            auto frame = receiveDecodedFrame(descriptor);
+            if (frame.type != snf::protocol::MessageType::BattleDigest)
+            {
+                return frame;
+            }
+        }
+    }
+
+    void test_battle_lifecycle_over_session()
+    {
+        SessionHarness harness;
+
+        auto client = connectClient(harness.port());
+        authenticate(client.getDescriptor(), 1, 302);
+
+        const auto size_0 = zoneReplyEncodedSize(0);
+
+        // Enter zone 100
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(enterZoneFrame(2, 100, 10, 20)));
+        const auto entered = receiveFrame(client.getDescriptor(), size_0);
+        assert(entered.type == snf::protocol::MessageType::ZoneEntered);
+
+        // Join room 2
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(roomJoinFrame(3, 2)));
+        const auto joined = receiveNextNonDigestFrame(client.getDescriptor());
+        assert(joined.type == snf::protocol::MessageType::RoomJoined);
+        assert(joined.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::Applied));
+
+        // Start battle
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(battleStartFrame(4, 2)));
+        const auto started = receiveNextNonDigestFrame(client.getDescriptor());
+        assert(started.type == snf::protocol::MessageType::BattleStarted);
+        assert(started.request_id == 4);
+        assert(started.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::Applied));
+        assert(started.payload[1] == static_cast<std::byte>(snf::server::RoomPhase::Running));
+
+        // Use skill
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(useSkillFrame(5, 2, snf::server::SLASH_SKILL_ID.value, 1)));
+        const auto skill_ack = receiveNextNonDigestFrame(client.getDescriptor());
+        assert(skill_ack.type == snf::protocol::MessageType::SkillAcknowledged);
+        assert(skill_ack.request_id == 5);
+        assert(skill_ack.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::Applied));
+
+        // Set move intent
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(setMoveIntentFrame(6, 2, static_cast<std::uint8_t>(snf::server::MoveDirection::North), 1)));
+        const auto move_ack = receiveNextNonDigestFrame(client.getDescriptor());
+        assert(move_ack.type == snf::protocol::MessageType::MoveAcknowledged);
+        assert(move_ack.request_id == 6);
+        assert(move_ack.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::Applied));
+
+        // Leave room while battle is active
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(roomLeaveFrame(7)));
+        const auto returned = receiveNextNonDigestFrame(client.getDescriptor());
+        assert(returned.type == snf::protocol::MessageType::ReturnedToZone);
+        assert(readBigEndian64(returned.payload, 0) == 100);
+
+        client.init();
+        waitForSessionsReleased(harness);
+        harness.stop();
+        assert(harness.metrics().network.protocol_errors == 0);
+    }
+
+    void test_boss_defeat_or_timeout_returns_to_zone_over_session()
+    {
+        snf::server::RoomConfig config;
+        config.wave_count = 1;
+        config.battle_duration = std::chrono::milliseconds{100};
+        config.boss_spawn_after = std::chrono::milliseconds{50};
+        config.tick_interval = std::chrono::milliseconds{20};
+        config.wave_interval = std::chrono::milliseconds{5000};
+        SessionHarness harness(config);
+
+        auto client = connectClient(harness.port());
+        authenticate(client.getDescriptor(), 1, 303);
+
+        const auto size_0 = zoneReplyEncodedSize(0);
+
+        // Enter zone 100 at position (10, 20)
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(enterZoneFrame(2, 100, 10, 20)));
+        const auto entered = receiveFrame(client.getDescriptor(), size_0);
+        assert(entered.type == snf::protocol::MessageType::ZoneEntered);
+        assert(entered.request_id == 2);
+
+        // Join room 3
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(roomJoinFrame(3, 3)));
+        const auto joined = receiveDecodedFrame(client.getDescriptor());
+        assert(joined.type == snf::protocol::MessageType::RoomJoined);
+        assert(joined.request_id == 3);
+        assert(joined.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::Applied));
+
+        // Start battle
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(battleStartFrame(4, 3)));
+        const auto started = receiveDecodedFrame(client.getDescriptor());
+        assert(started.type == snf::protocol::MessageType::BattleStarted);
+        assert(started.request_id == 4);
+        assert(started.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::Applied));
+
+        // Wait for battle terminal outcome and returned to zone frame
+        const auto timeout_deadline = Clock::now() + 5s;
+        bool got_battle_terminal = false;
+        bool got_returned_to_zone = false;
+        while (Clock::now() < timeout_deadline && (!got_battle_terminal || !got_returned_to_zone))
+        {
+            const auto frame = receiveDecodedFrame(client.getDescriptor());
+            if (frame.type == snf::protocol::MessageType::BattleDigest)
+            {
+                continue;
+            }
+            if (frame.type == snf::protocol::MessageType::BattleFailed || frame.type == snf::protocol::MessageType::BattleCleared)
+            {
+                got_battle_terminal = true;
+            }
+            else if (frame.type == snf::protocol::MessageType::ReturnedToZone)
+            {
+                got_returned_to_zone = true;
+                assert(readBigEndian64(frame.payload, 0) == 100);
+                assert(readBigEndianSigned32(frame.payload, 8) == 10);
+                assert(readBigEndianSigned32(frame.payload, 12) == 20);
+            }
+        }
+        assert(got_battle_terminal);
+        assert(got_returned_to_zone);
+
+        client.init();
+        waitForSessionsReleased(harness);
+        harness.stop();
+        assert(harness.metrics().network.protocol_errors == 0);
+    }
+
+    void test_room_join_zero_closes_connection()
+    {
+        SessionHarness harness;
+
+        auto client = connectClient(harness.port());
+        authenticate(client.getDescriptor(), 1, 304);
+
+        const auto size_0 = zoneReplyEncodedSize(0);
+
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(enterZoneFrame(2, 100, 10, 20)));
+        const auto entered = receiveFrame(client.getDescriptor(), size_0);
+        assert(entered.type == snf::protocol::MessageType::ZoneEntered);
+
+        // Join room 0 -> PlayerActor closes connection gracefully
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(roomJoinFrame(3, 0)));
+        assert(receivesEof(client.getDescriptor()));
+
+        client.init();
+        waitForSessionsReleased(harness);
+        harness.stop();
+        assert(harness.metrics().network.protocol_errors == 0);
+    }
+
+    void test_malformed_room_payloads_rejected()
+    {
+        SessionHarness harness;
+
+        const std::vector<snf::protocol::Frame> malformed{
+            // RoomJoin: too short (7), too long (9), empty (0).
+            snf::protocol::Frame{.type = snf::protocol::MessageType::RoomJoin, .request_id = 1, .payload = std::vector<std::byte>(7)},
+            snf::protocol::Frame{.type = snf::protocol::MessageType::RoomJoin, .request_id = 1, .payload = std::vector<std::byte>(9)},
+            snf::protocol::Frame{.type = snf::protocol::MessageType::RoomJoin, .request_id = 1, .payload = {}},
+            // BattleStart: too short (7), too long (9), empty (0).
+            snf::protocol::Frame{.type = snf::protocol::MessageType::BattleStart, .request_id = 1, .payload = std::vector<std::byte>(7)},
+            snf::protocol::Frame{.type = snf::protocol::MessageType::BattleStart, .request_id = 1, .payload = std::vector<std::byte>(9)},
+            // RoomLeave: non-empty payload.
+            snf::protocol::Frame{.type = snf::protocol::MessageType::RoomLeave, .request_id = 1, .payload = {std::byte{0x01}}},
+            // UseSkill: too short (19), too long (21).
+            snf::protocol::Frame{.type = snf::protocol::MessageType::UseSkill, .request_id = 1, .payload = std::vector<std::byte>(19)},
+            // SetMoveIntent: too short (16), too long (18), invalid direction (99).
+            snf::protocol::Frame{.type = snf::protocol::MessageType::SetMoveIntent, .request_id = 1, .payload = std::vector<std::byte>(16)},
+            snf::protocol::Frame{.type = snf::protocol::MessageType::SetMoveIntent, .request_id = 1, .payload = std::vector<std::byte>(17, std::byte{99})},
+        };
+
+        for (const auto& frame : malformed)
+        {
+            auto client = connectClient(harness.port());
+            authenticate(client.getDescriptor(), 1, 56);
+            sendAll(client.getDescriptor(), snf::protocol::encode_frame(frame));
+            assert(receivesEof(client.getDescriptor()));
+            waitForSessionsReleased(harness);
+        }
+
+        harness.stop();
+        assert(harness.metrics().network.protocol_errors == malformed.size());
+    }
 }
 
 #define SNF_RUN_SESSION_TEST(fn)                                                                                                                     \
@@ -1163,4 +1505,9 @@ void run_worker_session_tests()
     SNF_RUN_SESSION_TEST(test_malformed_zone_payloads_never_reach_an_actor);
     SNF_RUN_SESSION_TEST(test_implicit_leave_on_disconnect_removes_player_from_zone);
     SNF_RUN_SESSION_TEST(test_reconnect_restores_last_zone_position);
+    SNF_RUN_SESSION_TEST(test_room_join_and_leave_over_session);
+    SNF_RUN_SESSION_TEST(test_battle_lifecycle_over_session);
+    SNF_RUN_SESSION_TEST(test_boss_defeat_or_timeout_returns_to_zone_over_session);
+    SNF_RUN_SESSION_TEST(test_room_join_zero_closes_connection);
+    SNF_RUN_SESSION_TEST(test_malformed_room_payloads_rejected);
 }

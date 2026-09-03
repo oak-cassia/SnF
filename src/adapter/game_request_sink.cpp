@@ -1,6 +1,7 @@
 #include "snf/adapter/game_request_sink.hpp"
 
 #include "snf/adapter/game_payloads.hpp"
+#include "snf/game/arena.hpp"
 
 #include <cassert>
 
@@ -133,6 +134,80 @@ namespace snf::adapter
                 return std::nullopt;
             }
             return ZoneRequest{LeaveRequest{}};
+        }
+
+        constexpr std::size_t ROOM_JOIN_WIRE_SIZE = 8;
+        constexpr std::size_t BATTLE_START_WIRE_SIZE = 8;
+        constexpr std::size_t USE_SKILL_WIRE_SIZE = 20;
+        constexpr std::size_t SET_MOVE_INTENT_WIRE_SIZE = 17;
+
+        [[nodiscard]] std::optional<RoomRequest> decodeRoomJoin(const std::vector<std::byte>& payload)
+        {
+            if (payload.size() != ROOM_JOIN_WIRE_SIZE)
+            {
+                return std::nullopt;
+            }
+            const auto room = decodeBigEndian<std::uint64_t>(payload, 0, 8);
+            return RoomRequest{RoomJoinRequest{.room = snf::server::RoomId{.value = room}}};
+        }
+
+        [[nodiscard]] std::optional<RoomRequest> decodeBattleStart(const std::vector<std::byte>& payload)
+        {
+            if (payload.size() != BATTLE_START_WIRE_SIZE)
+            {
+                return std::nullopt;
+            }
+            const auto room = decodeBigEndian<std::uint64_t>(payload, 0, 8);
+            return RoomRequest{BattleStartRequest{.room = snf::server::RoomId{.value = room}}};
+        }
+
+        [[nodiscard]] std::optional<RoomRequest> decodeRoomLeave(const std::vector<std::byte>& payload)
+        {
+            if (!payload.empty())
+            {
+                return std::nullopt;
+            }
+            return RoomRequest{RoomLeaveRequest{}};
+        }
+
+        [[nodiscard]] std::optional<RoomRequest> decodeUseSkill(const std::vector<std::byte>& payload)
+        {
+            if (payload.size() != USE_SKILL_WIRE_SIZE)
+            {
+                return std::nullopt;
+            }
+            const auto room = decodeBigEndian<std::uint64_t>(payload, 0, 8);
+            const auto skill = decodeBigEndian<std::uint32_t>(payload, 8, 4);
+            const auto seq = decodeBigEndian<std::uint64_t>(payload, 12, 8);
+            if (skill == 0 || seq == 0)
+            {
+                return std::nullopt;
+            }
+            return RoomRequest{UseSkillRequest{
+                .room = snf::server::RoomId{.value = room},
+                .skill_id = snf::server::SkillId{.value = skill},
+                .request_sequence = seq,
+            }};
+        }
+
+        [[nodiscard]] std::optional<RoomRequest> decodeSetMoveIntent(const std::vector<std::byte>& payload)
+        {
+            if (payload.size() != SET_MOVE_INTENT_WIRE_SIZE)
+            {
+                return std::nullopt;
+            }
+            const auto room = decodeBigEndian<std::uint64_t>(payload, 0, 8);
+            const auto dir_byte = std::to_integer<std::uint8_t>(payload[8]);
+            const auto seq = decodeBigEndian<std::uint64_t>(payload, 9, 8);
+            if (!snf::server::isValidMoveDirection(dir_byte) || seq == 0)
+            {
+                return std::nullopt;
+            }
+            return RoomRequest{SetMoveIntentRequest{
+                .room = snf::server::RoomId{.value = room},
+                .direction = static_cast<snf::server::MoveDirection>(dir_byte),
+                .request_sequence = seq,
+            }};
         }
     }
 
@@ -292,6 +367,34 @@ namespace snf::adapter
                    : snf::worker::RequestPostResult::Rejected;
     }
 
+    snf::worker::RequestPostResult GameRequestSink::postRoomRequest(
+        const snf::worker::ConnectionRef connection,
+        const snf::protocol::Frame& frame,
+        const RoomRequestDecoder decoder
+    )
+    {
+        const auto player = playerFor(connection);
+        if (!player)
+        {
+            return snf::worker::RequestPostResult::Invalid;
+        }
+
+        auto request = decoder(frame.payload);
+        if (!request)
+        {
+            return snf::worker::RequestPostResult::Invalid;
+        }
+
+        auto envelope = GameActorPayloadRegistry::create(PlayerRoomRequestMessage{
+            .connection = connection,
+            .request_id = frame.request_id,
+            .request = std::move(*request),
+        });
+        return _worker->tell(playerKey(*player), std::move(envelope)) == snf::worker::DeliveryResult::Accepted
+                   ? snf::worker::RequestPostResult::Accepted
+                   : snf::worker::RequestPostResult::Rejected;
+    }
+
     snf::worker::RequestPostResult GameRequestSink::tryPost(const snf::worker::ConnectionRef connection, snf::protocol::Frame&& frame)
     {
         assert(_worker != nullptr);
@@ -313,6 +416,16 @@ namespace snf::adapter
             return postZoneRequest(connection, frame, decodeMove);
         case snf::protocol::MessageType::LeaveZone:
             return postZoneRequest(connection, frame, decodeLeave);
+        case snf::protocol::MessageType::RoomJoin:
+            return postRoomRequest(connection, frame, decodeRoomJoin);
+        case snf::protocol::MessageType::BattleStart:
+            return postRoomRequest(connection, frame, decodeBattleStart);
+        case snf::protocol::MessageType::RoomLeave:
+            return postRoomRequest(connection, frame, decodeRoomLeave);
+        case snf::protocol::MessageType::UseSkill:
+            return postRoomRequest(connection, frame, decodeUseSkill);
+        case snf::protocol::MessageType::SetMoveIntent:
+            return postRoomRequest(connection, frame, decodeSetMoveIntent);
         default:
             break;
         }
