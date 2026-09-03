@@ -141,9 +141,33 @@ mailbox full / 용량 초과   → Rejected  (overload는 연결 종료가 맞�
 - legacy `PlayerAttachResult` 6개 결과값에 각각 owner를 배정하고 `worker_session_test.cpp`로 고정했다.
 - session entry는 connection id로 키를 잡고 generation을 함께 검증한다. close 통지를 놓친 stale entry가
   재사용된 slot에 이전 player의 세션을 넘기지 않고 fail closed된다.
-- **의도적 동작 변경 2건**
-  - 인증 전 `Ping`을 sink가 직접 답한다. 인증되지 않은 연결이 actor slot을 할당할 수 없게 하려는 것이다.
-  - 그 결과 legacy의 provisional actor 부작용(ping한 연결은 이후 인증이 막힘)은 **보존하지 않는다.**
+#### 의도적 parity 변경 2건 (승인 2026-09-03)
+
+**Pre-auth `Ping`은 state-free liveness operation으로 정의한다.** sink가 직접 `Pong`으로 답하고 ActorSlot,
+DB activation, session state를 하나도 만들지 않는다. `Ping`은 gameplay command가 아니라 connection/liveness
+protocol이기 때문이다.
+
+**Legacy의 pre-auth provisional activity는 architecture artifact로 판단하여 parity 대상에서 제외한다.**
+legacy는 인증 전 `Ping`을 connection 키 provisional actor로 보냈고, 그 활동이 이후 그 연결의 인증을 막았다.
+이는 gameplay 계약이 아니라 옛 ActorRuntime 구조가 외부 동작으로 새어 나온 것이며, 보존하려면 새 구조에
+불필요한 상태를 다시 만들어야 한다.
+
+인증 경계는 그대로 유지한다.
+
+```text
+Unauthenticated
+  Ping         → Pong, actor 생성 없음, session entry 없음
+  Authenticate → 정상 인증
+  그 외 전부    → Invalid, 연결 종료
+```
+
+`worker_session_test.cpp`가 고정하는 것:
+
+| 테스트 | 고정 내용 |
+| --- | --- |
+| `test_pre_auth_ping_is_answered_without_an_actor` | Pong 수신, `actor_turns == 0`, session entry 없음 |
+| `test_pre_auth_ping_does_not_block_authentication` | Ping → Pong → Authenticate 성공, 전체 흐름에서 `actor_turns == 1` (Ping은 turn을 만들지 않았다) |
+| `test_only_ping_and_authenticate_cross_the_pre_auth_boundary` | 나머지 client frame 10종 전부 인증 전 거절. **11B 이후 라우팅이 추가돼도 계속 성립해야 한다** |
 - `RequestSink`에 "Worker마다 1 인스턴스" 계약을 명시하고 sink가 owner thread를 debug assertion으로 고정했다.
 - 관측용 live session count만 atomic mirror다. map 자체는 다른 thread에서 읽지 않는다. 이 규칙을 어긴
   **테스트 자신이 TSan data race로 잡혔고**, 계약대로 고쳤다.

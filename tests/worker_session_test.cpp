@@ -6,6 +6,7 @@
 
 #include "socket_test_support.hpp"
 
+#include <array>
 #include <cassert>
 #include <chrono>
 #include <cstddef>
@@ -353,28 +354,53 @@ namespace
 
         harness.stop();
         assert(harness.metrics().network.protocol_errors == 0);
+        // Two frames in, two answered, but only the Authenticate ran a turn: the
+        // Ping that preceded it created no actor even in this combined flow.
+        assert(harness.metrics().network.received_frames == 2);
+        assert(harness.metrics().network.sent_frames == 2);
+        assert(harness.metrics().actor.actor_turns == 1);
     }
 
-    // A game frame before authentication is a frame-order violation, matching the
-    // legacy requires_persistent_player check that answered InvalidPayload.
-    void test_game_frame_before_authentication_is_rejected()
+    // Serving Ping before authentication must not loosen the boundary for
+    // anything else. Every other client frame stays a frame-order violation until
+    // the connection has a session, matching the legacy requires_persistent_player
+    // check that answered InvalidPayload. This test is meant to keep holding as
+    // 11B onwards add real routing for these frames.
+    void test_only_ping_and_authenticate_cross_the_pre_auth_boundary()
     {
-        SessionHarness harness;
-        auto client = connectClient(harness.port());
+        constexpr std::array<snf::protocol::MessageType, 10> GUARDED{
+            snf::protocol::MessageType::EnterZone,
+            snf::protocol::MessageType::Move,
+            snf::protocol::MessageType::LeaveZone,
+            snf::protocol::MessageType::Purchase,
+            snf::protocol::MessageType::RoomJoin,
+            snf::protocol::MessageType::BattleStart,
+            snf::protocol::MessageType::RoomLeave,
+            snf::protocol::MessageType::UseSkill,
+            snf::protocol::MessageType::SetMoveIntent,
+            snf::protocol::MessageType::EquipSkill,
+        };
 
-        sendAll(
-            client.getDescriptor(),
-            snf::protocol::encode_frame(snf::protocol::Frame{
-                .type = snf::protocol::MessageType::EnterZone,
-                .request_id = 1,
-                .payload = {std::byte{0x00}},
-            })
-        );
-        assert(receivesEof(client.getDescriptor()));
+        SessionHarness harness;
+        for (const auto type : GUARDED)
+        {
+            // One connection per frame: a rejected frame is terminal for it.
+            auto client = connectClient(harness.port());
+            sendAll(
+                client.getDescriptor(),
+                snf::protocol::encode_frame(snf::protocol::Frame{
+                    .type = type,
+                    .request_id = 1,
+                    .payload = {std::byte{0x00}},
+                })
+            );
+            assert(receivesEof(client.getDescriptor()));
+        }
 
         harness.stop();
-        assert(harness.metrics().network.protocol_errors == 1);
+        assert(harness.metrics().network.protocol_errors == GUARDED.size());
         assert(harness.metrics().actor.actor_turns == 0);
+        assert(harness.sink().sessionCount() == 0);
     }
 
     // The session entry lives exactly as long as its connection.
@@ -407,6 +433,6 @@ void run_worker_session_tests()
     test_malformed_authenticate_payloads_are_rejected();
     test_pre_auth_ping_is_answered_without_an_actor();
     test_pre_auth_ping_does_not_block_authentication();
-    test_game_frame_before_authentication_is_rejected();
+    test_only_ping_and_authenticate_cross_the_pre_auth_boundary();
     test_disconnect_releases_the_session_entry();
 }
