@@ -108,7 +108,7 @@ mailbox full / 용량 초과   → Rejected  (overload는 연결 종료가 맞�
 
 | 스텝 | 커밋 | 닫는 테스트 |
 | --- | --- | --- |
-| 11E | `feat(adapter): own room entry and return in the PlayerActor workflow state` | room 계약 §3·§4 |
+| 11E | `feat(adapter): own room entry and return in the PlayerActor workflow state` | room 계약 §3·§4, Zone→Player 응답 채널 기반 (a) location R1/R3 복원, (b) tell 실패 롤백·실패 프레임 |
 | 11F | `feat(adapter): own cross-zone transition in the same workflow state` | cross-zone 계약 §3·§4 |
 | 11G | `test(adapter): match failure, disconnect and shutdown terminals to the contracts` | room §5·§6 + cross-zone §5·§6, 계약 조항별 대조표 |
 
@@ -216,6 +216,24 @@ Unauthenticated
   전달하여 Zone participant에서 제거됨을 후속 Move의 AOI `visible_count == 0`으로 고정했다.
 - debug, tsan, asan-ubsan 전체 테스트가 깨끗하게 통과했다.
 
+#### 알려진 격차 (11E에서 수정)
+
+`applyEffectBatch`는 tell 실패 시 `effect_tell_failures`만 올리고(`worker.cpp:1759`), effect는 turn이 반환된
+뒤 적용되므로 adapter가 실패를 관측할 수 없다. 반면 route state(`_route_epoch`, `_current_zone`)는 tell 전에
+커밋된다.
+
+Zone mailbox / remote inbox / actor table 포화 시:
+- `EnterZone`: `_route_epoch += 1`, `_current_zone = zone`이 커밋되지만 `TellActorEffect`가 조용히 실패하면
+  Player는 들어간 적 없는 zone에 있다고 믿고, client는 응답을 받지 못한다.
+- `LeaveZone`: `_current_zone.reset()`이 커밋되지만 `TellActorEffect`가 조용히 실패하면 Zone에 participant가
+  남는다 (재입장 시 epoch이 더 커서 re-seat되므로 피해는 작다).
+
+legacy는 이 지점에서 명시적으로 롤백했다(`rollbackEnter`, `protocol_gateway.cpp:289`). adapter는 실패를
+관측할 수 없으므로 제대로 고치려면 **Zone→Player 응답 채널**이 필요하다(forward 시 timer를 걸고 ack가 없으면
+롤백 + 실패 프레임). 그 채널은 11E가 transition correlation을 위해 이미 만들 예정이고, 11C 유보 결정(location
+R1/R3)과 같은 채널이다. 두 번 만들지 않고 11E에서 함께 닫는다. 과부하에서만 발생하고 11C의 정상 경로는
+정확하므로 부채로 남긴다. 11I 게이트 재실행에서 과부하를 실제로 주입하면 이 격차가 드러날 수 있다.
+
 ## 검증
 
 각 스텝마다 Docker 안에서:
@@ -239,7 +257,8 @@ docker run --rm -v "$PWD:/workspace" -w /workspace snf-server-dev bash -lc 'cmak
 - **cross-worker transition ordering.** Player와 Zone/Room이 다른 worker면 transition 응답이 remote inbox를
   거친다. remote tell은 10단계에서 검증됐지만 계약의 순서·backpressure 의미를 재확인해야 한다.
 - **completion slot 예약 개념이 신규 경로에 없다.** room 계약 §3의 예약은 legacy outbound reservation
-  기반이다. 신규 경로의 대응물이 무엇인지(또는 불필요한지)를 11E에서 먼저 결론낸다.
+  기반이다. 신규 경로의 대응물이 무엇인지(또는 불필요한지)를 11E에서 먼저 결론낸다. 또한 11C에서 기록된
+  `TellActorEffect` 실패 롤백 미처리 격차 역시 11E의 응답 채널에서 함께 해결한다 (11I 게이트 과부하 시 관측 가능).
 - **D4 함정.** 도메인 실패를 잘못 매핑하면 부하 중 연결이 끊기고 parity 실패로 나타난다.
 - **11I의 MySQL 실측이 처음이다.** `mysql_close()` boundedness를 포함해 새로 드러날 문제가 있을 수 있다.
 - **11J 후 `snf::server::Player` 이름과 `snf_game` 위치의 불일치가 남는다.** 네임스페이스 정리는 범위 밖이다.
