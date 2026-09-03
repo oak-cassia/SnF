@@ -623,6 +623,776 @@ namespace
         assert(!player_actor.currentZone().has_value());
     }
 
+    void test_room_join_and_return_saga_round_trip()
+    {
+        snf::adapter::PlayerActorAdapter player_actor(snf::server::PlayerId{105});
+        const snf::worker::ActorTurnContext turn_ctx{
+            .activation = snf::worker::ActivationRef{},
+            .now = std::chrono::steady_clock::now(),
+            .turn_id = 1,
+        };
+
+        const snf::worker::ConnectionRef conn{
+            .id = snf::worker::ConnectionId{15}, .generation = snf::worker::ConnectionGeneration{1}, .owner = snf::worker::WorkerId{0}
+        };
+
+        // 1. Authenticate
+        auto auth_env = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerCommandMessage{
+            .connection = conn,
+            .request_id = 1,
+            .command = snf::server::AuthenticateCommand{.player = snf::server::PlayerId{105}},
+        });
+        auto auth_res = player_actor.dispatch(std::move(auth_env), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(auth_res));
+
+        // 2. Enter Zone 10 at (10, 20)
+        auto enter_env = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerZoneRequestMessage{
+            .connection = conn,
+            .request_id = 2,
+            .request = snf::adapter::EnterZoneRequest{
+                .zone = snf::server::ZoneId{10},
+                .position = snf::server::ZonePosition{.x = 10, .y = 20},
+            },
+        });
+        auto enter_res = player_actor.dispatch(std::move(enter_env), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(enter_res));
+
+        auto zone_out = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneOutcomeMessage{
+            .player = snf::server::PlayerId{105},
+            .connection_generation = conn.generation,
+            .correlation_id = 1,
+            .step = snf::adapter::WorkflowStep::ZoneEnter,
+            .zone = snf::server::ZoneId{10},
+            .route_epoch = 1,
+            .request_id = 2,
+            .result = snf::server::ZoneResult{
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .player = snf::server::PlayerId{105},
+                .position = snf::server::ZonePosition{.x = 10, .y = 20},
+                .route_epoch = 1,
+                .tick = 0,
+                .visible_players = {},
+            },
+        });
+        auto zone_out_res = player_actor.dispatch(std::move(zone_out), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(zone_out_res));
+        assert(player_actor.currentZone() == snf::server::ZoneId{10});
+
+        // 3. Request RoomJoin for Room 1
+        auto join_env = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerRoomRequestMessage{
+            .connection = conn,
+            .request_id = 3,
+            .request = snf::adapter::RoomJoinRequest{
+                .room = snf::server::RoomId{1},
+            },
+        });
+        auto join_res = player_actor.dispatch(std::move(join_env), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(join_res));
+        auto& join_comp = std::get<snf::worker::CompletedTurn>(join_res);
+        assert(join_comp.effects.size() >= 1);
+        assert(std::holds_alternative<snf::worker::TellActorEffect>(join_comp.effects.effects()[0]));
+        const auto& room_tell = std::get<snf::worker::TellActorEffect>(join_comp.effects.effects()[0]);
+        assert(room_tell.target.kind == snf::worker::ActorKind::Room);
+        assert(room_tell.target.entity == 1);
+        assert(std::holds_alternative<snf::adapter::EnteringRoute>(player_actor.workflowState()));
+
+        // 4. RoomActor returns RoomOutcomeMessage with status = Applied (correlation 2)
+        auto room_out = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::RoomOutcomeMessage{
+            .player = snf::server::PlayerId{105},
+            .connection_generation = conn.generation,
+            .correlation_id = 2,
+            .step = snf::adapter::WorkflowStep::RoomJoinStep1_JoinRoom,
+            .room = snf::server::RoomId{1},
+            .request_id = 3,
+            .result = snf::server::RoomResult{
+                .status = snf::server::RoomCommandStatus::Applied,
+                .phase = snf::server::RoomPhase::Waiting,
+            },
+        });
+        auto room_out_res = player_actor.dispatch(std::move(room_out), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(room_out_res));
+        auto& room_out_comp = std::get<snf::worker::CompletedTurn>(room_out_res);
+        // PlayerActor tells Zone 10 LeaveZoneCommand
+        assert(room_out_comp.effects.size() == 1);
+        assert(std::holds_alternative<snf::worker::TellActorEffect>(room_out_comp.effects.effects()[0]));
+        const auto& zone_leave_tell = std::get<snf::worker::TellActorEffect>(room_out_comp.effects.effects()[0]);
+        assert(zone_leave_tell.target.kind == snf::worker::ActorKind::Zone);
+        assert(zone_leave_tell.target.entity == 10);
+
+        // 5. ZoneActor returns ZoneOutcomeMessage for RoomJoinStep2_LeaveZone
+        auto zone_leave_out = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneOutcomeMessage{
+            .player = snf::server::PlayerId{105},
+            .connection_generation = conn.generation,
+            .correlation_id = 2,
+            .step = snf::adapter::WorkflowStep::RoomJoinStep2_LeaveZone,
+            .zone = snf::server::ZoneId{10},
+            .route_epoch = 1,
+            .request_id = 3,
+            .result = snf::server::ZoneResult{
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .player = snf::server::PlayerId{105},
+                .position = std::nullopt,
+                .route_epoch = 1,
+                .tick = 0,
+                .visible_players = {},
+            },
+        });
+        auto zone_leave_out_res = player_actor.dispatch(std::move(zone_leave_out), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(zone_leave_out_res));
+        auto& zone_leave_out_comp = std::get<snf::worker::CompletedTurn>(zone_leave_out_res);
+        assert(zone_leave_out_comp.effects.size() == 1);
+        assert(std::holds_alternative<snf::worker::SendFrameEffect>(zone_leave_out_comp.effects.effects()[0]));
+        const auto& joined_frame = std::get<snf::worker::SendFrameEffect>(zone_leave_out_comp.effects.effects()[0]);
+        assert(joined_frame.frame.type == snf::protocol::MessageType::RoomJoined);
+        assert(joined_frame.frame.request_id == 3);
+        assert(joined_frame.frame.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::Applied));
+
+        // Player is now authoritative InRoom!
+        assert(player_actor.isInRoom());
+        assert(player_actor.currentRoom() == snf::server::RoomId{1});
+
+        // 6. Zone Move during InRoom receives InRoom status and keeps connection
+        auto move_in_room_env = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerZoneRequestMessage{
+            .connection = conn,
+            .request_id = 4,
+            .request = snf::adapter::MoveRequest{
+                .position = snf::server::ZonePosition{.x = 99, .y = 99},
+            },
+        });
+        auto move_in_room_res = player_actor.dispatch(std::move(move_in_room_env), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(move_in_room_res));
+        auto& move_comp = std::get<snf::worker::CompletedTurn>(move_in_room_res);
+        assert(move_comp.effects.size() == 1);
+        assert(std::holds_alternative<snf::worker::SendFrameEffect>(move_comp.effects.effects()[0]));
+        const auto& move_reply = std::get<snf::worker::SendFrameEffect>(move_comp.effects.effects()[0]);
+        assert(move_reply.frame.payload[0] == static_cast<std::byte>(snf::server::ZoneCommandStatus::InRoom));
+
+        // 7. Request RoomLeave
+        auto leave_room_env = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerRoomRequestMessage{
+            .connection = conn,
+            .request_id = 5,
+            .request = snf::adapter::RoomLeaveRequest{},
+        });
+        auto leave_room_res = player_actor.dispatch(std::move(leave_room_env), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(leave_room_res));
+        auto& leave_room_comp = std::get<snf::worker::CompletedTurn>(leave_room_res);
+        // Emits LeaveRoom tell to Room 1 and EnterZone tell to Zone 10
+        assert(leave_room_comp.effects.size() >= 2);
+        assert(std::holds_alternative<snf::worker::TellActorEffect>(leave_room_comp.effects.effects()[0]));
+        const auto& room_leave_tell = std::get<snf::worker::TellActorEffect>(leave_room_comp.effects.effects()[0]);
+        assert(room_leave_tell.target.kind == snf::worker::ActorKind::Room);
+        assert(room_leave_tell.target.entity == 1);
+
+        assert(std::holds_alternative<snf::worker::TellActorEffect>(leave_room_comp.effects.effects()[1]));
+        const auto& zone_enter_tell = std::get<snf::worker::TellActorEffect>(leave_room_comp.effects.effects()[1]);
+        assert(zone_enter_tell.target.kind == snf::worker::ActorKind::Zone);
+        assert(zone_enter_tell.target.entity == 10);
+        assert(std::holds_alternative<snf::adapter::ReturningRoute>(player_actor.workflowState()));
+
+        // 8. ZoneActor returns ZoneOutcomeMessage for RoomReturnStep1_ZoneEnter
+        auto return_zone_out = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneOutcomeMessage{
+            .player = snf::server::PlayerId{105},
+            .connection_generation = conn.generation,
+            .correlation_id = 3,
+            .step = snf::adapter::WorkflowStep::RoomReturnStep1_ZoneEnter,
+            .zone = snf::server::ZoneId{10},
+            .route_epoch = 2,
+            .request_id = 0,
+            .result = snf::server::ZoneResult{
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .player = snf::server::PlayerId{105},
+                .position = snf::server::ZonePosition{.x = 10, .y = 20},
+                .route_epoch = 2,
+                .tick = 0,
+                .visible_players = {},
+            },
+        });
+        auto return_res = player_actor.dispatch(std::move(return_zone_out), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(return_res));
+        auto& return_comp = std::get<snf::worker::CompletedTurn>(return_res);
+        assert(return_comp.effects.size() == 1);
+        assert(std::holds_alternative<snf::worker::SendFrameEffect>(return_comp.effects.effects()[0]));
+        const auto& return_frame = std::get<snf::worker::SendFrameEffect>(return_comp.effects.effects()[0]);
+        assert(return_frame.frame.type == snf::protocol::MessageType::ReturnedToZone);
+        assert(return_frame.frame.request_id == 0);
+
+        // Player is back in StableRoute(Zone 10)!
+        assert(player_actor.currentZone() == snf::server::ZoneId{10});
+        assert(!player_actor.isInRoom());
+    }
+
+    void test_room_join_refusal_keeps_zone_route()
+    {
+        snf::adapter::PlayerActorAdapter player_actor(snf::server::PlayerId{106});
+        const snf::worker::ActorTurnContext turn_ctx{
+            .activation = snf::worker::ActivationRef{},
+            .now = std::chrono::steady_clock::now(),
+            .turn_id = 1,
+        };
+
+        const snf::worker::ConnectionRef conn{
+            .id = snf::worker::ConnectionId{16}, .generation = snf::worker::ConnectionGeneration{1}, .owner = snf::worker::WorkerId{0}
+        };
+
+        // Authenticate & enter zone 10
+        auto auth_env = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerCommandMessage{
+            .connection = conn,
+            .request_id = 1,
+            .command = snf::server::AuthenticateCommand{.player = snf::server::PlayerId{106}},
+        });
+        static_cast<void>(player_actor.dispatch(std::move(auth_env), turn_ctx));
+
+        auto enter_env = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerZoneRequestMessage{
+            .connection = conn,
+            .request_id = 2,
+            .request = snf::adapter::EnterZoneRequest{
+                .zone = snf::server::ZoneId{10},
+                .position = snf::server::ZonePosition{.x = 5, .y = 5},
+            },
+        });
+        static_cast<void>(player_actor.dispatch(std::move(enter_env), turn_ctx));
+
+        auto zone_out = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneOutcomeMessage{
+            .player = snf::server::PlayerId{106},
+            .connection_generation = conn.generation,
+            .correlation_id = 1,
+            .step = snf::adapter::WorkflowStep::ZoneEnter,
+            .zone = snf::server::ZoneId{10},
+            .route_epoch = 1,
+            .request_id = 2,
+            .result = snf::server::ZoneResult{
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .player = snf::server::PlayerId{106},
+                .position = snf::server::ZonePosition{.x = 5, .y = 5},
+                .route_epoch = 1,
+                .tick = 0,
+                .visible_players = {},
+            },
+        });
+        static_cast<void>(player_actor.dispatch(std::move(zone_out), turn_ctx));
+        assert(player_actor.currentZone() == snf::server::ZoneId{10});
+
+        // Request RoomJoin
+        auto join_env = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerRoomRequestMessage{
+            .connection = conn,
+            .request_id = 3,
+            .request = snf::adapter::RoomJoinRequest{.room = snf::server::RoomId{2}},
+        });
+        static_cast<void>(player_actor.dispatch(std::move(join_env), turn_ctx));
+        assert(std::holds_alternative<snf::adapter::EnteringRoute>(player_actor.workflowState()));
+
+        // Room returns RoomFull
+        auto room_out = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::RoomOutcomeMessage{
+            .player = snf::server::PlayerId{106},
+            .connection_generation = conn.generation,
+            .correlation_id = 2,
+            .step = snf::adapter::WorkflowStep::RoomJoinStep1_JoinRoom,
+            .room = snf::server::RoomId{2},
+            .request_id = 3,
+            .result = snf::server::RoomResult{
+                .status = snf::server::RoomCommandStatus::RoomFull,
+                .phase = snf::server::RoomPhase::Waiting,
+            },
+        });
+        auto room_res = player_actor.dispatch(std::move(room_out), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(room_res));
+        auto& room_comp = std::get<snf::worker::CompletedTurn>(room_res);
+        assert(room_comp.effects.size() == 1);
+        assert(std::holds_alternative<snf::worker::SendFrameEffect>(room_comp.effects.effects()[0]));
+        const auto& reply_frame = std::get<snf::worker::SendFrameEffect>(room_comp.effects.effects()[0]);
+        assert(reply_frame.frame.type == snf::protocol::MessageType::RoomJoined);
+        assert(reply_frame.frame.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::RoomFull));
+
+        // Route rolled back to StableRoute(Zone 10)!
+        assert(player_actor.currentZone() == snf::server::ZoneId{10});
+        assert(!player_actor.isInRoom());
+    }
+
+    void test_room_join_zone_leave_failure_compensates_and_keeps_zone_route()
+    {
+        snf::adapter::PlayerActorAdapter player_actor(snf::server::PlayerId{107});
+        const snf::worker::ActorTurnContext turn_ctx{
+            .activation = snf::worker::ActivationRef{},
+            .now = std::chrono::steady_clock::now(),
+            .turn_id = 1,
+        };
+
+        const snf::worker::ConnectionRef conn{
+            .id = snf::worker::ConnectionId{17}, .generation = snf::worker::ConnectionGeneration{1}, .owner = snf::worker::WorkerId{0}
+        };
+
+        auto auth_env = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerCommandMessage{
+            .connection = conn,
+            .request_id = 1,
+            .command = snf::server::AuthenticateCommand{.player = snf::server::PlayerId{107}},
+        });
+        static_cast<void>(player_actor.dispatch(std::move(auth_env), turn_ctx));
+
+        auto enter_env = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerZoneRequestMessage{
+            .connection = conn,
+            .request_id = 2,
+            .request = snf::adapter::EnterZoneRequest{
+                .zone = snf::server::ZoneId{10},
+                .position = snf::server::ZonePosition{.x = 5, .y = 5},
+            },
+        });
+        static_cast<void>(player_actor.dispatch(std::move(enter_env), turn_ctx));
+
+        auto zone_out = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneOutcomeMessage{
+            .player = snf::server::PlayerId{107},
+            .connection_generation = conn.generation,
+            .correlation_id = 1,
+            .step = snf::adapter::WorkflowStep::ZoneEnter,
+            .zone = snf::server::ZoneId{10},
+            .route_epoch = 1,
+            .request_id = 2,
+            .result = snf::server::ZoneResult{
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .player = snf::server::PlayerId{107},
+                .position = snf::server::ZonePosition{.x = 5, .y = 5},
+                .route_epoch = 1,
+                .tick = 0,
+                .visible_players = {},
+            },
+        });
+        static_cast<void>(player_actor.dispatch(std::move(zone_out), turn_ctx));
+
+        // Request RoomJoin
+        auto join_env = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerRoomRequestMessage{
+            .connection = conn,
+            .request_id = 3,
+            .request = snf::adapter::RoomJoinRequest{.room = snf::server::RoomId{3}},
+        });
+        static_cast<void>(player_actor.dispatch(std::move(join_env), turn_ctx));
+
+        // Room returns Applied -> enters step 2
+        auto room_out = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::RoomOutcomeMessage{
+            .player = snf::server::PlayerId{107},
+            .connection_generation = conn.generation,
+            .correlation_id = 2,
+            .step = snf::adapter::WorkflowStep::RoomJoinStep1_JoinRoom,
+            .room = snf::server::RoomId{3},
+            .request_id = 3,
+            .result = snf::server::RoomResult{
+                .status = snf::server::RoomCommandStatus::Applied,
+                .phase = snf::server::RoomPhase::Waiting,
+            },
+        });
+        static_cast<void>(player_actor.dispatch(std::move(room_out), turn_ctx));
+
+        // Zone returns failure for LeaveZone
+        auto zone_leave_fail = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneOutcomeMessage{
+            .player = snf::server::PlayerId{107},
+            .connection_generation = conn.generation,
+            .correlation_id = 2,
+            .step = snf::adapter::WorkflowStep::RoomJoinStep2_LeaveZone,
+            .zone = snf::server::ZoneId{10},
+            .route_epoch = 1,
+            .request_id = 3,
+            .result = snf::server::ZoneResult{
+                .status = snf::server::ZoneCommandStatus::PlayerMissing,
+                .player = snf::server::PlayerId{107},
+                .position = std::nullopt,
+                .route_epoch = 1,
+                .tick = 0,
+                .visible_players = {},
+            },
+        });
+        auto fail_res = player_actor.dispatch(std::move(zone_leave_fail), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(fail_res));
+        auto& fail_comp = std::get<snf::worker::CompletedTurn>(fail_res);
+
+        // Compensation: LeaveRoom tell to Room 3 + EntryFailed reply to client
+        assert(fail_comp.effects.size() == 2);
+        assert(std::holds_alternative<snf::worker::TellActorEffect>(fail_comp.effects.effects()[0]));
+        const auto& comp_tell = std::get<snf::worker::TellActorEffect>(fail_comp.effects.effects()[0]);
+        assert(comp_tell.target.kind == snf::worker::ActorKind::Room);
+        assert(comp_tell.target.entity == 3);
+
+        assert(std::holds_alternative<snf::worker::SendFrameEffect>(fail_comp.effects.effects()[1]));
+        const auto& fail_reply = std::get<snf::worker::SendFrameEffect>(fail_comp.effects.effects()[1]);
+        assert(fail_reply.frame.type == snf::protocol::MessageType::RoomJoined);
+        assert(fail_reply.frame.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::EntryFailed));
+
+        // Zone route maintained!
+        assert(player_actor.currentZone() == snf::server::ZoneId{10});
+        assert(!player_actor.isInRoom());
+    }
+
+    void test_battle_start_only_allowed_when_in_room()
+    {
+        snf::adapter::PlayerActorAdapter player_actor(snf::server::PlayerId{108});
+        const snf::worker::ActorTurnContext turn_ctx{
+            .activation = snf::worker::ActivationRef{},
+            .now = std::chrono::steady_clock::now(),
+            .turn_id = 1,
+        };
+
+        const snf::worker::ConnectionRef conn{
+            .id = snf::worker::ConnectionId{18}, .generation = snf::worker::ConnectionGeneration{1}, .owner = snf::worker::WorkerId{0}
+        };
+
+        auto auth_env = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerCommandMessage{
+            .connection = conn,
+            .request_id = 1,
+            .command = snf::server::AuthenticateCommand{.player = snf::server::PlayerId{108}},
+        });
+        static_cast<void>(player_actor.dispatch(std::move(auth_env), turn_ctx));
+
+        // Not in room: BattleStart is discarded without tell
+        auto bs_not_in_room = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerRoomRequestMessage{
+            .connection = conn,
+            .request_id = 10,
+            .request = snf::adapter::BattleStartRequest{.room = snf::server::RoomId{1}},
+        });
+        auto res1 = player_actor.dispatch(std::move(bs_not_in_room), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(res1));
+        assert(std::get<snf::worker::CompletedTurn>(res1).effects.empty());
+
+        // Join room 5 via saga
+        auto enter_env = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerZoneRequestMessage{
+            .connection = conn,
+            .request_id = 2,
+            .request = snf::adapter::EnterZoneRequest{
+                .zone = snf::server::ZoneId{10},
+                .position = snf::server::ZonePosition{.x = 5, .y = 5},
+            },
+        });
+        static_cast<void>(player_actor.dispatch(std::move(enter_env), turn_ctx));
+
+        auto zone_out = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneOutcomeMessage{
+            .player = snf::server::PlayerId{108},
+            .connection_generation = conn.generation,
+            .correlation_id = 1,
+            .step = snf::adapter::WorkflowStep::ZoneEnter,
+            .zone = snf::server::ZoneId{10},
+            .route_epoch = 1,
+            .request_id = 2,
+            .result = snf::server::ZoneResult{
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .player = snf::server::PlayerId{108},
+                .position = snf::server::ZonePosition{.x = 5, .y = 5},
+                .route_epoch = 1,
+                .tick = 0,
+                .visible_players = {},
+            },
+        });
+        static_cast<void>(player_actor.dispatch(std::move(zone_out), turn_ctx));
+
+        auto join_env = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerRoomRequestMessage{
+            .connection = conn,
+            .request_id = 3,
+            .request = snf::adapter::RoomJoinRequest{.room = snf::server::RoomId{5}},
+        });
+        static_cast<void>(player_actor.dispatch(std::move(join_env), turn_ctx));
+
+        auto room_out = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::RoomOutcomeMessage{
+            .player = snf::server::PlayerId{108},
+            .connection_generation = conn.generation,
+            .correlation_id = 2,
+            .step = snf::adapter::WorkflowStep::RoomJoinStep1_JoinRoom,
+            .room = snf::server::RoomId{5},
+            .request_id = 3,
+            .result = snf::server::RoomResult{
+                .status = snf::server::RoomCommandStatus::Applied,
+                .phase = snf::server::RoomPhase::Waiting,
+                .player = snf::server::PlayerId{108},
+                .deadline_after = std::nullopt,
+                .tick_after = std::nullopt,
+                .boss_health = 0,
+                .boss_spawned = false,
+                .digest = std::nullopt,
+                .outcome = std::nullopt,
+                .failure_reason = std::nullopt,
+                .audience = {},
+                .grants = {},
+            },
+        });
+        static_cast<void>(player_actor.dispatch(std::move(room_out), turn_ctx));
+
+        auto zone_leave_out = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneOutcomeMessage{
+            .player = snf::server::PlayerId{108},
+            .connection_generation = conn.generation,
+            .correlation_id = 2,
+            .step = snf::adapter::WorkflowStep::RoomJoinStep2_LeaveZone,
+            .zone = snf::server::ZoneId{10},
+            .route_epoch = 1,
+            .request_id = 3,
+            .result = snf::server::ZoneResult{
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .player = snf::server::PlayerId{108},
+                .position = std::nullopt,
+                .route_epoch = 1,
+                .tick = 0,
+                .visible_players = {},
+            },
+        });
+        static_cast<void>(player_actor.dispatch(std::move(zone_leave_out), turn_ctx));
+        assert(player_actor.isInRoom());
+        assert(player_actor.currentRoom() == snf::server::RoomId{5});
+
+        // Now in room 5: BattleStart for room 99 (different room!) is discarded
+        auto bs_wrong_room = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerRoomRequestMessage{
+            .connection = conn,
+            .request_id = 11,
+            .request = snf::adapter::BattleStartRequest{.room = snf::server::RoomId{99}},
+        });
+        auto res2 = player_actor.dispatch(std::move(bs_wrong_room), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(res2));
+        assert(std::get<snf::worker::CompletedTurn>(res2).effects.empty());
+
+        // BattleStart for room 5 (matching room!) is forwarded to Room 5
+        auto bs_matching_room = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerRoomRequestMessage{
+            .connection = conn,
+            .request_id = 12,
+            .request = snf::adapter::BattleStartRequest{.room = snf::server::RoomId{5}},
+        });
+        auto res3 = player_actor.dispatch(std::move(bs_matching_room), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(res3));
+        auto& comp3 = std::get<snf::worker::CompletedTurn>(res3);
+        assert(comp3.effects.size() == 1);
+        assert(std::holds_alternative<snf::worker::TellActorEffect>(comp3.effects.effects()[0]));
+        const auto& bs_tell = std::get<snf::worker::TellActorEffect>(comp3.effects.effects()[0]);
+        assert(bs_tell.target.kind == snf::worker::ActorKind::Room);
+        assert(bs_tell.target.entity == 5);
+    }
+
+    void test_room_terminal_outcome_initiates_return_saga()
+    {
+        snf::adapter::PlayerActorAdapter player_actor(snf::server::PlayerId{109});
+        const snf::worker::ActorTurnContext turn_ctx{
+            .activation = snf::worker::ActivationRef{},
+            .now = std::chrono::steady_clock::now(),
+            .turn_id = 1,
+        };
+
+        const snf::worker::ConnectionRef conn{
+            .id = snf::worker::ConnectionId{19}, .generation = snf::worker::ConnectionGeneration{1}, .owner = snf::worker::WorkerId{0}
+        };
+
+        // Authenticate & enter zone 10 & join room 1
+        auto auth_env = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerCommandMessage{
+            .connection = conn,
+            .request_id = 1,
+            .command = snf::server::AuthenticateCommand{.player = snf::server::PlayerId{109}},
+        });
+        static_cast<void>(player_actor.dispatch(std::move(auth_env), turn_ctx));
+
+        auto enter_env = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerZoneRequestMessage{
+            .connection = conn,
+            .request_id = 2,
+            .request = snf::adapter::EnterZoneRequest{
+                .zone = snf::server::ZoneId{10},
+                .position = snf::server::ZonePosition{.x = 12, .y = 34},
+            },
+        });
+        static_cast<void>(player_actor.dispatch(std::move(enter_env), turn_ctx));
+
+        auto zone_out = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneOutcomeMessage{
+            .player = snf::server::PlayerId{109},
+            .connection_generation = conn.generation,
+            .correlation_id = 1,
+            .step = snf::adapter::WorkflowStep::ZoneEnter,
+            .zone = snf::server::ZoneId{10},
+            .route_epoch = 1,
+            .request_id = 2,
+            .result = snf::server::ZoneResult{
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .player = snf::server::PlayerId{109},
+                .position = snf::server::ZonePosition{.x = 12, .y = 34},
+                .route_epoch = 1,
+                .tick = 0,
+                .visible_players = {},
+            },
+        });
+        static_cast<void>(player_actor.dispatch(std::move(zone_out), turn_ctx));
+
+        auto join_env = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerRoomRequestMessage{
+            .connection = conn,
+            .request_id = 3,
+            .request = snf::adapter::RoomJoinRequest{.room = snf::server::RoomId{1}},
+        });
+        static_cast<void>(player_actor.dispatch(std::move(join_env), turn_ctx));
+
+        auto room_out = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::RoomOutcomeMessage{
+            .player = snf::server::PlayerId{109},
+            .connection_generation = conn.generation,
+            .correlation_id = 2,
+            .step = snf::adapter::WorkflowStep::RoomJoinStep1_JoinRoom,
+            .room = snf::server::RoomId{1},
+            .request_id = 3,
+            .result = snf::server::RoomResult{
+                .status = snf::server::RoomCommandStatus::Applied,
+                .phase = snf::server::RoomPhase::Waiting,
+                .player = snf::server::PlayerId{109},
+                .deadline_after = std::nullopt,
+                .tick_after = std::nullopt,
+                .boss_health = 0,
+                .boss_spawned = false,
+                .digest = std::nullopt,
+                .outcome = std::nullopt,
+                .failure_reason = std::nullopt,
+                .audience = {},
+                .grants = {},
+            },
+        });
+        static_cast<void>(player_actor.dispatch(std::move(room_out), turn_ctx));
+
+        auto zone_leave_out = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneOutcomeMessage{
+            .player = snf::server::PlayerId{109},
+            .connection_generation = conn.generation,
+            .correlation_id = 2,
+            .step = snf::adapter::WorkflowStep::RoomJoinStep2_LeaveZone,
+            .zone = snf::server::ZoneId{10},
+            .route_epoch = 1,
+            .request_id = 3,
+            .result = snf::server::ZoneResult{
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .player = snf::server::PlayerId{109},
+                .position = std::nullopt,
+                .route_epoch = 1,
+                .tick = 0,
+                .visible_players = {},
+            },
+        });
+        static_cast<void>(player_actor.dispatch(std::move(zone_leave_out), turn_ctx));
+        assert(player_actor.isInRoom());
+
+        // Room emits terminal notification: BattleCleared
+        auto term_out = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::RoomOutcomeMessage{
+            .player = snf::server::PlayerId{109},
+            .connection_generation = conn.generation,
+            .correlation_id = 0,
+            .step = snf::adapter::WorkflowStep::RoomTerminalNotification,
+            .room = snf::server::RoomId{1},
+            .request_id = 0,
+            .result = snf::server::RoomResult{
+                .status = snf::server::RoomCommandStatus::Applied,
+                .phase = snf::server::RoomPhase::Cleared,
+                .player = snf::server::PlayerId{109},
+                .deadline_after = std::nullopt,
+                .tick_after = std::nullopt,
+                .boss_health = 0,
+                .boss_spawned = false,
+                .digest = std::nullopt,
+                .outcome = snf::server::BattleOutcome::Cleared,
+                .failure_reason = std::nullopt,
+                .audience = {snf::server::PlayerId{109}},
+                .grants = {},
+            },
+        });
+        auto term_res = player_actor.dispatch(std::move(term_out), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(term_res));
+        auto& term_comp = std::get<snf::worker::CompletedTurn>(term_res);
+        assert(std::holds_alternative<snf::adapter::ReturningRoute>(player_actor.workflowState()));
+        assert(term_comp.effects.size() >= 1);
+        assert(std::holds_alternative<snf::worker::TellActorEffect>(term_comp.effects.effects()[0]));
+        const auto& return_tell = std::get<snf::worker::TellActorEffect>(term_comp.effects.effects()[0]);
+        assert(return_tell.target.kind == snf::worker::ActorKind::Zone);
+        assert(return_tell.target.entity == 10);
+
+        // Zone returns Applied for RoomReturnStep1_ZoneEnter
+        auto return_zone_out = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneOutcomeMessage{
+            .player = snf::server::PlayerId{109},
+            .connection_generation = conn.generation,
+            .correlation_id = 3,
+            .step = snf::adapter::WorkflowStep::RoomReturnStep1_ZoneEnter,
+            .zone = snf::server::ZoneId{10},
+            .route_epoch = 2,
+            .request_id = 0,
+            .result = snf::server::ZoneResult{
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .player = snf::server::PlayerId{109},
+                .position = snf::server::ZonePosition{.x = 12, .y = 34},
+                .route_epoch = 2,
+                .tick = 0,
+                .visible_players = {},
+            },
+        });
+        auto ret_res = player_actor.dispatch(std::move(return_zone_out), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(ret_res));
+        auto& ret_comp = std::get<snf::worker::CompletedTurn>(ret_res);
+        assert(ret_comp.effects.size() == 1);
+        assert(std::holds_alternative<snf::worker::SendFrameEffect>(ret_comp.effects.effects()[0]));
+        const auto& ret_frame = std::get<snf::worker::SendFrameEffect>(ret_comp.effects.effects()[0]);
+        assert(ret_frame.frame.type == snf::protocol::MessageType::ReturnedToZone);
+        assert(player_actor.currentZone() == snf::server::ZoneId{10});
+        assert(!player_actor.isInRoom());
+    }
+
+    void test_room_admission_pre_check_failure()
+    {
+        MockTimerAdmission admission(100);
+        snf::adapter::PlayerActorAdapter player_actor(snf::server::PlayerId{110}, &admission);
+        const snf::worker::ActorTurnContext turn_ctx{
+            .activation = snf::worker::ActivationRef{},
+            .now = std::chrono::steady_clock::now(),
+            .turn_id = 1,
+        };
+
+        const snf::worker::ConnectionRef conn{
+            .id = snf::worker::ConnectionId{20}, .generation = snf::worker::ConnectionGeneration{1}, .owner = snf::worker::WorkerId{0}
+        };
+
+        auto auth_env = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerCommandMessage{
+            .connection = conn,
+            .request_id = 1,
+            .command = snf::server::AuthenticateCommand{.player = snf::server::PlayerId{110}},
+        });
+        static_cast<void>(player_actor.dispatch(std::move(auth_env), turn_ctx));
+
+        auto enter_env = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerZoneRequestMessage{
+            .connection = conn,
+            .request_id = 2,
+            .request = snf::adapter::EnterZoneRequest{
+                .zone = snf::server::ZoneId{10},
+                .position = snf::server::ZonePosition{.x = 5, .y = 5},
+            },
+        });
+        static_cast<void>(player_actor.dispatch(std::move(enter_env), turn_ctx));
+
+        auto zone_out = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneOutcomeMessage{
+            .player = snf::server::PlayerId{110},
+            .connection_generation = conn.generation,
+            .correlation_id = 1,
+            .step = snf::adapter::WorkflowStep::ZoneEnter,
+            .zone = snf::server::ZoneId{10},
+            .route_epoch = 1,
+            .request_id = 2,
+            .result = snf::server::ZoneResult{
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .player = snf::server::PlayerId{110},
+                .position = snf::server::ZonePosition{.x = 5, .y = 5},
+                .route_epoch = 1,
+                .tick = 0,
+                .visible_players = {},
+            },
+        });
+        static_cast<void>(player_actor.dispatch(std::move(zone_out), turn_ctx));
+        assert(player_actor.currentZone() == snf::server::ZoneId{10});
+
+        // Set admission failure
+        admission.should_fail = true;
+
+        auto join_env = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerRoomRequestMessage{
+            .connection = conn,
+            .request_id = 3,
+            .request = snf::adapter::RoomJoinRequest{.room = snf::server::RoomId{1}},
+        });
+        auto join_res = player_actor.dispatch(std::move(join_env), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(join_res));
+        auto& join_comp = std::get<snf::worker::CompletedTurn>(join_res);
+        assert(join_comp.effects.size() == 1);
+        assert(std::holds_alternative<snf::worker::SendFrameEffect>(join_comp.effects.effects()[0]));
+        const auto& reply = std::get<snf::worker::SendFrameEffect>(join_comp.effects.effects()[0]);
+        assert(reply.frame.type == snf::protocol::MessageType::RoomJoined);
+        assert(reply.frame.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::RuntimeOverloaded));
+
+        // State unchanged: remains StableRoute(Zone 10)!
+        assert(player_actor.currentZone() == snf::server::ZoneId{10});
+        assert(!player_actor.isInRoom());
+    }
+
     void test_room_adapter_critical_deadline_pre_admission_success()
     {
         MockTimerAdmission admission(2048);
@@ -1173,6 +1943,24 @@ int main()
 
     test_zone_timeout_cleans_up_zone_participant();
     std::cout << "  - test_zone_timeout_cleans_up_zone_participant PASSED" << std::endl;
+
+    test_room_join_and_return_saga_round_trip();
+    std::cout << "  - test_room_join_and_return_saga_round_trip PASSED" << std::endl;
+
+    test_room_join_refusal_keeps_zone_route();
+    std::cout << "  - test_room_join_refusal_keeps_zone_route PASSED" << std::endl;
+
+    test_room_join_zone_leave_failure_compensates_and_keeps_zone_route();
+    std::cout << "  - test_room_join_zone_leave_failure_compensates_and_keeps_zone_route PASSED" << std::endl;
+
+    test_battle_start_only_allowed_when_in_room();
+    std::cout << "  - test_battle_start_only_allowed_when_in_room PASSED" << std::endl;
+
+    test_room_terminal_outcome_initiates_return_saga();
+    std::cout << "  - test_room_terminal_outcome_initiates_return_saga PASSED" << std::endl;
+
+    test_room_admission_pre_check_failure();
+    std::cout << "  - test_room_admission_pre_check_failure PASSED" << std::endl;
 
     test_room_adapter_critical_deadline_pre_admission_success();
     std::cout << "  - test_room_adapter_critical_deadline_pre_admission_success PASSED" << std::endl;
