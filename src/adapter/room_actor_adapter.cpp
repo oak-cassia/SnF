@@ -96,6 +96,7 @@ namespace snf::adapter
                     .reply_kind = command_reply_kind,
                     .now = context.now,
                     .audience_routes = routesOf(_player_connections),
+                    .reply_to = msg.reply_to,
                 };
 
                 if (!reservation.has_value())
@@ -146,6 +147,7 @@ namespace snf::adapter
                 .reply_kind = command_reply_kind,
                 .now = context.now,
                 .audience_routes = routesOf(_player_connections),
+                .reply_to = msg.reply_to,
             };
             auto effects = toEffects(turn_context, result);
             return snf::worker::CompletedTurn{.effects = std::move(effects)};

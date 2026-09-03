@@ -402,4 +402,22 @@ namespace snf::adapter
             .payload = std::move(payload),
         };
     }
+
+    snf::protocol::Frame encodeReturnedToZone(
+        const snf::server::ZoneId zone,
+        const snf::server::ZonePosition position,
+        const std::uint32_t request_id
+    )
+    {
+        std::vector<std::byte> payload;
+        payload.reserve(8 + 4 + 4);
+        append_u64(payload, zone.value);
+        append_u32(payload, static_cast<std::uint32_t>(position.x));
+        append_u32(payload, static_cast<std::uint32_t>(position.y));
+        return snf::protocol::Frame{
+            .type = snf::protocol::MessageType::ReturnedToZone,
+            .request_id = request_id,
+            .payload = std::move(payload),
+        };
+    }
 }

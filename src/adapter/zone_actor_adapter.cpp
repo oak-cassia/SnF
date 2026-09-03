@@ -38,6 +38,7 @@ namespace snf::adapter
                 .reply_kind = replyKind(msg.command),
                 .now = context.now,
                 .zone_empty = (_zone.playerCount() == 0),
+                .reply_to = msg.reply_to,
             };
             auto effects = toEffects(turn_ctx, result);
             return snf::worker::CompletedTurn{.effects = std::move(effects)};

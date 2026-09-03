@@ -3,24 +3,81 @@
 #include "snf/adapter/game_payloads.hpp"
 #include "snf/game/player.hpp"
 #include "snf/game/player_record.hpp"
+#include "snf/game/room_id.hpp"
 #include "snf/game/zone_id.hpp"
 #include "snf/worker/actor.hpp"
+#include "snf/worker/timer_queue.hpp"
 
 #include <chrono>
+#include <variant>
 
 namespace snf::adapter
 {
+    struct StableRoute
+    {
+        std::optional<snf::server::ZoneId> zone{std::nullopt};
+    };
+
+    struct EnteringRoute
+    {
+        snf::server::RoomId target_room{0};
+        snf::server::ZoneId source_zone{0};
+        std::uint64_t source_epoch{0};
+        snf::server::ZonePosition return_position{0, 0};
+        std::uint32_t request_id{0};
+        std::uint64_t correlation_id{0};
+        WorkflowStep step{WorkflowStep::RoomJoinStep1_JoinRoom};
+    };
+
+    struct InRoomRoute
+    {
+        snf::server::RoomId room{0};
+        snf::server::ZoneId return_zone{0};
+        snf::server::ZonePosition return_position{0, 0};
+    };
+
+    struct ReturningRoute
+    {
+        snf::server::RoomId source_room{0};
+        snf::server::ZoneId return_zone{0};
+        snf::server::ZonePosition return_position{0, 0};
+        std::uint64_t return_epoch{0};
+        std::uint32_t request_id{0};
+        std::uint64_t correlation_id{0};
+        WorkflowStep step{WorkflowStep::RoomReturnStep1_ZoneEnter};
+    };
+
+    using WorkflowState = std::variant<StableRoute, EnteringRoute, InRoomRoute, ReturningRoute>;
+
+    struct PendingZoneOperation
+    {
+        std::uint64_t correlation_id{0};
+        WorkflowStep step{WorkflowStep::None};
+        snf::server::ZoneId target_zone{0};
+        std::uint64_t target_epoch{0};
+        std::uint32_t request_id{0};
+    };
+
     class PlayerActorAdapter final : public snf::worker::ActorInstance
     {
     public:
-        explicit PlayerActorAdapter(std::optional<snf::server::PlayerId> player_id = std::nullopt)
+        explicit PlayerActorAdapter(
+            std::optional<snf::server::PlayerId> player_id = std::nullopt,
+            snf::worker::TimerAdmission* timer_admission = nullptr
+        )
             : _player(player_id)
+            , _timer_admission(timer_admission)
         {
         }
 
         // Built from persisted state after an activation load.
-        PlayerActorAdapter(const snf::server::PlayerId player_id, const snf::server::PlayerRecord& record)
+        PlayerActorAdapter(
+            const snf::server::PlayerId player_id,
+            const snf::server::PlayerRecord& record,
+            snf::worker::TimerAdmission* timer_admission = nullptr
+        )
             : _player(player_id)
+            , _timer_admission(timer_admission)
         {
             _player.restore(record);
         }
@@ -69,12 +126,35 @@ namespace snf::adapter
 
         [[nodiscard]] std::optional<snf::server::ZoneId> currentZone() const noexcept
         {
-            return _current_zone;
+            if (std::holds_alternative<StableRoute>(_workflow_state))
+            {
+                return std::get<StableRoute>(_workflow_state).zone;
+            }
+            return std::nullopt;
         }
 
         [[nodiscard]] std::uint64_t routeEpoch() const noexcept
         {
             return _route_epoch;
+        }
+
+        [[nodiscard]] const WorkflowState& workflowState() const noexcept
+        {
+            return _workflow_state;
+        }
+
+        [[nodiscard]] bool isInRoom() const noexcept
+        {
+            return std::holds_alternative<InRoomRoute>(_workflow_state);
+        }
+
+        [[nodiscard]] std::optional<snf::server::RoomId> currentRoom() const noexcept
+        {
+            if (std::holds_alternative<InRoomRoute>(_workflow_state))
+            {
+                return std::get<InRoomRoute>(_workflow_state).room;
+            }
+            return std::nullopt;
         }
 
     private:
@@ -83,12 +163,19 @@ namespace snf::adapter
             const std::optional<snf::worker::ConnectionRef>& connection
         );
         [[nodiscard]] snf::worker::TurnResult handleZoneRequest(PlayerZoneRequestMessage&& msg, const snf::worker::ActorTurnContext& context);
+        [[nodiscard]] snf::worker::TurnResult handleRoomRequest(PlayerRoomRequestMessage&& msg, const snf::worker::ActorTurnContext& context);
+        [[nodiscard]] snf::worker::TurnResult handleZoneOutcome(ZoneOutcomeMessage&& msg, const snf::worker::ActorTurnContext& context);
+        [[nodiscard]] snf::worker::TurnResult handleRoomOutcome(RoomOutcomeMessage&& msg, const snf::worker::ActorTurnContext& context);
+        [[nodiscard]] snf::worker::TurnResult handleWorkflowTimeout(PlayerWorkflowTimeoutMessage&& msg, const snf::worker::ActorTurnContext& context);
 
         snf::server::Player _player;
+        snf::worker::TimerAdmission* _timer_admission{nullptr};
         // player -> connection. The sink owns connection -> player.
         std::optional<snf::worker::ConnectionRef> _bound_connection{std::nullopt};
-        std::optional<snf::server::ZoneId> _current_zone{std::nullopt};
+        WorkflowState _workflow_state{StableRoute{}};
         std::uint64_t _route_epoch{0};
+        std::uint64_t _correlation_sequence{0};
+        std::optional<PendingZoneOperation> _pending_zone_op{std::nullopt};
         std::uint64_t _authentication_conflicts{0};
         std::chrono::milliseconds _save_interval{std::chrono::seconds{5}};
         // Only one save timer may be outstanding. The actor is Suspended for the

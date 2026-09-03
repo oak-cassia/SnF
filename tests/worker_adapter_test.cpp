@@ -227,6 +227,402 @@ namespace
         assert(std::holds_alternative<snf::worker::StopActorEffect>(leave_completed.effects.effects()[1]));
     }
 
+    void test_zone_adapter_outcome_reply_to_player()
+    {
+        snf::adapter::ZoneActorAdapter zone_actor(snf::server::ZoneId{1});
+        const snf::worker::ActorTurnContext turn_ctx{
+            .activation = snf::worker::ActivationRef{},
+            .now = std::chrono::steady_clock::now(),
+        };
+
+        auto enter_envelope = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneCommandMessage{
+            .connection = std::nullopt,
+            .request_id = 12,
+            .command =
+                snf::server::EnterZoneCommand{
+                    .player = snf::server::PlayerId{101},
+                    .route_epoch = 1,
+                    .position = snf::server::ZonePosition{.x = 10, .y = 20},
+                },
+            .reply_to =
+                snf::adapter::WorkflowReplyTo{
+                    .player = snf::server::PlayerId{101},
+                    .connection_generation = snf::worker::ConnectionGeneration{1},
+                    .correlation_id = 42,
+                    .step = snf::adapter::WorkflowStep::ZoneEnter,
+                    .route_epoch = 1,
+                    .request_id = 12,
+                },
+        });
+
+        auto result = zone_actor.dispatch(std::move(enter_envelope), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(result));
+        auto& completed = std::get<snf::worker::CompletedTurn>(result);
+        assert(completed.effects.size() == 2);
+        assert(std::holds_alternative<snf::worker::TellActorEffect>(completed.effects.effects()[0]));
+        const auto& tell = std::get<snf::worker::TellActorEffect>(completed.effects.effects()[0]);
+        assert(tell.target.kind == snf::worker::ActorKind::Player);
+        assert(tell.target.entity == 101);
+        assert(tell.message.is<snf::adapter::ZoneOutcomeMessage>());
+        const auto& outcome = tell.message.get<snf::adapter::ZoneOutcomeMessage>();
+        assert(outcome.correlation_id == 42);
+        assert(outcome.step == snf::adapter::WorkflowStep::ZoneEnter);
+        assert(outcome.result.status == snf::server::ZoneCommandStatus::Applied);
+        assert(outcome.result.position.has_value());
+        assert(outcome.result.position->x == 10);
+        assert(outcome.result.position->y == 20);
+    }
+
+    void test_player_persists_zone_location_on_save()
+    {
+        snf::adapter::PlayerActorAdapter player_actor(snf::server::PlayerId{101});
+        const snf::worker::ActorTurnContext turn_ctx{
+            .activation = snf::worker::ActivationRef{},
+            .now = std::chrono::steady_clock::now(),
+        };
+
+        const snf::worker::ConnectionRef conn{
+            .id = snf::worker::ConnectionId{5}, .generation = snf::worker::ConnectionGeneration{1}, .owner = snf::worker::WorkerId{0}
+        };
+
+        auto auth_envelope = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerCommandMessage{
+            .connection = conn,
+            .request_id = 1,
+            .command = snf::server::AuthenticateCommand{.player = snf::server::PlayerId{101}},
+        });
+        auto auth_res = player_actor.dispatch(std::move(auth_envelope), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(auth_res));
+
+        auto enter_envelope = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerZoneRequestMessage{
+            .connection = conn,
+            .request_id = 2,
+            .request = snf::adapter::EnterZoneRequest{
+                .zone = snf::server::ZoneId{10},
+                .position = snf::server::ZonePosition{.x = 15, .y = 25},
+            },
+        });
+        auto enter_res = player_actor.dispatch(std::move(enter_envelope), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(enter_res));
+        assert(!player_actor.currentZone().has_value());
+        assert(!player_actor.player().state().lastLocation().has_value());
+
+        auto enter_outcome = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneOutcomeMessage{
+            .player = snf::server::PlayerId{101},
+            .connection_generation = conn.generation,
+            .correlation_id = 1,
+            .step = snf::adapter::WorkflowStep::ZoneEnter,
+            .zone = snf::server::ZoneId{10},
+            .route_epoch = 1,
+            .request_id = 2,
+            .result = snf::server::ZoneResult{
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .player = snf::server::PlayerId{101},
+                .position = snf::server::ZonePosition{.x = 15, .y = 25},
+                .route_epoch = 1,
+                .tick = 0,
+                .visible_players = {},
+            },
+        });
+        auto enter_out_res = player_actor.dispatch(std::move(enter_outcome), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(enter_out_res));
+        assert(player_actor.currentZone() == snf::server::ZoneId{10});
+        assert(player_actor.player().state().lastLocation().has_value());
+        assert(player_actor.player().state().lastLocation()->zone == snf::server::ZoneId{10});
+        assert(player_actor.player().state().lastLocation()->position.x == 15);
+        assert(player_actor.player().state().lastLocation()->position.y == 25);
+
+        auto move_envelope = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerZoneRequestMessage{
+            .connection = conn,
+            .request_id = 3,
+            .request = snf::adapter::MoveRequest{
+                .position = snf::server::ZonePosition{.x = 35, .y = 45},
+            },
+        });
+        auto move_res = player_actor.dispatch(std::move(move_envelope), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(move_res));
+
+        auto move_outcome = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneOutcomeMessage{
+            .player = snf::server::PlayerId{101},
+            .connection_generation = conn.generation,
+            .correlation_id = 2,
+            .step = snf::adapter::WorkflowStep::ZoneMove,
+            .zone = snf::server::ZoneId{10},
+            .route_epoch = 1,
+            .request_id = 3,
+            .result = snf::server::ZoneResult{
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .player = snf::server::PlayerId{101},
+                .position = snf::server::ZonePosition{.x = 35, .y = 45},
+                .route_epoch = 1,
+                .tick = 0,
+                .visible_players = {},
+            },
+        });
+        auto move_out_res = player_actor.dispatch(std::move(move_outcome), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(move_out_res));
+
+        assert(player_actor.player().state().lastLocation().has_value());
+        assert(player_actor.player().state().lastLocation()->position.x == 35);
+        assert(player_actor.player().state().lastLocation()->position.y == 45);
+
+        const auto record = player_actor.player().snapshot();
+        assert(record.last_location.has_value());
+        assert(record.last_location->zone == snf::server::ZoneId{10});
+        assert(record.last_location->position.x == 35);
+        assert(record.last_location->position.y == 45);
+
+        auto leave_envelope = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerZoneRequestMessage{
+            .connection = conn,
+            .request_id = 4,
+            .request = snf::adapter::LeaveRequest{},
+        });
+        auto leave_res = player_actor.dispatch(std::move(leave_envelope), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(leave_res));
+
+        auto leave_outcome = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneOutcomeMessage{
+            .player = snf::server::PlayerId{101},
+            .connection_generation = conn.generation,
+            .correlation_id = 3,
+            .step = snf::adapter::WorkflowStep::ZoneLeave,
+            .zone = snf::server::ZoneId{10},
+            .route_epoch = 1,
+            .request_id = 4,
+            .result = snf::server::ZoneResult{
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .player = snf::server::PlayerId{101},
+                .position = std::nullopt,
+                .route_epoch = 1,
+                .tick = 0,
+                .visible_players = {},
+            },
+        });
+        auto leave_out_res = player_actor.dispatch(std::move(leave_outcome), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(leave_out_res));
+        assert(!player_actor.currentZone().has_value());
+        assert(!player_actor.player().state().lastLocation().has_value());
+        const auto leave_record = player_actor.player().snapshot();
+        assert(!leave_record.last_location.has_value());
+    }
+
+    void test_zone_tell_timeout_rolls_back_unconfirmed_route()
+    {
+        MockTimerAdmission admission(10000);
+        snf::adapter::PlayerActorAdapter player_actor(snf::server::PlayerId{102}, &admission);
+        const snf::worker::ActorTurnContext turn_ctx{
+            .activation = snf::worker::ActivationRef{},
+            .now = std::chrono::steady_clock::now(),
+            .turn_id = 1,
+        };
+
+        const snf::worker::ConnectionRef conn{
+            .id = snf::worker::ConnectionId{6}, .generation = snf::worker::ConnectionGeneration{1}, .owner = snf::worker::WorkerId{0}
+        };
+
+        auto auth_envelope = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerCommandMessage{
+            .connection = conn,
+            .request_id = 1,
+            .command = snf::server::AuthenticateCommand{.player = snf::server::PlayerId{102}},
+        });
+        auto auth_res = player_actor.dispatch(std::move(auth_envelope), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(auth_res));
+
+        auto enter_envelope = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerZoneRequestMessage{
+            .connection = conn,
+            .request_id = 10,
+            .request = snf::adapter::EnterZoneRequest{
+                .zone = snf::server::ZoneId{20},
+                .position = snf::server::ZonePosition{.x = 0, .y = 0},
+            },
+        });
+        auto enter_res = player_actor.dispatch(std::move(enter_envelope), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(enter_res));
+        assert(!player_actor.currentZone().has_value());
+
+        auto timeout_envelope = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerWorkflowTimeoutMessage{
+            .correlation_id = 1,
+            .step = snf::adapter::WorkflowStep::ZoneEnter,
+        });
+        auto timeout_res = player_actor.dispatch(std::move(timeout_envelope), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(timeout_res));
+        auto& timeout_completed = std::get<snf::worker::CompletedTurn>(timeout_res);
+        assert(timeout_completed.effects.size() == 2);
+        assert(std::holds_alternative<snf::worker::TellActorEffect>(timeout_completed.effects.effects()[0]));
+        const auto& cleanup_tell = std::get<snf::worker::TellActorEffect>(timeout_completed.effects.effects()[0]);
+        assert(cleanup_tell.target.kind == snf::worker::ActorKind::Zone);
+        assert(cleanup_tell.target.entity == 20);
+
+        assert(std::holds_alternative<snf::worker::SendFrameEffect>(timeout_completed.effects.effects()[1]));
+        const auto& reply_frame = std::get<snf::worker::SendFrameEffect>(timeout_completed.effects.effects()[1]);
+        assert(reply_frame.frame.type == snf::protocol::MessageType::ZoneEntered);
+        assert(reply_frame.frame.request_id == 10);
+        assert(reply_frame.frame.payload[0] == static_cast<std::byte>(snf::server::ZoneCommandStatus::TransferFailed));
+        assert(!player_actor.currentZone().has_value());
+    }
+
+    void test_stale_correlation_and_epoch_ignored()
+    {
+        snf::adapter::PlayerActorAdapter player_actor(snf::server::PlayerId{103});
+        const snf::worker::ActorTurnContext turn_ctx{
+            .activation = snf::worker::ActivationRef{},
+            .now = std::chrono::steady_clock::now(),
+            .turn_id = 2,
+        };
+
+        const snf::worker::ConnectionRef conn{
+            .id = snf::worker::ConnectionId{8}, .generation = snf::worker::ConnectionGeneration{1}, .owner = snf::worker::WorkerId{0}
+        };
+
+        auto auth_envelope = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerCommandMessage{
+            .connection = conn,
+            .request_id = 1,
+            .command = snf::server::AuthenticateCommand{.player = snf::server::PlayerId{103}},
+        });
+        auto auth_res = player_actor.dispatch(std::move(auth_envelope), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(auth_res));
+
+        auto enter_envelope = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerZoneRequestMessage{
+            .connection = conn,
+            .request_id = 5,
+            .request = snf::adapter::EnterZoneRequest{
+                .zone = snf::server::ZoneId{30},
+                .position = snf::server::ZonePosition{.x = 1, .y = 1},
+            },
+        });
+        auto enter_res = player_actor.dispatch(std::move(enter_envelope), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(enter_res));
+
+        auto stale_outcome = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneOutcomeMessage{
+            .player = snf::server::PlayerId{103},
+            .connection_generation = conn.generation,
+            .correlation_id = 99,
+            .step = snf::adapter::WorkflowStep::ZoneEnter,
+            .zone = snf::server::ZoneId{30},
+            .route_epoch = 1,
+            .request_id = 5,
+            .result = snf::server::ZoneResult{
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .player = snf::server::PlayerId{103},
+                .position = std::nullopt,
+                .route_epoch = 1,
+                .tick = 0,
+                .visible_players = {},
+            },
+        });
+        auto stale_res = player_actor.dispatch(std::move(stale_outcome), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(stale_res));
+        assert(std::get<snf::worker::CompletedTurn>(stale_res).effects.empty());
+        assert(!player_actor.currentZone().has_value());
+
+        auto valid_outcome = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneOutcomeMessage{
+            .player = snf::server::PlayerId{103},
+            .connection_generation = conn.generation,
+            .correlation_id = 1,
+            .step = snf::adapter::WorkflowStep::ZoneEnter,
+            .zone = snf::server::ZoneId{30},
+            .route_epoch = 1,
+            .request_id = 5,
+            .result = snf::server::ZoneResult{
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .player = snf::server::PlayerId{103},
+                .position = snf::server::ZonePosition{.x = 1, .y = 1},
+                .route_epoch = 1,
+                .tick = 0,
+                .visible_players = {},
+            },
+        });
+        auto valid_res = player_actor.dispatch(std::move(valid_outcome), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(valid_res));
+        assert(player_actor.currentZone() == snf::server::ZoneId{30});
+
+        auto dup_outcome = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneOutcomeMessage{
+            .player = snf::server::PlayerId{103},
+            .connection_generation = conn.generation,
+            .correlation_id = 1,
+            .step = snf::adapter::WorkflowStep::ZoneEnter,
+            .zone = snf::server::ZoneId{30},
+            .route_epoch = 1,
+            .request_id = 5,
+            .result = snf::server::ZoneResult{
+                .status = snf::server::ZoneCommandStatus::Applied,
+                .player = snf::server::PlayerId{103},
+                .position = snf::server::ZonePosition{.x = 99, .y = 99},
+                .route_epoch = 1,
+                .tick = 0,
+                .visible_players = {},
+            },
+        });
+        auto dup_res = player_actor.dispatch(std::move(dup_outcome), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(dup_res));
+        assert(std::get<snf::worker::CompletedTurn>(dup_res).effects.empty());
+        assert(player_actor.player().state().lastLocation()->position.x == 1);
+    }
+
+    void test_zone_timeout_cleans_up_zone_participant()
+    {
+        MockTimerAdmission admission(10000);
+        snf::adapter::PlayerActorAdapter player_actor(snf::server::PlayerId{104}, &admission);
+        snf::adapter::ZoneActorAdapter zone_actor(snf::server::ZoneId{50});
+        const snf::worker::ActorTurnContext turn_ctx{
+            .activation = snf::worker::ActivationRef{},
+            .now = std::chrono::steady_clock::now(),
+            .turn_id = 1,
+        };
+
+        const snf::worker::ConnectionRef conn{
+            .id = snf::worker::ConnectionId{9}, .generation = snf::worker::ConnectionGeneration{1}, .owner = snf::worker::WorkerId{0}
+        };
+
+        auto auth_envelope = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerCommandMessage{
+            .connection = conn,
+            .request_id = 1,
+            .command = snf::server::AuthenticateCommand{.player = snf::server::PlayerId{104}},
+        });
+        static_cast<void>(player_actor.dispatch(std::move(auth_envelope), turn_ctx));
+
+        // Player requests EnterZone
+        auto enter_envelope = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerZoneRequestMessage{
+            .connection = conn,
+            .request_id = 10,
+            .request = snf::adapter::EnterZoneRequest{
+                .zone = snf::server::ZoneId{50},
+                .position = snf::server::ZonePosition{.x = 5, .y = 5},
+            },
+        });
+        auto enter_res = player_actor.dispatch(std::move(enter_envelope), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(enter_res));
+        auto& enter_completed = std::get<snf::worker::CompletedTurn>(enter_res);
+
+        // Zone receives EnterZoneCommand and applies it
+        auto& tell_effect = std::get<snf::worker::TellActorEffect>(enter_completed.effects.mutableEffects()[0]);
+        auto zone_res = zone_actor.dispatch(std::move(tell_effect.message), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(zone_res));
+        assert(zone_actor.zone().playerCount() == 1);
+
+        // Suppose the ZoneOutcomeMessage was lost in network/mailbox. PlayerActor timeout fires!
+        auto timeout_envelope = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerWorkflowTimeoutMessage{
+            .correlation_id = 1,
+            .step = snf::adapter::WorkflowStep::ZoneEnter,
+        });
+        auto timeout_res = player_actor.dispatch(std::move(timeout_envelope), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(timeout_res));
+        auto& timeout_completed = std::get<snf::worker::CompletedTurn>(timeout_res);
+
+        // PlayerActor emitted cleanup LeaveZone tell to Zone 50
+        assert(timeout_completed.effects.size() == 2);
+        assert(std::holds_alternative<snf::worker::TellActorEffect>(timeout_completed.effects.effects()[0]));
+        auto& cleanup_tell = std::get<snf::worker::TellActorEffect>(timeout_completed.effects.mutableEffects()[0]);
+        assert(cleanup_tell.target.kind == snf::worker::ActorKind::Zone);
+        assert(cleanup_tell.target.entity == 50);
+
+        // Zone receives cleanup LeaveZoneCommand: player count drops back to 0!
+        auto zone_cleanup_res = zone_actor.dispatch(std::move(cleanup_tell.message), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(zone_cleanup_res));
+        assert(zone_actor.zone().playerCount() == 0);
+
+        // Player route remains unconfirmed
+        assert(!player_actor.currentZone().has_value());
+    }
+
     void test_room_adapter_critical_deadline_pre_admission_success()
     {
         MockTimerAdmission admission(2048);
@@ -762,6 +1158,21 @@ int main()
 
     test_zone_adapter_and_to_effects();
     std::cout << "  - test_zone_adapter_and_to_effects PASSED" << std::endl;
+
+    test_zone_adapter_outcome_reply_to_player();
+    std::cout << "  - test_zone_adapter_outcome_reply_to_player PASSED" << std::endl;
+
+    test_player_persists_zone_location_on_save();
+    std::cout << "  - test_player_persists_zone_location_on_save PASSED" << std::endl;
+
+    test_zone_tell_timeout_rolls_back_unconfirmed_route();
+    std::cout << "  - test_zone_tell_timeout_rolls_back_unconfirmed_route PASSED" << std::endl;
+
+    test_stale_correlation_and_epoch_ignored();
+    std::cout << "  - test_stale_correlation_and_epoch_ignored PASSED" << std::endl;
+
+    test_zone_timeout_cleans_up_zone_participant();
+    std::cout << "  - test_zone_timeout_cleans_up_zone_participant PASSED" << std::endl;
 
     test_room_adapter_critical_deadline_pre_admission_success();
     std::cout << "  - test_room_adapter_critical_deadline_pre_admission_success PASSED" << std::endl;

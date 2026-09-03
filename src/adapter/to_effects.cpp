@@ -68,7 +68,23 @@ namespace snf::adapter
     {
         snf::worker::EffectBatch batch;
 
-        if (context.connection.has_value() && context.reply_kind.has_value())
+        if (context.reply_to.has_value())
+        {
+            batch.push(snf::worker::TellActorEffect{
+                .target = snf::worker::ActorKey{snf::worker::ActorKind::Player, context.reply_to->player.value},
+                .message = GameActorPayloadRegistry::create(ZoneOutcomeMessage{
+                    .player = context.reply_to->player,
+                    .connection_generation = context.reply_to->connection_generation,
+                    .correlation_id = context.reply_to->correlation_id,
+                    .step = context.reply_to->step,
+                    .zone = context.zone,
+                    .route_epoch = context.reply_to->route_epoch,
+                    .request_id = context.request_id,
+                    .result = result,
+                }),
+            });
+        }
+        else if (context.connection.has_value() && context.reply_kind.has_value())
         {
             batch.push(snf::worker::SendFrameEffect{
                 .connection = *context.connection,
@@ -112,7 +128,22 @@ namespace snf::adapter
             });
         }
 
-        if (context.connection.has_value() && context.reply_kind.has_value())
+        if (context.reply_to.has_value())
+        {
+            batch.push(snf::worker::TellActorEffect{
+                .target = snf::worker::ActorKey{snf::worker::ActorKind::Player, context.reply_to->player.value},
+                .message = GameActorPayloadRegistry::create(RoomOutcomeMessage{
+                    .player = context.reply_to->player,
+                    .connection_generation = context.reply_to->connection_generation,
+                    .correlation_id = context.reply_to->correlation_id,
+                    .step = context.reply_to->step,
+                    .room = context.room,
+                    .request_id = context.request_id,
+                    .result = result,
+                }),
+            });
+        }
+        else if (context.connection.has_value() && context.reply_kind.has_value())
         {
             batch.push(snf::worker::SendFrameEffect{
                 .connection = *context.connection,
@@ -196,6 +227,26 @@ namespace snf::adapter
                     .target = player_key,
                     .message = GameActorPayloadRegistry::create(ExperienceGrantMessage{
                         .grant = grant,
+                    }),
+                });
+            }
+
+            for (const auto player : result.audience)
+            {
+                const snf::worker::ActorKey player_key{
+                    .kind = snf::worker::ActorKind::Player,
+                    .entity = player.value,
+                };
+                batch.push(snf::worker::TellActorEffect{
+                    .target = player_key,
+                    .message = GameActorPayloadRegistry::create(RoomOutcomeMessage{
+                        .player = player,
+                        .connection_generation = snf::worker::ConnectionGeneration{},
+                        .correlation_id = 0,
+                        .step = WorkflowStep::RoomTerminalNotification,
+                        .room = context.room,
+                        .request_id = 0,
+                        .result = result,
                     }),
                 });
             }

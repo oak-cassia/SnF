@@ -36,6 +36,7 @@ namespace snf::adapter
         std::optional<ZoneReplyFrameKind> reply_kind{std::nullopt};
         std::chrono::steady_clock::time_point now{};
         bool zone_empty{false};
+        std::optional<WorkflowReplyTo> reply_to{std::nullopt};
     };
 
     struct PreparedRoomTimer
@@ -59,6 +60,7 @@ namespace snf::adapter
         std::optional<RoomReplyFrameKind> reply_kind{std::nullopt};
         std::chrono::steady_clock::time_point now{};
         std::vector<RoomAudienceRoute> audience_routes{};
+        std::optional<WorkflowReplyTo> reply_to{std::nullopt};
     };
 
     [[nodiscard]] snf::worker::EffectBatch toEffects(const PlayerTurnContext& context, const snf::server::PlayerResult& result);

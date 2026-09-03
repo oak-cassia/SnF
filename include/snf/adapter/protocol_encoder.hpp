@@ -48,4 +48,9 @@ namespace snf::adapter
     [[nodiscard]] snf::protocol::Frame encodeBattleCleared(std::uint64_t experience, std::uint32_t request_id = 0);
 
     [[nodiscard]] snf::protocol::Frame encodeBattleFailure(const snf::server::RoomResult& result, std::uint32_t request_id = 0);
+    [[nodiscard]] snf::protocol::Frame encodeReturnedToZone(
+        snf::server::ZoneId zone,
+        snf::server::ZonePosition position,
+        std::uint32_t request_id = 0
+    );
 }
