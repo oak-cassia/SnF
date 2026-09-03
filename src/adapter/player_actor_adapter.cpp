@@ -169,6 +169,18 @@ namespace snf::adapter
             return snf::worker::CompletedTurn{.effects = std::move(effects)};
         }
 
+        if (envelope.is<PlayerConnectionClosedMessage>())
+        {
+            auto msg = envelope.take<PlayerConnectionClosedMessage>();
+            // Generation-checked: a close notice for a previous incarnation of the
+            // slot must not unbind the connection currently authenticated.
+            if (_bound_connection.has_value() && *_bound_connection == msg.connection)
+            {
+                _bound_connection.reset();
+            }
+            return snf::worker::CompletedTurn{.effects = snf::worker::EffectBatch{}};
+        }
+
         if (envelope.is<PingMessage>())
         {
             auto msg = envelope.take<PingMessage>();

@@ -133,7 +133,8 @@ mailbox full / 용량 초과   → Rejected  (overload는 연결 종료가 맞�
 | 스텝 | 상태 | 비고 |
 | --- | --- | --- |
 | 11A | **완료** | 아래 "11A 결과" 참고 |
-| 11B~11K | 미착수 | |
+| 11B | **완료** | 아래 "11B 결과" 참고 |
+| 11C~11K | 미착수 | |
 
 ### 11A 결과
 
@@ -141,6 +142,10 @@ mailbox full / 용량 초과   → Rejected  (overload는 연결 종료가 맞�
 - legacy `PlayerAttachResult` 6개 결과값에 각각 owner를 배정하고 `worker_session_test.cpp`로 고정했다.
 - session entry는 connection id로 키를 잡고 generation을 함께 검증한다. close 통지를 놓친 stale entry가
   재사용된 slot에 이전 player의 세션을 넘기지 않고 fail closed된다.
+- `RequestSink`에 "Worker마다 1 인스턴스" 계약을 명시하고 sink가 owner thread를 debug assertion으로 고정했다.
+- 관측용 live session count만 atomic mirror다. map 자체는 다른 thread에서 읽지 않는다. 이 규칙을 어긴
+  **테스트 자신이 TSan data race로 잡혔고**, 제품 코드를 우회하지 않고 테스트가 계약을 따르도록 고쳤다.
+
 #### 의도적 parity 변경 2건 (승인 2026-09-03)
 
 **Pre-auth `Ping`은 state-free liveness operation으로 정의한다.** sink가 직접 `Pong`으로 답하고 ActorSlot,
@@ -168,9 +173,30 @@ Unauthenticated
 | `test_pre_auth_ping_is_answered_without_an_actor` | Pong 수신, `actor_turns == 0`, session entry 없음 |
 | `test_pre_auth_ping_does_not_block_authentication` | Ping → Pong → Authenticate 성공, 전체 흐름에서 `actor_turns == 1` (Ping은 turn을 만들지 않았다) |
 | `test_only_ping_and_authenticate_cross_the_pre_auth_boundary` | 나머지 client frame 10종 전부 인증 전 거절. **11B 이후 라우팅이 추가돼도 계속 성립해야 한다** |
-- `RequestSink`에 "Worker마다 1 인스턴스" 계약을 명시하고 sink가 owner thread를 debug assertion으로 고정했다.
-- 관측용 live session count만 atomic mirror다. map 자체는 다른 thread에서 읽지 않는다. 이 규칙을 어긴
-  **테스트 자신이 TSan data race로 잡혔고**, 계약대로 고쳤다.
+
+### 11B 결과
+
+- `Purchase`(12바이트: 8바이트 idempotency key + 4바이트 product id)와 `EquipSkill`(4바이트 skill id)을
+  legacy dispatcher와 같은 wire form으로 디코딩해 세션의 player actor로 라우팅한다. 둘 다 non-zero 검사까지
+  동일하다.
+- 도메인 실패는 D4대로 `Accepted` + 응답 프레임이다. `SkillNotOwned`가 응답으로 돌아오는 것을 테스트가
+  확인한다. `Rejected`는 mailbox full 같은 overload에만 쓴다.
+- 라우팅이 실제 도메인에 닿았는지는 **같은 idempotency key 재전송**으로 증명한다. 두 번째 응답이
+  `replayed = 1`이고 잔액이 두 번 줄지 않았다는 것은 두 프레임이 같은 Player 상태를 봤다는 뜻이다.
+
+#### 구현 중 발견한 격차 (수정함)
+
+`PlayerActor`가 **bound connection이 닫힌 것을 알 방법이 없었다.** 그래서 한 번 접속한 player는 연결이
+끊긴 뒤 재접속하면 자기 자신과 PlayerConflict가 나서 영구히 로그인할 수 없었다. legacy는
+`PlayerSessionDirectory`가 close 시 양방향 entry를 지웠고 통합 테스트
+`test_authenticates_one_session_and_allows_reconnect_after_passivation`이 이를 덮고 있었다.
+
+수정: sink가 `onConnectionClosed`에서 `PlayerConnectionClosedMessage`를 player actor에게 보내고, actor는
+`ConnectionRef`가 정확히 일치할 때만 binding을 해제한다(generation까지 비교하므로 이전 incarnation의 close
+통지가 현재 세션을 끊지 못한다). `test_the_same_player_can_reconnect_after_disconnecting`이 고정한다.
+
+이 release가 turn을 하나 만들기 때문에, 정확한 turn 수를 검사하는 테스트는 먼저 연결을 끊고 session release가
+끝나기를 기다린 뒤에 검사한다. shutdown 순서에 의존하지 않게 하려는 것이다.
 
 ## 검증
 

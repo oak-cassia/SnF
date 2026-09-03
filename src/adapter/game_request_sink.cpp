@@ -35,6 +35,57 @@ namespace snf::adapter
         {
             return snf::worker::ActorKey{.kind = snf::worker::ActorKind::Player, .entity = player.value};
         }
+
+        // Big-endian unsigned integer over an exact byte range.
+        template <class Value>
+        [[nodiscard]] Value decodeBigEndian(const std::vector<std::byte>& payload, const std::size_t offset, const std::size_t size) noexcept
+        {
+            Value value = 0;
+            for (std::size_t index = offset; index < offset + size; ++index)
+            {
+                value = static_cast<Value>((value << 8U) | std::to_integer<Value>(payload[index]));
+            }
+            return value;
+        }
+
+        constexpr std::size_t PURCHASE_WIRE_SIZE = 12;
+        constexpr std::size_t EQUIP_SKILL_WIRE_SIZE = 4;
+
+        // 8-byte idempotency key then a 4-byte product id, both non-zero. Same
+        // wire form the legacy dispatcher decoded.
+        [[nodiscard]] std::optional<snf::server::PlayerCommand> decodePurchase(const std::vector<std::byte>& payload)
+        {
+            if (payload.size() != PURCHASE_WIRE_SIZE)
+            {
+                return std::nullopt;
+            }
+            const auto key = decodeBigEndian<std::uint64_t>(payload, 0, 8);
+            const auto product = decodeBigEndian<std::uint32_t>(payload, 8, 4);
+            if (key == 0 || product == 0)
+            {
+                return std::nullopt;
+            }
+            return snf::server::PlayerCommand{snf::server::PurchaseCommand{
+                .idempotency_key = snf::server::PurchaseIdempotencyKey{.value = key},
+                .product = snf::server::ProductId{.value = product},
+            }};
+        }
+
+        [[nodiscard]] std::optional<snf::server::PlayerCommand> decodeEquipSkill(const std::vector<std::byte>& payload)
+        {
+            if (payload.size() != EQUIP_SKILL_WIRE_SIZE)
+            {
+                return std::nullopt;
+            }
+            const auto skill_id = decodeBigEndian<std::uint32_t>(payload, 0, EQUIP_SKILL_WIRE_SIZE);
+            if (skill_id == 0)
+            {
+                return std::nullopt;
+            }
+            return snf::server::PlayerCommand{snf::server::EquipSkillCommand{
+                .skill_id = snf::server::SkillId{.value = skill_id},
+            }};
+        }
     }
 
     void GameRequestSink::assertOwnerThread() noexcept
@@ -130,6 +181,41 @@ namespace snf::adapter
                    : snf::worker::RequestPostResult::Rejected;
     }
 
+    // Commands that belong to the authenticated player itself. The session gives
+    // the route, so there is no lookup beyond it.
+    snf::worker::RequestPostResult GameRequestSink::postPlayerCommand(
+        const snf::worker::ConnectionRef connection,
+        const snf::protocol::Frame& frame,
+        const PlayerCommandDecoder decoder
+    )
+    {
+        // Frame order: these need a persistent player, which is what the legacy
+        // requires_persistent_player check enforced before routing.
+        const auto player = playerFor(connection);
+        if (!player)
+        {
+            return snf::worker::RequestPostResult::Invalid;
+        }
+
+        auto command = decoder(frame.payload);
+        if (!command)
+        {
+            return snf::worker::RequestPostResult::Invalid;
+        }
+
+        auto envelope = GameActorPayloadRegistry::create(PlayerCommandMessage{
+            .connection = connection,
+            .request_id = frame.request_id,
+            .command = std::move(*command),
+        });
+        // A full mailbox is overload, not a domain failure, so it stays Rejected.
+        // Domain outcomes such as a refused purchase travel back as a response
+        // frame from the actor turn instead.
+        return _worker->tell(playerKey(*player), std::move(envelope)) == snf::worker::DeliveryResult::Accepted
+                   ? snf::worker::RequestPostResult::Accepted
+                   : snf::worker::RequestPostResult::Rejected;
+    }
+
     snf::worker::RequestPostResult GameRequestSink::tryPost(const snf::worker::ConnectionRef connection, snf::protocol::Frame&& frame)
     {
         assert(_worker != nullptr);
@@ -141,14 +227,17 @@ namespace snf::adapter
             return postAuthenticate(connection, frame);
         case snf::protocol::MessageType::Ping:
             return postPing(connection, std::move(frame));
+        case snf::protocol::MessageType::Purchase:
+            return postPlayerCommand(connection, frame, decodePurchase);
+        case snf::protocol::MessageType::EquipSkill:
+            return postPlayerCommand(connection, frame, decodeEquipSkill);
         default:
             break;
         }
 
-        // Every remaining game frame needs a persistent player, so an
-        // unauthenticated connection sending one has violated the frame order.
-        // Frames whose routing is not implemented yet are refused the same way
-        // the previous revision refused them.
+        // Frames whose routing is not implemented yet are refused the same way the
+        // previous revision refused them, which also keeps every one of them
+        // outside the pre-auth boundary.
         return snf::worker::RequestPostResult::Invalid;
     }
 
@@ -160,7 +249,16 @@ namespace snf::adapter
         {
             return;
         }
+
+        // Release the other half of the identity too. Without this the actor keeps
+        // the dead ConnectionRef and refuses this player's next connection as a
+        // conflict, so a disconnected player could never reconnect. A refused
+        // delivery is ignored: it means the actor is already gone, which releases
+        // the binding anyway.
+        const snf::server::PlayerId player = session->second.player;
         _sessions.erase(session);
         _live_sessions.fetch_sub(1, std::memory_order_relaxed);
+        static_cast<void>(_worker->tell(playerKey(player), GameActorPayloadRegistry::create(PlayerConnectionClosedMessage{.connection = connection}))
+        );
     }
 }

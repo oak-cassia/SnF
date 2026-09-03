@@ -1,5 +1,6 @@
 #pragma once
 
+#include "snf/game/player_command.hpp"
 #include "snf/game/player_id.hpp"
 #include "snf/worker/request_sink.hpp"
 #include "snf/worker/worker.hpp"
@@ -10,6 +11,7 @@
 #include <optional>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 namespace snf::adapter
 {
@@ -56,8 +58,15 @@ namespace snf::adapter
         // corrupt _sessions silently instead of failing.
         void assertOwnerThread() noexcept;
 
+        using PlayerCommandDecoder = std::optional<snf::server::PlayerCommand> (*)(const std::vector<std::byte>&);
+
         [[nodiscard]] snf::worker::RequestPostResult postAuthenticate(snf::worker::ConnectionRef connection, const snf::protocol::Frame& frame);
         [[nodiscard]] snf::worker::RequestPostResult postPing(snf::worker::ConnectionRef connection, snf::protocol::Frame&& frame);
+        [[nodiscard]] snf::worker::RequestPostResult postPlayerCommand(
+            snf::worker::ConnectionRef connection,
+            const snf::protocol::Frame& frame,
+            PlayerCommandDecoder decoder
+        );
 
         // Keyed by connection id, but the generation is stored and verified on
         // every lookup. A connection slot is reused with a new generation, so a

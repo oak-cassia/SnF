@@ -81,6 +81,15 @@ namespace snf::adapter
     {
         snf::server::PlayerId player{};
     };
+
+    // Tells the player actor that the connection it is bound to is gone. The sink
+    // sends it from onConnectionClosed, because the actor holds the
+    // player -> connection half of the session identity and would otherwise keep
+    // refusing the same player's next connection as a conflict.
+    struct PlayerConnectionClosedMessage
+    {
+        snf::worker::ConnectionRef connection;
+    };
 }
 
 namespace snf::worker
@@ -91,6 +100,15 @@ namespace snf::worker
         static std::uint64_t calculateCharge(const snf::adapter::PlayerSaveMessage&) noexcept
         {
             return sizeof(snf::adapter::PlayerSaveMessage);
+        }
+    };
+
+    template <> struct ActorPayloadTraits<snf::adapter::PlayerConnectionClosedMessage>
+    {
+        static constexpr std::uint32_t TAG = 10;
+        static std::uint64_t calculateCharge(const snf::adapter::PlayerConnectionClosedMessage&) noexcept
+        {
+            return sizeof(snf::adapter::PlayerConnectionClosedMessage);
         }
     };
 
@@ -184,5 +202,6 @@ namespace snf::adapter
         RoomDeadlineMessage,
         RoomTickMessage,
         PingMessage,
-        PlayerSaveMessage>;
+        PlayerSaveMessage,
+        PlayerConnectionClosedMessage>;
 }
