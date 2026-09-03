@@ -90,6 +90,30 @@ namespace snf::adapter
     {
         snf::worker::ConnectionRef connection;
     };
+
+    struct EnterZoneRequest
+    {
+        snf::server::ZoneId zone;
+        snf::server::ZonePosition position;
+    };
+
+    struct MoveRequest
+    {
+        snf::server::ZonePosition position;
+    };
+
+    struct LeaveRequest
+    {
+    };
+
+    using ZoneRequest = std::variant<EnterZoneRequest, MoveRequest, LeaveRequest>;
+
+    struct PlayerZoneRequestMessage
+    {
+        snf::worker::ConnectionRef connection;
+        std::uint32_t request_id{0};
+        ZoneRequest request;
+    };
 }
 
 namespace snf::worker
@@ -189,6 +213,15 @@ namespace snf::worker
             return snf::adapter::logicalCharge(sizeof(snf::adapter::PingMessage), msg.payload.capacity());
         }
     };
+
+    template <> struct ActorPayloadTraits<snf::adapter::PlayerZoneRequestMessage>
+    {
+        static constexpr std::uint32_t TAG = 11;
+        static std::uint64_t calculateCharge(const snf::adapter::PlayerZoneRequestMessage&) noexcept
+        {
+            return sizeof(snf::adapter::PlayerZoneRequestMessage);
+        }
+    };
 }
 
 namespace snf::adapter
@@ -203,5 +236,6 @@ namespace snf::adapter
         RoomTickMessage,
         PingMessage,
         PlayerSaveMessage,
-        PlayerConnectionClosedMessage>;
+        PlayerConnectionClosedMessage,
+        PlayerZoneRequestMessage>;
 }

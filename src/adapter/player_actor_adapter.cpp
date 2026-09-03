@@ -174,11 +174,42 @@ namespace snf::adapter
             auto msg = envelope.take<PlayerConnectionClosedMessage>();
             // Generation-checked: a close notice for a previous incarnation of the
             // slot must not unbind the connection currently authenticated.
+            snf::worker::EffectBatch effects;
             if (_bound_connection.has_value() && *_bound_connection == msg.connection)
             {
                 _bound_connection.reset();
+                if (_current_zone.has_value())
+                {
+                    const auto leaving_zone = *_current_zone;
+                    _current_zone.reset();
+                    if (_player.state().identity().has_value())
+                    {
+                        effects.push(snf::worker::TellActorEffect{
+                            .target =
+                                snf::worker::ActorKey{
+                                    .kind = snf::worker::ActorKind::Zone,
+                                    .entity = leaving_zone.value,
+                                },
+                            .message = GameActorPayloadRegistry::create(ZoneCommandMessage{
+                                .connection = std::nullopt,
+                                .request_id = 0,
+                                .command =
+                                    snf::server::LeaveZoneCommand{
+                                        .player = *_player.state().identity(),
+                                        .route_epoch = _route_epoch,
+                                    },
+                            }),
+                        });
+                    }
+                }
             }
-            return snf::worker::CompletedTurn{.effects = snf::worker::EffectBatch{}};
+            return snf::worker::CompletedTurn{.effects = std::move(effects)};
+        }
+
+        if (envelope.is<PlayerZoneRequestMessage>())
+        {
+            auto msg = envelope.take<PlayerZoneRequestMessage>();
+            return handleZoneRequest(std::move(msg), context);
         }
 
         if (envelope.is<PingMessage>())
@@ -208,5 +239,158 @@ namespace snf::adapter
         }
 
         return snf::worker::CompletedTurn{.effects = snf::worker::EffectBatch{}};
+    }
+
+    snf::worker::TurnResult PlayerActorAdapter::handleZoneRequest(PlayerZoneRequestMessage&& msg, const snf::worker::ActorTurnContext& context)
+    {
+        const auto player_id = _player.state().identity();
+        if (!player_id.has_value() || !_bound_connection.has_value() || *_bound_connection != msg.connection)
+        {
+            snf::worker::EffectBatch effects;
+            effects.push(snf::worker::CloseConnectionEffect{
+                .connection = msg.connection,
+                .reason = snf::worker::CloseReason::Application,
+                .graceful = true,
+            });
+            return snf::worker::CompletedTurn{.effects = std::move(effects)};
+        }
+
+        return std::visit(
+            [this, &msg, player = *player_id, &context](auto&& req) -> snf::worker::TurnResult
+            {
+                using T = std::decay_t<decltype(req)>;
+                if constexpr (std::is_same_v<T, EnterZoneRequest>)
+                {
+                    if (req.zone.value == 0)
+                    {
+                        snf::worker::EffectBatch effects;
+                        effects.push(snf::worker::CloseConnectionEffect{
+                            .connection = msg.connection,
+                            .reason = snf::worker::CloseReason::Application,
+                            .graceful = true,
+                        });
+                        return snf::worker::CompletedTurn{.effects = std::move(effects)};
+                    }
+
+                    if (_current_zone.has_value() && *_current_zone != req.zone)
+                    {
+                        // Zone-to-zone transfer fails until 11F handoff saga. Keep connection alive.
+                        const snf::server::ZoneResult result{
+                            .status = snf::server::ZoneCommandStatus::TransferFailed,
+                            .player = player,
+                            .position = std::nullopt,
+                            .route_epoch = _route_epoch,
+                            .tick = 0,
+                            .visible_players = {},
+                        };
+                        snf::worker::EffectBatch effects;
+                        effects.push(snf::worker::SendFrameEffect{
+                            .connection = msg.connection,
+                            .frame = encodeZoneReply(ZoneReplyFrameKind::Entered, *_current_zone, result, msg.request_id),
+                            .critical = false,
+                        });
+                        return snf::worker::CompletedTurn{.effects = std::move(effects)};
+                    }
+
+                    if (!_current_zone.has_value())
+                    {
+                        ++_route_epoch;
+                        _current_zone = req.zone;
+                    }
+
+                    snf::worker::EffectBatch effects;
+                    effects.push(snf::worker::TellActorEffect{
+                        .target =
+                            snf::worker::ActorKey{
+                                .kind = snf::worker::ActorKind::Zone,
+                                .entity = _current_zone->value,
+                            },
+                        .message = GameActorPayloadRegistry::create(ZoneCommandMessage{
+                            .connection = msg.connection,
+                            .request_id = msg.request_id,
+                            .command =
+                                snf::server::EnterZoneCommand{
+                                    .player = player,
+                                    .route_epoch = _route_epoch,
+                                    .position = req.position,
+                                },
+                        }),
+                    });
+                    scheduleSaveIfDirty(effects, context.now);
+                    return snf::worker::CompletedTurn{.effects = std::move(effects)};
+                }
+                else if constexpr (std::is_same_v<T, MoveRequest>)
+                {
+                    if (!_current_zone.has_value())
+                    {
+                        snf::worker::EffectBatch effects;
+                        effects.push(snf::worker::CloseConnectionEffect{
+                            .connection = msg.connection,
+                            .reason = snf::worker::CloseReason::Application,
+                            .graceful = true,
+                        });
+                        return snf::worker::CompletedTurn{.effects = std::move(effects)};
+                    }
+
+                    snf::worker::EffectBatch effects;
+                    effects.push(snf::worker::TellActorEffect{
+                        .target =
+                            snf::worker::ActorKey{
+                                .kind = snf::worker::ActorKind::Zone,
+                                .entity = _current_zone->value,
+                            },
+                        .message = GameActorPayloadRegistry::create(ZoneCommandMessage{
+                            .connection = msg.connection,
+                            .request_id = msg.request_id,
+                            .command =
+                                snf::server::MoveInZoneCommand{
+                                    .player = player,
+                                    .route_epoch = _route_epoch,
+                                    .position = req.position,
+                                },
+                        }),
+                    });
+                    scheduleSaveIfDirty(effects, context.now);
+                    return snf::worker::CompletedTurn{.effects = std::move(effects)};
+                }
+                else if constexpr (std::is_same_v<T, LeaveRequest>)
+                {
+                    if (!_current_zone.has_value())
+                    {
+                        snf::worker::EffectBatch effects;
+                        effects.push(snf::worker::CloseConnectionEffect{
+                            .connection = msg.connection,
+                            .reason = snf::worker::CloseReason::Application,
+                            .graceful = true,
+                        });
+                        return snf::worker::CompletedTurn{.effects = std::move(effects)};
+                    }
+
+                    const auto leaving_zone = *_current_zone;
+                    _current_zone.reset();
+
+                    snf::worker::EffectBatch effects;
+                    effects.push(snf::worker::TellActorEffect{
+                        .target =
+                            snf::worker::ActorKey{
+                                .kind = snf::worker::ActorKind::Zone,
+                                .entity = leaving_zone.value,
+                            },
+                        .message = GameActorPayloadRegistry::create(ZoneCommandMessage{
+                            .connection = msg.connection,
+                            .request_id = msg.request_id,
+                            .command =
+                                snf::server::LeaveZoneCommand{
+                                    .player = player,
+                                    .route_epoch = _route_epoch,
+                                },
+                        }),
+                    });
+                    scheduleSaveIfDirty(effects, context.now);
+                    return snf::worker::CompletedTurn{.effects = std::move(effects)};
+                }
+            },
+            msg.request
+        );
     }
 }

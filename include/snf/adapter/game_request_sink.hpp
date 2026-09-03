@@ -1,5 +1,6 @@
 #pragma once
 
+#include "snf/adapter/game_payloads.hpp"
 #include "snf/game/player_command.hpp"
 #include "snf/game/player_id.hpp"
 #include "snf/worker/request_sink.hpp"
@@ -59,6 +60,7 @@ namespace snf::adapter
         void assertOwnerThread() noexcept;
 
         using PlayerCommandDecoder = std::optional<snf::server::PlayerCommand> (*)(const std::vector<std::byte>&);
+        using ZoneRequestDecoder = std::optional<ZoneRequest> (*)(const std::vector<std::byte>&);
 
         [[nodiscard]] snf::worker::RequestPostResult postAuthenticate(snf::worker::ConnectionRef connection, const snf::protocol::Frame& frame);
         [[nodiscard]] snf::worker::RequestPostResult postPing(snf::worker::ConnectionRef connection, snf::protocol::Frame&& frame);
@@ -66,6 +68,11 @@ namespace snf::adapter
             snf::worker::ConnectionRef connection,
             const snf::protocol::Frame& frame,
             PlayerCommandDecoder decoder
+        );
+        [[nodiscard]] snf::worker::RequestPostResult postZoneRequest(
+            snf::worker::ConnectionRef connection,
+            const snf::protocol::Frame& frame,
+            ZoneRequestDecoder decoder
         );
 
         // Keyed by connection id, but the generation is stored and verified on

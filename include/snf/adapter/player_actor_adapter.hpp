@@ -1,7 +1,9 @@
 #pragma once
 
+#include "snf/adapter/game_payloads.hpp"
 #include "snf/game/player.hpp"
 #include "snf/game/player_record.hpp"
+#include "snf/game/zone_id.hpp"
 #include "snf/worker/actor.hpp"
 
 #include <chrono>
@@ -65,15 +67,28 @@ namespace snf::adapter
             return _authentication_conflicts;
         }
 
+        [[nodiscard]] std::optional<snf::server::ZoneId> currentZone() const noexcept
+        {
+            return _current_zone;
+        }
+
+        [[nodiscard]] std::uint64_t routeEpoch() const noexcept
+        {
+            return _route_epoch;
+        }
+
     private:
         void scheduleSaveIfDirty(snf::worker::EffectBatch& effects, std::chrono::steady_clock::time_point now);
         [[nodiscard]] std::optional<snf::worker::EffectBatch> rejectConflictingAuthentication(
             const std::optional<snf::worker::ConnectionRef>& connection
         );
+        [[nodiscard]] snf::worker::TurnResult handleZoneRequest(PlayerZoneRequestMessage&& msg, const snf::worker::ActorTurnContext& context);
 
         snf::server::Player _player;
         // player -> connection. The sink owns connection -> player.
         std::optional<snf::worker::ConnectionRef> _bound_connection{std::nullopt};
+        std::optional<snf::server::ZoneId> _current_zone{std::nullopt};
+        std::uint64_t _route_epoch{0};
         std::uint64_t _authentication_conflicts{0};
         std::chrono::milliseconds _save_interval{std::chrono::seconds{5}};
         // Only one save timer may be outstanding. The actor is Suspended for the

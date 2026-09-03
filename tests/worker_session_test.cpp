@@ -3,6 +3,7 @@
 #include "snf/game/equip_skill.hpp"
 #include "snf/game/purchase.hpp"
 #include "snf/game/skill_id.hpp"
+#include "snf/game/zone_result.hpp"
 #include "snf/net/tcp_listener.hpp"
 #include "snf/protocol/frame_codec.hpp"
 #include "snf/worker/worker.hpp"
@@ -11,6 +12,7 @@
 
 #include <array>
 #include <cassert>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -529,6 +531,92 @@ namespace
         return value;
     }
 
+    [[nodiscard]] std::uint16_t readBigEndian16(const std::vector<std::byte>& payload, const std::size_t offset)
+    {
+        std::uint16_t value = 0;
+        for (std::size_t index = offset; index < offset + 2; ++index)
+        {
+            value = static_cast<std::uint16_t>((value << 8U) | std::to_integer<std::uint16_t>(payload[index]));
+        }
+        return value;
+    }
+
+    [[nodiscard]] std::int32_t readBigEndianSigned32(const std::vector<std::byte>& payload, const std::size_t offset)
+    {
+        return static_cast<std::int32_t>(readBigEndian32(payload, offset));
+    }
+
+    [[nodiscard]] snf::protocol::Frame enterZoneFrame(
+        const std::uint32_t request_id,
+        const std::uint64_t zone,
+        const std::int32_t x,
+        const std::int32_t y
+    )
+    {
+        std::vector<std::byte> payload;
+        payload.reserve(16);
+        for (std::size_t index = 0; index < 8; ++index)
+        {
+            payload.push_back(static_cast<std::byte>((zone >> (8 * (7 - index))) & 0xFFULL));
+        }
+        const auto ux = static_cast<std::uint32_t>(x);
+        for (std::size_t index = 0; index < 4; ++index)
+        {
+            payload.push_back(static_cast<std::byte>((ux >> (8 * (3 - index))) & 0xFFU));
+        }
+        const auto uy = static_cast<std::uint32_t>(y);
+        for (std::size_t index = 0; index < 4; ++index)
+        {
+            payload.push_back(static_cast<std::byte>((uy >> (8 * (3 - index))) & 0xFFU));
+        }
+        return snf::protocol::Frame{
+            .type = snf::protocol::MessageType::EnterZone,
+            .request_id = request_id,
+            .payload = std::move(payload),
+        };
+    }
+
+    [[nodiscard]] snf::protocol::Frame moveFrame(const std::uint32_t request_id, const std::int32_t x, const std::int32_t y)
+    {
+        std::vector<std::byte> payload;
+        payload.reserve(8);
+        const auto ux = static_cast<std::uint32_t>(x);
+        for (std::size_t index = 0; index < 4; ++index)
+        {
+            payload.push_back(static_cast<std::byte>((ux >> (8 * (3 - index))) & 0xFFU));
+        }
+        const auto uy = static_cast<std::uint32_t>(y);
+        for (std::size_t index = 0; index < 4; ++index)
+        {
+            payload.push_back(static_cast<std::byte>((uy >> (8 * (3 - index))) & 0xFFU));
+        }
+        return snf::protocol::Frame{
+            .type = snf::protocol::MessageType::Move,
+            .request_id = request_id,
+            .payload = std::move(payload),
+        };
+    }
+
+    [[nodiscard]] snf::protocol::Frame leaveZoneFrame(const std::uint32_t request_id)
+    {
+        return snf::protocol::Frame{
+            .type = snf::protocol::MessageType::LeaveZone,
+            .request_id = request_id,
+            .payload = {},
+        };
+    }
+
+    [[nodiscard]] std::size_t zoneReplyEncodedSize(const std::size_t visible_count = 0)
+    {
+        constexpr std::size_t FIXED_PAYLOAD = 27;
+        return snf::protocol::encode_frame(snf::protocol::Frame{
+                                               .type = snf::protocol::MessageType::ZoneEntered,
+                                               .request_id = 0,
+                                               .payload = std::vector<std::byte>(FIXED_PAYLOAD + visible_count * 8),
+                                           })
+            .size();
+    }
+
     [[nodiscard]] snf::protocol::Frame receiveFrame(const int descriptor, const std::size_t encoded_size)
     {
         const auto encoded = receiveExact(descriptor, encoded_size);
@@ -668,6 +756,296 @@ namespace
         // Authenticate plus release per iteration, and nothing else.
         assert(harness.metrics().actor.actor_turns == malformed.size() * 2);
     }
+
+    // 27-byte zone frame layout round trip: status=Applied(0), zone id,
+    // route_epoch == 1, signed x/y round trip. Moved and ZoneLeft keep epoch
+    // unchanged.
+    void test_enter_move_leave_round_trip()
+    {
+        SessionHarness harness;
+        auto client = connectClient(harness.port());
+        authenticate(client.getDescriptor(), 1, 42);
+
+        const auto size_0 = zoneReplyEncodedSize(0);
+
+        // EnterZone with negative x (legacy test parity check)
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(enterZoneFrame(2, 100, -3, 42)));
+        const auto entered = receiveFrame(client.getDescriptor(), size_0);
+        assert(entered.type == snf::protocol::MessageType::ZoneEntered);
+        assert(entered.request_id == 2);
+        assert(entered.payload.size() == 27);
+        assert(std::to_integer<std::uint8_t>(entered.payload[0]) == static_cast<std::uint8_t>(snf::server::ZoneCommandStatus::Applied));
+        assert(readBigEndian64(entered.payload, 1) == 100);
+        assert(readBigEndian64(entered.payload, 9) == 1); // route_epoch == 1
+        assert(readBigEndianSigned32(entered.payload, 17) == -3);
+        assert(readBigEndianSigned32(entered.payload, 21) == 42);
+        assert(readBigEndian16(entered.payload, 25) == 0); // visible_count == 0
+
+        // Move
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(moveFrame(3, -10, 50)));
+        const auto moved = receiveFrame(client.getDescriptor(), size_0);
+        assert(moved.type == snf::protocol::MessageType::Moved);
+        assert(moved.request_id == 3);
+        assert(moved.payload.size() == 27);
+        assert(std::to_integer<std::uint8_t>(moved.payload[0]) == static_cast<std::uint8_t>(snf::server::ZoneCommandStatus::Applied));
+        assert(readBigEndian64(moved.payload, 1) == 100);
+        assert(readBigEndian64(moved.payload, 9) == 1); // epoch invariant
+        assert(readBigEndianSigned32(moved.payload, 17) == -10);
+        assert(readBigEndianSigned32(moved.payload, 21) == 50);
+        assert(readBigEndian16(moved.payload, 25) == 0);
+
+        // LeaveZone
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(leaveZoneFrame(4)));
+        const auto left = receiveFrame(client.getDescriptor(), size_0);
+        assert(left.type == snf::protocol::MessageType::ZoneLeft);
+        assert(left.request_id == 4);
+        assert(left.payload.size() == 27);
+        assert(std::to_integer<std::uint8_t>(left.payload[0]) == static_cast<std::uint8_t>(snf::server::ZoneCommandStatus::Applied));
+        assert(readBigEndian64(left.payload, 1) == 100);
+        assert(readBigEndian64(left.payload, 9) == 1); // epoch invariant
+        assert(readBigEndianSigned32(left.payload, 17) == -10);
+        assert(readBigEndianSigned32(left.payload, 21) == 50);
+        assert(readBigEndian16(left.payload, 25) == 0);
+
+        client.init();
+        waitForSessionsReleased(harness);
+        harness.stop();
+        assert(harness.metrics().network.protocol_errors == 0);
+    }
+
+    // Two players in the same zone within AOI radius: the second player's
+    // response includes the first in visible_players. Crucially pins that there is
+    // no broadcast: the first player receives no unsolicited frame.
+    void test_aoi_visibility_and_no_broadcast()
+    {
+        SessionHarness harness;
+        auto client1 = connectClient(harness.port());
+        authenticate(client1.getDescriptor(), 1, 10);
+
+        auto client2 = connectClient(harness.port());
+        authenticate(client2.getDescriptor(), 1, 20);
+
+        const auto size_0 = zoneReplyEncodedSize(0);
+        const auto size_1 = zoneReplyEncodedSize(1);
+
+        sendAll(client1.getDescriptor(), snf::protocol::encode_frame(enterZoneFrame(2, 100, 0, 0)));
+        const auto entered1 = receiveFrame(client1.getDescriptor(), size_0);
+        assert(entered1.type == snf::protocol::MessageType::ZoneEntered);
+        assert(readBigEndian16(entered1.payload, 25) == 0);
+
+        sendAll(client2.getDescriptor(), snf::protocol::encode_frame(enterZoneFrame(2, 100, 5, 5)));
+        const auto entered2 = receiveFrame(client2.getDescriptor(), size_1);
+        assert(entered2.type == snf::protocol::MessageType::ZoneEntered);
+        assert(readBigEndian16(entered2.payload, 25) == 1);
+        assert(readBigEndian64(entered2.payload, 27) == 10); // client1's player id
+
+        // Confirm no broadcast was sent to client 1.
+        std::this_thread::sleep_for(20ms);
+        std::byte unexpected{};
+        const ssize_t received = ::recv(client1.getDescriptor(), &unexpected, 1, MSG_DONTWAIT);
+        assert(received == -1 && (errno == EAGAIN || errno == EWOULDBLOCK));
+
+        client1.init();
+        client2.init();
+        waitForSessionsReleased(harness);
+        harness.stop();
+        assert(harness.metrics().network.protocol_errors == 0);
+    }
+
+    // Re-entering the same zone is AlreadyPresent(1) with epoch and position unchanged.
+    void test_same_zone_reenter_is_already_present_with_same_epoch()
+    {
+        SessionHarness harness;
+        auto client = connectClient(harness.port());
+        authenticate(client.getDescriptor(), 1, 77);
+
+        const auto size_0 = zoneReplyEncodedSize(0);
+
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(enterZoneFrame(2, 100, 10, 20)));
+        const auto first = receiveFrame(client.getDescriptor(), size_0);
+        assert(std::to_integer<std::uint8_t>(first.payload[0]) == static_cast<std::uint8_t>(snf::server::ZoneCommandStatus::Applied));
+        assert(readBigEndian64(first.payload, 9) == 1);
+
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(enterZoneFrame(3, 100, 99, 99)));
+        const auto second = receiveFrame(client.getDescriptor(), size_0);
+        assert(second.type == snf::protocol::MessageType::ZoneEntered);
+        assert(second.request_id == 3);
+        assert(std::to_integer<std::uint8_t>(second.payload[0]) == static_cast<std::uint8_t>(snf::server::ZoneCommandStatus::AlreadyPresent));
+        assert(readBigEndian64(second.payload, 1) == 100);
+        assert(readBigEndian64(second.payload, 9) == 1); // epoch unchanged
+        // Existing position preserved by Zone
+        assert(readBigEndianSigned32(second.payload, 17) == 10);
+        assert(readBigEndianSigned32(second.payload, 21) == 20);
+
+        client.init();
+        waitForSessionsReleased(harness);
+        harness.stop();
+        assert(harness.metrics().network.protocol_errors == 0);
+    }
+
+    // Zone-to-zone EnterZone answers TransferFailed(5) and keeps the connection alive.
+    // Fixed with this test so Stage 11F will intentionally replace it with the handoff saga.
+    void test_zone_to_zone_fails_with_transfer_failed_and_keeps_connection()
+    {
+        SessionHarness harness;
+        auto client = connectClient(harness.port());
+        authenticate(client.getDescriptor(), 1, 77);
+
+        const auto size_0 = zoneReplyEncodedSize(0);
+
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(enterZoneFrame(2, 100, 10, 20)));
+        const auto first = receiveFrame(client.getDescriptor(), size_0);
+        assert(std::to_integer<std::uint8_t>(first.payload[0]) == static_cast<std::uint8_t>(snf::server::ZoneCommandStatus::Applied));
+
+        // Enter a different zone
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(enterZoneFrame(3, 200, 30, 40)));
+        const auto failed = receiveFrame(client.getDescriptor(), size_0);
+        assert(failed.type == snf::protocol::MessageType::ZoneEntered);
+        assert(failed.request_id == 3);
+        assert(std::to_integer<std::uint8_t>(failed.payload[0]) == static_cast<std::uint8_t>(snf::server::ZoneCommandStatus::TransferFailed));
+        assert(readBigEndian64(failed.payload, 1) == 100); // remains in current zone
+        assert(readBigEndian64(failed.payload, 9) == 1);
+
+        // Connection is preserved: subsequent command succeeds in zone 100.
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(moveFrame(4, 15, 25)));
+        const auto moved = receiveFrame(client.getDescriptor(), size_0);
+        assert(moved.type == snf::protocol::MessageType::Moved);
+        assert(moved.request_id == 4);
+        assert(std::to_integer<std::uint8_t>(moved.payload[0]) == static_cast<std::uint8_t>(snf::server::ZoneCommandStatus::Applied));
+        assert(readBigEndian64(moved.payload, 1) == 100);
+        assert(readBigEndianSigned32(moved.payload, 17) == 15);
+        assert(readBigEndianSigned32(moved.payload, 21) == 25);
+
+        client.init();
+        waitForSessionsReleased(harness);
+        harness.stop();
+        assert(harness.metrics().network.protocol_errors == 0);
+    }
+
+    // Move or LeaveZone without an active zone closes the connection.
+    void test_move_and_leave_without_current_zone_closes_connection()
+    {
+        SessionHarness harness;
+
+        // Move without zone
+        {
+            auto client = connectClient(harness.port());
+            authenticate(client.getDescriptor(), 1, 11);
+            sendAll(client.getDescriptor(), snf::protocol::encode_frame(moveFrame(2, 10, 20)));
+            assert(receivesEof(client.getDescriptor()));
+            waitForSessionsReleased(harness);
+        }
+
+        // LeaveZone without zone
+        {
+            auto client = connectClient(harness.port());
+            authenticate(client.getDescriptor(), 1, 12);
+            sendAll(client.getDescriptor(), snf::protocol::encode_frame(leaveZoneFrame(2)));
+            assert(receivesEof(client.getDescriptor()));
+            waitForSessionsReleased(harness);
+        }
+
+        harness.stop();
+        assert(harness.metrics().network.invariant_violations == 0);
+    }
+
+    // Zone id 0 must be rejected by PlayerActor before telling ZoneActor,
+    // avoiding downstream throw and invariant violation.
+    void test_enter_zone_zero_closes_connection_without_worker_exception()
+    {
+        SessionHarness harness;
+        auto client = connectClient(harness.port());
+        authenticate(client.getDescriptor(), 1, 33);
+
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(enterZoneFrame(2, 0, 1, 1)));
+        assert(receivesEof(client.getDescriptor()));
+
+        waitForSessionsReleased(harness);
+        harness.stop();
+        assert(harness.metrics().network.invariant_violations == 0);
+    }
+
+    // Malformed payloads for zone commands are protocol errors and never reach an actor.
+    void test_malformed_zone_payloads_never_reach_an_actor()
+    {
+        SessionHarness harness;
+
+        const std::vector<snf::protocol::Frame> malformed{
+            // EnterZone: too short (15), too long (17), empty (0).
+            snf::protocol::Frame{.type = snf::protocol::MessageType::EnterZone, .request_id = 1, .payload = std::vector<std::byte>(15)},
+            snf::protocol::Frame{.type = snf::protocol::MessageType::EnterZone, .request_id = 1, .payload = std::vector<std::byte>(17)},
+            snf::protocol::Frame{.type = snf::protocol::MessageType::EnterZone, .request_id = 1, .payload = {}},
+            // Move: too short (7), too long (9), empty (0).
+            snf::protocol::Frame{.type = snf::protocol::MessageType::Move, .request_id = 1, .payload = std::vector<std::byte>(7)},
+            snf::protocol::Frame{.type = snf::protocol::MessageType::Move, .request_id = 1, .payload = std::vector<std::byte>(9)},
+            snf::protocol::Frame{.type = snf::protocol::MessageType::Move, .request_id = 1, .payload = {}},
+            // LeaveZone: non-empty payload.
+            snf::protocol::Frame{.type = snf::protocol::MessageType::LeaveZone, .request_id = 1, .payload = {std::byte{0x01}}},
+        };
+
+        for (const auto& frame : malformed)
+        {
+            auto client = connectClient(harness.port());
+            authenticate(client.getDescriptor(), 1, 55);
+            sendAll(client.getDescriptor(), snf::protocol::encode_frame(frame));
+            assert(receivesEof(client.getDescriptor()));
+            waitForSessionsReleased(harness);
+        }
+
+        harness.stop();
+        assert(harness.metrics().network.protocol_errors == malformed.size());
+        assert(harness.metrics().network.sent_frames == malformed.size());
+        assert(harness.metrics().actor.actor_turns == malformed.size() * 2);
+    }
+
+    // When a connection closes, an implicit LeaveZone is dispatched to the zone.
+    // Verified by checking that a remaining player's AOI no longer sees the disconnected player.
+    void test_implicit_leave_on_disconnect_removes_player_from_zone()
+    {
+        SessionHarness harness;
+        auto client1 = connectClient(harness.port());
+        authenticate(client1.getDescriptor(), 1, 100);
+
+        auto client2 = connectClient(harness.port());
+        authenticate(client2.getDescriptor(), 1, 200);
+
+        const auto size_0 = zoneReplyEncodedSize(0);
+        const auto size_1 = zoneReplyEncodedSize(1);
+
+        sendAll(client1.getDescriptor(), snf::protocol::encode_frame(enterZoneFrame(2, 100, 0, 0)));
+        const auto entered1 = receiveFrame(client1.getDescriptor(), size_0);
+        assert(entered1.type == snf::protocol::MessageType::ZoneEntered);
+
+        sendAll(client2.getDescriptor(), snf::protocol::encode_frame(enterZoneFrame(2, 100, 10, 10)));
+        const auto entered2 = receiveFrame(client2.getDescriptor(), size_1);
+        assert(readBigEndian16(entered2.payload, 25) == 1);
+        assert(readBigEndian64(entered2.payload, 27) == 100);
+
+        // Disconnect client 1
+        client1.init();
+
+        // Wait until client 1 session is released in sink
+        const auto deadline = Clock::now() + 2s;
+        while (harness.sink().sessionCount() != 1 && Clock::now() < deadline)
+        {
+            std::this_thread::sleep_for(1ms);
+        }
+        assert(harness.sink().sessionCount() == 1);
+
+        // Allow worker turn to process the implicit LeaveZoneCommand on ZoneActor
+        std::this_thread::sleep_for(20ms);
+
+        // Client 2 moves; visible_count must now be 0 because client 1 left the zone.
+        sendAll(client2.getDescriptor(), snf::protocol::encode_frame(moveFrame(3, 11, 11)));
+        const auto moved2 = receiveFrame(client2.getDescriptor(), size_0);
+        assert(moved2.type == snf::protocol::MessageType::Moved);
+        assert(readBigEndian16(moved2.payload, 25) == 0);
+
+        client2.init();
+        waitForSessionsReleased(harness);
+        harness.stop();
+        assert(harness.metrics().network.protocol_errors == 0);
+    }
 }
 
 #define SNF_RUN_SESSION_TEST(fn)                                                                                                                     \
@@ -691,4 +1069,12 @@ void run_worker_session_tests()
     SNF_RUN_SESSION_TEST(test_purchase_reaches_the_player_and_replays_on_the_same_key);
     SNF_RUN_SESSION_TEST(test_equip_skill_reaches_the_player_after_the_skill_is_owned);
     SNF_RUN_SESSION_TEST(test_malformed_player_command_payloads_never_reach_an_actor);
+    SNF_RUN_SESSION_TEST(test_enter_move_leave_round_trip);
+    SNF_RUN_SESSION_TEST(test_aoi_visibility_and_no_broadcast);
+    SNF_RUN_SESSION_TEST(test_same_zone_reenter_is_already_present_with_same_epoch);
+    SNF_RUN_SESSION_TEST(test_zone_to_zone_fails_with_transfer_failed_and_keeps_connection);
+    SNF_RUN_SESSION_TEST(test_move_and_leave_without_current_zone_closes_connection);
+    SNF_RUN_SESSION_TEST(test_enter_zone_zero_closes_connection_without_worker_exception);
+    SNF_RUN_SESSION_TEST(test_malformed_zone_payloads_never_reach_an_actor);
+    SNF_RUN_SESSION_TEST(test_implicit_leave_on_disconnect_removes_player_from_zone);
 }

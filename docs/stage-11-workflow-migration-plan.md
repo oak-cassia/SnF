@@ -134,7 +134,8 @@ mailbox full / 용량 초과   → Rejected  (overload는 연결 종료가 맞�
 | --- | --- | --- |
 | 11A | **완료** | 아래 "11A 결과" 참고 |
 | 11B | **완료** | 아래 "11B 결과" 참고 |
-| 11C~11K | 미착수 | |
+| 11C | **완료** | 아래 "11C 결과" 참고 |
+| 11D~11K | 미착수 | |
 
 ### 11A 결과
 
@@ -197,6 +198,23 @@ Unauthenticated
 
 이 release가 turn을 하나 만들기 때문에, 정확한 turn 수를 검사하는 테스트는 먼저 연결을 끊고 session release가
 끝나기를 기다린 뒤에 검사한다. shutdown 순서에 의존하지 않게 하려는 것이다.
+
+### 11C 결과
+
+- `EnterZone`(16바이트: 8바이트 zone id + 4바이트 x + 4바이트 y), `Move`(8바이트: 4바이트 x + 4바이트 y),
+  `LeaveZone`(0바이트)을 디코딩하여 세션의 `PlayerActor`로 라우팅한다.
+- `RouteCoordinator`가 가졌던 per-player route state(`_current_zone`, `_route_epoch`)를 `PlayerActorAdapter`로
+  옮겨, `PlayerActor`가 epoch을 관리하고 대상 `ZoneActor`로 `ZoneCommandMessage`를 tell한다.
+- `ZoneActorAdapter` 및 `to_effects` zone overload를 통해 client로 27바이트 고정 규격의 유니캐스트 응답이 전달된다.
+- legacy 조사 결과와 일치하게 **broadcast가 없음을 검증했다**: 두 번째 플레이어의 진입 시 첫 번째 플레이어에게
+  unsolicited 프레임이 전달되지 않으며, AOI는 응답자의 `visible_players` 필드로만 전달된다.
+- zone-to-zone 진입 시도 시 `TransferFailed`(5)를 반환하고 연결을 유지하며, 동일 zone 재입장은 epoch 불변 상태로
+  전달되어 `AlreadyPresent`(1)와 기존 위치를 반환한다.
+- zone id 0 및 zone 없는 Move/Leave는 `PlayerActor`에서 `CloseConnectionEffect`로 안전하게 거절하여 worker의
+  throw(`invariant_violations == 0`)를 방지한다.
+- 연결 종료 시 `PlayerConnectionClosedMessage`에서 `_current_zone`이 있으면 암묵적 `LeaveZoneCommand`를
+  전달하여 Zone participant에서 제거됨을 후속 Move의 AOI `visible_count == 0`으로 고정했다.
+- debug, tsan, asan-ubsan 전체 테스트가 깨끗하게 통과했다.
 
 ## 검증
 

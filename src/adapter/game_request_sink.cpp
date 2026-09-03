@@ -86,6 +86,54 @@ namespace snf::adapter
                 .skill_id = snf::server::SkillId{.value = skill_id},
             }};
         }
+
+        constexpr std::size_t ENTER_ZONE_WIRE_SIZE = 16;
+        constexpr std::size_t MOVE_WIRE_SIZE = 8;
+
+        [[nodiscard]] std::optional<ZoneRequest> decodeEnterZone(const std::vector<std::byte>& payload)
+        {
+            if (payload.size() != ENTER_ZONE_WIRE_SIZE)
+            {
+                return std::nullopt;
+            }
+            const auto zone = decodeBigEndian<std::uint64_t>(payload, 0, 8);
+            const auto x = decodeBigEndian<std::uint32_t>(payload, 8, 4);
+            const auto y = decodeBigEndian<std::uint32_t>(payload, 12, 4);
+            return ZoneRequest{EnterZoneRequest{
+                .zone = snf::server::ZoneId{.value = zone},
+                .position =
+                    snf::server::ZonePosition{
+                        .x = static_cast<std::int32_t>(x),
+                        .y = static_cast<std::int32_t>(y),
+                    },
+            }};
+        }
+
+        [[nodiscard]] std::optional<ZoneRequest> decodeMove(const std::vector<std::byte>& payload)
+        {
+            if (payload.size() != MOVE_WIRE_SIZE)
+            {
+                return std::nullopt;
+            }
+            const auto x = decodeBigEndian<std::uint32_t>(payload, 0, 4);
+            const auto y = decodeBigEndian<std::uint32_t>(payload, 4, 4);
+            return ZoneRequest{MoveRequest{
+                .position =
+                    snf::server::ZonePosition{
+                        .x = static_cast<std::int32_t>(x),
+                        .y = static_cast<std::int32_t>(y),
+                    },
+            }};
+        }
+
+        [[nodiscard]] std::optional<ZoneRequest> decodeLeave(const std::vector<std::byte>& payload)
+        {
+            if (!payload.empty())
+            {
+                return std::nullopt;
+            }
+            return ZoneRequest{LeaveRequest{}};
+        }
     }
 
     void GameRequestSink::assertOwnerThread() noexcept
@@ -216,6 +264,34 @@ namespace snf::adapter
                    : snf::worker::RequestPostResult::Rejected;
     }
 
+    snf::worker::RequestPostResult GameRequestSink::postZoneRequest(
+        const snf::worker::ConnectionRef connection,
+        const snf::protocol::Frame& frame,
+        const ZoneRequestDecoder decoder
+    )
+    {
+        const auto player = playerFor(connection);
+        if (!player)
+        {
+            return snf::worker::RequestPostResult::Invalid;
+        }
+
+        auto request = decoder(frame.payload);
+        if (!request)
+        {
+            return snf::worker::RequestPostResult::Invalid;
+        }
+
+        auto envelope = GameActorPayloadRegistry::create(PlayerZoneRequestMessage{
+            .connection = connection,
+            .request_id = frame.request_id,
+            .request = std::move(*request),
+        });
+        return _worker->tell(playerKey(*player), std::move(envelope)) == snf::worker::DeliveryResult::Accepted
+                   ? snf::worker::RequestPostResult::Accepted
+                   : snf::worker::RequestPostResult::Rejected;
+    }
+
     snf::worker::RequestPostResult GameRequestSink::tryPost(const snf::worker::ConnectionRef connection, snf::protocol::Frame&& frame)
     {
         assert(_worker != nullptr);
@@ -231,6 +307,12 @@ namespace snf::adapter
             return postPlayerCommand(connection, frame, decodePurchase);
         case snf::protocol::MessageType::EquipSkill:
             return postPlayerCommand(connection, frame, decodeEquipSkill);
+        case snf::protocol::MessageType::EnterZone:
+            return postZoneRequest(connection, frame, decodeEnterZone);
+        case snf::protocol::MessageType::Move:
+            return postZoneRequest(connection, frame, decodeMove);
+        case snf::protocol::MessageType::LeaveZone:
+            return postZoneRequest(connection, frame, decodeLeave);
         default:
             break;
         }
