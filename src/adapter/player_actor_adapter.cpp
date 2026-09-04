@@ -1819,6 +1819,22 @@ namespace snf::adapter
                 }
                 else
                 {
+                    // The join may already have been applied even though its
+                    // outcome was lost. LeaveRoom is idempotent, so compensate
+                    // before exposing the source Zone as stable again.
+                    if (_player.state().identity().has_value())
+                    {
+                        effects.push(snf::worker::TellActorEffect{
+                            .target = snf::worker::ActorKey{snf::worker::ActorKind::Room, room.value},
+                            .message = GameActorPayloadRegistry::create(RoomCommandMessage{
+                                .connection = std::nullopt,
+                                .request_id = 0,
+                                .command = snf::server::LeaveRoom{.player = *_player.state().identity()},
+                                .reply_to = std::nullopt,
+                            }),
+                        });
+                    }
+
                     _workflow_state = StableRoute{.zone = zone};
 
                     if (_bound_connection.has_value())

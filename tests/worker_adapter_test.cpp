@@ -1204,6 +1204,109 @@ namespace
         assert(bs_tell.target.entity == 5);
     }
 
+    void test_room_join_step1_timeout_compensates_applied_room_join()
+    {
+        MockTimerAdmission admission(10000);
+        snf::adapter::PlayerActorAdapter player_actor(snf::server::PlayerId{116}, &admission);
+        snf::adapter::RoomActorAdapter room_actor(snf::server::RoomId{7});
+        const snf::worker::ActorTurnContext turn_ctx{
+            .activation = snf::worker::ActivationRef{},
+            .now = std::chrono::steady_clock::now(),
+            .turn_id = 1,
+        };
+
+        const snf::worker::ConnectionRef conn{
+            .id = snf::worker::ConnectionId{25}, .generation = snf::worker::ConnectionGeneration{1}, .owner = snf::worker::WorkerId{0}
+        };
+
+        static_cast<void>(player_actor.dispatch(
+            snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerCommandMessage{
+                .connection = conn,
+                .request_id = 1,
+                .command = snf::server::AuthenticateCommand{.player = snf::server::PlayerId{116}},
+            }),
+            turn_ctx
+        ));
+        static_cast<void>(player_actor.dispatch(
+            snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerZoneRequestMessage{
+                .connection = conn,
+                .request_id = 2,
+                .request =
+                    snf::adapter::EnterZoneRequest{
+                        .zone = snf::server::ZoneId{10},
+                        .position = snf::server::ZonePosition{.x = 5, .y = 5},
+                    },
+            }),
+            turn_ctx
+        ));
+        static_cast<void>(player_actor.dispatch(
+            snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneOutcomeMessage{
+                .player = snf::server::PlayerId{116},
+                .connection_generation = conn.generation,
+                .correlation_id = 1,
+                .step = snf::adapter::WorkflowStep::ZoneEnter,
+                .zone = snf::server::ZoneId{10},
+                .route_epoch = 1,
+                .request_id = 2,
+                .result =
+                    snf::server::ZoneResult{
+                        .status = snf::server::ZoneCommandStatus::Applied,
+                        .player = snf::server::PlayerId{116},
+                        .position = snf::server::ZonePosition{.x = 5, .y = 5},
+                        .route_epoch = 1,
+                        .tick = 0,
+                        .visible_players = {},
+                    },
+            }),
+            turn_ctx
+        ));
+
+        auto join_result = player_actor.dispatch(
+            snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerRoomRequestMessage{
+                .connection = conn,
+                .request_id = 3,
+                .request = snf::adapter::RoomJoinRequest{.room = snf::server::RoomId{7}},
+            }),
+            turn_ctx
+        );
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(join_result));
+        auto& join_completed = std::get<snf::worker::CompletedTurn>(join_result);
+        assert(join_completed.effects.size() == 2);
+        auto& join_tell = std::get<snf::worker::TellActorEffect>(join_completed.effects.mutableEffects()[0]);
+
+        // Room applies JoinRoom, but its RoomOutcomeMessage is lost.
+        auto room_join_result = room_actor.dispatch(std::move(join_tell.message), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(room_join_result));
+        assert(room_actor.room().participantCount() == 1);
+
+        auto timeout_result = player_actor.dispatch(
+            snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerWorkflowTimeoutMessage{
+                .correlation_id = 2,
+                .step = snf::adapter::WorkflowStep::RoomJoinStep1_JoinRoom,
+            }),
+            turn_ctx
+        );
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(timeout_result));
+        auto& timeout_completed = std::get<snf::worker::CompletedTurn>(timeout_result);
+        assert(timeout_completed.effects.size() == 2);
+        assert(std::holds_alternative<snf::worker::TellActorEffect>(timeout_completed.effects.effects()[0]));
+        assert(std::holds_alternative<snf::worker::SendFrameEffect>(timeout_completed.effects.effects()[1]));
+
+        auto& cleanup_tell = std::get<snf::worker::TellActorEffect>(timeout_completed.effects.mutableEffects()[0]);
+        assert(cleanup_tell.target.kind == snf::worker::ActorKind::Room);
+        assert(cleanup_tell.target.entity == 7);
+        auto room_cleanup_result = room_actor.dispatch(std::move(cleanup_tell.message), turn_ctx);
+        assert(std::holds_alternative<snf::worker::CompletedTurn>(room_cleanup_result));
+        assert(room_actor.room().participantCount() == 0);
+
+        const auto& failure_reply = std::get<snf::worker::SendFrameEffect>(timeout_completed.effects.effects()[1]);
+        assert(failure_reply.frame.type == snf::protocol::MessageType::RoomJoined);
+        assert(failure_reply.frame.request_id == 3);
+        assert(failure_reply.frame.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::EntryFailed));
+        assert(player_actor.currentZone() == snf::server::ZoneId{10});
+        assert(!player_actor.isInRoom());
+    }
+
     void test_room_join_step2_leave_zone_timeout_compensates()
     {
         MockTimerAdmission admission(10000);
@@ -2558,6 +2661,9 @@ int main()
 
     test_battle_start_only_allowed_when_in_room();
     std::cout << "  - test_battle_start_only_allowed_when_in_room PASSED" << std::endl;
+
+    test_room_join_step1_timeout_compensates_applied_room_join();
+    std::cout << "  - test_room_join_step1_timeout_compensates_applied_room_join PASSED" << std::endl;
 
     test_room_join_step2_leave_zone_timeout_compensates();
     std::cout << "  - test_room_join_step2_leave_zone_timeout_compensates PASSED" << std::endl;

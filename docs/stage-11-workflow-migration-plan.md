@@ -273,6 +273,7 @@ transition correlation을 위해 이미 만들 예정이므로, 11E에서 한 �
 - **Room 입장/복귀 Saga 및 보상 트랜잭션**:
   - PlayerActor `WorkflowState`(`StableRoute`, `EnteringRoute`, `InRoomRoute`, `ReturningRoute`)를 도입하여 Room 입장 시 `JoinRoom` → `LeaveZone` 순서로 안전하게 전이한다.
   - Room 거절 시 Zone route를 유지하며 (`test_room_join_refusal_keeps_zone_route`), Zone leave 실패 시 `LeaveRoom` 보상 트랜잭션을 실행하고 좌석을 반환한다 (`test_room_join_zone_leave_failure_compensates_and_keeps_zone_route`).
+  - Room 입장 1단계(`RoomJoinStep1_JoinRoom`) 타임아웃은 join 미적용과 적용 후 outcome 유실을 구분할 수 없으므로, 멱등 `LeaveRoom` cleanup을 발행한 뒤 source Zone route를 유지하고 `EntryFailed`를 반환한다. 실제 `RoomActor`에 join을 적용하고 outcome을 폐기한 실패 주입으로 좌석이 제거됨을 검증한다 (`test_room_join_step1_timeout_compensates_applied_room_join`).
   - Room 입장 2단계(`RoomJoinStep2_LeaveZone`) 진입 시 별도 1초 타임아웃 타이머를 예약하며, Zone 응답 유실 시 Room에 `LeaveRoom` 보상 및 Zone에 cleanup tell을 발행하고, 허위 source zone route 복귀 대신 route를 nullopt로 확정하고 연결을 안전하게 닫는다 (`test_room_join_step2_leave_zone_timeout_compensates`).
   - Room 복귀 1단계(`RoomReturnStep1_ZoneEnter`) 타임아웃 시 Zone에 cleanup tell(`LeaveZoneCommand`)을 발행하여 outcome 유실로 인한 Zone ghost participant를 제거하고 연결을 닫는다 (`test_room_return_timeout_cleans_up_zone_participant`).
   - Room 퇴장 및 전투 종료(`RoomTerminalNotification`) 자동 복귀 시 `TimerAdmission::tryReserve` 사전 검사 후 상태를 커밋하며, 실제 `InRoom` 상태에서 admission 실패 시 상태 오염 없이 세션을 닫음을 검증했다 (`test_room_return_timer_admission_failure_safely_closes`).
@@ -315,9 +316,10 @@ docker run --rm -v "$PWD:/workspace" -w /workspace snf-server-dev bash -lc 'cmak
 
 - **cross-worker transition ordering.** Player와 Zone/Room이 다른 worker면 transition 응답이 remote inbox를
   거친다. remote tell은 10단계에서 검증됐지만 계약의 순서·backpressure 의미를 재확인해야 한다.
-- **completion slot 예약 개념이 신규 경로에 없다.** room 계약 §3의 예약은 legacy outbound reservation
-  기반이다. 신규 경로의 대응물이 무엇인지(또는 불필요한지)를 11E에서 먼저 결론낸다. 또한 11C에서 기록된
-  `TellActorEffect` 실패 롤백 미처리 격차 역시 11E의 응답 채널에서 함께 해결한다 (11I 게이트 과부하 시 관측 가능).
+- **cleanup tell은 best-effort다.** 11E는 `TimerAdmission::tryReserve`로 terminal timeout 예산을 먼저 확보해
+  primary Zone/Room tell 또는 outcome 유실을 감지하고, idempotent cleanup tell과 안전한 local route를
+  결정한다. 다만 cleanup `TellActorEffect` 자체의 적용 실패는 metric으로만 관측되므로, 11G에서
+  disconnect/shutdown terminal과 함께 실패 계약을 대조하고 11I 과부하 게이트에서 해당 metric을 확인한다.
 - **D4 함정.** 도메인 실패를 잘못 매핑하면 부하 중 연결이 끊기고 parity 실패로 나타난다.
 - **11I의 MySQL 실측이 처음이다.** `mysql_close()` boundedness를 포함해 새로 드러날 문제가 있을 수 있다.
 - **11J 후 `snf::server::Player` 이름과 `snf_game` 위치의 불일치가 남는다.** 네임스페이스 정리는 범위 밖이다.
