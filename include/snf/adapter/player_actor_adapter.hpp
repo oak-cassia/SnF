@@ -48,7 +48,21 @@ namespace snf::adapter
         WorkflowStep step{WorkflowStep::RoomReturnStep1_ZoneEnter};
     };
 
-    using WorkflowState = std::variant<StableRoute, EnteringRoute, InRoomRoute, ReturningRoute>;
+    struct TransferringRoute
+    {
+        snf::server::ZoneId source_zone{0};
+        std::uint64_t source_epoch{0};
+        snf::server::ZonePosition source_position{0, 0};
+        snf::server::ZoneId target_zone{0};
+        std::uint64_t target_epoch{0};
+        snf::server::ZonePosition target_position{0, 0};
+        std::uint64_t restore_epoch{0};
+        std::uint32_t request_id{0};
+        std::uint64_t correlation_id{0};
+        WorkflowStep step{WorkflowStep::CrossZoneLeaveSource};
+    };
+
+    using WorkflowState = std::variant<StableRoute, EnteringRoute, InRoomRoute, ReturningRoute, TransferringRoute>;
 
     struct PendingZoneOperation
     {
@@ -168,6 +182,8 @@ namespace snf::adapter
         [[nodiscard]] snf::worker::TurnResult handleZoneOutcome(ZoneOutcomeMessage&& msg, const snf::worker::ActorTurnContext& context);
         [[nodiscard]] snf::worker::TurnResult handleRoomOutcome(RoomOutcomeMessage&& msg, const snf::worker::ActorTurnContext& context);
         [[nodiscard]] snf::worker::TurnResult handleWorkflowTimeout(PlayerWorkflowTimeoutMessage&& msg, const snf::worker::ActorTurnContext& context);
+        void appendCrossZoneCleanup(snf::worker::EffectBatch& effects, const TransferringRoute& transfer);
+        void failCrossZoneKnownNone(snf::worker::EffectBatch& effects, const TransferringRoute& transfer, bool close_connection);
 
         snf::server::Player _player;
         snf::worker::TimerAdmission* _timer_admission{nullptr};

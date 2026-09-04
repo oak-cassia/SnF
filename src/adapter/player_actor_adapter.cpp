@@ -260,10 +260,16 @@ namespace snf::adapter
                     }
                     _workflow_state = StableRoute{.zone = std::nullopt};
                 }
+                else if (std::holds_alternative<TransferringRoute>(_workflow_state))
+                {
+                    const auto transfer = std::get<TransferringRoute>(_workflow_state);
+                    failCrossZoneKnownNone(effects, transfer, false);
+                }
                 else
                 {
                     _workflow_state = StableRoute{.zone = std::nullopt};
                 }
+                scheduleSaveIfDirty(effects, context.now);
             }
             return snf::worker::CompletedTurn{.effects = std::move(effects)};
         }
@@ -329,6 +335,50 @@ namespace snf::adapter
 
     constexpr auto WORKFLOW_TIMEOUT = std::chrono::milliseconds{1000};
 
+    void PlayerActorAdapter::appendCrossZoneCleanup(snf::worker::EffectBatch& effects, const TransferringRoute& transfer)
+    {
+        const auto player_id = _player.state().identity();
+        if (!player_id.has_value())
+        {
+            return;
+        }
+
+        const auto append_leave = [&effects, player = *player_id](const snf::server::ZoneId zone, const std::uint64_t epoch)
+        {
+            effects.push(snf::worker::TellActorEffect{
+                .target = snf::worker::ActorKey{snf::worker::ActorKind::Zone, zone.value},
+                .message = GameActorPayloadRegistry::create(ZoneCommandMessage{
+                    .connection = std::nullopt,
+                    .request_id = 0,
+                    .command = snf::server::LeaveZoneCommand{.player = player, .route_epoch = epoch},
+                    .reply_to = std::nullopt,
+                }),
+            });
+        };
+
+        const auto source_cleanup_epoch =
+            transfer.step == WorkflowStep::CrossZoneRestoreSource && transfer.restore_epoch != 0 ? transfer.restore_epoch : transfer.source_epoch;
+        append_leave(transfer.source_zone, source_cleanup_epoch);
+        append_leave(transfer.target_zone, transfer.target_epoch);
+    }
+
+    void PlayerActorAdapter::failCrossZoneKnownNone(snf::worker::EffectBatch& effects, const TransferringRoute& transfer, const bool close_connection)
+    {
+        appendCrossZoneCleanup(effects, transfer);
+        _pending_zone_ops.clear();
+        _player.setLastLocation(std::nullopt);
+        _workflow_state = StableRoute{.zone = std::nullopt};
+
+        if (close_connection && _bound_connection.has_value())
+        {
+            effects.push(snf::worker::CloseConnectionEffect{
+                .connection = *_bound_connection,
+                .reason = snf::worker::CloseReason::Application,
+                .graceful = true,
+            });
+        }
+    }
+
     snf::worker::TurnResult PlayerActorAdapter::handleZoneRequest(PlayerZoneRequestMessage&& msg, const snf::worker::ActorTurnContext& context)
     {
         const auto player_id = _player.state().identity();
@@ -379,7 +429,8 @@ namespace snf::adapter
                         return snf::worker::CompletedTurn{.effects = std::move(effects)};
                     }
 
-                    if (std::holds_alternative<EnteringRoute>(_workflow_state) || std::holds_alternative<ReturningRoute>(_workflow_state))
+                    if (std::holds_alternative<EnteringRoute>(_workflow_state) || std::holds_alternative<ReturningRoute>(_workflow_state) ||
+                        std::holds_alternative<TransferringRoute>(_workflow_state))
                     {
                         const snf::server::ZoneResult result{
                             .status = snf::server::ZoneCommandStatus::TransitionInProgress,
@@ -401,21 +452,112 @@ namespace snf::adapter
                     const auto active_zone = currentZone();
                     if (active_zone.has_value() && *active_zone != req.zone)
                     {
-                        // Zone-to-zone transfer fails until 11F handoff saga. Keep connection alive.
-                        const snf::server::ZoneResult result{
-                            .status = snf::server::ZoneCommandStatus::TransferFailed,
-                            .player = player,
-                            .position = std::nullopt,
-                            .route_epoch = _route_epoch,
-                            .tick = 0,
-                            .visible_players = {},
-                        };
-                        snf::worker::EffectBatch effects;
-                        effects.push(snf::worker::SendFrameEffect{
-                            .connection = msg.connection,
-                            .frame = encodeZoneReply(ZoneReplyFrameKind::Entered, *active_zone, result, msg.request_id),
-                            .critical = false,
+                        const bool has_boundary_op = std::any_of(
+                            _pending_zone_ops.begin(),
+                            _pending_zone_ops.end(),
+                            [](const auto& op)
+                            {
+                                return op.step != WorkflowStep::ZoneMove;
+                            }
+                        );
+                        if (has_boundary_op)
+                        {
+                            const snf::server::ZoneResult result{
+                                .status = snf::server::ZoneCommandStatus::TransitionInProgress,
+                                .player = player,
+                                .position = std::nullopt,
+                                .route_epoch = _route_epoch,
+                                .tick = 0,
+                                .visible_players = {},
+                            };
+                            snf::worker::EffectBatch effects;
+                            effects.push(snf::worker::SendFrameEffect{
+                                .connection = msg.connection,
+                                .frame = encodeZoneReply(ZoneReplyFrameKind::Entered, req.zone, result, msg.request_id),
+                                .critical = false,
+                            });
+                            return snf::worker::CompletedTurn{.effects = std::move(effects)};
+                        }
+
+                        const auto correlation = ++_correlation_sequence;
+                        auto timeout_msg = GameActorPayloadRegistry::create(PlayerWorkflowTimeoutMessage{
+                            .correlation_id = correlation,
+                            .step = WorkflowStep::CrossZoneLeaveSource,
                         });
+                        std::optional<snf::worker::TimerReservation> reservation = std::nullopt;
+                        if (_timer_admission != nullptr)
+                        {
+                            reservation = _timer_admission->tryReserve(timeout_msg.chargedBytes(), context.turn_id);
+                            if (!reservation.has_value())
+                            {
+                                const snf::server::ZoneResult result{
+                                    .status = snf::server::ZoneCommandStatus::TransferFailed,
+                                    .player = player,
+                                    .position = std::nullopt,
+                                    .route_epoch = _route_epoch,
+                                    .tick = 0,
+                                    .visible_players = {},
+                                };
+                                snf::worker::EffectBatch effects;
+                                effects.push(snf::worker::SendFrameEffect{
+                                    .connection = msg.connection,
+                                    .frame = encodeZoneReply(ZoneReplyFrameKind::Entered, *active_zone, result, msg.request_id),
+                                    .critical = false,
+                                });
+                                return snf::worker::CompletedTurn{.effects = std::move(effects)};
+                            }
+                        }
+
+                        const auto source_epoch = _route_epoch;
+                        const auto target_epoch = _route_epoch + 1;
+                        const auto source_position =
+                            _player.state().lastLocation().has_value() && _player.state().lastLocation()->zone == *active_zone
+                                ? _player.state().lastLocation()->position
+                                : snf::server::ZonePosition{0, 0};
+                        _route_epoch = target_epoch;
+                        _workflow_state = TransferringRoute{
+                            .source_zone = *active_zone,
+                            .source_epoch = source_epoch,
+                            .source_position = source_position,
+                            .target_zone = req.zone,
+                            .target_epoch = target_epoch,
+                            .target_position = req.position,
+                            .restore_epoch = 0,
+                            .request_id = msg.request_id,
+                            .correlation_id = correlation,
+                            .step = WorkflowStep::CrossZoneLeaveSource,
+                        };
+
+                        snf::worker::EffectBatch effects;
+                        effects.push(snf::worker::TellActorEffect{
+                            .target = snf::worker::ActorKey{snf::worker::ActorKind::Zone, active_zone->value},
+                            .message = GameActorPayloadRegistry::create(ZoneCommandMessage{
+                                .connection = std::nullopt,
+                                .request_id = msg.request_id,
+                                .command =
+                                    snf::server::LeaveZoneCommand{
+                                        .player = player,
+                                        .route_epoch = source_epoch,
+                                    },
+                                .reply_to =
+                                    WorkflowReplyTo{
+                                        .player = player,
+                                        .connection_generation = msg.connection.generation,
+                                        .correlation_id = correlation,
+                                        .step = WorkflowStep::CrossZoneLeaveSource,
+                                        .route_epoch = source_epoch,
+                                        .request_id = msg.request_id,
+                                    },
+                            }),
+                        });
+                        if (reservation.has_value())
+                        {
+                            effects.push(snf::worker::ScheduleTimerEffect{
+                                .deadline = context.now + WORKFLOW_TIMEOUT,
+                                .message = std::move(timeout_msg),
+                                .reservation = std::move(*reservation),
+                            });
+                        }
                         return snf::worker::CompletedTurn{.effects = std::move(effects)};
                     }
 
@@ -545,7 +687,8 @@ namespace snf::adapter
                         return snf::worker::CompletedTurn{.effects = std::move(effects)};
                     }
 
-                    if (std::holds_alternative<EnteringRoute>(_workflow_state) || std::holds_alternative<ReturningRoute>(_workflow_state))
+                    if (std::holds_alternative<EnteringRoute>(_workflow_state) || std::holds_alternative<ReturningRoute>(_workflow_state) ||
+                        std::holds_alternative<TransferringRoute>(_workflow_state))
                     {
                         const snf::server::ZoneResult result{
                             .status = snf::server::ZoneCommandStatus::TransitionInProgress,
@@ -558,7 +701,13 @@ namespace snf::adapter
                         snf::worker::EffectBatch effects;
                         effects.push(snf::worker::SendFrameEffect{
                             .connection = msg.connection,
-                            .frame = encodeZoneReply(ZoneReplyFrameKind::Moved, currentZone().value_or(snf::server::ZoneId{0}), result, msg.request_id),
+                            .frame = encodeZoneReply(
+                                ZoneReplyFrameKind::Moved,
+                                std::holds_alternative<TransferringRoute>(_workflow_state) ? std::get<TransferringRoute>(_workflow_state).target_zone
+                                                                                           : currentZone().value_or(snf::server::ZoneId{0}),
+                                result,
+                                msg.request_id
+                            ),
                             .critical = false,
                         });
                         return snf::worker::CompletedTurn{.effects = std::move(effects)};
@@ -719,7 +868,8 @@ namespace snf::adapter
                         return snf::worker::CompletedTurn{.effects = std::move(effects)};
                     }
 
-                    if (std::holds_alternative<EnteringRoute>(_workflow_state) || std::holds_alternative<ReturningRoute>(_workflow_state))
+                    if (std::holds_alternative<EnteringRoute>(_workflow_state) || std::holds_alternative<ReturningRoute>(_workflow_state) ||
+                        std::holds_alternative<TransferringRoute>(_workflow_state))
                     {
                         const snf::server::ZoneResult result{
                             .status = snf::server::ZoneCommandStatus::TransitionInProgress,
@@ -732,7 +882,13 @@ namespace snf::adapter
                         snf::worker::EffectBatch effects;
                         effects.push(snf::worker::SendFrameEffect{
                             .connection = msg.connection,
-                            .frame = encodeZoneReply(ZoneReplyFrameKind::Left, currentZone().value_or(snf::server::ZoneId{0}), result, msg.request_id),
+                            .frame = encodeZoneReply(
+                                ZoneReplyFrameKind::Left,
+                                std::holds_alternative<TransferringRoute>(_workflow_state) ? std::get<TransferringRoute>(_workflow_state).target_zone
+                                                                                           : currentZone().value_or(snf::server::ZoneId{0}),
+                                result,
+                                msg.request_id
+                            ),
                             .critical = false,
                         });
                         return snf::worker::CompletedTurn{.effects = std::move(effects)};
@@ -1250,6 +1406,153 @@ namespace snf::adapter
             return snf::worker::CompletedTurn{.effects = snf::worker::EffectBatch{}};
         }
 
+        const bool is_cross_zone_step = msg.step == WorkflowStep::CrossZoneLeaveSource || msg.step == WorkflowStep::CrossZoneEnterTarget ||
+                                        msg.step == WorkflowStep::CrossZoneRestoreSource;
+        if (is_cross_zone_step)
+        {
+            if (!std::holds_alternative<TransferringRoute>(_workflow_state))
+            {
+                return snf::worker::CompletedTurn{.effects = snf::worker::EffectBatch{}};
+            }
+
+            auto& transfer = std::get<TransferringRoute>(_workflow_state);
+            const auto expected_zone = transfer.step == WorkflowStep::CrossZoneEnterTarget ? transfer.target_zone : transfer.source_zone;
+            const auto expected_epoch = transfer.step == WorkflowStep::CrossZoneLeaveSource
+                                            ? transfer.source_epoch
+                                            : (transfer.step == WorkflowStep::CrossZoneEnterTarget ? transfer.target_epoch : transfer.restore_epoch);
+            if (msg.correlation_id != transfer.correlation_id || msg.step != transfer.step || msg.zone != expected_zone ||
+                msg.route_epoch != expected_epoch || msg.request_id != transfer.request_id ||
+                (msg.result.player.has_value() && *msg.result.player != *player_id))
+            {
+                return snf::worker::CompletedTurn{.effects = snf::worker::EffectBatch{}};
+            }
+
+            snf::worker::EffectBatch effects;
+            if (transfer.step == WorkflowStep::CrossZoneLeaveSource)
+            {
+                if (msg.result.status != snf::server::ZoneCommandStatus::Applied || !msg.result.position.has_value())
+                {
+                    const auto failed = transfer;
+                    failCrossZoneKnownNone(effects, failed, true);
+                    scheduleSaveIfDirty(effects, context.now);
+                    return snf::worker::CompletedTurn{.effects = std::move(effects)};
+                }
+
+                transfer.source_position = *msg.result.position;
+                transfer.step = WorkflowStep::CrossZoneEnterTarget;
+                effects.push(snf::worker::TellActorEffect{
+                    .target = snf::worker::ActorKey{snf::worker::ActorKind::Zone, transfer.target_zone.value},
+                    .message = GameActorPayloadRegistry::create(ZoneCommandMessage{
+                        .connection = std::nullopt,
+                        .request_id = transfer.request_id,
+                        .command =
+                            snf::server::EnterZoneCommand{
+                                .player = *player_id,
+                                .route_epoch = transfer.target_epoch,
+                                .position = transfer.target_position,
+                            },
+                        .reply_to =
+                            WorkflowReplyTo{
+                                .player = *player_id,
+                                .connection_generation = _bound_connection->generation,
+                                .correlation_id = transfer.correlation_id,
+                                .step = WorkflowStep::CrossZoneEnterTarget,
+                                .route_epoch = transfer.target_epoch,
+                                .request_id = transfer.request_id,
+                            },
+                    }),
+                });
+                return snf::worker::CompletedTurn{.effects = std::move(effects)};
+            }
+
+            if (transfer.step == WorkflowStep::CrossZoneEnterTarget)
+            {
+                if ((msg.result.status == snf::server::ZoneCommandStatus::Applied ||
+                     msg.result.status == snf::server::ZoneCommandStatus::AlreadyPresent) &&
+                    msg.result.position.has_value())
+                {
+                    const auto target_zone = transfer.target_zone;
+                    const auto target_epoch = transfer.target_epoch;
+                    const auto request_id = transfer.request_id;
+                    const auto final_position = *msg.result.position;
+                    _workflow_state = StableRoute{.zone = target_zone};
+                    _route_epoch = target_epoch;
+                    _player.setLastLocation(snf::server::PlayerLocation{.zone = target_zone, .position = final_position});
+                    effects.push(snf::worker::SendFrameEffect{
+                        .connection = *_bound_connection,
+                        .frame = encodeZoneReply(ZoneReplyFrameKind::Entered, target_zone, msg.result, request_id),
+                        .critical = false,
+                    });
+                    scheduleSaveIfDirty(effects, context.now);
+                    return snf::worker::CompletedTurn{.effects = std::move(effects)};
+                }
+
+                transfer.restore_epoch = _route_epoch + 1;
+                _route_epoch = transfer.restore_epoch;
+                transfer.step = WorkflowStep::CrossZoneRestoreSource;
+                effects.push(snf::worker::TellActorEffect{
+                    .target = snf::worker::ActorKey{snf::worker::ActorKind::Zone, transfer.source_zone.value},
+                    .message = GameActorPayloadRegistry::create(ZoneCommandMessage{
+                        .connection = std::nullopt,
+                        .request_id = transfer.request_id,
+                        .command =
+                            snf::server::EnterZoneCommand{
+                                .player = *player_id,
+                                .route_epoch = transfer.restore_epoch,
+                                .position = transfer.source_position,
+                            },
+                        .reply_to =
+                            WorkflowReplyTo{
+                                .player = *player_id,
+                                .connection_generation = _bound_connection->generation,
+                                .correlation_id = transfer.correlation_id,
+                                .step = WorkflowStep::CrossZoneRestoreSource,
+                                .route_epoch = transfer.restore_epoch,
+                                .request_id = transfer.request_id,
+                            },
+                    }),
+                });
+                return snf::worker::CompletedTurn{.effects = std::move(effects)};
+            }
+
+            if ((msg.result.status == snf::server::ZoneCommandStatus::Applied || msg.result.status == snf::server::ZoneCommandStatus::AlreadyPresent
+                ) &&
+                msg.result.position.has_value())
+            {
+                const auto source_zone = transfer.source_zone;
+                const auto restore_epoch = transfer.restore_epoch;
+                const auto request_id = transfer.request_id;
+                const auto final_position = *msg.result.position;
+                _workflow_state = StableRoute{.zone = source_zone};
+                _route_epoch = restore_epoch;
+                _player.setLastLocation(snf::server::PlayerLocation{.zone = source_zone, .position = final_position});
+                effects.push(snf::worker::SendFrameEffect{
+                    .connection = *_bound_connection,
+                    .frame = encodeZoneReply(
+                        ZoneReplyFrameKind::Entered,
+                        source_zone,
+                        snf::server::ZoneResult{
+                            .status = snf::server::ZoneCommandStatus::TransferFailed,
+                            .player = *player_id,
+                            .position = final_position,
+                            .route_epoch = restore_epoch,
+                            .tick = msg.result.tick,
+                            .visible_players = msg.result.visible_players,
+                        },
+                        request_id
+                    ),
+                    .critical = false,
+                });
+                scheduleSaveIfDirty(effects, context.now);
+                return snf::worker::CompletedTurn{.effects = std::move(effects)};
+            }
+
+            const auto failed = transfer;
+            failCrossZoneKnownNone(effects, failed, true);
+            scheduleSaveIfDirty(effects, context.now);
+            return snf::worker::CompletedTurn{.effects = std::move(effects)};
+        }
+
         if (msg.step == WorkflowStep::RoomJoinStep2_LeaveZone)
         {
             if (std::holds_alternative<EnteringRoute>(_workflow_state))
@@ -1753,6 +2056,22 @@ namespace snf::adapter
             }
             scheduleSaveIfDirty(effects, context.now);
             return snf::worker::CompletedTurn{.effects = std::move(effects)};
+        }
+
+        if (std::holds_alternative<TransferringRoute>(_workflow_state))
+        {
+            const auto& transfer = std::get<TransferringRoute>(_workflow_state);
+            // Cross-zone handoff owns one overall timeout reservation for its
+            // complete lifetime. The original step value identifies that timer;
+            // the current state step may already be EnterTarget or RestoreSource.
+            if (transfer.correlation_id == msg.correlation_id && msg.step == WorkflowStep::CrossZoneLeaveSource)
+            {
+                const auto failed = transfer;
+                snf::worker::EffectBatch effects;
+                failCrossZoneKnownNone(effects, failed, true);
+                scheduleSaveIfDirty(effects, context.now);
+                return snf::worker::CompletedTurn{.effects = std::move(effects)};
+            }
         }
 
         if (std::holds_alternative<EnteringRoute>(_workflow_state))

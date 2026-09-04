@@ -37,6 +37,9 @@ namespace snf::adapter
         RoomJoinStep2_LeaveZone = 5,
         RoomReturnStep1_ZoneEnter = 6,
         RoomTerminalNotification = 7,
+        CrossZoneLeaveSource = 8,
+        CrossZoneEnterTarget = 9,
+        CrossZoneRestoreSource = 10,
     };
 
     struct WorkflowReplyTo
