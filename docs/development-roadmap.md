@@ -177,7 +177,7 @@ production 전환 뒤에는 11단계에서 실제 MySQL을 포함해 같은 게�
 
 ### 11단계 — Application workflow 이전, production 전환과 legacy 제거
 
-- [ ] Room entry/return과 cross-zone transition의 natural owner를 결정한다.
+- [x] Room entry/return과 cross-zone transition의 natural owner를 결정한다.
 - [x] natural domain owner가 있으면 explicit Actor state + correlation ID로 구현한다.
 - [x] 독립 lifecycle이 실제 필요한 흐름만 Coordinator Actor로 만든다.
 - [x] Actor-to-Actor mailbox 응답을 suspended coroutine이 기다리게 하지 않는다.

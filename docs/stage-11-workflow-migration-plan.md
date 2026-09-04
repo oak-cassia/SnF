@@ -144,7 +144,8 @@ room 상태를 갖지 않으면 대상을 결정할 수 없다.
 | 11C | **완료** | 아래 "11C 결과" 참고 |
 | 11E | **완료** | 아래 "11E 결과" 참고 |
 | 11D | **완료** | 아래 "11D 결과" 참고 |
-| 11F~11K | 미착수 | |
+| 11F | **완료** | 아래 "11F 결과" 참고 |
+| 11G~11K | 미착수 | |
 
 ### 11A 결과
 
@@ -294,6 +295,43 @@ transition correlation을 위해 이미 만들 예정이므로, 11E에서 한 �
 - **E2E TCP 세션 검증**:
   - `worker_session_test.cpp`를 통해 정상 입장/퇴장 왕복 (`test_room_join_and_leave_over_session`), 전투 라이프사이클 및 스킬/이동 (`test_battle_lifecycle_over_session`), 전투 종료 후 unsolicited `ReturnedToZone` 수신 및 Zone 복귀 (`test_boss_defeat_or_timeout_returns_to_zone_over_session`), Room 0 입장 시 안전한 종료 (`test_room_join_zero_closes_connection`), 파이프라인된 TCP Move 연속 수발신 (`test_pipelined_zone_moves_over_session`)을 검증했다.
 
+### 11F 결과
+
+- **PlayerActor 소유 교차 Zone 상태 머신**:
+  - `WorkflowState`에 bounded `TransferringRoute`를 추가하고 `LeaveSource` → `EnterTarget` → 필요 시
+    `RestoreSource`를 correlation ID, connection generation, step, Zone, request ID와 route epoch으로 검증한다.
+  - 전환 중 `currentZone()`은 `nullopt`라 target 완료 전 route가 공개되지 않는다. 이때 들어온 Zone 요청은
+    ZoneActor로 전달하지 않고 `TransitionInProgress`, Room 입장은 `EntryFailed`로 끝낸다.
+- **정상 전환과 FIFO drain**:
+  - 기존 source route의 Move만 pending인 경우 handoff를 허용한다. 같은 PlayerActor에서 source Zone으로 먼저
+    발행된 Move tell 뒤에 Leave tell이 놓이므로 source mailbox FIFO drain을 보존한다.
+  - target `Applied`/`AlreadyPresent`와 authoritative position을 확인한 뒤에만 target route와
+    `last_location`을 공개하고 최초 `EnterZone`에 `ZoneEntered`를 정확히 한 번 반환한다.
+- **실패 보상과 known-none terminal**:
+  - target의 확정 실패는 target epoch보다 큰 restore epoch으로 source를 재입장시키고, 복구 성공 뒤 source
+    route와 위치를 공개하며 `TransferFailed`를 한 번 반환한다.
+  - source leave, target enter 또는 source restore의 적용 여부를 알 수 없는 timeout과 복구 실패는 source와
+    target에 멱등 cleanup Leave를 발행하고 pending source operation을 폐기한 뒤 route/location을
+    `known none`으로 확정하고 connection을 닫는다. 전환 중 disconnect도 같은 cleanup 경로를 사용한다.
+- **전 수명 timeout 예약**:
+  - 런타임에는 등록된 application timer를 outcome 시점에 취소하는 API가 없으므로 단계마다 timer를 추가하지
+    않는다. handoff 시작 전에 `TimerAdmission::tryReserve`로 **단일 전체수명 timeout**을 예약하며, 그
+    correlation이 만료될 때 현재 단계와 무관하게 위 cleanup terminal로 끝낸다. Actor-to-Actor tell 적용 실패는
+    발신 actor가 동기 관측할 수 없으므로 timeout 전에는 `target admission 실패`와 `outcome 유실`을 구분할 수
+    없고, 둘 다 추측성 source 복구 대신 known-none close로 처리한다.
+- **검증**:
+  - 실제 source/target `ZoneActorAdapter`를 사용해 route 비공개, 전환 중 입력 차단, stale outcome 무시, epoch 2
+    target 성공, epoch 3 source 보상, target outcome 유실 후 양쪽 participant cleanup, 시작 전 timer admission
+    실패 시 source route 유지를 검증했다.
+  - 2-Worker `WorkerGroup`에서 PlayerActor와 두 ZoneActor를 서로 다른 owner에 배치하고, 실제 TCP로 source
+    Move와 target Enter를 한 번의 `sendAll`로 파이프라인해 remote inbox를 거친 Move 응답이 먼저 오며 target
+    Zone의 새 epoch에서 Move/Leave까지 이어짐을
+    `test_cross_zone_handoff_orders_source_move_and_serves_target`으로 고정했다.
+  - Debug: 13 PASS / 4 SKIP (MySQL)
+  - TSan worker: 8 PASS / 3 SKIP (MySQL), data race 0건
+  - ASan-UBSan worker: 8 PASS / 3 SKIP (MySQL), sanitizer 오류 0건
+  - Debug adapter 반복: 5회 연속 PASS (`--repeat until-fail:5`)
+
 ## 검증
 
 각 스텝마다 Docker 안에서:
@@ -314,8 +352,9 @@ docker run --rm -v "$PWD:/workspace" -w /workspace snf-server-dev bash -lc 'cmak
 
 ## 리스크
 
-- **cross-worker transition ordering.** Player와 Zone/Room이 다른 worker면 transition 응답이 remote inbox를
-  거친다. remote tell은 10단계에서 검증됐지만 계약의 순서·backpressure 의미를 재확인해야 한다.
+- **cross-worker transition ordering.** 11F의 2-Worker TCP 테스트에서 Player와 Zone을 다른 owner에 배치해
+  source Move → Leave와 Zone outcome의 remote inbox 순서를 재확인했다. 포화 시 backpressure와 cleanup tell
+  failure metric은 11I 과부하 게이트에서 다시 확인한다.
 - **cleanup tell은 best-effort다.** 11E는 `TimerAdmission::tryReserve`로 terminal timeout 예산을 먼저 확보해
   primary Zone/Room tell 또는 outcome 유실을 감지하고, idempotent cleanup tell과 안전한 local route를
   결정한다. 다만 cleanup `TellActorEffect` 자체의 적용 실패는 metric으로만 관측되므로, 11G에서

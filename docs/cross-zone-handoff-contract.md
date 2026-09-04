@@ -1,10 +1,10 @@
 # Cross-Zone Handoff 계약
 
-> 문서 상태: **gameplay 전이 의미 보존 / target runtime topology 미확정**
+> 문서 상태: **gameplay 전이 의미 보존 / Worker target 구현 완료 (11F)**
 > epoch, stale 방어와 실패 보상은 보존한다. `reactor`, `RouteCoordinator`와
-> `ZoneTransitionChannel`은 현행 구현 이름이며 목표 구조가 아니다. 새 owner와 message flow는
-> [Unified Worker Runtime](./architecture/unified-worker-runtime.md)과
-> [개발 로드맵 11단계](./development-roadmap.md)의 Application workflow 이전에서 확정한다.
+> `ZoneTransitionChannel`은 legacy parity oracle의 이름이다. target runtime은 `PlayerActor`의 explicit
+> workflow state와 Actor-to-Actor mailbox 응답으로 구현했으며, 상세 결과는
+> [11단계 실행 계획의 11F 결과](./stage-11-workflow-migration-plan.md#11f-결과)를 따른다.
 >
 > 범위: 한 프로세스 안의 두 `ZoneActor` 사이에서 Player를 옮기는 상태 전이
 
@@ -26,13 +26,14 @@ Zone에도 없는 상태가 될 수 있다. `route_epoch`은 stale command를 �
 
 ## 2. 소유권과 상태
 
-reactor의 `RouteCoordinator`가 route와 transition을 소유한다. `ZoneActor`는 자신의 participant와 위치만
-수정한다. Worker는 immutable completion value를 bounded `ZoneTransitionChannel`에 게시하며 route나
-session 객체를 직접 참조하지 않는다.
+legacy에서는 reactor의 `RouteCoordinator`가 route와 transition을 소유했다. target runtime에서는
+`PlayerActor`가 route와 transition을 소유하며, `ZoneActor`는 계속 자신의 participant와 위치만 수정한다.
+Zone 결과는 immutable `ZoneOutcomeMessage`로 PlayerActor mailbox에 회신되고 Worker는 route나 session
+객체를 직접 참조하지 않는다.
 
 ```text
 Stable(zone, epoch, position)
-Transferring(handoff_id,
+Transferring(correlation_id,
              source_zone, source_epoch,
              target_zone, target_epoch,
              requested_position,
@@ -40,7 +41,7 @@ Transferring(handoff_id,
 ```
 
 - connection마다 handoff는 최대 하나다.
-- `handoff_id`와 route epoch은 0이 아닌 단조 증가 값이다.
+- correlation ID와 route epoch은 0이 아닌 단조 증가 값이다.
 - `Transferring` 동안 gameplay와 두 번째 Enter는 `TransitionInProgress`로 끝낸다.
 - completion은 connection generation, handoff ID, step과 epoch이 모두 일치할 때만 적용한다.
 
@@ -64,9 +65,11 @@ source에 게시하지 않고, target route는 target activation이 확인되기
 
 ## 4. Backpressure와 client outcome
 
-handoff admission이 completion slot 하나를 전체 수명 동안 예약한다. 한 handoff에는 내부 Zone command
-하나만 in-flight이며, 단계가 바뀌어도 같은 reservation을 재사용한다. 따라서 승인된 Worker completion이
-queue 포화로 유실되지 않는다.
+legacy handoff admission은 completion slot 하나를 전체 수명 동안 예약했다. target Worker 구현은 시작 전에
+`TimerAdmission::tryReserve`로 application timer 하나를 예약하고 전체 handoff에 같은 correlation을 사용한다.
+등록된 timer를 조기 취소하는 API가 없으므로 단계별 timer를 중첩하지 않으며, 한 handoff에는 내부 Zone
+command 하나만 in-flight다. Actor mailbox의 outcome tell 적용 실패는 발신 actor가 동기 관측할 수 없지만,
+전체수명 timeout이 이를 terminal cleanup과 close로 바꾼다.
 
 내부 Leave/Enter/cleanup command는 client credit을 만들지 않는다. transition record 하나가 최초
 `EnterZone`의 request와 `CommandReleaseToken`을 소유한다.
@@ -80,13 +83,16 @@ queue 포화로 유실되지 않는다.
 
 ### Source 변경 전
 
-handoff slot 또는 source command admission이 실패하면 source를 수정하지 않고 기존
-`Stable(source)`를 유지한 채 failure를 응답한다.
+handoff timeout admission이 실패하면 source를 수정하지 않고 기존 `Stable(source)`를 유지한 채 failure를
+응답한다. target Worker의 `TellActorEffect` 적용은 actor turn이 끝난 뒤 Worker에서 일어나므로 source command
+post 실패를 PlayerActor가 동기 관측할 수 없다. 이 경우 전체수명 timeout에서 적용 여부 불명으로 취급해 양쪽
+cleanup과 close로 끝낸다.
 
 ### Source leave 뒤
 
-target admission 또는 적용이 실패하면 더 큰 `restore_epoch`으로 source Enter를 게시한다. restore가
-성공한 뒤에만 source route를 다시 공개하고 failure를 응답한다.
+target의 **확정된 적용 실패 outcome**은 더 큰 `restore_epoch`으로 source Enter를 게시한다. restore가 성공한
+뒤에만 source route를 다시 공개하고 failure를 응답한다. target tell post 실패와 outcome 유실은 PlayerActor
+관점에서 구분되지 않으므로 아래의 적용 여부 불명 경로를 따른다.
 
 target 적용 여부를 알 수 없거나 restore도 실패하면 stable route를 추측하지 않는다. source와 target에
 epoch별 cleanup Leave를 게시하고 connection을 닫으며 session location을 `known none`으로 만든다.
