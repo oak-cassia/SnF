@@ -7,6 +7,7 @@
 #include "snf/net/tcp_listener.hpp"
 #include "snf/protocol/frame_codec.hpp"
 #include "snf/worker/worker.hpp"
+#include "snf/worker/worker_group.hpp"
 
 #include "socket_test_support.hpp"
 
@@ -21,6 +22,17 @@
 #include <sys/socket.h>
 #include <thread>
 #include <vector>
+
+namespace snf::worker
+{
+    struct WorkerGroupTestAccess
+    {
+        [[nodiscard]] static Worker& worker(WorkerGroup& group, const std::size_t index)
+        {
+            return *group._workers[index];
+        }
+    };
+}
 
 // Stage 11A. The legacy PlayerSessionDirectory was one mutex-guarded map holding
 // both directions of the session identity. This runtime splits it: the sink owns
@@ -168,6 +180,92 @@ namespace
         std::unique_ptr<snf::worker::Worker> _worker;
         std::uint16_t _port{0};
         std::thread _thread;
+    };
+
+    class MultiWorkerSessionHarness final
+    {
+    public:
+        MultiWorkerSessionHarness()
+        {
+            snf::worker::WorkerGroupConfig config{};
+            config.worker_count = WORKER_COUNT;
+            config.max_workers = WORKER_COUNT;
+            config.port = 0;
+            config.network = sessionNetworkConfig();
+            config.actor = sessionActorConfig();
+
+            _group = std::make_unique<snf::worker::WorkerGroup>(
+                config,
+                [this](const snf::worker::WorkerId id) -> std::unique_ptr<snf::worker::RequestSink>
+                {
+                    auto sink = std::make_unique<snf::adapter::GameRequestSink>();
+                    _sinks[id.value] = sink.get();
+                    return sink;
+                },
+                [this](const snf::worker::WorkerId id) -> std::unique_ptr<snf::worker::ActorFactory>
+                {
+                    auto factory = std::make_unique<snf::adapter::GameActorFactory>();
+                    _factories[id.value] = factory.get();
+                    return factory;
+                }
+            );
+
+            for (std::size_t index = 0; index < WORKER_COUNT; ++index)
+            {
+                auto& worker = snf::worker::WorkerGroupTestAccess::worker(*_group, index);
+                _sinks[index]->setWorker(worker);
+                _factories[index]->setTimerAdmission(worker);
+            }
+            _group->start();
+        }
+
+        ~MultiWorkerSessionHarness()
+        {
+            stop();
+        }
+
+        MultiWorkerSessionHarness(const MultiWorkerSessionHarness&) = delete;
+        MultiWorkerSessionHarness& operator=(const MultiWorkerSessionHarness&) = delete;
+
+        void stop()
+        {
+            if (_group && _group->isRunning())
+            {
+                _group->requestStop();
+                _group->join();
+            }
+        }
+
+        [[nodiscard]] std::uint16_t port() const noexcept
+        {
+            return _group->port();
+        }
+
+        [[nodiscard]] std::size_t sessionCount() const noexcept
+        {
+            std::size_t count = 0;
+            for (const auto* sink : _sinks)
+            {
+                count += sink->sessionCount();
+            }
+            return count;
+        }
+
+        [[nodiscard]] std::uint64_t remoteTellsSent() const noexcept
+        {
+            std::uint64_t count = 0;
+            for (std::size_t index = 0; index < WORKER_COUNT; ++index)
+            {
+                count += _group->worker(index).metrics().actor.remote_tells_sent;
+            }
+            return count;
+        }
+
+    private:
+        static constexpr std::size_t WORKER_COUNT = 2;
+        std::array<snf::adapter::GameRequestSink*, WORKER_COUNT> _sinks{};
+        std::array<snf::adapter::GameActorFactory*, WORKER_COUNT> _factories{};
+        std::unique_ptr<snf::worker::WorkerGroup> _group;
     };
 
     void expectFrame(const int descriptor, const snf::protocol::Frame& expected)
@@ -999,43 +1097,87 @@ namespace
         assert(harness.metrics().network.protocol_errors == 0);
     }
 
-    // Zone-to-zone EnterZone answers TransferFailed(5) and keeps the connection alive.
-    // Fixed with this test so Stage 11F will intentionally replace it with the handoff saga.
-    void test_zone_to_zone_fails_with_transfer_failed_and_keeps_connection()
+    // A source Move accepted before the handoff must drain first, then the target
+    // route is published at the new epoch and remains usable through LeaveZone.
+    void test_cross_zone_handoff_orders_source_move_and_serves_target()
     {
-        SessionHarness harness;
+        MultiWorkerSessionHarness harness;
+        const auto placement_seed = sessionActorConfig().placement_seed;
+        std::uint64_t player = 70;
+        while (snf::worker::ownerOf({snf::worker::ActorKind::Player, player}, 2, placement_seed) != snf::worker::WorkerId{0})
+        {
+            ++player;
+        }
+        std::uint64_t source_zone = 100;
+        while (snf::worker::ownerOf({snf::worker::ActorKind::Zone, source_zone}, 2, placement_seed) != snf::worker::WorkerId{1})
+        {
+            ++source_zone;
+        }
+        std::uint64_t target_zone = source_zone + 1;
+        while (snf::worker::ownerOf({snf::worker::ActorKind::Zone, target_zone}, 2, placement_seed) != snf::worker::WorkerId{1})
+        {
+            ++target_zone;
+        }
+
         auto client = connectClient(harness.port());
-        authenticate(client.getDescriptor(), 1, 77);
+        authenticate(client.getDescriptor(), 1, player);
 
-        const auto size_0 = zoneReplyEncodedSize(0);
-
-        sendAll(client.getDescriptor(), snf::protocol::encode_frame(enterZoneFrame(2, 100, 10, 20)));
-        const auto first = receiveFrame(client.getDescriptor(), size_0);
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(enterZoneFrame(2, source_zone, 10, 20)));
+        const auto first = receiveDecodedFrame(client.getDescriptor());
         assert(std::to_integer<std::uint8_t>(first.payload[0]) == static_cast<std::uint8_t>(snf::server::ZoneCommandStatus::Applied));
+        assert(readBigEndian64(first.payload, 1) == source_zone);
+        assert(readBigEndian64(first.payload, 9) == 1);
 
-        // Enter a different zone
-        sendAll(client.getDescriptor(), snf::protocol::encode_frame(enterZoneFrame(3, 200, 30, 40)));
-        const auto failed = receiveFrame(client.getDescriptor(), size_0);
-        assert(failed.type == snf::protocol::MessageType::ZoneEntered);
-        assert(failed.request_id == 3);
-        assert(std::to_integer<std::uint8_t>(failed.payload[0]) == static_cast<std::uint8_t>(snf::server::ZoneCommandStatus::TransferFailed));
-        assert(readBigEndian64(failed.payload, 1) == 100); // remains in current zone
-        assert(readBigEndian64(failed.payload, 9) == 1);
+        const auto source_move = snf::protocol::encode_frame(moveFrame(3, 15, 25));
+        const auto target_enter = snf::protocol::encode_frame(enterZoneFrame(4, target_zone, 30, 40));
+        std::vector<std::byte> pipelined;
+        pipelined.insert(pipelined.end(), source_move.begin(), source_move.end());
+        pipelined.insert(pipelined.end(), target_enter.begin(), target_enter.end());
+        sendAll(client.getDescriptor(), pipelined);
 
-        // Connection is preserved: subsequent command succeeds in zone 100.
-        sendAll(client.getDescriptor(), snf::protocol::encode_frame(moveFrame(4, 15, 25)));
-        const auto moved = receiveFrame(client.getDescriptor(), size_0);
-        assert(moved.type == snf::protocol::MessageType::Moved);
-        assert(moved.request_id == 4);
-        assert(std::to_integer<std::uint8_t>(moved.payload[0]) == static_cast<std::uint8_t>(snf::server::ZoneCommandStatus::Applied));
-        assert(readBigEndian64(moved.payload, 1) == 100);
-        assert(readBigEndianSigned32(moved.payload, 17) == 15);
-        assert(readBigEndianSigned32(moved.payload, 21) == 25);
+        const auto moved_source = receiveDecodedFrame(client.getDescriptor());
+        assert(moved_source.type == snf::protocol::MessageType::Moved);
+        assert(moved_source.request_id == 3);
+        assert(moved_source.payload[0] == static_cast<std::byte>(snf::server::ZoneCommandStatus::Applied));
+        assert(readBigEndian64(moved_source.payload, 1) == source_zone);
+        assert(readBigEndian64(moved_source.payload, 9) == 1);
+        assert(readBigEndianSigned32(moved_source.payload, 17) == 15);
+        assert(readBigEndianSigned32(moved_source.payload, 21) == 25);
+
+        const auto entered_target = receiveDecodedFrame(client.getDescriptor());
+        assert(entered_target.type == snf::protocol::MessageType::ZoneEntered);
+        assert(entered_target.request_id == 4);
+        assert(entered_target.payload[0] == static_cast<std::byte>(snf::server::ZoneCommandStatus::Applied));
+        assert(readBigEndian64(entered_target.payload, 1) == target_zone);
+        assert(readBigEndian64(entered_target.payload, 9) == 2);
+        assert(readBigEndianSigned32(entered_target.payload, 17) == 30);
+        assert(readBigEndianSigned32(entered_target.payload, 21) == 40);
+
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(moveFrame(5, 35, 45)));
+        const auto moved_target = receiveDecodedFrame(client.getDescriptor());
+        assert(moved_target.type == snf::protocol::MessageType::Moved);
+        assert(moved_target.request_id == 5);
+        assert(moved_target.payload[0] == static_cast<std::byte>(snf::server::ZoneCommandStatus::Applied));
+        assert(readBigEndian64(moved_target.payload, 1) == target_zone);
+        assert(readBigEndian64(moved_target.payload, 9) == 2);
+
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(leaveZoneFrame(6)));
+        const auto left_target = receiveDecodedFrame(client.getDescriptor());
+        assert(left_target.type == snf::protocol::MessageType::ZoneLeft);
+        assert(left_target.request_id == 6);
+        assert(left_target.payload[0] == static_cast<std::byte>(snf::server::ZoneCommandStatus::Applied));
+        assert(readBigEndian64(left_target.payload, 1) == target_zone);
+        assert(readBigEndian64(left_target.payload, 9) == 2);
 
         client.init();
-        waitForSessionsReleased(harness);
+        const auto deadline = Clock::now() + 2s;
+        while (harness.sessionCount() != 0 && Clock::now() < deadline)
+        {
+            std::this_thread::sleep_for(1ms);
+        }
+        assert(harness.sessionCount() == 0);
         harness.stop();
-        assert(harness.metrics().network.protocol_errors == 0);
+        assert(harness.remoteTellsSent() > 0);
     }
 
     // Move or LeaveZone without an active zone closes the connection.
@@ -1546,7 +1688,7 @@ void run_worker_session_tests()
     SNF_RUN_SESSION_TEST(test_enter_move_leave_round_trip);
     SNF_RUN_SESSION_TEST(test_aoi_visibility_and_no_broadcast);
     SNF_RUN_SESSION_TEST(test_same_zone_reenter_is_already_present_with_same_epoch);
-    SNF_RUN_SESSION_TEST(test_zone_to_zone_fails_with_transfer_failed_and_keeps_connection);
+    SNF_RUN_SESSION_TEST(test_cross_zone_handoff_orders_source_move_and_serves_target);
     SNF_RUN_SESSION_TEST(test_move_and_leave_without_current_zone_closes_connection);
     SNF_RUN_SESSION_TEST(test_enter_zone_zero_closes_connection_without_worker_exception);
     SNF_RUN_SESSION_TEST(test_malformed_zone_payloads_never_reach_an_actor);
