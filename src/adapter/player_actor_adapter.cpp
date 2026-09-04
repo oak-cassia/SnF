@@ -4,6 +4,8 @@
 #include "snf/adapter/to_effects.hpp"
 #include "snf/game/street_progression.hpp"
 
+#include <algorithm>
+
 namespace snf::adapter
 {
     namespace
@@ -179,7 +181,7 @@ namespace snf::adapter
             if (_bound_connection.has_value() && *_bound_connection == msg.connection)
             {
                 _bound_connection.reset();
-                _pending_zone_op.reset();
+                _pending_zone_ops.clear();
                 if (currentZone().has_value())
                 {
                     const auto leaving_zone = *currentZone();
@@ -426,6 +428,25 @@ namespace snf::adapter
                         entry_position = _player.state().lastLocation()->position;
                     }
 
+                    if (!_pending_zone_ops.empty())
+                    {
+                        const snf::server::ZoneResult result{
+                            .status = snf::server::ZoneCommandStatus::TransferFailed,
+                            .player = player,
+                            .position = std::nullopt,
+                            .route_epoch = _route_epoch,
+                            .tick = 0,
+                            .visible_players = {},
+                        };
+                        snf::worker::EffectBatch effects;
+                        effects.push(snf::worker::SendFrameEffect{
+                            .connection = msg.connection,
+                            .frame = encodeZoneReply(ZoneReplyFrameKind::Entered, req.zone, result, msg.request_id),
+                            .critical = false,
+                        });
+                        return snf::worker::CompletedTurn{.effects = std::move(effects)};
+                    }
+
                     const auto correlation = ++_correlation_sequence;
                     auto timeout_msg = GameActorPayloadRegistry::create(PlayerWorkflowTimeoutMessage{
                         .correlation_id = correlation,
@@ -455,13 +476,13 @@ namespace snf::adapter
                         }
                     }
 
-                    _pending_zone_op = PendingZoneOperation{
+                    _pending_zone_ops.push_back(PendingZoneOperation{
                         .correlation_id = correlation,
                         .step = WorkflowStep::ZoneEnter,
                         .target_zone = req.zone,
                         .target_epoch = next_epoch,
                         .request_id = msg.request_id,
-                    };
+                    });
 
                     snf::worker::EffectBatch effects;
                     effects.push(snf::worker::TellActorEffect{
@@ -555,6 +576,51 @@ namespace snf::adapter
                         return snf::worker::CompletedTurn{.effects = std::move(effects)};
                     }
 
+                    const bool has_boundary_op = std::any_of(
+                        _pending_zone_ops.begin(),
+                        _pending_zone_ops.end(),
+                        [](const auto& op) {
+                            return op.step == WorkflowStep::ZoneEnter || op.step == WorkflowStep::ZoneLeave;
+                        }
+                    );
+                    if (has_boundary_op)
+                    {
+                        const snf::server::ZoneResult result{
+                            .status = snf::server::ZoneCommandStatus::TransitionInProgress,
+                            .player = player,
+                            .position = std::nullopt,
+                            .route_epoch = _route_epoch,
+                            .tick = 0,
+                            .visible_players = {},
+                        };
+                        snf::worker::EffectBatch effects;
+                        effects.push(snf::worker::SendFrameEffect{
+                            .connection = msg.connection,
+                            .frame = encodeZoneReply(ZoneReplyFrameKind::Moved, currentZone().value_or(snf::server::ZoneId{0}), result, msg.request_id),
+                            .critical = false,
+                        });
+                        return snf::worker::CompletedTurn{.effects = std::move(effects)};
+                    }
+
+                    if (_pending_zone_ops.size() >= MAX_PENDING_ZONE_OPS)
+                    {
+                        const snf::server::ZoneResult result{
+                            .status = snf::server::ZoneCommandStatus::TransferFailed,
+                            .player = player,
+                            .position = std::nullopt,
+                            .route_epoch = _route_epoch,
+                            .tick = 0,
+                            .visible_players = {},
+                        };
+                        snf::worker::EffectBatch effects;
+                        effects.push(snf::worker::SendFrameEffect{
+                            .connection = msg.connection,
+                            .frame = encodeZoneReply(ZoneReplyFrameKind::Moved, *active_zone, result, msg.request_id),
+                            .critical = false,
+                        });
+                        return snf::worker::CompletedTurn{.effects = std::move(effects)};
+                    }
+
                     const auto correlation = ++_correlation_sequence;
                     auto timeout_msg = GameActorPayloadRegistry::create(PlayerWorkflowTimeoutMessage{
                         .correlation_id = correlation,
@@ -584,13 +650,13 @@ namespace snf::adapter
                         }
                     }
 
-                    _pending_zone_op = PendingZoneOperation{
+                    _pending_zone_ops.push_back(PendingZoneOperation{
                         .correlation_id = correlation,
                         .step = WorkflowStep::ZoneMove,
                         .target_zone = *active_zone,
                         .target_epoch = _route_epoch,
                         .request_id = msg.request_id,
-                    };
+                    });
 
                     snf::worker::EffectBatch effects;
                     effects.push(snf::worker::TellActorEffect{
@@ -684,6 +750,25 @@ namespace snf::adapter
                         return snf::worker::CompletedTurn{.effects = std::move(effects)};
                     }
 
+                    if (!_pending_zone_ops.empty())
+                    {
+                        const snf::server::ZoneResult result{
+                            .status = snf::server::ZoneCommandStatus::TransitionInProgress,
+                            .player = player,
+                            .position = std::nullopt,
+                            .route_epoch = _route_epoch,
+                            .tick = 0,
+                            .visible_players = {},
+                        };
+                        snf::worker::EffectBatch effects;
+                        effects.push(snf::worker::SendFrameEffect{
+                            .connection = msg.connection,
+                            .frame = encodeZoneReply(ZoneReplyFrameKind::Left, *active_zone, result, msg.request_id),
+                            .critical = false,
+                        });
+                        return snf::worker::CompletedTurn{.effects = std::move(effects)};
+                    }
+
                     const auto correlation = ++_correlation_sequence;
                     auto timeout_msg = GameActorPayloadRegistry::create(PlayerWorkflowTimeoutMessage{
                         .correlation_id = correlation,
@@ -713,13 +798,13 @@ namespace snf::adapter
                         }
                     }
 
-                    _pending_zone_op = PendingZoneOperation{
+                    _pending_zone_ops.push_back(PendingZoneOperation{
                         .correlation_id = correlation,
                         .step = WorkflowStep::ZoneLeave,
                         .target_zone = *active_zone,
                         .target_epoch = _route_epoch,
                         .request_id = msg.request_id,
-                    };
+                    });
 
                     snf::worker::EffectBatch effects;
                     effects.push(snf::worker::TellActorEffect{
@@ -845,7 +930,7 @@ namespace snf::adapter
                     }
 
                     const auto& stable = std::get<StableRoute>(_workflow_state);
-                    if (!stable.zone.has_value())
+                    if (!stable.zone.has_value() || !_pending_zone_ops.empty())
                     {
                         const snf::server::RoomResult result{
                             .status = snf::server::RoomCommandStatus::EntryFailed,
@@ -921,7 +1006,7 @@ namespace snf::adapter
                                     .step = WorkflowStep::RoomJoinStep1_JoinRoom,
                                     .route_epoch = 0,
                                     .request_id = msg.request_id,
-                                },
+                                    },
                         }),
                     });
 
@@ -941,12 +1026,24 @@ namespace snf::adapter
                 {
                     if (!std::holds_alternative<InRoomRoute>(_workflow_state))
                     {
-                        return snf::worker::CompletedTurn{.effects = snf::worker::EffectBatch{}};
+                        snf::worker::EffectBatch effects;
+                        effects.push(snf::worker::CloseConnectionEffect{
+                            .connection = msg.connection,
+                            .reason = snf::worker::CloseReason::Application,
+                            .graceful = true,
+                        });
+                        return snf::worker::CompletedTurn{.effects = std::move(effects)};
                     }
                     const auto& in_room = std::get<InRoomRoute>(_workflow_state);
                     if (in_room.room != req.room)
                     {
-                        return snf::worker::CompletedTurn{.effects = snf::worker::EffectBatch{}};
+                        snf::worker::EffectBatch effects;
+                        effects.push(snf::worker::CloseConnectionEffect{
+                            .connection = msg.connection,
+                            .reason = snf::worker::CloseReason::Application,
+                            .graceful = true,
+                        });
+                        return snf::worker::CompletedTurn{.effects = std::move(effects)};
                     }
 
                     snf::worker::EffectBatch effects;
@@ -965,12 +1062,24 @@ namespace snf::adapter
                 {
                     if (!std::holds_alternative<InRoomRoute>(_workflow_state))
                     {
-                        return snf::worker::CompletedTurn{.effects = snf::worker::EffectBatch{}};
+                        snf::worker::EffectBatch effects;
+                        effects.push(snf::worker::CloseConnectionEffect{
+                            .connection = msg.connection,
+                            .reason = snf::worker::CloseReason::Application,
+                            .graceful = true,
+                        });
+                        return snf::worker::CompletedTurn{.effects = std::move(effects)};
                     }
                     const auto& in_room = std::get<InRoomRoute>(_workflow_state);
                     if (in_room.room != req.room)
                     {
-                        return snf::worker::CompletedTurn{.effects = snf::worker::EffectBatch{}};
+                        snf::worker::EffectBatch effects;
+                        effects.push(snf::worker::CloseConnectionEffect{
+                            .connection = msg.connection,
+                            .reason = snf::worker::CloseReason::Application,
+                            .graceful = true,
+                        });
+                        return snf::worker::CompletedTurn{.effects = std::move(effects)};
                     }
 
                     snf::worker::EffectBatch effects;
@@ -994,12 +1103,24 @@ namespace snf::adapter
                 {
                     if (!std::holds_alternative<InRoomRoute>(_workflow_state))
                     {
-                        return snf::worker::CompletedTurn{.effects = snf::worker::EffectBatch{}};
+                        snf::worker::EffectBatch effects;
+                        effects.push(snf::worker::CloseConnectionEffect{
+                            .connection = msg.connection,
+                            .reason = snf::worker::CloseReason::Application,
+                            .graceful = true,
+                        });
+                        return snf::worker::CompletedTurn{.effects = std::move(effects)};
                     }
                     const auto& in_room = std::get<InRoomRoute>(_workflow_state);
                     if (in_room.room != req.room)
                     {
-                        return snf::worker::CompletedTurn{.effects = snf::worker::EffectBatch{}};
+                        snf::worker::EffectBatch effects;
+                        effects.push(snf::worker::CloseConnectionEffect{
+                            .connection = msg.connection,
+                            .reason = snf::worker::CloseReason::Application,
+                            .graceful = true,
+                        });
+                        return snf::worker::CompletedTurn{.effects = std::move(effects)};
                     }
 
                     snf::worker::EffectBatch effects;
@@ -1023,9 +1144,35 @@ namespace snf::adapter
                 {
                     if (!std::holds_alternative<InRoomRoute>(_workflow_state))
                     {
-                        return snf::worker::CompletedTurn{.effects = snf::worker::EffectBatch{}};
+                        snf::worker::EffectBatch effects;
+                        effects.push(snf::worker::CloseConnectionEffect{
+                            .connection = msg.connection,
+                            .reason = snf::worker::CloseReason::Application,
+                            .graceful = true,
+                        });
+                        return snf::worker::CompletedTurn{.effects = std::move(effects)};
                     }
                     const auto in_room = std::get<InRoomRoute>(_workflow_state);
+
+                    auto timeout_msg = GameActorPayloadRegistry::create(PlayerWorkflowTimeoutMessage{
+                        .correlation_id = _correlation_sequence + 1,
+                        .step = WorkflowStep::RoomReturnStep1_ZoneEnter,
+                    });
+                    std::optional<snf::worker::TimerReservation> reservation = std::nullopt;
+                    if (_timer_admission != nullptr)
+                    {
+                        reservation = _timer_admission->tryReserve(timeout_msg.chargedBytes(), context.turn_id);
+                        if (!reservation.has_value())
+                        {
+                            snf::worker::EffectBatch effects;
+                            effects.push(snf::worker::CloseConnectionEffect{
+                                .connection = msg.connection,
+                                .reason = snf::worker::CloseReason::Application,
+                                .graceful = true,
+                            });
+                            return snf::worker::CompletedTurn{.effects = std::move(effects)};
+                        }
+                    }
 
                     ++_route_epoch;
                     const auto correlation = ++_correlation_sequence;
@@ -1038,16 +1185,6 @@ namespace snf::adapter
                         .correlation_id = correlation,
                         .step = WorkflowStep::RoomReturnStep1_ZoneEnter,
                     };
-
-                    auto timeout_msg = GameActorPayloadRegistry::create(PlayerWorkflowTimeoutMessage{
-                        .correlation_id = correlation,
-                        .step = WorkflowStep::RoomReturnStep1_ZoneEnter,
-                    });
-                    std::optional<snf::worker::TimerReservation> reservation = std::nullopt;
-                    if (_timer_admission != nullptr)
-                    {
-                        reservation = _timer_admission->tryReserve(timeout_msg.chargedBytes(), context.turn_id);
-                    }
 
                     snf::worker::EffectBatch effects;
                     effects.push(snf::worker::TellActorEffect{
@@ -1223,13 +1360,20 @@ namespace snf::adapter
             return snf::worker::CompletedTurn{.effects = snf::worker::EffectBatch{}};
         }
 
-        if (!_pending_zone_op.has_value() || _pending_zone_op->correlation_id != msg.correlation_id || _pending_zone_op->step != msg.step)
+        auto it = std::find_if(
+            _pending_zone_ops.begin(),
+            _pending_zone_ops.end(),
+            [&msg](const auto& op) {
+                return op.correlation_id == msg.correlation_id && op.step == msg.step;
+            }
+        );
+        if (it == _pending_zone_ops.end())
         {
             return snf::worker::CompletedTurn{.effects = snf::worker::EffectBatch{}};
         }
 
-        const auto op = std::move(*_pending_zone_op);
-        _pending_zone_op.reset();
+        const auto op = *it;
+        _pending_zone_ops.erase(it);
 
         snf::worker::EffectBatch effects;
         if (op.step == WorkflowStep::ZoneEnter)
@@ -1299,6 +1443,32 @@ namespace snf::adapter
                 const auto in_room = std::get<InRoomRoute>(_workflow_state);
                 if (in_room.room == msg.room)
                 {
+                    auto timeout_msg = GameActorPayloadRegistry::create(PlayerWorkflowTimeoutMessage{
+                        .correlation_id = _correlation_sequence + 1,
+                        .step = WorkflowStep::RoomReturnStep1_ZoneEnter,
+                    });
+                    std::optional<snf::worker::TimerReservation> reservation = std::nullopt;
+                    if (_timer_admission != nullptr)
+                    {
+                        reservation = _timer_admission->tryReserve(timeout_msg.chargedBytes(), context.turn_id);
+                        if (!reservation.has_value())
+                        {
+                            _player.setLastLocation(std::nullopt);
+                            _workflow_state = StableRoute{.zone = std::nullopt};
+                            snf::worker::EffectBatch effects;
+                            if (_bound_connection.has_value())
+                            {
+                                effects.push(snf::worker::CloseConnectionEffect{
+                                    .connection = *_bound_connection,
+                                    .reason = snf::worker::CloseReason::Application,
+                                    .graceful = true,
+                                });
+                            }
+                            scheduleSaveIfDirty(effects, context.now);
+                            return snf::worker::CompletedTurn{.effects = std::move(effects)};
+                        }
+                    }
+
                     ++_route_epoch;
                     const auto correlation = ++_correlation_sequence;
                     _workflow_state = ReturningRoute{
@@ -1310,16 +1480,6 @@ namespace snf::adapter
                         .correlation_id = correlation,
                         .step = WorkflowStep::RoomReturnStep1_ZoneEnter,
                     };
-
-                    auto timeout_msg = GameActorPayloadRegistry::create(PlayerWorkflowTimeoutMessage{
-                        .correlation_id = correlation,
-                        .step = WorkflowStep::RoomReturnStep1_ZoneEnter,
-                    });
-                    std::optional<snf::worker::TimerReservation> reservation = std::nullopt;
-                    if (_timer_admission != nullptr)
-                    {
-                        reservation = _timer_admission->tryReserve(timeout_msg.chargedBytes(), context.turn_id);
-                    }
 
                     snf::worker::EffectBatch effects;
                     effects.push(snf::worker::TellActorEffect{
@@ -1375,6 +1535,49 @@ namespace snf::adapter
                 if (msg.result.status == snf::server::RoomCommandStatus::Applied ||
                     msg.result.status == snf::server::RoomCommandStatus::AlreadyJoined)
                 {
+                    auto timeout_msg = GameActorPayloadRegistry::create(PlayerWorkflowTimeoutMessage{
+                        .correlation_id = entering.correlation_id,
+                        .step = WorkflowStep::RoomJoinStep2_LeaveZone,
+                    });
+                    std::optional<snf::worker::TimerReservation> reservation = std::nullopt;
+                    if (_timer_admission != nullptr)
+                    {
+                        reservation = _timer_admission->tryReserve(timeout_msg.chargedBytes(), context.turn_id);
+                        if (!reservation.has_value())
+                        {
+                            const auto room = entering.target_room;
+                            const auto zone = entering.source_zone;
+                            const auto req_id = entering.request_id;
+                            _workflow_state = StableRoute{.zone = zone};
+
+                            effects.push(snf::worker::TellActorEffect{
+                                .target = snf::worker::ActorKey{snf::worker::ActorKind::Room, room.value},
+                                .message = GameActorPayloadRegistry::create(RoomCommandMessage{
+                                    .connection = std::nullopt,
+                                    .request_id = 0,
+                                    .command = snf::server::LeaveRoom{.player = *player_id},
+                                    .reply_to = std::nullopt,
+                                }),
+                            });
+
+                            effects.push(snf::worker::SendFrameEffect{
+                                .connection = *_bound_connection,
+                                .frame = encodeRoomReply(
+                                    RoomReplyFrameKind::Joined,
+                                    room,
+                                    snf::server::RoomResult{
+                                        .status = snf::server::RoomCommandStatus::EntryFailed,
+                                        .phase = snf::server::RoomPhase::Waiting,
+                                    },
+                                    req_id
+                                ),
+                                .critical = false,
+                            });
+                            scheduleSaveIfDirty(effects, context.now);
+                            return snf::worker::CompletedTurn{.effects = std::move(effects)};
+                        }
+                    }
+
                     entering.step = WorkflowStep::RoomJoinStep2_LeaveZone;
 
                     effects.push(snf::worker::TellActorEffect{
@@ -1398,6 +1601,15 @@ namespace snf::adapter
                                 },
                         }),
                     });
+
+                    if (reservation.has_value())
+                    {
+                        effects.push(snf::worker::ScheduleTimerEffect{
+                            .deadline = context.now + WORKFLOW_TIMEOUT,
+                            .message = std::move(timeout_msg),
+                            .reservation = std::move(*reservation),
+                        });
+                    }
                 }
                 else
                 {
@@ -1425,10 +1637,17 @@ namespace snf::adapter
         const snf::worker::ActorTurnContext& context
     )
     {
-        if (_pending_zone_op.has_value() && _pending_zone_op->correlation_id == msg.correlation_id && _pending_zone_op->step == msg.step)
+        auto it = std::find_if(
+            _pending_zone_ops.begin(),
+            _pending_zone_ops.end(),
+            [&msg](const auto& op) {
+                return op.correlation_id == msg.correlation_id && op.step == msg.step;
+            }
+        );
+        if (it != _pending_zone_ops.end())
         {
-            const auto op = std::move(*_pending_zone_op);
-            _pending_zone_op.reset();
+            const auto op = *it;
+            _pending_zone_ops.erase(it);
 
             snf::worker::EffectBatch effects;
             if (_bound_connection.has_value())
@@ -1486,6 +1705,51 @@ namespace snf::adapter
                         .critical = false,
                     });
                 }
+                else if (op.step == WorkflowStep::ZoneLeave)
+                {
+                    if (_player.state().identity().has_value())
+                    {
+                        effects.push(snf::worker::TellActorEffect{
+                            .target =
+                                snf::worker::ActorKey{
+                                    .kind = snf::worker::ActorKind::Zone,
+                                    .entity = op.target_zone.value,
+                                },
+                            .message = GameActorPayloadRegistry::create(ZoneCommandMessage{
+                                .connection = std::nullopt,
+                                .request_id = 0,
+                                .command =
+                                    snf::server::LeaveZoneCommand{
+                                        .player = *_player.state().identity(),
+                                        .route_epoch = op.target_epoch,
+                                    },
+                                .reply_to = std::nullopt,
+                            }),
+                        });
+                    }
+
+                    _workflow_state = StableRoute{.zone = std::nullopt};
+                    _player.setLastLocation(std::nullopt);
+
+                    const snf::server::ZoneResult result{
+                        .status = snf::server::ZoneCommandStatus::TransferFailed,
+                        .player = _player.state().identity(),
+                        .position = std::nullopt,
+                        .route_epoch = _route_epoch,
+                        .tick = 0,
+                        .visible_players = {},
+                    };
+                    effects.push(snf::worker::SendFrameEffect{
+                        .connection = *_bound_connection,
+                        .frame = encodeZoneReply(ZoneReplyFrameKind::Left, op.target_zone, result, op.request_id),
+                        .critical = false,
+                    });
+                    effects.push(snf::worker::CloseConnectionEffect{
+                        .connection = *_bound_connection,
+                        .reason = snf::worker::CloseReason::Application,
+                        .graceful = true,
+                    });
+                }
             }
             scheduleSaveIfDirty(effects, context.now);
             return snf::worker::CompletedTurn{.effects = std::move(effects)};
@@ -1514,26 +1778,65 @@ namespace snf::adapter
                                 .reply_to = std::nullopt,
                             }),
                         });
+                        effects.push(snf::worker::TellActorEffect{
+                            .target = snf::worker::ActorKey{snf::worker::ActorKind::Zone, zone.value},
+                            .message = GameActorPayloadRegistry::create(ZoneCommandMessage{
+                                .connection = std::nullopt,
+                                .request_id = 0,
+                                .command = snf::server::LeaveZoneCommand{
+                                    .player = *_player.state().identity(),
+                                    .route_epoch = entering.source_epoch,
+                                },
+                                .reply_to = std::nullopt,
+                            }),
+                        });
+                    }
+
+                    _workflow_state = StableRoute{.zone = std::nullopt};
+                    _player.setLastLocation(std::nullopt);
+
+                    if (_bound_connection.has_value())
+                    {
+                        effects.push(snf::worker::SendFrameEffect{
+                            .connection = *_bound_connection,
+                            .frame = encodeRoomReply(
+                                RoomReplyFrameKind::Joined,
+                                room,
+                                snf::server::RoomResult{
+                                    .status = snf::server::RoomCommandStatus::EntryFailed,
+                                    .phase = snf::server::RoomPhase::Waiting,
+                                },
+                                req_id
+                            ),
+                            .critical = false,
+                        });
+                        effects.push(snf::worker::CloseConnectionEffect{
+                            .connection = *_bound_connection,
+                            .reason = snf::worker::CloseReason::Application,
+                            .graceful = true,
+                        });
                     }
                 }
-
-                _workflow_state = StableRoute{.zone = zone};
-
-                if (_bound_connection.has_value())
+                else
                 {
-                    effects.push(snf::worker::SendFrameEffect{
-                        .connection = *_bound_connection,
-                        .frame = encodeRoomReply(
-                            RoomReplyFrameKind::Joined,
-                            room,
-                            snf::server::RoomResult{
-                                .status = snf::server::RoomCommandStatus::EntryFailed,
-                                .phase = snf::server::RoomPhase::Waiting,
-                            },
-                            req_id
-                        ),
-                        .critical = false,
-                    });
+                    _workflow_state = StableRoute{.zone = zone};
+
+                    if (_bound_connection.has_value())
+                    {
+                        effects.push(snf::worker::SendFrameEffect{
+                            .connection = *_bound_connection,
+                            .frame = encodeRoomReply(
+                                RoomReplyFrameKind::Joined,
+                                room,
+                                snf::server::RoomResult{
+                                    .status = snf::server::RoomCommandStatus::EntryFailed,
+                                    .phase = snf::server::RoomPhase::Waiting,
+                                },
+                                req_id
+                            ),
+                            .critical = false,
+                        });
+                    }
                 }
                 scheduleSaveIfDirty(effects, context.now);
                 return snf::worker::CompletedTurn{.effects = std::move(effects)};
@@ -1546,6 +1849,21 @@ namespace snf::adapter
             if (returning.correlation_id == msg.correlation_id && returning.step == msg.step)
             {
                 snf::worker::EffectBatch effects;
+                if (_player.state().identity().has_value())
+                {
+                    effects.push(snf::worker::TellActorEffect{
+                        .target = snf::worker::ActorKey{snf::worker::ActorKind::Zone, returning.return_zone.value},
+                        .message = GameActorPayloadRegistry::create(ZoneCommandMessage{
+                            .connection = std::nullopt,
+                            .request_id = 0,
+                            .command = snf::server::LeaveZoneCommand{
+                                .player = *_player.state().identity(),
+                                .route_epoch = returning.return_epoch,
+                            },
+                            .reply_to = std::nullopt,
+                        }),
+                    });
+                }
                 _player.setLastLocation(std::nullopt);
                 _workflow_state = StableRoute{.zone = std::nullopt};
                 if (_bound_connection.has_value())

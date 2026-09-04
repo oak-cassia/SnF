@@ -331,10 +331,14 @@ namespace snf::worker
         static constexpr std::uint32_t TAG = 13;
         static std::uint64_t calculateCharge(const snf::adapter::RoomOutcomeMessage& msg) noexcept
         {
+            const std::size_t digest_bytes = msg.result.digest.has_value()
+                ? (msg.result.digest->events.capacity() * sizeof(snf::server::BattleEvent))
+                : 0;
             return snf::adapter::logicalCharge(
                 sizeof(snf::adapter::RoomOutcomeMessage),
                 msg.result.audience.capacity() * sizeof(snf::server::PlayerId) +
-                    msg.result.grants.capacity() * sizeof(snf::server::StreetExperienceGrant)
+                    msg.result.grants.capacity() * sizeof(snf::server::StreetExperienceGrant) +
+                    digest_bytes
             );
         }
     };

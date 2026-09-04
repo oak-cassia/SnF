@@ -261,26 +261,37 @@ transition correlation을 위해 이미 만들 예정이므로, 11E에서 한 �
   - `GameActorPayloadRegistry`에 `ZoneOutcomeMessage`(12), `RoomOutcomeMessage`(13), `PlayerWorkflowTimeoutMessage`(14), `PlayerRoomRequestMessage`(15)를 등록했다.
   - `ZoneActorAdapter` 및 `RoomActorAdapter`의 `toEffects`에 `WorkflowReplyTo` 응답 채널 및 audience 대상 `RoomOutcomeMessage` 브로드캐스트를 연결했다.
 - **11C 알려진 격차 해소**:
-  - Zone tell 및 비동기 처리 실패 시 `TimerAdmission::tryReserve`로 사전 예약된 타이머 기반 timeout(5s)으로 미확정 route를 롤백하고 연결을 유지한다 (`test_zone_tell_timeout_rolls_back_unconfirmed_route`, `test_zone_timeout_cleans_up_zone_participant`).
+  - Zone tell 및 비동기 처리 실패 시 `TimerAdmission::tryReserve`로 사전 예약된 타이머 기반 timeout(1s, `WORKFLOW_TIMEOUT`)으로 미확정 route를 롤백하고 연결을 유지한다 (`test_zone_tell_timeout_rolls_back_unconfirmed_route`, `test_zone_timeout_cleans_up_zone_participant`).
+  - 일반 `ZoneLeave` 타임아웃 발생 시 결과 불확실성에 대응하여 Zone에 cleanup tell(`LeaveZoneCommand`)을 발행하고, 허위 zone route를 유지하지 않고 nullopt로 확정한 뒤 `CloseConnectionEffect`로 안전하게 fail-closed 처리한다 (`test_zone_leave_timeout_sends_terminal_outcome`).
   - Stale epoch/correlation 응답을 무시해 레이스를 방지한다 (`test_stale_correlation_and_epoch_ignored`).
+- **Zone 요청 파이프라이닝 (`_pending_zone_ops`, 최대 16개)**:
+  - 단일 read loop에서 여러 frame 수신 시 이전 correlation_id가 덮어쓰여지지 않도록 vector로 관리한다.
+  - Move 요청 파이프라이닝 및 correlation별 개별 응답 처리를 단위 테스트(`test_pipelined_zone_moves_handled_individually`)와 TCP 통합 테스트(`test_pipelined_zone_moves_over_session`)로 검증했다.
 - **Location R1 / R3 복원**:
   - Zone 입장/이동 및 Room 복귀 시 `Player::setLastLocation`을 갱신하고 DB flush 시 영속화한다 (`test_player_persists_zone_location_on_save`).
   - 재접속 후 재입장 시 클라이언트의 임의 좌표 대신 서버의 마지막 유효 위치를 복원한다 (`test_reconnect_restores_last_zone_position`).
 - **Room 입장/복귀 Saga 및 보상 트랜잭션**:
   - PlayerActor `WorkflowState`(`StableRoute`, `EnteringRoute`, `InRoomRoute`, `ReturningRoute`)를 도입하여 Room 입장 시 `JoinRoom` → `LeaveZone` 순서로 안전하게 전이한다.
   - Room 거절 시 Zone route를 유지하며 (`test_room_join_refusal_keeps_zone_route`), Zone leave 실패 시 `LeaveRoom` 보상 트랜잭션을 실행하고 좌석을 반환한다 (`test_room_join_zone_leave_failure_compensates_and_keeps_zone_route`).
-  - 전투 종료(`BattleCleared`, `BattleFailed`) 시 `RoomTerminalNotification`을 통해 `ReturningRoute`로 전이하고 새 route epoch으로 Zone에 복귀한다 (`test_room_terminal_outcome_initiates_return_saga`).
+  - Room 입장 2단계(`RoomJoinStep2_LeaveZone`) 진입 시 별도 1초 타임아웃 타이머를 예약하며, Zone 응답 유실 시 Room에 `LeaveRoom` 보상 및 Zone에 cleanup tell을 발행하고, 허위 source zone route 복귀 대신 route를 nullopt로 확정하고 연결을 안전하게 닫는다 (`test_room_join_step2_leave_zone_timeout_compensates`).
+  - Room 복귀 1단계(`RoomReturnStep1_ZoneEnter`) 타임아웃 시 Zone에 cleanup tell(`LeaveZoneCommand`)을 발행하여 outcome 유실로 인한 Zone ghost participant를 제거하고 연결을 닫는다 (`test_room_return_timeout_cleans_up_zone_participant`).
+  - Room 퇴장 및 전투 종료(`RoomTerminalNotification`) 자동 복귀 시 `TimerAdmission::tryReserve` 사전 검사 후 상태를 커밋하며, 실제 `InRoom` 상태에서 admission 실패 시 상태 오염 없이 세션을 닫음을 검증했다 (`test_room_return_timer_admission_failure_safely_closes`).
+  - `RoomOutcomeMessage` dynamic charge에 `BattleDigest` 용량(`digest->events.capacity() * sizeof(BattleEvent)`)을 반영하여 bounded mailbox 계상을 일치시키고, `MAX_ROOM_EFFECTS`를 4인 clear 최대 effect 수(17개: 4×4 + stop 1)로 정확화했다.
+- **테스트 결과**:
+  - Debug: 13 PASS / 4 SKIP (MySQL)
+  - TSan worker: 8 PASS / 3 SKIP (MySQL)
+  - ASan-UBSan worker: 8 PASS / 3 SKIP (MySQL)
 
 ### 11D 결과
 
 - **Wire 프레임 5종 라우팅**:
   - `GameRequestSink`에 `RoomJoin`(17), `BattleStart`(19), `RoomLeave`(22), `UseSkill`(25), `SetMoveIntent`(30) wire frame의 디코더 및 PlayerActor 라우팅(`postRoomRequest`)을 구현했다.
-  - 불필요한 payload나 규격 외의 프레임은 sink 단계에서 거절(`RequestPostResult::Invalid`)되어 액터 턴을 소모하지 않는다 (`test_malformed_room_payloads_rejected`).
+  - 불필요한 payload나 규격 외의 프레임(BattleStart 0바이트, UseSkill 0/21바이트, SetMoveIntent 0/18바이트 등 포함)은 sink 단계에서 거절(`RequestPostResult::Invalid`)되어 액터 턴을 소모하지 않는다 (`test_malformed_room_payloads_rejected`).
 - **Authoritative 상태 검증**:
-  - 클라이언트가 임의의 room id를 전달하더라도 PlayerActor가 `InRoom` 상태와 room 일치 여부를 검증하므로, 타 방의 전투를 시작하거나 스킬/이동을 주입할 수 없다 (`test_battle_start_only_allowed_when_in_room`).
+  - 클라이언트가 임의의 room id를 전달하거나 방에 없는 상태에서 `BattleStart`, `UseSkill`, `SetMoveIntent`, `RoomLeave`를 전달할 경우 침묵 대신 legacy 프로토콜 계약(`InvalidPayload -> close`)에 맞춰 `CloseConnectionEffect`로 세션을 닫는다 (`test_battle_start_only_allowed_when_in_room`).
   - `InRoom` 상태 중 수신된 Zone 프레임(`Move` 등)은 `ZoneCommandStatus::InRoom`으로 안전하게 거절되며 세션 연결이 유지된다.
 - **E2E TCP 세션 검증**:
-  - `worker_session_test.cpp`를 통해 정상 입장/퇴장 왕복 (`test_room_join_and_leave_over_session`), 전투 라이프사이클 및 스킬/이동 (`test_battle_lifecycle_over_session`), 전투 종료 후 unsolicited `ReturnedToZone` 수신 및 Zone 복귀 (`test_boss_defeat_or_timeout_returns_to_zone_over_session`), Room 0 입장 시 안전한 종료 (`test_room_join_zero_closes_connection`)를 검증했다.
+  - `worker_session_test.cpp`를 통해 정상 입장/퇴장 왕복 (`test_room_join_and_leave_over_session`), 전투 라이프사이클 및 스킬/이동 (`test_battle_lifecycle_over_session`), 전투 종료 후 unsolicited `ReturnedToZone` 수신 및 Zone 복귀 (`test_boss_defeat_or_timeout_returns_to_zone_over_session`), Room 0 입장 시 안전한 종료 (`test_room_join_zero_closes_connection`), 파이프라인된 TCP Move 연속 수발신 (`test_pipelined_zone_moves_over_session`)을 검증했다.
 
 ## 검증
 

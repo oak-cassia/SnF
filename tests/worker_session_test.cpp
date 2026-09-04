@@ -1452,12 +1452,17 @@ namespace
             // BattleStart: too short (7), too long (9), empty (0).
             snf::protocol::Frame{.type = snf::protocol::MessageType::BattleStart, .request_id = 1, .payload = std::vector<std::byte>(7)},
             snf::protocol::Frame{.type = snf::protocol::MessageType::BattleStart, .request_id = 1, .payload = std::vector<std::byte>(9)},
+            snf::protocol::Frame{.type = snf::protocol::MessageType::BattleStart, .request_id = 1, .payload = {}},
             // RoomLeave: non-empty payload.
             snf::protocol::Frame{.type = snf::protocol::MessageType::RoomLeave, .request_id = 1, .payload = {std::byte{0x01}}},
-            // UseSkill: too short (19), too long (21).
+            // UseSkill: too short (19), too long (21), empty (0).
             snf::protocol::Frame{.type = snf::protocol::MessageType::UseSkill, .request_id = 1, .payload = std::vector<std::byte>(19)},
-            // SetMoveIntent: too short (16), too long (18), invalid direction (99).
+            snf::protocol::Frame{.type = snf::protocol::MessageType::UseSkill, .request_id = 1, .payload = std::vector<std::byte>(21)},
+            snf::protocol::Frame{.type = snf::protocol::MessageType::UseSkill, .request_id = 1, .payload = {}},
+            // SetMoveIntent: too short (16), too long (18), empty (0), invalid direction (99).
             snf::protocol::Frame{.type = snf::protocol::MessageType::SetMoveIntent, .request_id = 1, .payload = std::vector<std::byte>(16)},
+            snf::protocol::Frame{.type = snf::protocol::MessageType::SetMoveIntent, .request_id = 1, .payload = std::vector<std::byte>(18)},
+            snf::protocol::Frame{.type = snf::protocol::MessageType::SetMoveIntent, .request_id = 1, .payload = {}},
             snf::protocol::Frame{.type = snf::protocol::MessageType::SetMoveIntent, .request_id = 1, .payload = std::vector<std::byte>(17, std::byte{99})},
         };
 
@@ -1472,6 +1477,48 @@ namespace
 
         harness.stop();
         assert(harness.metrics().network.protocol_errors == malformed.size());
+    }
+
+    void test_pipelined_zone_moves_over_session()
+    {
+        SessionHarness harness;
+        auto client = connectClient(harness.port());
+        authenticate(client.getDescriptor(), 1, 57);
+
+        // Enter Zone 1
+        sendAll(client.getDescriptor(), snf::protocol::encode_frame(enterZoneFrame(2, 1, 10, 20)));
+        const auto entered = receiveDecodedFrame(client.getDescriptor());
+        assert(entered.type == snf::protocol::MessageType::ZoneEntered);
+        assert(entered.request_id == 2);
+        assert(entered.payload[0] == static_cast<std::byte>(snf::server::ZoneCommandStatus::Applied));
+
+        // Pipeline two moves in a single TCP write
+        const auto move1 = snf::protocol::encode_frame(moveFrame(3, 11, 21));
+        const auto move2 = snf::protocol::encode_frame(moveFrame(4, 12, 22));
+        std::vector<std::byte> combined;
+        combined.insert(combined.end(), move1.begin(), move1.end());
+        combined.insert(combined.end(), move2.begin(), move2.end());
+        sendAll(client.getDescriptor(), combined);
+
+        // Read both replies back
+        const auto reply1 = receiveDecodedFrame(client.getDescriptor());
+        assert(reply1.type == snf::protocol::MessageType::Moved);
+        assert(reply1.request_id == 3);
+        assert(reply1.payload[0] == static_cast<std::byte>(snf::server::ZoneCommandStatus::Applied));
+        assert(readBigEndianSigned32(reply1.payload, 17) == 11);
+        assert(readBigEndianSigned32(reply1.payload, 21) == 21);
+
+        const auto reply2 = receiveDecodedFrame(client.getDescriptor());
+        assert(reply2.type == snf::protocol::MessageType::Moved);
+        assert(reply2.request_id == 4);
+        assert(reply2.payload[0] == static_cast<std::byte>(snf::server::ZoneCommandStatus::Applied));
+        assert(readBigEndianSigned32(reply2.payload, 17) == 12);
+        assert(readBigEndianSigned32(reply2.payload, 21) == 22);
+
+        client.init();
+        waitForSessionsReleased(harness);
+        harness.stop();
+        assert(harness.metrics().network.protocol_errors == 0);
     }
 }
 
@@ -1510,4 +1557,5 @@ void run_worker_session_tests()
     SNF_RUN_SESSION_TEST(test_boss_defeat_or_timeout_returns_to_zone_over_session);
     SNF_RUN_SESSION_TEST(test_room_join_zero_closes_connection);
     SNF_RUN_SESSION_TEST(test_malformed_room_payloads_rejected);
+    SNF_RUN_SESSION_TEST(test_pipelined_zone_moves_over_session);
 }

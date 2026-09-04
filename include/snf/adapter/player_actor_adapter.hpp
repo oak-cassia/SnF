@@ -10,6 +10,7 @@
 
 #include <chrono>
 #include <variant>
+#include <vector>
 
 namespace snf::adapter
 {
@@ -175,7 +176,8 @@ namespace snf::adapter
         WorkflowState _workflow_state{StableRoute{}};
         std::uint64_t _route_epoch{0};
         std::uint64_t _correlation_sequence{0};
-        std::optional<PendingZoneOperation> _pending_zone_op{std::nullopt};
+        static constexpr std::size_t MAX_PENDING_ZONE_OPS = 16;
+        std::vector<PendingZoneOperation> _pending_zone_ops{};
         std::uint64_t _authentication_conflicts{0};
         std::chrono::milliseconds _save_interval{std::chrono::seconds{5}};
         // Only one save timer may be outstanding. The actor is Suspended for the

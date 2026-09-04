@@ -17,7 +17,9 @@
 namespace snf::adapter
 {
     constexpr std::size_t MAX_ROOM_PARTICIPANTS = 4;
-    constexpr std::size_t MAX_ROOM_EFFECTS = 16;
+    // Maximum effects in a terminal room turn:
+    // 4 audience * (SendFrame(Digest) + SendFrame(Outcome) + Tell(Grant) + Tell(TerminalNotification)) + StopActor = 17.
+    constexpr std::size_t MAX_ROOM_EFFECTS = 17;
     static_assert(MAX_ROOM_EFFECTS <= snf::worker::EffectBatch::MAX_EFFECTS);
 
     struct PlayerTurnContext
