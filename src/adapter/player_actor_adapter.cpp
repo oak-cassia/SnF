@@ -185,40 +185,36 @@ namespace snf::adapter
             snf::worker::EffectBatch effects;
             if (_bound_connection.has_value() && *_bound_connection == msg.connection)
             {
-                _connection_closing = false;
-                _bound_connection.reset();
-                _pending_zone_ops.clear();
-                if (currentZone().has_value())
+                if (std::holds_alternative<TransferringRoute>(_workflow_state))
                 {
-                    const auto leaving_zone = *currentZone();
-                    _workflow_state = StableRoute{.zone = std::nullopt};
-                    if (_player.state().identity().has_value())
+                    const auto transfer = std::get<TransferringRoute>(_workflow_state);
+                    failCrossZoneKnownNone(effects, transfer, false);
+                }
+                else if (_player.state().identity().has_value())
+                {
+                    const auto player = *_player.state().identity();
+                    const auto send_leave_zone = [&](const snf::server::ZoneId zone, const std::uint64_t epoch)
                     {
                         effects.push(snf::worker::TellActorEffect{
                             .target =
                                 snf::worker::ActorKey{
                                     .kind = snf::worker::ActorKind::Zone,
-                                    .entity = leaving_zone.value,
+                                    .entity = zone.value,
                                 },
                             .message = GameActorPayloadRegistry::create(ZoneCommandMessage{
                                 .connection = std::nullopt,
                                 .request_id = 0,
                                 .command =
                                     snf::server::LeaveZoneCommand{
-                                        .player = *_player.state().identity(),
-                                        .route_epoch = _route_epoch,
+                                        .player = player,
+                                        .route_epoch = epoch,
                                     },
                                 .reply_to = std::nullopt,
                             }),
                         });
-                    }
-                }
-                else if (std::holds_alternative<InRoomRoute>(_workflow_state))
-                {
-                    const auto& in_room = std::get<InRoomRoute>(_workflow_state);
-                    const auto room = in_room.room;
-                    _workflow_state = StableRoute{.zone = std::nullopt};
-                    if (_player.state().identity().has_value())
+                    };
+
+                    const auto send_leave_room = [&](const snf::server::RoomId room)
                     {
                         effects.push(snf::worker::TellActorEffect{
                             .target =
@@ -231,50 +227,52 @@ namespace snf::adapter
                                 .request_id = 0,
                                 .command =
                                     snf::server::LeaveRoom{
-                                        .player = *_player.state().identity(),
+                                        .player = player,
                                     },
                                 .reply_to = std::nullopt,
                             }),
                         });
-                    }
-                }
-                else if (std::holds_alternative<EnteringRoute>(_workflow_state))
-                {
-                    const auto& entering = std::get<EnteringRoute>(_workflow_state);
-                    if (entering.step == WorkflowStep::RoomJoinStep2_LeaveZone)
+                    };
+
+                    for (const auto& op : _pending_zone_ops)
                     {
-                        const auto room = entering.target_room;
-                        if (_player.state().identity().has_value())
+                        if (op.step == WorkflowStep::ZoneEnter)
                         {
-                            effects.push(snf::worker::TellActorEffect{
-                                .target =
-                                    snf::worker::ActorKey{
-                                        .kind = snf::worker::ActorKind::Room,
-                                        .entity = room.value,
-                                    },
-                                .message = GameActorPayloadRegistry::create(RoomCommandMessage{
-                                    .connection = std::nullopt,
-                                    .request_id = 0,
-                                    .command =
-                                        snf::server::LeaveRoom{
-                                            .player = *_player.state().identity(),
-                                        },
-                                    .reply_to = std::nullopt,
-                                }),
-                            });
+                            send_leave_zone(op.target_zone, op.target_epoch);
                         }
                     }
-                    _workflow_state = StableRoute{.zone = std::nullopt};
+
+                    if (std::holds_alternative<StableRoute>(_workflow_state))
+                    {
+                        const auto stable = std::get<StableRoute>(_workflow_state);
+                        if (stable.zone.has_value())
+                        {
+                            send_leave_zone(*stable.zone, _route_epoch);
+                        }
+                    }
+                    else if (std::holds_alternative<EnteringRoute>(_workflow_state))
+                    {
+                        const auto entering = std::get<EnteringRoute>(_workflow_state);
+                        send_leave_room(entering.target_room);
+                        send_leave_zone(entering.source_zone, entering.source_epoch);
+                    }
+                    else if (std::holds_alternative<InRoomRoute>(_workflow_state))
+                    {
+                        const auto in_room = std::get<InRoomRoute>(_workflow_state);
+                        send_leave_room(in_room.room);
+                    }
+                    else if (std::holds_alternative<ReturningRoute>(_workflow_state))
+                    {
+                        const auto returning = std::get<ReturningRoute>(_workflow_state);
+                        send_leave_room(returning.source_room);
+                        send_leave_zone(returning.return_zone, returning.return_epoch);
+                    }
                 }
-                else if (std::holds_alternative<TransferringRoute>(_workflow_state))
-                {
-                    const auto transfer = std::get<TransferringRoute>(_workflow_state);
-                    failCrossZoneKnownNone(effects, transfer, false);
-                }
-                else
-                {
-                    _workflow_state = StableRoute{.zone = std::nullopt};
-                }
+
+                _bound_connection.reset();
+                _connection_closing = false;
+                _pending_zone_ops.clear();
+                _workflow_state = StableRoute{.zone = std::nullopt};
                 scheduleSaveIfDirty(effects, context.now);
             }
             return snf::worker::CompletedTurn{.effects = std::move(effects)};

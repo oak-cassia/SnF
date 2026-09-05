@@ -182,6 +182,10 @@ production 전환 뒤에는 11단계에서 실제 MySQL을 포함해 같은 게�
 - [x] 독립 lifecycle이 실제 필요한 흐름만 Coordinator Actor로 만든다.
 - [x] Actor-to-Actor mailbox 응답을 suspended coroutine이 기다리게 하지 않는다.
 - [ ] disconnect, timeout, compensation과 shutdown terminal을 기존 contract와 대조한다.
+
+  - 11G-1: close 통지가 도착한 뒤의 상태별 cleanup과 재접속 회귀 검증 완료. 통지/cleanup 전달 보장과
+    shutdown을 포함한 전체 terminal 대조는 남아 있다. [검증 결과](./stage-11-workflow-migration-plan.md#11g-1-결과--도착한-disconnect-통지의-cleanup).
+
 - [ ] production server의 connection/game request 경로를 신규 Worker로 100% 전환한다.
 - [ ] 전환된 production 경로에서 10단계의 load scenario와 전체 품질 게이트를 다시 통과한다.
 - [ ] 전환 뒤 ActorRuntime, Binding, shared Outbound와 legacy completion 코드를 제거한다.

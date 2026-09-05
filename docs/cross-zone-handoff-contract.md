@@ -124,6 +124,15 @@ connection close를 결정한 순간부터 같은 generation의 새 client input
 
 ## 6. Disconnect와 shutdown
 
+**11G-1에서 확인한 Worker 구현 범위:** generation이 일치하는 `PlayerConnectionClosedMessage`가 도착하면
+transfer 상태를 값으로 복사해 기존 known-none helper를 호출한다. source와 target에 epoch별 Leave를 발행하고
+binding/pending/workflow를 해제하며, location은 nullopt로 만든다. restore 단계의 source cleanup은 restore
+epoch을 사용한다. 추가 restore Enter, client 응답, close effect나 workflow timer는 생성하지 않는다.
+실제 양쪽 Zone adapter로 각 단계의 disconnect 점유 제거 및 stale event no-op을 검증했다.
+
+다음 흐름은 전체 계약의 목표이며, 11G-1은 **통지 및 cleanup tell 정상 전달 시**의 점유 제거만 검증했다.
+cleanup 성공 확인, 통지/timeout 전달 보장, final snapshot과 shutdown cancel은 아직 완료하지 않았다.
+
 ```text
 새 client input 차단
 → 진행 중 completion 또는 cleanup 처리

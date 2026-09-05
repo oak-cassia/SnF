@@ -145,7 +145,8 @@ room 상태를 갖지 않으면 대상을 결정할 수 없다.
 | 11E | **완료** | 아래 "11E 결과" 참고 |
 | 11D | **완료** | 아래 "11D 결과" 참고 |
 | 11F | **완료** | source Leave/Restore의 stale epoch cleanup 회귀 검증 포함. 아래 "11F 결과" 참고 |
-| 11G~11K | 미착수 | |
+| 11G | **진행 중** | 11G-1 disconnect 통지 도착 후 cleanup 검증 완료. 전달 보장·failure terminal 대조·shutdown은 남음 |
+| 11H~11K | 미착수 | |
 
 ### 11A 결과
 
@@ -345,6 +346,43 @@ transition correlation을 위해 이미 만들 예정이므로, 11E에서 한 �
   - TSan worker: 8 PASS / 3 SKIP (MySQL), data race 0건
   - ASan-UBSan worker: 8 PASS / 3 SKIP (MySQL), sanitizer 오류 0건
   - Debug adapter 반복: 5회 연속 PASS (`--repeat until-fail:5`)
+
+### 11G-1 결과 — 도착한 disconnect 통지의 cleanup
+
+범위는 `PlayerConnectionClosedMessage`가 PlayerActor에 도착한 뒤다. 정확히 일치하는 bound connection만
+처리하며, pending/workflow 정보를 지우기 전에 다음 cleanup을 발행한다. 새 API·상태·timer는 추가하지 않았다.
+
+| close 당시 상태 | cleanup 순서 | 회귀 증거 (`DisconnectPoint`) |
+| --- | --- | --- |
+| Stable(None), pending Enter | pending Enter의 target Zone·epoch으로 Leave | `StableNone`, `PendingEnter` |
+| Stable(zone) | pending Enter cleanup → stable Zone Leave(`_route_epoch`) | `StableZone`, `PendingReenter`, `PendingMoves`(16개), `PendingLeave`, `AppliedLeave` |
+| Entering 두 단계 | target Room Leave → source Zone Leave(`source_epoch`) | `RoomJoin1`, `RoomJoin2`, `RoomJoin2AppliedLeave` |
+| InRoom | Room Leave | `InRoom` |
+| Returning | source Room Leave → return Zone Leave(`return_epoch`) | `Returning`, `ReturningAppliedRoomLeave` |
+| Transferring | 기존 known-none helper로 source → target Zone Leave, restore 중 source에는 restore epoch 사용 | `CrossLeave`, `CrossAppliedLeave`, `CrossTarget`, `CrossRestore` |
+
+- `test_disconnect_cleanup_state_matrix`는 실제 Zone/Room adapter에서 위 17개 시점을 재현한다. 명령 적용 후
+  outcome을 보류한 경우를 포함해 cleanup을 전달하면 양쪽 Zone participant와 Room 좌석이 모두 0이 된다.
+  생성되는 tell의 player, 대상, epoch, 순서, `connection/reply_to = nullopt`, `request_id = 0`을 검사한다.
+  현재 admission으로 도달 가능한 상태에서는 cleanup tell 최대 2개와 save timer 최대 1개다. pending Move/Leave는
+  추가 cleanup을 만들지 않으며, 동일 Zone 재입장의 중복 Leave는 허용한다.
+- close 뒤 binding과 pending/workflow를 해제하지만 route epoch과 correlation sequence는 보존한다. 이전 generation
+  close, 중복 close, 늦은 Zone/Room outcome과 이전 timer가 effect를 내지 않는 것을 재접속 전후 모두 확인했다.
+  재접속 Enter의 correlation은 직전 값 +1, epoch은 보존한 값 +1이며, non-transfer는 저장된 위치를 복원한다.
+  Transferring만 기존 정책대로 location을 known-none으로 바꾼다. identity가 없는 actor의 close도 no-op이다.
+- `test_disconnect_preserves_dirty_location_save`는 기존 `scheduleSaveIfDirty` 호출을 고정한다. Session/location만
+  dirty인 경우는 기존에도 flush 대상이 아니며, flushable progression 변경이 있으면 close에서 save를 예약하고
+  location을 유지한다. 최종 persistence 보장을 추가한 것은 아니다.
+- 기준 `bf29027`의 PlayerActor를 임시 object로 컴파일해 새 테스트에 연결하면 `PendingEnter`의 cleanup 개수
+  assertion에서 실패한다. 작업 트리의 제품 코드를 되돌리지 않고 회귀 탐지력을 확인했다.
+- 검증: Debug **13 PASS / MySQL 4 SKIP**, TSan worker **8 PASS / MySQL 3 SKIP**(race 0),
+  ASan/UBSan worker **8 PASS / MySQL 3 SKIP**(sanitizer 오류 0), TCP 세션 테스트를 포함한 Debug adapter
+  **5회 연속 PASS**, 변경 줄 clang-format 및 `git diff --check` 통과.
+
+**완료 조건은 close 통지와 cleanup tell이 정상 전달됐을 때 점유가 남지 않는 것**이다. Room→Zone 순서는 effect
+발행 순서이며, 서로 다른 owner의 실행 완료 순서를 보장하지 않는다. close 통지 유실, cleanup tell 실패,
+application timeout 전달 보장, 최종 persistence와 shutdown cancel은 이번 패치로 해결하지 않았다.
+11G 전체 계약 대조와 11I production 품질 게이트는 여전히 남아 있다.
 
 ## 검증
 
