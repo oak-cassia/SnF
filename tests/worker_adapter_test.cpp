@@ -31,6 +31,24 @@
 
 using namespace std::chrono_literals;
 
+namespace snf::worker
+{
+    // This executable is separate from worker_actor_test.cpp. Keep deterministic
+    // phase driving in tests, without exposing another production Worker API.
+    struct WorkerActorTestAccess
+    {
+        static void runReadyActors(Worker& worker)
+        {
+            worker.runReadyActors(CountTimeBudget{128, 1s});
+        }
+
+        static void expireTimers(Worker& worker, const TimePoint now)
+        {
+            worker.expireTimers(now, CountTimeBudget{128, 1s});
+        }
+    };
+}
+
 namespace
 {
     using snf::test::connectClient;
@@ -3435,6 +3453,192 @@ namespace
         assert(!batch.tryPush(snf::worker::StopActorEffect{}));
     }
 
+    struct WorkflowTimerObservation
+    {
+        std::optional<snf::adapter::ZoneOutcomeMessage> held_target_outcome;
+        std::vector<snf::adapter::PlayerWorkflowTimeoutMessage> timeouts;
+        snf::worker::TimePoint target_deadline{};
+        std::size_t close_effects{0};
+        std::size_t handoff_replies{0};
+    };
+
+    class ObservedWorkflowActor final : public snf::worker::ActorInstance
+    {
+    public:
+        ObservedWorkflowActor(std::shared_ptr<snf::worker::ActorInstance> actor, WorkflowTimerObservation& observation)
+            : _actor(std::move(actor))
+            , _observation(observation)
+        {
+        }
+
+        snf::worker::TurnResult dispatch(snf::worker::ActorEnvelope&& envelope, const snf::worker::ActorTurnContext& context) override
+        {
+            using namespace snf::worker;
+            using namespace snf::adapter;
+            auto result = _actor->dispatch(std::move(envelope), context);
+            EffectBatch forwarded;
+            for (auto& effect : completedTurn(result).effects.mutableEffects())
+            {
+                if (auto* tell = std::get_if<TellActorEffect>(&effect); tell != nullptr && tell->message.is<ZoneOutcomeMessage>())
+                {
+                    auto outcome = tell->message.take<ZoneOutcomeMessage>();
+                    if (outcome.step == WorkflowStep::CrossZoneEnterTarget)
+                    {
+                        assert(!_observation.held_target_outcome.has_value());
+                        assert(outcome.result.status == snf::server::ZoneCommandStatus::Applied);
+                        _observation.held_target_outcome = std::move(outcome);
+                        continue; // Fault injection: applied target Enter, lost outcome.
+                    }
+                    tell->message = GameActorPayloadRegistry::create(std::move(outcome));
+                }
+                if (auto* timer = std::get_if<ScheduleTimerEffect>(&effect); timer != nullptr && timer->message.is<PlayerWorkflowTimeoutMessage>())
+                {
+                    auto timeout = timer->message.take<PlayerWorkflowTimeoutMessage>();
+                    _observation.timeouts.push_back(timeout);
+                    if (timeout.step == WorkflowStep::CrossZoneEnterTarget)
+                    {
+                        _observation.target_deadline = timer->deadline;
+                    }
+                    timer->message = GameActorPayloadRegistry::create(std::move(timeout));
+                }
+                // Observe network terminals at the adapter boundary; TCP lifecycle
+                // is covered by run_worker_session_tests. Internal tells and timer
+                // reservations still pass through the real Worker effect machinery.
+                if (std::holds_alternative<CloseConnectionEffect>(effect))
+                {
+                    ++_observation.close_effects;
+                    continue;
+                }
+                if (auto* send = std::get_if<SendFrameEffect>(&effect))
+                {
+                    if (send->frame.request_id == 3)
+                    {
+                        ++_observation.handoff_replies;
+                    }
+                    continue;
+                }
+                forwarded.push(std::move(effect));
+            }
+            return CompletedTurn{.effects = std::move(forwarded)};
+        }
+
+    private:
+        std::shared_ptr<snf::worker::ActorInstance> _actor;
+        WorkflowTimerObservation& _observation;
+    };
+
+    class WorkflowTimerTestFactory final : public snf::worker::ActorFactory
+    {
+    public:
+        snf::worker::ActorConstructionResult construct(const snf::worker::ActorKey key) override
+        {
+            std::shared_ptr<snf::worker::ActorInstance> actor;
+            if (key.kind == snf::worker::ActorKind::Player)
+            {
+                player = std::make_shared<snf::adapter::PlayerActorAdapter>(snf::server::PlayerId{key.entity}, admission);
+                actor = player;
+            }
+            else
+            {
+                assert(key.kind == snf::worker::ActorKind::Zone && (key.entity == 10 || key.entity == 20));
+                auto zone = std::make_shared<snf::adapter::ZoneActorAdapter>(snf::server::ZoneId{key.entity});
+                (key.entity == 10 ? source : target) = zone;
+                actor = std::move(zone);
+            }
+            return snf::worker::ActorConstructionResult::ready(std::make_unique<ObservedWorkflowActor>(std::move(actor), observation));
+        }
+
+        snf::worker::TimerAdmission* admission{nullptr};
+        WorkflowTimerObservation observation;
+        std::shared_ptr<snf::adapter::PlayerActorAdapter> player;
+        std::shared_ptr<snf::adapter::ZoneActorAdapter> source;
+        std::shared_ptr<snf::adapter::ZoneActorAdapter> target;
+    };
+
+    void test_worker_retried_workflow_timeout_cleans_cross_zone_transfer()
+    {
+        using namespace snf::worker;
+        using namespace snf::adapter;
+        WorkflowTimerTestFactory factory;
+        const WorkerActorConfig config{
+            .actor_table_capacity = 10,
+            .max_mailbox_messages_per_actor = 1,
+            .max_mailbox_bytes_per_actor = 4096,
+            .max_mailbox_messages_total = 10,
+            .max_mailbox_bytes_total = 40960,
+            .max_application_timer_bytes_total = 40960,
+        };
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        factory.admission = &worker;
+        const ActorKey key{ActorKind::Player, 150};
+        const ConnectionRef connection{.id = ConnectionId{60}, .generation = ConnectionGeneration{1}, .owner = WorkerId{0}};
+        const auto post = [&](auto message)
+        {
+            assert(worker.tryDeliverLocal(key, GameActorPayloadRegistry::create(std::move(message))) == DeliveryResult::Accepted);
+        };
+        const auto run = [&]
+        {
+            WorkerActorTestAccess::runReadyActors(worker);
+        };
+        post(PlayerCommandMessage{
+            .connection = connection, .request_id = 1, .command = snf::server::AuthenticateCommand{.player = snf::server::PlayerId{150}}
+        });
+        run();
+        post(PlayerZoneRequestMessage{
+            .connection = connection, .request_id = 2, .request = EnterZoneRequest{.zone = snf::server::ZoneId{10}, .position = {.x = 8, .y = 9}}
+        });
+        run();
+        assert(factory.player->currentZone() == snf::server::ZoneId{10});
+        post(PlayerZoneRequestMessage{
+            .connection = connection, .request_id = 3, .request = EnterZoneRequest{.zone = snf::server::ZoneId{20}, .position = {.x = 30, .y = 40}}
+        });
+        run();
+        assert(factory.observation.held_target_outcome.has_value());
+        assert(factory.source->zone().playerCount() == 0 && factory.target->zone().playerCount() == 1);
+        assert(std::get<TransferringRoute>(factory.player->workflowState()).step == WorkflowStep::CrossZoneEnterTarget);
+        assert(!factory.player->currentZone().has_value());
+
+        // Occupy the Player mailbox with a legitimate transition-busy request.
+        post(PlayerZoneRequestMessage{.connection = connection, .request_id = 4, .request = MoveRequest{.position = {.x = 1, .y = 2}}});
+        const auto expiry = factory.observation.target_deadline;
+        WorkerActorTestAccess::expireTimers(worker, expiry);
+        const auto retries = worker.metrics().actor.application_timer_delivery_retries;
+        assert(retries >= 1);
+        assert(worker.metrics().actor.application_timer_delivery_failures == 0);
+        assert(factory.observation.close_effects == 0 && factory.observation.handoff_replies == 0);
+        assert(std::holds_alternative<TransferringRoute>(factory.player->workflowState()));
+        WorkerActorTestAccess::expireTimers(worker, expiry);
+        assert(worker.metrics().actor.application_timer_delivery_retries == retries);
+        run();
+
+        // Old stage timers may share the one-slot mailbox. Advance bounded passes
+        // so all three Player timers get a turn, without sleep or wall-clock races.
+        for (int i = 1; i <= 8; ++i)
+        {
+            WorkerActorTestAccess::expireTimers(worker, expiry + std::chrono::milliseconds{i});
+            run();
+        }
+        assert(std::holds_alternative<StableRoute>(factory.player->workflowState()));
+        assert(!factory.player->currentZone().has_value() && !factory.player->player().state().lastLocation().has_value());
+        assert(factory.player->routeEpoch() == 2);
+        assert(factory.observation.close_effects == 1 && factory.observation.handoff_replies == 0);
+        assert(factory.source->zone().playerCount() == 0 && factory.target->zone().playerCount() == 0);
+        assert(worker.metrics().actor.effect_tell_failures == 0);
+        assert(worker.metrics().actor.application_timer_delivery_failures == 0);
+
+        post(ZoneOutcomeMessage{*factory.observation.held_target_outcome});
+        run();
+        const auto old_timeouts = factory.observation.timeouts;
+        for (const auto& timeout : old_timeouts)
+        {
+            post(timeout);
+            run();
+        }
+        assert(factory.observation.close_effects == 1 && factory.observation.handoff_replies == 0);
+        assert(!factory.player->currentZone().has_value());
+        assert(factory.target->zone().playerCount() == 0);
+    }
+
     void test_worker_application_timer_schedule_and_delivery()
     {
         MockRequestSink sink;
@@ -3673,6 +3877,9 @@ void run_worker_session_tests();
 int main()
 {
     std::cout << "Running Stage 7 Adapter and Effect Tests..." << std::endl;
+
+    test_worker_retried_workflow_timeout_cleans_cross_zone_transfer();
+    std::cout << "  - test_worker_retried_workflow_timeout_cleans_cross_zone_transfer PASSED" << std::endl;
 
     test_disconnect_cleanup_state_matrix();
     std::cout << "  - test_disconnect_cleanup_state_matrix PASSED" << std::endl;

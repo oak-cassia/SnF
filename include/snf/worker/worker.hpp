@@ -337,7 +337,7 @@ namespace snf::worker
         void flushWrites(const ByteTimeBudget& budget);
 
         void onEvent(WorkerEvent&& event);
-        void onTimer(TimerPayload&& payload);
+        void onTimer(TimerPayload&& payload, TimePoint now);
 
         [[nodiscard]] SendResult sendLocal(ConnectionRef connection, snf::protocol::Frame&& frame, bool critical);
         [[nodiscard]] bool enqueueRead(ConnectionSlot& slot);

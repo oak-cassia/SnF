@@ -99,6 +99,16 @@ namespace snf::worker
             worker.expireTimers(now, budget);
         }
 
+        static TimerQueue& timers(Worker& worker)
+        {
+            return worker._timers;
+        }
+
+        static void runShutdownPhaseB(Worker& worker, const TimePoint deadline)
+        {
+            worker.runShutdownPhaseB(deadline);
+        }
+
         static void drainInbox(Worker& worker, const InboxBudget& budget)
         {
             worker.drainInbox(budget);
@@ -334,6 +344,181 @@ namespace
     private:
         ConstructFn _fn;
     };
+
+    enum class TimerDeliveryCase
+    {
+        ActorCount,
+        ActorBytes,
+        TotalCount,
+        TotalBytes,
+        Shutdown,
+        MissingActor,
+        ReplacedIncarnation,
+        Stopping,
+        Oversized,
+    };
+
+    void assert_application_timer_delivery(const TimerDeliveryCase test_case)
+    {
+        WorkerActorConfig config{
+            .actor_table_capacity = 10,
+            .max_mailbox_messages_per_actor = 10,
+            .max_mailbox_bytes_per_actor = 1000,
+            .max_mailbox_messages_total = 100,
+            .max_mailbox_bytes_total = 10000,
+            .max_application_timer_bytes_total = 2000,
+        };
+        if (test_case == TimerDeliveryCase::ActorCount || test_case == TimerDeliveryCase::Shutdown)
+        {
+            config.max_mailbox_messages_per_actor = 1;
+        }
+        else if (test_case == TimerDeliveryCase::ActorBytes)
+        {
+            config.max_mailbox_bytes_per_actor = 30;
+        }
+        else if (test_case == TimerDeliveryCase::TotalCount)
+        {
+            config.max_mailbox_messages_per_actor = 1;
+            config.max_mailbox_messages_total = 1;
+        }
+        else if (test_case == TimerDeliveryCase::TotalBytes)
+        {
+            config.max_mailbox_bytes_per_actor = 30;
+            config.max_mailbox_bytes_total = 30;
+        }
+
+        const auto expiry = Clock::now() + 1h;
+        const std::uint64_t charge = test_case == TimerDeliveryCase::Oversized ? 1001 : 20;
+        std::size_t timer_turns = 0;
+        TimerAdmission* admission = nullptr;
+        FunctionalActorFactory factory(
+            [&](ActorKey)
+            {
+                return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(
+                    [&](ActorEnvelope&& envelope, const ActorTurnContext& context) -> TurnResult
+                    {
+                        const auto request = envelope.take<TestPingPayload>();
+                        EffectBatch effects;
+                        if (request.frame.request_id == 100)
+                        {
+                            auto timer = TestActorPayloadRegistry::create(
+                                TestPingPayload{.connection = std::nullopt, .frame = makeFrame(0, MessageType::Ping, 200), .explicit_charge = charge}
+                            );
+                            auto reservation = admission->tryReserve(timer.chargedBytes(), context.turn_id);
+                            assert(reservation.has_value());
+                            effects.push(ScheduleTimerEffect{.deadline = expiry, .message = std::move(timer), .reservation = std::move(reservation)});
+                        }
+                        else if (request.frame.request_id == 200)
+                        {
+                            ++timer_turns;
+                        }
+                        return CompletedTurn{.effects = std::move(effects)};
+                    }
+                ));
+            }
+        );
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, config, factory);
+        admission = &worker;
+        const ActorKey key{ActorKind::Player, 101};
+        const ActorKey other{ActorKind::Player, 102};
+        const CountTimeBudget budget{100, 1s};
+        assert(worker.tryDeliverLocal(key, makeEnvelope(0, MessageType::Ping, 100)) == DeliveryResult::Accepted);
+        WorkerActorTestAccess::runReadyActors(worker, budget);
+        auto& timers = WorkerActorTestAccess::timers(worker);
+        assert(worker.metrics().actor.application_timers_scheduled == 1);
+        assert(timers.size() == 1 && timers.applicationTimerBytes() == charge);
+        assert(timers.reservedApplicationTimerCount() == 0 && timers.reservedApplicationTimerBytes() == 0);
+
+        const bool temporary = test_case <= TimerDeliveryCase::Shutdown;
+        if (temporary)
+        {
+            const auto filler_key = test_case == TimerDeliveryCase::TotalCount || test_case == TimerDeliveryCase::TotalBytes ? other : key;
+            assert(worker.tryDeliverLocal(filler_key, makeEnvelopeWithCharge(0, 20)) == DeliveryResult::Accepted);
+            for (std::uint64_t i = 0; i < 50; ++i)
+            {
+                const auto now = expiry + std::chrono::milliseconds{i};
+                WorkerActorTestAccess::expireTimers(worker, now, budget);
+                assert(worker.metrics().actor.application_timer_delivery_retries == i + 1);
+                assert(worker.metrics().timers_fired == i + 1);
+                assert(timers.size() == 1 && timers.applicationTimerBytes() == charge);
+                assert(timers.nextDeadline() == now + 1ms);
+                assert(worker.totalMailboxMessages() == 1 && worker.totalMailboxBytes() == 20);
+                // A future synthetic expiry clock must not cause reprocessing in
+                // the same pass, or in a second pass with the same timestamp.
+                WorkerActorTestAccess::expireTimers(worker, now, budget);
+                assert(worker.metrics().actor.application_timer_delivery_retries == i + 1);
+                assert(worker.metrics().actor.application_timers_delivered == 0);
+                assert(worker.metrics().actor.application_timer_delivery_failures == 0);
+                assert(worker.metrics().actor.application_timers_scheduled == 1);
+                assert(timer_turns == 0);
+            }
+            if (test_case == TimerDeliveryCase::Shutdown)
+            {
+                WorkerActorTestAccess::beginShutdownPhaseA(worker);
+                WorkerActorTestAccess::runShutdownPhaseB(worker, Clock::now() + 1s);
+                assert(worker.metrics().actor.cancelled_application_timers == 1);
+                assert(worker.metrics().actor.application_timers_delivered == 0);
+            }
+            else
+            {
+                WorkerActorTestAccess::runReadyActors(worker, budget);
+                WorkerActorTestAccess::expireTimers(worker, expiry + 50ms, budget);
+                assert(worker.metrics().actor.application_timers_delivered == 1);
+                assert(worker.totalMailboxMessages() == 1 && worker.totalMailboxBytes() == charge);
+                assert(timer_turns == 0); // Timer phase only enqueues; no inline dispatch.
+                WorkerActorTestAccess::runReadyActors(worker, budget);
+                assert(timer_turns == 1);
+                WorkerActorTestAccess::expireTimers(worker, expiry + 100ms, budget);
+                WorkerActorTestAccess::runReadyActors(worker, budget);
+                assert(timer_turns == 1 && worker.metrics().actor.application_timers_delivered == 1);
+            }
+        }
+        else
+        {
+            if (test_case == TimerDeliveryCase::MissingActor || test_case == TimerDeliveryCase::ReplacedIncarnation)
+            {
+                const auto old_handle = WorkerActorTestAccess::handle(worker, key);
+                WorkerActorTestAccess::removeActor(worker, old_handle, ActorRemovalReason::ShutdownForced);
+                if (test_case == TimerDeliveryCase::ReplacedIncarnation)
+                {
+                    assert(worker.tryDeliverLocal(key, makeEnvelope(0)) == DeliveryResult::Accepted);
+                    assert(WorkerActorTestAccess::handle(worker, key) != old_handle);
+                    WorkerActorTestAccess::runReadyActors(worker, budget);
+                }
+            }
+            else if (test_case == TimerDeliveryCase::Stopping)
+            {
+                WorkerActorTestAccess::slot(worker, key)->setState(ActorState::Stopping);
+            }
+            WorkerActorTestAccess::expireTimers(worker, expiry, budget);
+            const bool stale = test_case == TimerDeliveryCase::MissingActor || test_case == TimerDeliveryCase::ReplacedIncarnation;
+            assert(worker.metrics().actor.stale_application_timers == (stale ? 1U : 0U));
+            assert(worker.metrics().actor.application_timer_delivery_failures == (stale ? 0U : 1U));
+            assert(worker.metrics().actor.application_timer_delivery_retries == 0);
+            assert(worker.metrics().actor.application_timers_delivered == 0);
+            assert(timer_turns == 0);
+        }
+        assert(timers.size() == 0 && timers.applicationTimerBytes() == 0);
+        assert(timers.reservedApplicationTimerCount() == 0 && timers.reservedApplicationTimerBytes() == 0);
+    }
+
+    void test_application_timer_backpressure_and_terminal_matrix()
+    {
+        for (const auto test_case : {
+                 TimerDeliveryCase::ActorCount,
+                 TimerDeliveryCase::ActorBytes,
+                 TimerDeliveryCase::TotalCount,
+                 TimerDeliveryCase::TotalBytes,
+                 TimerDeliveryCase::Shutdown,
+                 TimerDeliveryCase::MissingActor,
+                 TimerDeliveryCase::ReplacedIncarnation,
+                 TimerDeliveryCase::Stopping,
+                 TimerDeliveryCase::Oversized,
+             })
+        {
+            assert_application_timer_delivery(test_case);
+        }
+    }
 
     // =========================================================================
     // 1. Core and Construction Tests
@@ -4343,6 +4528,7 @@ namespace
 
 void run_worker_actor_tests()
 {
+    test_application_timer_backpressure_and_terminal_matrix();
     test_actor_table_hard_cap_and_reservation_rollback();
     test_incarnation_never_reused_after_rollback();
     test_stale_actor_handle_detection();

@@ -706,6 +706,7 @@ namespace snf::worker
         std::uint64_t application_timers_scheduled{0};
         std::uint64_t application_timers_delivered{0};
         std::uint64_t application_timer_delivery_failures{0};
+        std::uint64_t application_timer_delivery_retries{0};
         std::uint64_t timer_schedule_failures{0};
         std::uint64_t stale_application_timers{0};
         std::uint64_t cancelled_application_timers{0};

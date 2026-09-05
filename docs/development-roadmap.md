@@ -185,6 +185,8 @@ production 전환 뒤에는 11단계에서 실제 MySQL을 포함해 같은 게�
 
   - 11G-1: close 통지가 도착한 뒤의 상태별 cleanup과 재접속 회귀 검증 완료. 통지/cleanup 전달 보장과
     shutdown을 포함한 전체 terminal 대조는 남아 있다. [검증 결과](./stage-11-workflow-migration-plan.md#11g-1-결과--도착한-disconnect-통지의-cleanup).
+  - 11G-2: application timer의 일시적 mailbox 포화 재시도와 실제 Player workflow timeout 종결 검증 완료.
+    지속 과부하에서의 전달 시간 상한은 보장하지 않는다. [검증 결과](./stage-11-workflow-migration-plan.md#11g-2-결과--application-timer의-일시적-mailbox-포화-재시도).
 
 - [ ] production server의 connection/game request 경로를 신규 Worker로 100% 전환한다.
 - [ ] 전환된 production 경로에서 10단계의 load scenario와 전체 품질 게이트를 다시 통과한다.

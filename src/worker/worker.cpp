@@ -1289,9 +1289,9 @@ namespace snf::worker
         const auto res = _timers.expire(
             now,
             budget,
-            [this](TimerPayload&& payload)
+            [this, now](TimerPayload&& payload)
             {
-                onTimer(std::move(payload));
+                onTimer(std::move(payload), now);
             }
         );
         _metrics.timers_fired += res.expired;
@@ -2516,7 +2516,7 @@ namespace snf::worker
         }
     }
 
-    void Worker::onTimer(TimerPayload&& payload)
+    void Worker::onTimer(TimerPayload&& payload, const TimePoint now)
     {
         assertOwnerThread();
         if (networkEnabled() && std::holds_alternative<ConnectionCloseDeadline>(payload))
@@ -2607,13 +2607,28 @@ namespace snf::worker
             }
 
             const std::uint64_t charge = app_timer.message.chargedBytes();
-            if (slot->mailbox().size() >= _actor_config.max_mailbox_messages_per_actor ||
-                slot->mailbox().chargedBytes() > _actor_config.max_mailbox_bytes_per_actor ||
-                charge > _actor_config.max_mailbox_bytes_per_actor - slot->mailbox().chargedBytes() ||
-                _total_mailbox_messages >= _actor_config.max_mailbox_messages_total || _total_mailbox_bytes > _actor_config.max_mailbox_bytes_total ||
-                charge > _actor_config.max_mailbox_bytes_total - _total_mailbox_bytes)
+            if (charge > _actor_config.max_mailbox_bytes_per_actor || charge > _actor_config.max_mailbox_bytes_total)
             {
                 ++_metrics.actor.application_timer_delivery_failures;
+                return;
+            }
+
+            const bool saturated = slot->mailbox().size() >= _actor_config.max_mailbox_messages_per_actor ||
+                                   _total_mailbox_messages >= _actor_config.max_mailbox_messages_total ||
+                                   slot->mailbox().chargedBytes() > _actor_config.max_mailbox_bytes_per_actor ||
+                                   charge > _actor_config.max_mailbox_bytes_per_actor - slot->mailbox().chargedBytes() ||
+                                   _total_mailbox_bytes > _actor_config.max_mailbox_bytes_total ||
+                                   charge > _actor_config.max_mailbox_bytes_total - _total_mailbox_bytes;
+
+            if (saturated)
+            {
+                const TimePoint retry_deadline = now + std::chrono::milliseconds{1};
+                const bool scheduled = _timers.trySchedule(retry_deadline, TimerPayload{std::move(app_timer)});
+                if (!scheduled)
+                {
+                    throw std::logic_error{"Failed to re-register application timer on transient mailbox saturation"};
+                }
+                ++_metrics.actor.application_timer_delivery_retries;
                 return;
             }
 
@@ -3289,12 +3304,13 @@ namespace snf::worker
             );
             _metrics.shutdown_inbox_events += drain_res.processed;
 
+            const auto now = std::chrono::steady_clock::now();
             const auto expire_res = _timers.expire(
-                std::chrono::steady_clock::now(),
+                now,
                 _budgets.timers,
-                [this](TimerPayload&& payload)
+                [this, now](TimerPayload&& payload)
                 {
-                    onTimer(std::move(payload));
+                    onTimer(std::move(payload), now);
                 }
             );
             _metrics.shutdown_timers_fired += expire_res.expired;

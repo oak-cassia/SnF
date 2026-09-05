@@ -145,7 +145,7 @@ room 상태를 갖지 않으면 대상을 결정할 수 없다.
 | 11E | **완료** | 아래 "11E 결과" 참고 |
 | 11D | **완료** | 아래 "11D 결과" 참고 |
 | 11F | **완료** | source Leave/Restore의 stale epoch cleanup 회귀 검증 포함. 아래 "11F 결과" 참고 |
-| 11G | **진행 중** | 11G-1 disconnect 통지 도착 후 cleanup 검증 완료. 전달 보장·failure terminal 대조·shutdown은 남음 |
+| 11G | **진행 중** | 11G-1 disconnect cleanup, 11G-2 일시적 mailbox 포화 시 timer 재시도 검증 완료. disconnect/cleanup 전달 보장·전체 terminal 대조·shutdown은 남음 |
 | 11H~11K | 미착수 | |
 
 ### 11A 결과
@@ -383,6 +383,37 @@ transition correlation을 위해 이미 만들 예정이므로, 11E에서 한 �
 발행 순서이며, 서로 다른 owner의 실행 완료 순서를 보장하지 않는다. close 통지 유실, cleanup tell 실패,
 application timeout 전달 보장, 최종 persistence와 shutdown cancel은 이번 패치로 해결하지 않았다.
 11G 전체 계약 대조와 11I production 품질 게이트는 여전히 남아 있다.
+
+### 11G-2 결과 — Application timer의 일시적 mailbox 포화 재시도
+
+- `Worker::onTimer`는 per-actor/전체 mailbox의 count·byte 사용량으로 admission이 막힌 application timer를
+  폐기하지 않고 동일 activation·payload로 재등록한다. deadline은 expiry pass의 `now + 1ms`이며, 기존
+  TimerQueue에서 반환한 entry/byte를 다시 사용한다. 별도 queue, reservation, Actor inline 실행은 없다.
+- 없는 Actor·다른 incarnation은 stale, Stopping·payload 자체의 mailbox byte 상한 초과는 기존 terminal
+  failure를 유지한다. 재등록은 `application_timer_delivery_retries`로만 추가 계상하며 scheduled/delivered/
+  failure와 구분한다. deferred timer의 shutdown cancellation도 기존 경로를 사용한다.
+- 아키텍처 §11의 기존 "mailbox full이면 폐기" 정책을 위 정책으로 명시적으로 변경했다. 보장은 activation이
+  유지되고 충분한 mailbox 여유가 회복될 때의 전달 보존이다. 지속 과부하에서의 전달 시간 상한은 아니다.
+
+정식 회귀 증거:
+
+- `test_application_timer_backpressure_and_terminal_matrix` (`worker_actor_test.cpp`): 실제
+  `TimerAdmission` → `ScheduleTimerEffect`를 거친 9개 조건을 검증한다. 포화 4종, 재시도 중 shutdown,
+  없는 Actor, 재활성화된 incarnation, Stopping, oversized를 포함한다. 각 포화 및 shutdown 사례는
+  50회 재시도에도 timer 1개·동일 byte, mailbox accounting 불변과 scheduled 1회를 확인한다.
+  미래 시각으로 expiry를 호출해도 같은 pass/같은 시각에 재시도하지 않으며, 용량 회복 뒤 mailbox에
+  정확히 한 번 전달되고 Actor phase에서만 실행된다. terminal 뒤 timer/reservation accounting은 0이다.
+- `test_worker_retried_workflow_timeout_cleans_cross_zone_transfer` (`worker_adapter_test.cpp`): 실제
+  Player/Zone adapter를 Worker에서 구동하고 target Enter 적용 뒤 outcome만 보류한다. Player의 1칸 mailbox를
+  채운 상태에서 timeout을 만료시켜 재시도를 확인한 다음, mailbox를 비우면 known-none과 양쪽 Zone 점유 0,
+  close effect 1회로 종결된다. 늦은 target outcome과 이전 timeout은 추가 terminal을 만들지 않는다.
+  네트워크 effect는 테스트 관찰 지점에서 수집하며, 실제 TCP lifecycle은 기존 session suite를 함께 재실행했다.
+- 최종 검증: Debug **13 PASS / MySQL 4 SKIP**, TSan worker **8 PASS / MySQL 3 SKIP**(race 0),
+  ASan/UBSan worker **8 PASS / MySQL 3 SKIP**(sanitizer 오류 0), TCP 포함 Debug adapter **5회 연속 PASS**,
+  변경 줄 clang-format 및 `git diff --check` 통과.
+
+11G-2만 완료다. disconnect 통지와 cleanup tell의 전달 보장, 최종 persistence, workflow shutdown cancel 및
+전체 failure terminal 계약 대조는 남아 있다. 다음 제품 코드 위임 대상은 11G-3 disconnect 통지 전달 보장이다.
 
 ## 검증
 

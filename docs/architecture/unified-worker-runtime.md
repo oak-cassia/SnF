@@ -608,8 +608,25 @@ sequence number나 expected version을 message payload에 넣는다.
 
 Application timer가 만료되면 TimerQueue entry를 먼저 제거하여 entry/byte accounting을 정확히 한 번
 반환한다. 그 뒤 ActorKey + incarnation을 검증하고 mailbox admission을 별도로 수행한다. 성공하면 mailbox가
-message와 자신의 count/byte charge를 소유하고, stale activation·Stopping·mailbox full이면 message를
-파괴한다. TimerQueue와 mailbox accounting은 같은 logical charge를 사용해도 서로 독립된 resource다.
+message와 자신의 count/byte charge를 소유한다. TimerQueue와 mailbox accounting은 같은 logical charge를
+사용해도 서로 독립된 resource다.
+
+11G-2부터 application timer의 **일시적 mailbox 포화는 폐기하지 않고 재시도**한다.
+
+- per-actor 또는 Worker 전체 mailbox의 count/byte 사용량 때문에 admission할 수 없으면 같은 activation과
+  payload를 기존 TimerQueue에 move하여 해당 expiry pass의 `now + 1ms`로 재등록한다. 방금 반환한 entry와
+  동일 byte charge를 다시 사용하며, 그 사이 다른 admission이나 callback을 실행하지 않는다. 따라서 별도
+  queue·reservation·복제는 없고, 이 조건에서 재등록 실패는 invariant 위반이다.
+- 재등록 deadline은 expiry 기준 시각보다 뒤이므로 같은 pass 안에서 재시도를 반복하지 않는다. 기존 timer
+  count/time budget을 유지하며 mailbox cap을 우회하거나 Actor handler를 inline 실행하지 않는다.
+- 없는 Actor·다른 incarnation은 stale로 폐기한다. Stopping 또는 payload 자체가 mailbox byte 상한보다 큰
+  경우는 기존 terminal delivery failure다. 재시도에서도 activation 검증을 다시 수행한다.
+- 성공한 재등록은 `application_timer_delivery_retries`에만 계상한다. scheduled는 최초 등록 수, delivered는
+  mailbox 전달 수, delivery failures는 terminal 실패 수이며 `timers_fired`는 재시도를 포함한 expiry 처리 수다.
+- deferred timer도 기존 application timer이므로 §13의 shutdown cancellation 대상이다.
+
+보장 범위는 activation이 유지되고 mailbox에 충분한 여유가 회복됐을 때의 전달 보존이다. 지속 과부하에서의
+전달 시간 상한, disconnect 통지나 cleanup tell의 전달 보장, 최종 persistence 보장을 뜻하지 않는다.
 
 Stale 검증 key는 다음과 같다.
 
