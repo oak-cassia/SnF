@@ -310,19 +310,27 @@ transition correlation을 위해 이미 만들 예정이므로, 11E에서 한 �
 - **실패 보상과 known-none terminal**:
   - target의 확정 실패는 target epoch보다 큰 restore epoch으로 source를 재입장시키고, 복구 성공 뒤 source
     route와 위치를 공개하며 `TransferFailed`를 한 번 반환한다.
+  - target `StaleRoute`는 일반 확정 실패와 구분한다. outcome에 실린 authoritative higher epoch으로 target을
+    cleanup하고 source를 추측 복구하지 않은 채 known-none close로 끝낸다.
   - source leave, target enter 또는 source restore의 적용 여부를 알 수 없는 timeout과 복구 실패는 source와
     target에 멱등 cleanup Leave를 발행하고 pending source operation을 폐기한 뒤 route/location을
     `known none`으로 확정하고 connection을 닫는다. 전환 중 disconnect도 같은 cleanup 경로를 사용한다.
-- **전 수명 timeout 예약**:
-  - 런타임에는 등록된 application timer를 outcome 시점에 취소하는 API가 없으므로 단계마다 timer를 추가하지
-    않는다. handoff 시작 전에 `TimerAdmission::tryReserve`로 **단일 전체수명 timeout**을 예약하며, 그
-    correlation이 만료될 때 현재 단계와 무관하게 위 cleanup terminal로 끝낸다. Actor-to-Actor tell 적용 실패는
-    발신 actor가 동기 관측할 수 없으므로 timeout 전에는 `target admission 실패`와 `outcome 유실`을 구분할 수
-    없고, 둘 다 추측성 source 복구 대신 known-none close로 처리한다.
+- **단계별 timeout admission**:
+  - `LeaveSource`, `EnterTarget`, `RestoreSource` 각각은 해당 내부 command를 발행하기 전에
+    `TimerAdmission::tryReserve`로 독립된 1초 timeout 예산을 확보한다. 후속 단계 admission 실패는 source가
+    이미 변경된 상태이므로 양쪽 cleanup과 known-none close로 끝낸다.
+  - 등록된 one-shot timer의 조기 취소 API가 없어 완료된 이전 단계 timer는 만료 때까지 잠시 남지만,
+    correlation과 현재 step을 함께 검사해 stale no-op으로 처리한다. handoff당 예약 수는 최대 3개로 고정된다.
+    Actor-to-Actor tell 적용 실패와 outcome 유실은 현재 단계 timeout이 cleanup terminal로 바꾼다.
+- **close 결정 이후 입력 차단**:
+  - known-none terminal에서 bound connection을 닫기로 결정한 즉시 closing gate를 세운다. owner Worker의
+    `PlayerConnectionClosedMessage`가 뒤늦게 도착하기 전에 이미 mailbox에 있던 client 요청도 drop하며, 정확히
+    일치하는 generation의 close 통지가 binding을 해제할 때 gate를 초기화한다.
 - **검증**:
   - 실제 source/target `ZoneActorAdapter`를 사용해 route 비공개, 전환 중 입력 차단, stale outcome 무시, epoch 2
-    target 성공, epoch 3 source 보상, target outcome 유실 후 양쪽 participant cleanup, 시작 전 timer admission
-    실패 시 source route 유지를 검증했다.
+    target 성공, epoch 3 source 보상, higher-epoch target `StaleRoute` cleanup, target outcome 유실 후 양쪽
+    participant cleanup과 close-before-notice 입력 차단, 각 후속 단계 timer admission 실패의 known-none 종료,
+    시작 전 timer admission 실패 시 source route 유지를 검증했다.
   - 2-Worker `WorkerGroup`에서 PlayerActor와 두 ZoneActor를 서로 다른 owner에 배치하고, 실제 TCP로 source
     Move와 target Enter를 한 번의 `sendAll`로 파이프라인해 remote inbox를 거친 Move 응답이 먼저 오며 target
     Zone의 새 epoch에서 Move/Leave까지 이어짐을

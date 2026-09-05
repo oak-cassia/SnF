@@ -152,6 +152,10 @@ namespace snf::adapter
         if (envelope.is<PlayerCommandMessage>())
         {
             auto msg = envelope.take<PlayerCommandMessage>();
+            if (isClosingConnection(msg.connection))
+            {
+                return snf::worker::CompletedTurn{.effects = snf::worker::EffectBatch{}};
+            }
             if (std::holds_alternative<snf::server::AuthenticateCommand>(msg.command))
             {
                 if (auto conflict = rejectConflictingAuthentication(msg.connection))
@@ -159,6 +163,7 @@ namespace snf::adapter
                     return snf::worker::CompletedTurn{.effects = std::move(*conflict)};
                 }
                 _bound_connection = msg.connection;
+                _connection_closing = false;
             }
             const auto result = _player.handle(msg.command);
             const PlayerTurnContext turn_ctx{
@@ -180,6 +185,7 @@ namespace snf::adapter
             snf::worker::EffectBatch effects;
             if (_bound_connection.has_value() && *_bound_connection == msg.connection)
             {
+                _connection_closing = false;
                 _bound_connection.reset();
                 _pending_zone_ops.clear();
                 if (currentZone().has_value())
@@ -307,6 +313,10 @@ namespace snf::adapter
         if (envelope.is<PingMessage>())
         {
             auto msg = envelope.take<PingMessage>();
+            if (isClosingConnection(msg.connection))
+            {
+                return snf::worker::CompletedTurn{.effects = snf::worker::EffectBatch{}};
+            }
             const auto result = _player.handle(snf::server::PingCommand{
                 .payload = std::move(msg.payload),
             });
@@ -334,6 +344,16 @@ namespace snf::adapter
     }
 
     constexpr auto WORKFLOW_TIMEOUT = std::chrono::milliseconds{1000};
+
+    bool PlayerActorAdapter::isClosingConnection(const snf::worker::ConnectionRef& connection) const noexcept
+    {
+        return _connection_closing && _bound_connection.has_value() && *_bound_connection == connection;
+    }
+
+    bool PlayerActorAdapter::isClosingConnection(const std::optional<snf::worker::ConnectionRef>& connection) const noexcept
+    {
+        return connection.has_value() && isClosingConnection(*connection);
+    }
 
     void PlayerActorAdapter::appendCrossZoneCleanup(snf::worker::EffectBatch& effects, const TransferringRoute& transfer)
     {
@@ -371,6 +391,7 @@ namespace snf::adapter
 
         if (close_connection && _bound_connection.has_value())
         {
+            _connection_closing = true;
             effects.push(snf::worker::CloseConnectionEffect{
                 .connection = *_bound_connection,
                 .reason = snf::worker::CloseReason::Application,
@@ -381,6 +402,11 @@ namespace snf::adapter
 
     snf::worker::TurnResult PlayerActorAdapter::handleZoneRequest(PlayerZoneRequestMessage&& msg, const snf::worker::ActorTurnContext& context)
     {
+        if (isClosingConnection(msg.connection))
+        {
+            return snf::worker::CompletedTurn{.effects = snf::worker::EffectBatch{}};
+        }
+
         const auto player_id = _player.state().identity();
         if (!player_id.has_value() || !_bound_connection.has_value() || *_bound_connection != msg.connection)
         {
@@ -1011,6 +1037,11 @@ namespace snf::adapter
         const snf::worker::ActorTurnContext& context
     )
     {
+        if (isClosingConnection(msg.connection))
+        {
+            return snf::worker::CompletedTurn{.effects = snf::worker::EffectBatch{}};
+        }
+
         const auto player_id = _player.state().identity();
         if (!player_id.has_value())
         {
@@ -1438,6 +1469,23 @@ namespace snf::adapter
                     return snf::worker::CompletedTurn{.effects = std::move(effects)};
                 }
 
+                auto timeout_msg = GameActorPayloadRegistry::create(PlayerWorkflowTimeoutMessage{
+                    .correlation_id = transfer.correlation_id,
+                    .step = WorkflowStep::CrossZoneEnterTarget,
+                });
+                std::optional<snf::worker::TimerReservation> reservation = std::nullopt;
+                if (_timer_admission != nullptr)
+                {
+                    reservation = _timer_admission->tryReserve(timeout_msg.chargedBytes(), context.turn_id);
+                    if (!reservation.has_value())
+                    {
+                        const auto failed = transfer;
+                        failCrossZoneKnownNone(effects, failed, true);
+                        scheduleSaveIfDirty(effects, context.now);
+                        return snf::worker::CompletedTurn{.effects = std::move(effects)};
+                    }
+                }
+
                 transfer.source_position = *msg.result.position;
                 transfer.step = WorkflowStep::CrossZoneEnterTarget;
                 effects.push(snf::worker::TellActorEffect{
@@ -1462,6 +1510,14 @@ namespace snf::adapter
                             },
                     }),
                 });
+                if (reservation.has_value())
+                {
+                    effects.push(snf::worker::ScheduleTimerEffect{
+                        .deadline = context.now + WORKFLOW_TIMEOUT,
+                        .message = std::move(timeout_msg),
+                        .reservation = std::move(*reservation),
+                    });
+                }
                 return snf::worker::CompletedTurn{.effects = std::move(effects)};
             }
 
@@ -1487,8 +1543,36 @@ namespace snf::adapter
                     return snf::worker::CompletedTurn{.effects = std::move(effects)};
                 }
 
-                transfer.restore_epoch = _route_epoch + 1;
-                _route_epoch = transfer.restore_epoch;
+                if (msg.result.status == snf::server::ZoneCommandStatus::StaleRoute)
+                {
+                    auto failed = transfer;
+                    failed.target_epoch = std::max(transfer.target_epoch, msg.result.route_epoch);
+                    _route_epoch = std::max(_route_epoch, failed.target_epoch);
+                    failCrossZoneKnownNone(effects, failed, true);
+                    scheduleSaveIfDirty(effects, context.now);
+                    return snf::worker::CompletedTurn{.effects = std::move(effects)};
+                }
+
+                const auto restore_epoch = _route_epoch + 1;
+                auto timeout_msg = GameActorPayloadRegistry::create(PlayerWorkflowTimeoutMessage{
+                    .correlation_id = transfer.correlation_id,
+                    .step = WorkflowStep::CrossZoneRestoreSource,
+                });
+                std::optional<snf::worker::TimerReservation> reservation = std::nullopt;
+                if (_timer_admission != nullptr)
+                {
+                    reservation = _timer_admission->tryReserve(timeout_msg.chargedBytes(), context.turn_id);
+                    if (!reservation.has_value())
+                    {
+                        const auto failed = transfer;
+                        failCrossZoneKnownNone(effects, failed, true);
+                        scheduleSaveIfDirty(effects, context.now);
+                        return snf::worker::CompletedTurn{.effects = std::move(effects)};
+                    }
+                }
+
+                transfer.restore_epoch = restore_epoch;
+                _route_epoch = restore_epoch;
                 transfer.step = WorkflowStep::CrossZoneRestoreSource;
                 effects.push(snf::worker::TellActorEffect{
                     .target = snf::worker::ActorKey{snf::worker::ActorKind::Zone, transfer.source_zone.value},
@@ -1512,6 +1596,14 @@ namespace snf::adapter
                             },
                     }),
                 });
+                if (reservation.has_value())
+                {
+                    effects.push(snf::worker::ScheduleTimerEffect{
+                        .deadline = context.now + WORKFLOW_TIMEOUT,
+                        .message = std::move(timeout_msg),
+                        .reservation = std::move(*reservation),
+                    });
+                }
                 return snf::worker::CompletedTurn{.effects = std::move(effects)};
             }
 
@@ -2061,10 +2153,9 @@ namespace snf::adapter
         if (std::holds_alternative<TransferringRoute>(_workflow_state))
         {
             const auto& transfer = std::get<TransferringRoute>(_workflow_state);
-            // Cross-zone handoff owns one overall timeout reservation for its
-            // complete lifetime. The original step value identifies that timer;
-            // the current state step may already be EnterTarget or RestoreSource.
-            if (transfer.correlation_id == msg.correlation_id && msg.step == WorkflowStep::CrossZoneLeaveSource)
+            // A completed stage cannot cancel its already scheduled one-shot
+            // timer. Correlation and current step make those older timers stale.
+            if (transfer.correlation_id == msg.correlation_id && transfer.step == msg.step)
             {
                 const auto failed = transfer;
                 snf::worker::EffectBatch effects;

@@ -182,6 +182,8 @@ namespace snf::adapter
         [[nodiscard]] snf::worker::TurnResult handleZoneOutcome(ZoneOutcomeMessage&& msg, const snf::worker::ActorTurnContext& context);
         [[nodiscard]] snf::worker::TurnResult handleRoomOutcome(RoomOutcomeMessage&& msg, const snf::worker::ActorTurnContext& context);
         [[nodiscard]] snf::worker::TurnResult handleWorkflowTimeout(PlayerWorkflowTimeoutMessage&& msg, const snf::worker::ActorTurnContext& context);
+        [[nodiscard]] bool isClosingConnection(const snf::worker::ConnectionRef& connection) const noexcept;
+        [[nodiscard]] bool isClosingConnection(const std::optional<snf::worker::ConnectionRef>& connection) const noexcept;
         void appendCrossZoneCleanup(snf::worker::EffectBatch& effects, const TransferringRoute& transfer);
         void failCrossZoneKnownNone(snf::worker::EffectBatch& effects, const TransferringRoute& transfer, bool close_connection);
 
@@ -189,6 +191,10 @@ namespace snf::adapter
         snf::worker::TimerAdmission* _timer_admission{nullptr};
         // player -> connection. The sink owns connection -> player.
         std::optional<snf::worker::ConnectionRef> _bound_connection{std::nullopt};
+        // Set as soon as the actor decides to close its bound connection. The
+        // owner Worker posts ConnectionClosed asynchronously, so queued client
+        // input must be ignored during that gap.
+        bool _connection_closing{false};
         WorkflowState _workflow_state{StableRoute{}};
         std::uint64_t _route_epoch{0};
         std::uint64_t _correlation_sequence{0};
