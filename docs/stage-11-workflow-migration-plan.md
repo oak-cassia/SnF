@@ -145,7 +145,7 @@ room 상태를 갖지 않으면 대상을 결정할 수 없다.
 | 11E | **완료** | 아래 "11E 결과" 참고 |
 | 11D | **완료** | 아래 "11D 결과" 참고 |
 | 11F | **완료** | source Leave/Restore의 stale epoch cleanup 회귀 검증 포함. 아래 "11F 결과" 참고 |
-| 11G | **진행 중** | 11G-1 disconnect cleanup, 11G-2 일시적 mailbox 포화 시 timer 재시도 검증 완료. disconnect/cleanup 전달 보장·전체 terminal 대조·shutdown은 남음 |
+| 11G | **진행 중** | 11G-1 disconnect cleanup, 11G-2 timer 재시도, 11G-3A close 통지 mailbox receipt 검증 완료. Sink 재시도 연동·cleanup 전달 보장·전체 terminal 대조·shutdown은 남음 |
 | 11H~11K | 미착수 | |
 
 ### 11A 결과
@@ -414,6 +414,40 @@ application timeout 전달 보장, 최종 persistence와 shutdown cancel은 이�
 
 11G-2만 완료다. disconnect 통지와 cleanup tell의 전달 보장, 최종 persistence, workflow shutdown cancel 및
 전체 failure terminal 계약 대조는 남아 있다. 다음 제품 코드 위임 대상은 11G-3 disconnect 통지 전달 보장이다.
+
+### 11G-3A 결과 — Close 통지의 mailbox admission receipt
+
+- `Worker::notifyActorConnectionClosed`는 opaque envelope를 기존 WorkerInbox로 전달한다. 대상 Actor가
+  없으면 재활성화 없이 `ActorAbsent`, 존재하면 bounded mailbox admission 뒤 `MailboxAccepted`를
+  connection owner의 `RequestSink`에 반환한다. Stopping·mailbox 포화·잘못된 owner에는 receipt가 없다.
+- **원격 API의 `Accepted`는 inbox 접수일 뿐**이다. receipt도 Actor 실행이나 Zone/Room cleanup 완료를
+  뜻하지 않는다. 로컬 receipt는 API 반환 전 동기 호출될 수 있으며, 재전송은 중복 통지와 receipt를 만들 수 있다.
+- 통지와 receipt 모두 byte accounting 및 성공 publication의 `barrier.notePublished`를 적용한다.
+  8개 전용 counter로 발신, admission, 부재, 거절, receipt 발신 실패와 수신을 구분한다. 자동 재시도는 없다.
+
+`worker_actor_test.cpp`의 정식 회귀 증거:
+
+- `test_connection_closed_receipts_local_remote_and_fifo`: 로컬 동기 callback과 원격 2-hop receipt 시점,
+  기존 mailbox 메시지 뒤의 FIFO, Actor inline 실행 금지, count/byte 복구, publication epoch.
+- `test_connection_closed_absent_and_state_admission`: 미존재 Actor의 무생성, Idle의 Queued 전이 및
+  Running/Loading/Suspended 상태 보존, Stopping 거절. 상태별 admission은 합성 상태로 격리해 검사하며
+  fabricated blocked operation의 resume 성공을 주장하지 않는다.
+- `test_connection_closed_mailbox_limits_and_recovery`: 로컬·원격 각각 per-actor/전체 count·byte 포화
+  4종에서 receipt 없음과 회계 불변, 용량 회복 뒤 명시적 재전송의 성공.
+- `test_connection_closed_inbox_failures_and_lost_receipt_retry`: 통지·receipt 양방향 inbox의 byte·count
+  포화 및 closed 상태, receipt 발행 실패에도 대상 메시지 보존, receipt 유실 후 중복 전달 허용.
+- `test_connection_closed_validation_and_charge_overflow`: 발신/수신 owner, 미설정 runtime/Sink,
+  charge overflow, stop 및 shutdown admission 거절.
+- `test_connection_closed_receipts_across_owner_threads`: 두 실제 owner thread에서 128회 통지·receipt를
+  교환하고 callback thread, 메시지 수, 256회 publication을 검사한다. Worker phase는 테스트 harness로 구동한다.
+
+검증: Debug **13 PASS / MySQL 4 SKIP**, 신규 경로 포함 TSan worker **8 PASS / MySQL 3 SKIP**(race 0),
+ASan/UBSan worker **8 PASS / MySQL 3 SKIP**(sanitizer 오류 0), TCP 포함 Debug adapter **5회 연속 PASS**,
+변경 줄 clang-format 및 `git diff --check` 통과.
+
+**11G-3A만 완료**다. GameRequestSink는 아직 기존 tell 경로를 사용한다. 다음 11G-3B는 B1(Worker의
+owner-thread retry hook/deadline 연동) → B2(Sink의 사전 용량 확보·pending 보존·receipt 기반 재시도)로
+분리하고 각각 검증한다. cleanup tell 실패, 최종 persistence, shutdown 종결과 전체 terminal 대조는 남는다.
 
 ## 검증
 

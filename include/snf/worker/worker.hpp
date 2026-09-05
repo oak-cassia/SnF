@@ -245,6 +245,16 @@ namespace snf::worker
         // Owner thread only.
         [[nodiscard]] DeliveryResult tell(ActorKey key, ActorEnvelope envelope);
 
+        // Notify actor about connection closure with receipt callback routing.
+        // If local, delivers directly to local mailbox (or emits ActorAbsent receipt if absent).
+        // Remote Accepted means inbox admission only, not a receipt. MailboxAccepted
+        // acknowledges mailbox admission, not actor execution or cleanup completion.
+        // ActorAbsent does not establish that domain occupancy has been cleaned up.
+        // Local receipt callbacks can run before this method returns: callers must
+        // install pending state before calling and tolerate synchronous removal.
+        // Owner thread only. Retries may enqueue duplicate notifications.
+        [[nodiscard]] DeliveryResult notifyActorConnectionClosed(ActorKey key, ConnectionRef connection, ActorEnvelope envelope);
+
         // Transitional local implementation primitive used by RequestSink and TellActorEffect.
         // Owner thread only.
         [[nodiscard]] DeliveryResult tryDeliverLocal(ActorKey key, ActorEnvelope envelope);
@@ -357,6 +367,8 @@ namespace snf::worker
 
         [[nodiscard]] DeliveryResult tellInternal(ActorKey key, ActorEnvelope envelope, bool allow_quiescing);
         [[nodiscard]] DeliveryResult tryDeliverLocalInternal(ActorKey key, ActorEnvelope envelope);
+        [[nodiscard]] DeliveryResult deliverActorConnectionClosedLocally(ActorKey key, ConnectionRef connection, ActorEnvelope envelope);
+        void sendActorConnectionClosedReceipt(ActorKey key, ConnectionRef connection, ActorConnectionClosedResult result);
         void applyEffectBatch(ActorSlot& current_slot, EffectBatch&& batch, bool& stopped, std::uint64_t turn_id);
         // Completion source for the Step 5 synthetic scaffold. The source owns the stale metric
         // decision so tryMarkSyntheticCommandReady() stays metric-free and 5C's timer path can

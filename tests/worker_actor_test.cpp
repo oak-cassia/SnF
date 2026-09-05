@@ -153,6 +153,26 @@ namespace snf::worker
             worker._inbox.close();
         }
 
+        static void onEvent(Worker& worker, WorkerEvent event)
+        {
+            worker.onEvent(std::move(event));
+        }
+
+        static void bindOwnerThread(Worker& worker)
+        {
+            worker.bindOwnerThread();
+        }
+
+        static void discardInbox(Worker& worker)
+        {
+            static_cast<void>(worker._inbox.drain(
+                WorkerBudgets::defaults().inbox,
+                [](WorkerEvent&&)
+                {
+                }
+            ));
+        }
+
         static void removeActor(Worker& worker, const ActorHandle handle, const ActorRemovalReason reason)
         {
             worker.removeActor(handle, reason);
@@ -3768,6 +3788,373 @@ namespace
         assert(worker.totalMailboxMessages() == 0);
     }
 
+    class CloseReceiptSink final : public RequestSink
+    {
+    public:
+        RequestPostResult tryPost(ConnectionRef, Frame&&) override
+        {
+            return RequestPostResult::Accepted;
+        }
+        void onActorConnectionClosedReceipt(ActorKey key, ConnectionRef connection, ActorConnectionClosedResult result) override
+        {
+            receipts.push_back({key, connection, result});
+            if (observe)
+                observe();
+        }
+        std::vector<RemoteActorConnectionClosedReceipt> receipts;
+        std::function<void()> observe;
+    };
+
+    struct CloseReceiptFixture
+    {
+        static WorkerActorConfig config()
+        {
+            return {
+                .actor_table_capacity = 10,
+                .max_mailbox_messages_per_actor = 2,
+                .max_mailbox_bytes_per_actor = 100,
+                .max_mailbox_messages_total = 3,
+                .max_mailbox_bytes_total = 150
+            };
+        }
+        explicit CloseReceiptFixture(bool local = false, WorkerInboxConfig source_inbox = {}, WorkerInboxConfig target_inbox = {})
+            : factory(
+                  [this](ActorKey)
+                  {
+                      return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(
+                          [this](ActorEnvelope&& envelope, const ActorTurnContext&) -> TurnResult
+                          {
+                              executed.push_back(envelope.get<TestPingPayload>().frame.request_id);
+                              return CompletedTurn{.effects = {}};
+                          }
+                      ));
+                  }
+              )
+            , source(WorkerId{0}, 2, WorkerBudgets::defaults(), source_inbox, config(), factory)
+            , target(WorkerId{1}, 2, WorkerBudgets::defaults(), target_inbox, config(), factory)
+            , destination(local ? source : target)
+        {
+            source.configureNetwork(WorkerNetworkConfig{}, sink);
+            source.bindRemoteTarget(WorkerId{1}, target.bindInboxSource(WorkerId{0}));
+            target.bindRemoteTarget(WorkerId{0}, source.bindInboxSource(WorkerId{1}));
+            source.attachBarrier(&barrier);
+            target.attachBarrier(&barrier);
+            barrier.arm();
+            while (ownerOf(key, 2, config().placement_seed) != destination.id())
+                ++key.entity;
+        }
+        void activate()
+        {
+            assert(destination.tryDeliverLocal(key, makeEnvelope()) == DeliveryResult::Accepted);
+            run();
+            executed.clear();
+        }
+        DeliveryResult notify()
+        {
+            return source.notifyActorConnectionClosed(key, connection, makeEnvelope(0, MessageType::Ping, 99));
+        }
+        void drainTarget()
+        {
+            WorkerActorTestAccess::drainInbox(target, {.max_events = 4096, .max_per_lane = 1024, .max_duration = 1s});
+        }
+        void drainSource()
+        {
+            WorkerActorTestAccess::drainInbox(source, {.max_events = 4096, .max_per_lane = 1024, .max_duration = 1s});
+        }
+        void run()
+        {
+            WorkerActorTestAccess::runReadyActors(destination, {100, 1s});
+        }
+        void checkReceipt(ActorConnectionClosedResult result)
+        {
+            assert(!sink.receipts.empty());
+            assert((sink.receipts.back() == RemoteActorConnectionClosedReceipt{key, connection, result}));
+        }
+        std::vector<std::uint32_t> executed;
+        CloseReceiptSink sink;
+        FunctionalActorFactory factory;
+        WorkerQuiescenceBarrier barrier{2};
+        Worker source;
+        Worker target;
+        Worker& destination;
+        ActorKey key{ActorKind::Player, 1};
+        ConnectionRef connection{ConnectionId{7}, ConnectionGeneration{19}, WorkerId{0}};
+    };
+
+    void test_connection_closed_receipts_local_remote_and_fifo()
+    {
+        for (bool local : {false, true})
+        {
+            CloseReceiptFixture f(local);
+            f.activate();
+            assert(f.destination.tryDeliverLocal(f.key, makeEnvelope(0, MessageType::Ping, 42)) == DeliveryResult::Accepted);
+            bool returned = false;
+            f.sink.observe = [&]
+            {
+                assert(returned != local);
+                assert(f.destination.totalMailboxMessages() == 2);
+                assert(f.executed.empty());
+            };
+            assert(f.notify() == DeliveryResult::Accepted);
+            returned = true;
+            assert(f.executed.empty());
+            if (!local)
+            {
+                assert(f.sink.receipts.empty());
+                assert(f.barrier.snapshot().epoch == 1);
+                f.drainTarget();
+                assert(f.sink.receipts.empty());
+                assert(f.barrier.snapshot().epoch == 2);
+                f.drainSource();
+            }
+            else
+                assert(f.barrier.snapshot().epoch == 0);
+            assert(f.sink.receipts.size() == 1);
+            f.checkReceipt(ActorConnectionClosedResult::MailboxAccepted);
+            assert(f.destination.totalMailboxBytes() == 2 * makeEnvelope(0).chargedBytes());
+            f.run();
+            assert((f.executed == std::vector<std::uint32_t>{42, 99}));
+            assert(f.destination.totalMailboxMessages() == 0 && f.destination.totalMailboxBytes() == 0);
+            assert(f.source.metrics().actor.actor_connection_closed_notifications_sent == 1);
+            assert(f.destination.metrics().actor.actor_connection_closed_mailbox_accepted == 1);
+            assert(f.destination.metrics().actor.actor_connection_closed_receipts_sent == 1);
+            assert(f.source.metrics().actor.actor_connection_closed_receipts_received == 1);
+        }
+    }
+
+    void test_connection_closed_absent_and_state_admission()
+    {
+        for (bool local : {false, true})
+        {
+            CloseReceiptFixture absent(local);
+            assert(absent.notify() == DeliveryResult::Accepted);
+            absent.drainTarget();
+            absent.drainSource();
+            absent.checkReceipt(ActorConnectionClosedResult::ActorAbsent);
+            assert(absent.factory.construct_calls == 0 && absent.destination.actorCount() == 0);
+            assert(absent.destination.metrics().actor.actor_connection_closed_actor_absent == 1);
+
+            for (auto state : {ActorState::Idle, ActorState::Running, ActorState::Loading, ActorState::Suspended, ActorState::Stopping})
+            {
+                CloseReceiptFixture f(local);
+                f.activate();
+                auto* slot = WorkerActorTestAccess::slot(f.destination, f.key);
+                // Isolate admission behavior; no fabricated blocked operation is resumed.
+                slot->setState(state);
+                const auto result = f.notify();
+                assert(result == (local && state == ActorState::Stopping ? DeliveryResult::Stopping : DeliveryResult::Accepted));
+                f.drainTarget();
+                f.drainSource();
+                if (state == ActorState::Stopping)
+                {
+                    assert(f.sink.receipts.empty() && f.destination.totalMailboxMessages() == 0);
+                    assert(f.destination.metrics().actor.actor_connection_closed_rejections == 1);
+                }
+                else
+                {
+                    f.checkReceipt(ActorConnectionClosedResult::MailboxAccepted);
+                    assert(slot->state() == (state == ActorState::Idle ? ActorState::Queued : state));
+                    assert(f.destination.totalMailboxMessages() == 1);
+                    if (state != ActorState::Idle)
+                    {
+                        f.run();
+                        assert(f.executed.empty());
+                    }
+                }
+            }
+        }
+    }
+
+    void test_connection_closed_mailbox_limits_and_recovery()
+    {
+        for (bool local : {false, true})
+        {
+            for (int limit = 0; limit < 4; ++limit)
+            {
+                CloseReceiptFixture f(local);
+                f.activate();
+                ActorKey other = f.key;
+                do
+                {
+                    ++other.entity;
+                } while (ownerOf(other, 2, 0) != f.destination.id());
+                const auto fill = [&](ActorKey key, std::uint64_t charge)
+                {
+                    assert(f.destination.tryDeliverLocal(key, makeEnvelopeWithCharge(0, charge)) == DeliveryResult::Accepted);
+                };
+                if (limit == 0)
+                {
+                    fill(f.key, 20);
+                    fill(f.key, 20);
+                }
+                if (limit == 1)
+                    fill(f.key, 100);
+                if (limit == 2)
+                {
+                    fill(f.key, 20);
+                    fill(other, 20);
+                    fill(other, 20);
+                }
+                if (limit == 3)
+                {
+                    fill(f.key, 50);
+                    fill(other, 100);
+                }
+                const auto messages = f.destination.totalMailboxMessages();
+                const auto bytes = f.destination.totalMailboxBytes();
+                assert(f.notify() == (local ? DeliveryResult::MailboxFull : DeliveryResult::Accepted));
+                f.drainTarget();
+                f.drainSource();
+                assert(f.sink.receipts.empty());
+                assert(f.destination.totalMailboxMessages() == messages && f.destination.totalMailboxBytes() == bytes);
+                assert(f.destination.metrics().actor.actor_connection_closed_rejections == 1);
+                assert(f.destination.metrics().actor.actor_connection_closed_receipts_sent == 0);
+                f.run();
+                f.executed.clear();
+                assert(f.notify() == DeliveryResult::Accepted);
+                f.drainTarget();
+                f.drainSource();
+                f.checkReceipt(ActorConnectionClosedResult::MailboxAccepted);
+                assert(f.executed.empty());
+                f.run();
+                assert((f.executed == std::vector<std::uint32_t>{99}));
+            }
+        }
+    }
+
+    void test_connection_closed_inbox_failures_and_lost_receipt_retry()
+    {
+        for (int failure = 0; failure < 6; ++failure)
+        {
+            // Both directions: byte limit, event-count limit, then closed inbox.
+            const bool receipt_side = failure % 2 != 0;
+            WorkerInboxConfig tiny{.max_bytes_per_worker = 2};
+            CloseReceiptFixture f(false, failure == 1 ? tiny : WorkerInboxConfig{}, failure == 0 ? tiny : WorkerInboxConfig{});
+            f.activate();
+            Worker& full = receipt_side ? f.source : f.target;
+            if (failure >= 4)
+                WorkerActorTestAccess::closeInbox(full);
+            else if (failure >= 2)
+            {
+                // Fill the same producer lane using normal remote actor traffic.
+                Worker& producer = receipt_side ? f.target : f.source;
+                ActorKey filler = f.key;
+                while (ownerOf(filler, 2, 0) != full.id())
+                    ++filler.entity;
+                for (std::size_t n = 0; n < InboxLane::CAPACITY; ++n)
+                    assert(producer.tell(filler, makeEnvelope(0)) == DeliveryResult::Accepted);
+            }
+            auto result = f.notify();
+            if (!receipt_side)
+            {
+                assert(result == (failure >= 4 ? DeliveryResult::Closed : DeliveryResult::RemoteInboxFull));
+                assert(f.source.metrics().actor.actor_connection_closed_notification_rejections == 1);
+                assert(f.barrier.snapshot().epoch == (failure == 2 ? InboxLane::CAPACITY : 0));
+            }
+            else
+            {
+                assert(result == DeliveryResult::Accepted);
+                f.drainTarget();
+                assert(f.target.totalMailboxMessages() == 1);
+                assert(f.target.metrics().actor.actor_connection_closed_receipt_send_failures == 1);
+                assert(f.target.metrics().actor.actor_connection_closed_receipts_sent == 0);
+                assert(f.barrier.snapshot().epoch == (failure == 3 ? InboxLane::CAPACITY + 1 : 1));
+            }
+            assert(f.sink.receipts.empty());
+        }
+        CloseReceiptFixture f;
+        f.activate();
+        assert(f.notify() == DeliveryResult::Accepted);
+        f.drainTarget();
+        WorkerActorTestAccess::discardInbox(f.source); // Deliberately lose the first receipt.
+        assert(f.sink.receipts.empty());
+        f.run();
+        assert(f.notify() == DeliveryResult::Accepted);
+        f.drainTarget();
+        f.drainSource();
+        f.run();
+        f.checkReceipt(ActorConnectionClosedResult::MailboxAccepted);
+        assert((f.executed == std::vector<std::uint32_t>{99, 99})); // At-least-once, not exactly-once.
+        assert(f.sink.receipts.size() == 1);
+    }
+
+    void test_connection_closed_receipts_across_owner_threads()
+    {
+        CloseReceiptFixture f;
+        f.activate();
+        constexpr std::size_t count = 128;
+        std::atomic<bool> done{false};
+        std::thread target_thread(
+            [&]
+            {
+                WorkerActorTestAccess::bindOwnerThread(f.target);
+                while (!done.load(std::memory_order_acquire))
+                {
+                    WorkerActorTestAccess::drainInbox(f.target, {.max_events = 1, .max_per_lane = 1, .max_duration = 1s});
+                    f.run();
+                    std::this_thread::yield();
+                }
+                f.run();
+            }
+        );
+        std::thread source_thread(
+            [&]
+            {
+                WorkerActorTestAccess::bindOwnerThread(f.source);
+                const auto owner = std::this_thread::get_id();
+                f.sink.observe = [owner]
+                {
+                    assert(std::this_thread::get_id() == owner);
+                };
+                const auto deadline = Clock::now() + 5s;
+                for (std::size_t n = 0; n < count; ++n)
+                {
+                    assert(f.notify() == DeliveryResult::Accepted);
+                    while (f.sink.receipts.size() <= n && Clock::now() < deadline)
+                    {
+                        f.drainSource();
+                        std::this_thread::yield();
+                    }
+                    assert(f.sink.receipts.size() == n + 1);
+                    f.checkReceipt(ActorConnectionClosedResult::MailboxAccepted);
+                }
+                done.store(true, std::memory_order_release);
+            }
+        );
+        source_thread.join();
+        target_thread.join();
+        assert(f.executed.size() == count && f.sink.receipts.size() == count);
+        assert(f.target.metrics().actor.actor_connection_closed_mailbox_accepted == count);
+        assert(f.source.metrics().actor.actor_connection_closed_receipts_received == count);
+        assert(f.barrier.snapshot().epoch == 2 * count);
+    }
+
+    void test_connection_closed_validation_and_charge_overflow()
+    {
+        CloseReceiptFixture f;
+        auto wrong = f.connection;
+        wrong.owner = WorkerId{1};
+        assert(f.source.notifyActorConnectionClosed(f.key, wrong, makeEnvelope()) == DeliveryResult::WrongOwner);
+        assert(f.source.notifyActorConnectionClosed(f.key, f.connection, makeEnvelopeWithCharge(0, UINT64_MAX)) == DeliveryResult::RemoteInboxFull);
+        WorkerActorTestAccess::onEvent(f.source, RemoteActorConnectionClosed{f.key, f.connection, makeEnvelope()});
+        WorkerActorTestAccess::onEvent(f.source, RemoteActorConnectionClosedReceipt{f.key, wrong, ActorConnectionClosedResult::MailboxAccepted});
+        assert(f.source.metrics().actor.misrouted_actor_events == 2);
+        assert(f.sink.receipts.empty() && f.source.actorCount() == 0);
+        assert(f.barrier.snapshot().epoch == 0);
+        Worker no_actor(WorkerId{0}, 2, WorkerBudgets::defaults(), WorkerInboxConfig{});
+        no_actor.configureNetwork(WorkerNetworkConfig{}, f.sink);
+        assert(no_actor.notifyActorConnectionClosed(f.key, f.connection, makeEnvelope()) == DeliveryResult::Closed);
+        WorkerActorTestAccess::onEvent(no_actor, RemoteActorConnectionClosed{f.key, f.connection, makeEnvelope()});
+        assert(no_actor.metrics().actor.actor_events_without_runtime == 1);
+        assert(f.target.notifyActorConnectionClosed(f.key, wrong, makeEnvelope()) == DeliveryResult::Closed); // No sink.
+        f.source.requestStop();
+        assert(f.notify() == DeliveryResult::Closed);
+        CloseReceiptFixture shutdown;
+        WorkerActorTestAccess::beginShutdownPhaseA(shutdown.source);
+        assert(shutdown.notify() == DeliveryResult::Closed);
+        assert(f.sink.receipts.empty() && shutdown.sink.receipts.empty());
+    }
+
     void test_tell_remote_routes_to_target_inbox_fifo_and_bounds()
     {
         const WorkerActorConfig config{
@@ -4602,6 +4989,12 @@ void run_worker_actor_tests()
     // 6A Tests
     test_tell_local_mailbox_non_reentrancy_and_no_self_lane();
     test_tell_remote_routes_to_target_inbox_fifo_and_bounds();
+    test_connection_closed_receipts_local_remote_and_fifo();
+    test_connection_closed_absent_and_state_admission();
+    test_connection_closed_mailbox_limits_and_recovery();
+    test_connection_closed_inbox_failures_and_lost_receipt_retry();
+    test_connection_closed_validation_and_charge_overflow();
+    test_connection_closed_receipts_across_owner_threads();
     test_tell_remote_inbox_full_and_charge_overflow_rejections();
     test_tell_actor_effect_remote_routing();
     test_remote_actor_message_without_runtime_and_misrouted_metrics();

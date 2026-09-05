@@ -707,6 +707,14 @@ namespace snf::worker
         std::uint64_t application_timers_delivered{0};
         std::uint64_t application_timer_delivery_failures{0};
         std::uint64_t application_timer_delivery_retries{0};
+        std::uint64_t actor_connection_closed_notifications_sent{0};
+        std::uint64_t actor_connection_closed_rejections{0};
+        std::uint64_t actor_connection_closed_notification_rejections{0};
+        std::uint64_t actor_connection_closed_mailbox_accepted{0};
+        std::uint64_t actor_connection_closed_actor_absent{0};
+        std::uint64_t actor_connection_closed_receipts_sent{0};
+        std::uint64_t actor_connection_closed_receipt_send_failures{0};
+        std::uint64_t actor_connection_closed_receipts_received{0};
         std::uint64_t timer_schedule_failures{0};
         std::uint64_t stale_application_timers{0};
         std::uint64_t cancelled_application_timers{0};

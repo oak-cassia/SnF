@@ -760,6 +760,192 @@ namespace snf::worker
         return DeliveryResult::Accepted;
     }
 
+    DeliveryResult Worker::notifyActorConnectionClosed(const ActorKey key, const ConnectionRef connection, ActorEnvelope envelope)
+    {
+        assertOwnerThread();
+
+        if (connection.owner != _id)
+        {
+            ++_metrics.actor.actor_connection_closed_rejections;
+            ++_metrics.actor.actor_connection_closed_notification_rejections;
+            return DeliveryResult::WrongOwner;
+        }
+
+        if (_shutting_down || _stop_requested.load(std::memory_order_acquire) || !actorsConfigured() || _request_sink == nullptr)
+        {
+            ++_metrics.actor.actor_connection_closed_rejections;
+            ++_metrics.actor.actor_connection_closed_notification_rejections;
+            return DeliveryResult::Closed;
+        }
+
+        const WorkerId owner = ownerOf(key, _worker_count, _actor_config.placement_seed);
+        if (owner == _id)
+        {
+            const DeliveryResult result = deliverActorConnectionClosedLocally(key, connection, std::move(envelope));
+            if (result == DeliveryResult::Accepted)
+            {
+                ++_metrics.actor.actor_connection_closed_notifications_sent;
+            }
+            else
+            {
+                ++_metrics.actor.actor_connection_closed_notification_rejections;
+            }
+            return result;
+        }
+
+        if (owner.value >= _remote_ports.size() || !_remote_ports[owner.value].isBound())
+        {
+            ++_metrics.actor.actor_connection_closed_rejections;
+            ++_metrics.actor.actor_connection_closed_notification_rejections;
+            return DeliveryResult::Closed;
+        }
+
+        const std::uint64_t envelope_charge = envelope.chargedBytes();
+        constexpr std::size_t base_charge = sizeof(RemoteActorConnectionClosed);
+        if (envelope_charge > std::numeric_limits<std::uint32_t>::max() - base_charge)
+        {
+            ++_metrics.actor.actor_connection_closed_rejections;
+            ++_metrics.actor.actor_connection_closed_notification_rejections;
+            return DeliveryResult::RemoteInboxFull;
+        }
+        const std::uint32_t total_charge = static_cast<std::uint32_t>(base_charge + envelope_charge);
+
+        WorkerEnvelope worker_envelope{
+            .event =
+                RemoteActorConnectionClosed{
+                    .target = key,
+                    .connection = connection,
+                    .message = std::move(envelope),
+                },
+            .charged_bytes = total_charge,
+        };
+
+        WorkerInboxPort& port = _remote_ports[owner.value];
+        const InboxPushResult push_result = port.tryPush(std::move(worker_envelope));
+        if (push_result == InboxPushResult::Accepted)
+        {
+            ++_metrics.actor.actor_connection_closed_notifications_sent;
+            if (_barrier != nullptr)
+            {
+                _barrier->notePublished(owner);
+            }
+            return DeliveryResult::Accepted;
+        }
+
+        ++_metrics.actor.actor_connection_closed_rejections;
+        ++_metrics.actor.actor_connection_closed_notification_rejections;
+        if (push_result == InboxPushResult::Full)
+        {
+            return DeliveryResult::RemoteInboxFull;
+        }
+        return DeliveryResult::Closed;
+    }
+
+    DeliveryResult Worker::deliverActorConnectionClosedLocally(const ActorKey key, const ConnectionRef connection, ActorEnvelope envelope)
+    {
+        assertOwnerThread();
+
+        if (!actorsConfigured())
+        {
+            ++_metrics.actor.actor_connection_closed_rejections;
+            ++_metrics.actor.actor_events_without_runtime;
+            return DeliveryResult::Closed;
+        }
+
+        if (ownerOf(key, _worker_count, _actor_config.placement_seed) != _id)
+        {
+            ++_metrics.actor.actor_connection_closed_rejections;
+            ++_metrics.actor.misrouted_actor_events;
+            return DeliveryResult::WrongOwner;
+        }
+
+        ActorSlot* slot = _actors->find(key);
+        if (slot == nullptr)
+        {
+            ++_metrics.actor.actor_connection_closed_actor_absent;
+            sendActorConnectionClosedReceipt(key, connection, ActorConnectionClosedResult::ActorAbsent);
+            return DeliveryResult::Accepted;
+        }
+
+        if (slot->state() == ActorState::Stopping)
+        {
+            ++_metrics.actor.actor_connection_closed_rejections;
+            return DeliveryResult::Stopping;
+        }
+
+        const std::uint64_t charge = envelope.chargedBytes();
+        if (slot->mailbox().size() >= _actor_config.max_mailbox_messages_per_actor ||
+            exceedsByteLimit(slot->mailbox().chargedBytes(), charge, _actor_config.max_mailbox_bytes_per_actor) ||
+            _total_mailbox_messages >= _actor_config.max_mailbox_messages_total ||
+            exceedsByteLimit(_total_mailbox_bytes, charge, _actor_config.max_mailbox_bytes_total))
+        {
+            ++_metrics.actor.actor_connection_closed_rejections;
+            return DeliveryResult::MailboxFull;
+        }
+
+        const bool was_idle = (slot->state() == ActorState::Idle);
+        slot->mailbox().push(std::move(envelope));
+        _total_mailbox_messages += 1;
+        _total_mailbox_bytes += charge;
+
+        if (was_idle)
+        {
+            slot->setState(ActorState::Queued);
+            _ready_queue->push(slot->handle());
+        }
+
+        ++_metrics.actor.actor_connection_closed_mailbox_accepted;
+        sendActorConnectionClosedReceipt(key, connection, ActorConnectionClosedResult::MailboxAccepted);
+        return DeliveryResult::Accepted;
+    }
+
+    void Worker::sendActorConnectionClosedReceipt(const ActorKey key, const ConnectionRef connection, const ActorConnectionClosedResult result)
+    {
+        assertOwnerThread();
+
+        if (connection.owner == _id)
+        {
+            ++_metrics.actor.actor_connection_closed_receipts_sent;
+            ++_metrics.actor.actor_connection_closed_receipts_received;
+            if (_request_sink != nullptr)
+            {
+                _request_sink->onActorConnectionClosedReceipt(key, connection, result);
+            }
+            return;
+        }
+
+        if (connection.owner.value >= _remote_ports.size() || !_remote_ports[connection.owner.value].isBound())
+        {
+            ++_metrics.actor.actor_connection_closed_receipt_send_failures;
+            return;
+        }
+
+        constexpr std::uint32_t receipt_charge = static_cast<std::uint32_t>(sizeof(RemoteActorConnectionClosedReceipt));
+        WorkerEnvelope worker_envelope{
+            .event =
+                RemoteActorConnectionClosedReceipt{
+                    .target = key,
+                    .connection = connection,
+                    .result = result,
+                },
+            .charged_bytes = receipt_charge,
+        };
+
+        WorkerInboxPort& port = _remote_ports[connection.owner.value];
+        const InboxPushResult push_result = port.tryPush(std::move(worker_envelope));
+        if (push_result == InboxPushResult::Accepted)
+        {
+            ++_metrics.actor.actor_connection_closed_receipts_sent;
+            if (_barrier != nullptr)
+            {
+                _barrier->notePublished(connection.owner);
+            }
+            return;
+        }
+
+        ++_metrics.actor.actor_connection_closed_receipt_send_failures;
+    }
+
     bool Worker::networkEnabled() const noexcept
     {
         return _connections != nullptr;
@@ -2469,6 +2655,30 @@ namespace snf::worker
             else
             {
                 ++_metrics.actor.remote_tell_delivery_failures;
+            }
+            return;
+        }
+
+        if (std::holds_alternative<RemoteActorConnectionClosed>(event))
+        {
+            auto& closed_msg = std::get<RemoteActorConnectionClosed>(event);
+            static_cast<void>(deliverActorConnectionClosedLocally(closed_msg.target, closed_msg.connection, std::move(closed_msg.message)));
+            return;
+        }
+
+        if (std::holds_alternative<RemoteActorConnectionClosedReceipt>(event))
+        {
+            const auto& receipt = std::get<RemoteActorConnectionClosedReceipt>(event);
+            if (receipt.connection.owner != _id)
+            {
+                ++_metrics.actor.misrouted_actor_events;
+                return;
+            }
+
+            ++_metrics.actor.actor_connection_closed_receipts_received;
+            if (_request_sink != nullptr)
+            {
+                _request_sink->onActorConnectionClosedReceipt(receipt.target, receipt.connection, receipt.result);
             }
             return;
         }

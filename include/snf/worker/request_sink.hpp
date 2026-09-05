@@ -38,6 +38,14 @@ namespace snf::worker
         virtual void onConnectionClosed(ConnectionRef, CloseReason)
         {
         }
+
+        // Connection-closed notification receipt. Called only on the connection
+        // owner Worker thread. Local receipts may be invoked synchronously.
+        // This acknowledges mailbox admission or actor absence, never execution
+        // or domain cleanup completion. Duplicate and late receipts are possible.
+        virtual void onActorConnectionClosedReceipt(ActorKey, ConnectionRef, ActorConnectionClosedResult)
+        {
+        }
     };
 
     class NullRequestSink final : public RequestSink

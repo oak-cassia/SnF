@@ -39,11 +39,35 @@ namespace snf::worker
         [[nodiscard]] bool operator==(const RemoteConnectionClose&) const noexcept = default;
     };
 
+    enum class ActorConnectionClosedResult : std::uint8_t
+    {
+        MailboxAccepted = 0,
+        ActorAbsent = 1,
+    };
+    using ActorConnectionClosedReceiptResult = ActorConnectionClosedResult;
+
     struct RemoteActorMessage
     {
         ActorKey target;
         ActorEnvelope message;
     };
 
-    using WorkerEvent = std::variant<RemoteConnectionSend, RemoteConnectionClose, RemoteActorMessage>;
+    struct RemoteActorConnectionClosed
+    {
+        ActorKey target;
+        ConnectionRef connection;
+        ActorEnvelope message;
+    };
+
+    struct RemoteActorConnectionClosedReceipt
+    {
+        ActorKey target;
+        ConnectionRef connection;
+        ActorConnectionClosedResult result;
+
+        [[nodiscard]] bool operator==(const RemoteActorConnectionClosedReceipt&) const noexcept = default;
+    };
+
+    using WorkerEvent = std::
+        variant<RemoteConnectionSend, RemoteConnectionClose, RemoteActorMessage, RemoteActorConnectionClosed, RemoteActorConnectionClosedReceipt>;
 }
