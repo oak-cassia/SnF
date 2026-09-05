@@ -95,6 +95,9 @@ LeaveSource timeout admission이 실패하면 source를 수정하지 않고 기�
 post 실패를 PlayerActor가 동기 관측할 수 없다. 이 경우 LeaveSource timeout에서 적용 여부 불명으로 취급해
 양쪽 cleanup과 close로 끝낸다.
 
+Source Leave가 `StaleRoute`를 반환하면 outcome에 실린 실제 source participant epoch으로 cleanup한다.
+요청의 source epoch을 재사용하지 않으며, route는 known-none으로 확정하고 connection을 닫는다.
+
 ### Source leave 뒤
 
 target의 **확정된 적용 실패 outcome**은 더 큰 `restore_epoch`으로 source Enter를 게시한다. restore가 성공한
@@ -108,6 +111,9 @@ command를 발행하지 않고 양쪽 cleanup과 known-none close로 끝낸다.
 
 target 적용 여부를 알 수 없거나 restore도 실패하면 stable route를 추측하지 않는다. source와 target에
 epoch별 cleanup Leave를 게시하고 connection을 닫으며 session location을 `known none`으로 만든다.
+RestoreSource의 `StaleRoute`도 실제 source participant epoch으로 cleanup한다. 세 단계 모두 outcome의 identity를
+검증한 뒤 관측 epoch을 반영하며, `_route_epoch`은 기존 값과 관측값 중 큰 값을 유지해 재접속 뒤 입장 epoch이
+관측값보다 커지도록 한다.
 
 target Enter 적용 뒤 route 공개 전에 disconnect되면 target cleanup을 먼저 끝낸다. target을 잠시 stable로
 공개해 새 입력을 받지 않는다.
@@ -138,6 +144,7 @@ drained로 판정하지 않는다.
 - source post 실패는 기존 stable route를 유지한다.
 - target 실패는 더 큰 epoch으로 source를 복구한다.
 - target `StaleRoute`는 결과의 higher epoch participant를 cleanup하고 source와 target 양쪽에 남지 않는다.
+- source Leave/Restore의 `StaleRoute`는 실제 participant epoch으로 cleanup하고 재접속 후 더 큰 epoch으로 입장한다.
 - stale completion은 현재 transition을 진행시키지 않는다.
 - close 결정과 `PlayerConnectionClosedMessage` 사이에 대기 중이던 Enter는 새 participant를 만들지 않는다.
 - disconnect와 shutdown 뒤 중복 Entity, stale location, timer, token과 reservation이 남지 않는다.

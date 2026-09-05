@@ -927,6 +927,152 @@ namespace
         assert(target_actor.zone().playerCount() == 0);
     }
 
+    void assert_cross_zone_stale_source_cleans_observed_epoch(const snf::adapter::WorkflowStep step)
+    {
+        MockTimerAdmission admission(10000);
+        const snf::server::PlayerId player{127};
+        snf::adapter::PlayerActorAdapter player_actor(player, &admission);
+        snf::adapter::ZoneActorAdapter source_actor(snf::server::ZoneId{17});
+        snf::adapter::ZoneActorAdapter target_actor(snf::server::ZoneId{27});
+        const snf::worker::ActorTurnContext turn_ctx{
+            .activation = {},
+            .now = std::chrono::steady_clock::now(),
+            .turn_id = 7,
+        };
+        const snf::worker::ConnectionRef conn{
+            .id = snf::worker::ConnectionId{37},
+            .generation = snf::worker::ConnectionGeneration{1},
+            .owner = snf::worker::WorkerId{0},
+        };
+        authenticateAndEnterZone(player_actor, source_actor, conn, player, {.x = 18, .y = 19}, turn_ctx);
+
+        auto handoff_result = player_actor.dispatch(
+            snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerZoneRequestMessage{
+                .connection = conn,
+                .request_id = 3,
+                .request = snf::adapter::EnterZoneRequest{.zone = target_actor.zone().id(), .position = {.x = 40, .y = 41}},
+            }),
+            turn_ctx
+        );
+        auto source_command = takeTellMessage(handoff_result);
+        if (step == snf::adapter::WorkflowStep::CrossZoneRestoreSource)
+        {
+            auto left = source_actor.dispatch(std::move(source_command), turn_ctx);
+            auto target_stage = player_actor.dispatch(takeTellMessage(left), turn_ctx);
+            auto target_command = takeTellMessage(target_stage).take<snf::adapter::ZoneCommandMessage>();
+            const auto reply = *target_command.reply_to;
+            // Inject a definite rejection before target Enter is applied, then
+            // exercise the real source adapter's response to the restore command.
+            auto restore_stage = player_actor.dispatch(
+                snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneOutcomeMessage{
+                    .player = player,
+                    .connection_generation = conn.generation,
+                    .correlation_id = reply.correlation_id,
+                    .step = reply.step,
+                    .zone = target_actor.zone().id(),
+                    .route_epoch = reply.route_epoch,
+                    .request_id = reply.request_id,
+                    .result =
+                        snf::server::ZoneResult{
+                            .status = snf::server::ZoneCommandStatus::TransferFailed,
+                            .player = player,
+                            .position = std::nullopt,
+                            .route_epoch = reply.route_epoch,
+                            .tick = 0,
+                            .visible_players = {},
+                        },
+                }),
+                turn_ctx
+            );
+            source_command = takeTellMessage(restore_stage);
+        }
+        assert(std::get<snf::adapter::TransferringRoute>(player_actor.workflowState()).step == step);
+
+        auto seeded = source_actor.dispatch(
+            snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneCommandMessage{
+                .command = snf::server::EnterZoneCommand{.player = player, .route_epoch = 7, .position = {.x = 90, .y = 91}},
+            }),
+            turn_ctx
+        );
+        static_cast<void>(completedTurn(seeded));
+        auto source_result = source_actor.dispatch(std::move(source_command), turn_ctx);
+        auto outcome = takeTellMessage(source_result).take<snf::adapter::ZoneOutcomeMessage>();
+        assert(outcome.result.status == snf::server::ZoneCommandStatus::StaleRoute);
+        assert(outcome.result.route_epoch == 7);
+
+        auto terminal = player_actor.dispatch(snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneOutcomeMessage{outcome}), turn_ctx);
+        const auto& effects = completedTurn(terminal).effects.effects();
+        assert(effects.size() == 3);
+        assert(std::holds_alternative<snf::worker::CloseConnectionEffect>(effects[2]));
+        assert(!player_actor.currentZone().has_value());
+        assert(!player_actor.player().state().lastLocation().has_value());
+        assert(player_actor.routeEpoch() == 7);
+
+        auto source_cleanup = takeTellMessage(terminal, 0);
+        const auto& cleanup_command = source_cleanup.get<snf::adapter::ZoneCommandMessage>().command;
+        assert(std::get<snf::server::LeaveZoneCommand>(cleanup_command).route_epoch == 7);
+        auto cleaned_source = source_actor.dispatch(std::move(source_cleanup), turn_ctx);
+        auto cleaned_target = target_actor.dispatch(takeTellMessage(terminal, 1), turn_ctx);
+        static_cast<void>(completedTurn(cleaned_source));
+        static_cast<void>(completedTurn(cleaned_target));
+        assert(source_actor.zone().playerCount() == 0);
+        assert(target_actor.zone().playerCount() == 0);
+
+        auto duplicate = player_actor.dispatch(snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneOutcomeMessage{outcome}), turn_ctx);
+        assert(completedTurn(duplicate).effects.empty());
+        auto old_timeout = player_actor.dispatch(
+            snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerWorkflowTimeoutMessage{
+                .correlation_id = outcome.correlation_id,
+                .step = step,
+            }),
+            turn_ctx
+        );
+        assert(completedTurn(old_timeout).effects.empty());
+
+        auto closed = player_actor.dispatch(
+            snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerConnectionClosedMessage{.connection = conn}), turn_ctx
+        );
+        assert(completedTurn(closed).effects.empty());
+        assert(!player_actor.boundConnection().has_value());
+
+        auto next_conn = conn;
+        next_conn.generation = snf::worker::ConnectionGeneration{2};
+        auto authenticated = player_actor.dispatch(
+            snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerCommandMessage{
+                .connection = next_conn,
+                .request_id = 4,
+                .command = snf::server::AuthenticateCommand{.player = player},
+            }),
+            turn_ctx
+        );
+        static_cast<void>(completedTurn(authenticated));
+        auto enter = player_actor.dispatch(
+            snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerZoneRequestMessage{
+                .connection = next_conn,
+                .request_id = 5,
+                .request = snf::adapter::EnterZoneRequest{.zone = source_actor.zone().id(), .position = {.x = 20, .y = 21}},
+            }),
+            turn_ctx
+        );
+        auto entered = source_actor.dispatch(takeTellMessage(enter), turn_ctx);
+        auto confirmed = player_actor.dispatch(takeTellMessage(entered), turn_ctx);
+        static_cast<void>(completedTurn(confirmed));
+        assert(player_actor.currentZone() == source_actor.zone().id());
+        assert(player_actor.routeEpoch() == 8);
+        assert(source_actor.zone().playerCount() == 1);
+        assert(target_actor.zone().playerCount() == 0);
+    }
+
+    void test_cross_zone_stale_source_leave_cleans_observed_epoch_and_closes()
+    {
+        assert_cross_zone_stale_source_cleans_observed_epoch(snf::adapter::WorkflowStep::CrossZoneLeaveSource);
+    }
+
+    void test_cross_zone_stale_source_restore_cleans_observed_epoch_and_closes()
+    {
+        assert_cross_zone_stale_source_cleans_observed_epoch(snf::adapter::WorkflowStep::CrossZoneRestoreSource);
+    }
+
     void test_cross_zone_target_timeout_cleans_both_zones_and_closes()
     {
         MockTimerAdmission admission(10000);
@@ -3166,6 +3312,12 @@ int main()
 
     test_cross_zone_stale_target_cleans_observed_epoch_and_closes();
     std::cout << "  - test_cross_zone_stale_target_cleans_observed_epoch_and_closes PASSED" << std::endl;
+
+    test_cross_zone_stale_source_leave_cleans_observed_epoch_and_closes();
+    std::cout << "  - test_cross_zone_stale_source_leave_cleans_observed_epoch_and_closes PASSED" << std::endl;
+
+    test_cross_zone_stale_source_restore_cleans_observed_epoch_and_closes();
+    std::cout << "  - test_cross_zone_stale_source_restore_cleans_observed_epoch_and_closes PASSED" << std::endl;
 
     test_cross_zone_target_timeout_cleans_both_zones_and_closes();
     std::cout << "  - test_cross_zone_target_timeout_cleans_both_zones_and_closes PASSED" << std::endl;

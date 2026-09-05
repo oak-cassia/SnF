@@ -144,7 +144,7 @@ room 상태를 갖지 않으면 대상을 결정할 수 없다.
 | 11C | **완료** | 아래 "11C 결과" 참고 |
 | 11E | **완료** | 아래 "11E 결과" 참고 |
 | 11D | **완료** | 아래 "11D 결과" 참고 |
-| 11F | **완료** | 아래 "11F 결과" 참고 |
+| 11F | **완료** | source Leave/Restore의 stale epoch cleanup 회귀 검증 포함. 아래 "11F 결과" 참고 |
 | 11G~11K | 미착수 | |
 
 ### 11A 결과
@@ -312,6 +312,8 @@ transition correlation을 위해 이미 만들 예정이므로, 11E에서 한 �
     route와 위치를 공개하며 `TransferFailed`를 한 번 반환한다.
   - target `StaleRoute`는 일반 확정 실패와 구분한다. outcome에 실린 authoritative higher epoch으로 target을
     cleanup하고 source를 추측 복구하지 않은 채 known-none close로 끝낸다.
+  - source Leave/Restore의 `StaleRoute`도 공통 처리한다. identity 검증을 통과한 outcome의 실제 source epoch으로
+    cleanup하고 `_route_epoch`을 관측값 이상으로 유지해 재접속 후 더 높은 epoch으로 입장한다.
   - source leave, target enter 또는 source restore의 적용 여부를 알 수 없는 timeout과 복구 실패는 source와
     target에 멱등 cleanup Leave를 발행하고 pending source operation을 폐기한 뒤 route/location을
     `known none`으로 확정하고 connection을 닫는다. 전환 중 disconnect도 같은 cleanup 경로를 사용한다.
@@ -331,6 +333,10 @@ transition correlation을 위해 이미 만들 예정이므로, 11E에서 한 �
     target 성공, epoch 3 source 보상, higher-epoch target `StaleRoute` cleanup, target outcome 유실 후 양쪽
     participant cleanup과 close-before-notice 입력 차단, 각 후속 단계 timer admission 실패의 known-none 종료,
     시작 전 timer admission 실패 시 source route 유지를 검증했다.
+  - `test_cross_zone_stale_source_leave_cleans_observed_epoch_and_closes`와
+    `test_cross_zone_stale_source_restore_cleans_observed_epoch_and_closes`는 실제 source epoch 7을 주입한다.
+    양쪽 participant가 0명이 되는 cleanup, known-none/close, 중복 outcome 및 이전 timeout의 no-op,
+    재접속 후 epoch 8 입장을 검증했다. 수정 전에는 관측 epoch 반영 assertion에서 실패함을 확인했다.
   - 2-Worker `WorkerGroup`에서 PlayerActor와 두 ZoneActor를 서로 다른 owner에 배치하고, 실제 TCP로 source
     Move와 target Enter를 한 번의 `sendAll`로 파이프라인해 remote inbox를 거친 Move 응답이 먼저 오며 target
     Zone의 새 epoch에서 Move/Leave까지 이어짐을

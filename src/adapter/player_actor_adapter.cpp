@@ -1459,6 +1459,29 @@ namespace snf::adapter
             }
 
             snf::worker::EffectBatch effects;
+            if (msg.result.status == snf::server::ZoneCommandStatus::StaleRoute)
+            {
+                // Identity was checked above. Clean the participant observed by
+                // the Zone, not the epoch echoed from our rejected command.
+                auto failed = transfer;
+                if (transfer.step == WorkflowStep::CrossZoneLeaveSource)
+                {
+                    failed.source_epoch = msg.result.route_epoch;
+                }
+                else if (transfer.step == WorkflowStep::CrossZoneEnterTarget)
+                {
+                    failed.target_epoch = msg.result.route_epoch;
+                }
+                else
+                {
+                    failed.restore_epoch = msg.result.route_epoch;
+                }
+                _route_epoch = std::max(_route_epoch, msg.result.route_epoch);
+                failCrossZoneKnownNone(effects, failed, true);
+                scheduleSaveIfDirty(effects, context.now);
+                return snf::worker::CompletedTurn{.effects = std::move(effects)};
+            }
+
             if (transfer.step == WorkflowStep::CrossZoneLeaveSource)
             {
                 if (msg.result.status != snf::server::ZoneCommandStatus::Applied || !msg.result.position.has_value())
@@ -1539,16 +1562,6 @@ namespace snf::adapter
                         .frame = encodeZoneReply(ZoneReplyFrameKind::Entered, target_zone, msg.result, request_id),
                         .critical = false,
                     });
-                    scheduleSaveIfDirty(effects, context.now);
-                    return snf::worker::CompletedTurn{.effects = std::move(effects)};
-                }
-
-                if (msg.result.status == snf::server::ZoneCommandStatus::StaleRoute)
-                {
-                    auto failed = transfer;
-                    failed.target_epoch = std::max(transfer.target_epoch, msg.result.route_epoch);
-                    _route_epoch = std::max(_route_epoch, failed.target_epoch);
-                    failCrossZoneKnownNone(effects, failed, true);
                     scheduleSaveIfDirty(effects, context.now);
                     return snf::worker::CompletedTurn{.effects = std::move(effects)};
                 }
