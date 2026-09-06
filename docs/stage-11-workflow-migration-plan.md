@@ -145,7 +145,7 @@ room 상태를 갖지 않으면 대상을 결정할 수 없다.
 | 11E | **완료** | 아래 "11E 결과" 참고 |
 | 11D | **완료** | 아래 "11D 결과" 참고 |
 | 11F | **완료** | source Leave/Restore의 stale epoch cleanup 회귀 검증 포함. 아래 "11F 결과" 참고 |
-| 11G | **진행 중** | 11G-1 disconnect cleanup, 11G-2 timer 재시도, 11G-3A close 통지 mailbox receipt 검증 완료. Sink 재시도 연동·cleanup 전달 보장·전체 terminal 대조·shutdown은 남음 |
+| 11G | **진행 중** | 11G-1 disconnect cleanup, 11G-2 timer 재시도, 11G-3A mailbox receipt, 11G-3B1 retry hook/deadline 검증 완료. B2 Sink 재시도·cleanup 전달 보장·전체 terminal 대조·shutdown은 남음 |
 | 11H~11K | 미착수 | |
 
 ### 11A 결과
@@ -448,6 +448,36 @@ ASan/UBSan worker **8 PASS / MySQL 3 SKIP**(sanitizer 오류 0), TCP 포함 Debu
 **11G-3A만 완료**다. GameRequestSink는 아직 기존 tell 경로를 사용한다. 다음 11G-3B는 B1(Worker의
 owner-thread retry hook/deadline 연동) → B2(Sink의 사전 용량 확보·pending 보존·receipt 기반 재시도)로
 분리하고 각각 검증한다. cleanup tell 실패, 최종 persistence, shutdown 종결과 전체 terminal 대조는 남는다.
+
+### 11G-3B1 결과 — Worker retry hook과 poll deadline 연동
+
+- `RequestSink`에 기본 nullopt deadline 조회와 no-op retry 훅을 추가했다. 정상 Worker loop는 inbox drain
+  뒤, timer phase 전에 due deadline일 때만 iteration당 한 번 호출한다. budget은 64건/100us이며 실제
+  count/time 준수는 후속 Sink 구현의 책임이다. 실행 시간은 Inbox phase에 포함한다.
+- `pollTimeout`은 TimerQueue와 Sink deadline 중 빠른 것을 선택한다. 지난 deadline은 0ms, 미래 값은
+  millisecond 올림 후 `max_poll_timeout`으로 제한한다. 둘 다 없으면 기존 최대 poll 대기를 유지한다.
+- Actor runtime/Sink 미설정, stop 관측 또는 shutdown 상태에서는 Sink 훅을 사용하지 않는다.
+  shutdown phase, 기존 timer admission, Actor mailbox와 publication 경로는 변경하지 않았다.
+
+정식 회귀 증거 (`worker_actor_test.cpp`):
+
+- `test_close_retry_poll_deadline_matrix`: 12가지 조합에서 nullopt/due/future, 올림·최대 대기 제한,
+  timer와 retry 우선순위, stop/shutdown 및 미설정 상태를 검사한다. 기본 NullRequestSink 훅도 확인한다.
+- `test_close_retry_idle_wakeup_phase_budget_and_iteration_limit`: 실제 `Worker::run`을 별도 owner thread에서
+  실행한다. 외부 event·timer 없이 30ms retry deadline을 설정하고, 5초 fallback poll보다 빠른 2초 안에
+  호출됨을 확인한다. due deadline을 남겨도 세 번의 callback이 서로 다른 iteration에서 실행되며,
+  Inbox phase, 64건/100us budget, Actor inline 실행 금지와 stop 이후 추가 호출 없음도 검사한다.
+- `test_close_retry_runs_before_due_timer`: 같은 iteration에서 retry → due timer → Actor 순서를 검사한다.
+- `test_close_retry_inbox_precedes_hook_and_stop_gates`: inbox receipt에서 deadline 취소·미래로 연기,
+  stop 요청·shutdown 진입, Actor runtime 미설정, run 이전 stop의 6개 조건에서 retry가 실행되지 않는다.
+
+검증: Debug **13 PASS / MySQL 4 SKIP**, TSan worker **8 PASS / MySQL 3 SKIP**(race 0),
+ASan/UBSan worker **8 PASS / MySQL 3 SKIP**(sanitizer 오류 0), Debug Worker 및 TCP 포함 adapter
+**각각 5회 연속 PASS**, 변경 줄 clang-format 및 `git diff --check` 통과.
+
+**B1 호출 기반만 완료**다. GameRequestSink는 아직 기본 훅을 상속하므로 실제 disconnect 재전송은 없다.
+B2에서 사전 용량 확보, pending 보존, receipt 기반 해제와 bounded retry를 구현·검증한다. 지속적으로 due인
+deadline을 반환하면 정상 loop가 반복되므로 backoff·공정성은 B2의 책임이며, shutdown 전달 보장은 별도다.
 
 ## 검증
 

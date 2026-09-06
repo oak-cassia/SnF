@@ -145,6 +145,22 @@ namespace snf::worker
             processPollEvents(events, _budgets.poll);
             enterPhase(WorkerPhase::Inbox, std::chrono::steady_clock::now());
             drainInbox(_budgets.inbox);
+            if (!_shutting_down && !_stop_requested.load(std::memory_order_acquire) && actorsConfigured() && _request_sink != nullptr)
+            {
+                const auto retry_deadline = _request_sink->nextActorConnectionCloseRetryDeadline();
+                if (retry_deadline.has_value())
+                {
+                    const auto retry_now = std::chrono::steady_clock::now();
+                    if (*retry_deadline <= retry_now)
+                    {
+                        constexpr CountTimeBudget retry_budget{
+                            .max_count = 64,
+                            .max_duration = std::chrono::microseconds{100},
+                        };
+                        _request_sink->retryActorConnectionClosed(retry_now, retry_budget);
+                    }
+                }
+            }
             const auto now = std::chrono::steady_clock::now();
             enterPhase(WorkerPhase::Timers, now);
             expireTimers(now, _budgets.timers);
@@ -1055,19 +1071,31 @@ namespace snf::worker
 
     std::optional<std::chrono::milliseconds> Worker::pollTimeout() const
     {
-        const auto next_deadline = _timers.nextDeadline();
-        if (!next_deadline.has_value())
+        std::optional<TimePoint> earliest_deadline = _timers.nextDeadline();
+        if (!_shutting_down && !_stop_requested.load(std::memory_order_acquire) && actorsConfigured() && _request_sink != nullptr)
+        {
+            const auto sink_deadline = _request_sink->nextActorConnectionCloseRetryDeadline();
+            if (sink_deadline.has_value())
+            {
+                if (!earliest_deadline.has_value() || *sink_deadline < *earliest_deadline)
+                {
+                    earliest_deadline = sink_deadline;
+                }
+            }
+        }
+
+        if (!earliest_deadline.has_value())
         {
             return _budgets.max_poll_timeout;
         }
 
         const auto now = std::chrono::steady_clock::now();
-        if (*next_deadline <= now)
+        if (*earliest_deadline <= now)
         {
             return std::chrono::milliseconds(0);
         }
 
-        const auto diff = std::chrono::ceil<std::chrono::milliseconds>(*next_deadline - now);
+        const auto diff = std::chrono::ceil<std::chrono::milliseconds>(*earliest_deadline - now);
         return std::min(diff, _budgets.max_poll_timeout);
     }
 

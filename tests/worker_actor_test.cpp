@@ -28,6 +28,11 @@ namespace snf::worker
 {
     struct WorkerActorTestAccess
     {
+        static std::optional<std::chrono::milliseconds> pollTimeout(const Worker& worker)
+        {
+            return worker.pollTimeout();
+        }
+
         static void runReadyActors(Worker& worker, const CountTimeBudget& budget)
         {
             worker.runReadyActors(budget);
@@ -3788,6 +3793,281 @@ namespace
         assert(worker.totalMailboxMessages() == 0);
     }
 
+    class CloseRetryProbe final : public RequestSink
+    {
+    public:
+        RequestPostResult tryPost(ConnectionRef, Frame&&) override
+        {
+            return RequestPostResult::Accepted;
+        }
+        std::optional<TimePoint> nextActorConnectionCloseRetryDeadline() const noexcept override
+        {
+            ++queries;
+            return deadline;
+        }
+        void retryActorConnectionClosed(TimePoint now, const CountTimeBudget& budget) override
+        {
+            ++calls;
+            if (retry)
+                retry(now, budget);
+        }
+        void onActorConnectionClosedReceipt(ActorKey, ConnectionRef, ActorConnectionClosedResult) override
+        {
+            if (receipt)
+                receipt();
+        }
+        std::optional<TimePoint> deadline;
+        mutable std::size_t queries{0}; // Test observation, owner thread only.
+        std::size_t calls{0};
+        std::function<void(TimePoint, const CountTimeBudget&)> retry;
+        std::function<void()> receipt;
+    };
+
+    void test_close_retry_poll_deadline_matrix()
+    {
+        struct Case
+        {
+            std::optional<std::chrono::microseconds> sink;
+            std::optional<std::chrono::microseconds> timer;
+            std::optional<std::chrono::microseconds> selected;
+            bool actors{true};
+            bool configured_sink{true};
+            bool stop{false};
+            bool shutdown{false};
+        };
+        for (const auto& item : std::vector<Case>{
+                 {},
+                 {-1ms, {}, -1ms},
+                 {1200us, {}, 1200us},
+                 {10s, {}, 10s},
+                 {200ms, 100ms, 100ms},
+                 {100ms, 200ms, 100ms},
+                 {{}, 100ms, 100ms},
+                 {100ms, -1ms, -1ms},
+                 {-1ms, 100ms, 100ms, true, true, true},
+                 {-1ms, 100ms, 100ms, true, true, false, true},
+                 {-1ms, {}, {}, false},
+                 {-1ms, {}, {}, true, false}
+             })
+        {
+            CloseRetryProbe sink;
+            FunctionalActorFactory factory(nullptr);
+            auto budgets = WorkerBudgets::defaults();
+            budgets.max_poll_timeout = 500ms;
+            Worker worker(WorkerId{0}, 1, budgets, WorkerInboxConfig{});
+            if (item.actors)
+                worker.configureActors(WorkerActorConfig{}, factory);
+            if (item.configured_sink)
+                worker.configureNetwork(WorkerNetworkConfig{}, sink);
+            if (item.stop)
+                worker.requestStop();
+            if (item.shutdown)
+                WorkerActorTestAccess::beginShutdownPhaseA(worker);
+            const auto base = Clock::now();
+            if (item.sink)
+                sink.deadline = base + *item.sink;
+            // Inject into TimerQueue to isolate poll selection, including shutdown.
+            if (item.timer)
+                assert(WorkerActorTestAccess::timers(worker).trySchedule(base + *item.timer, AwaitTimeout{}));
+            const auto before = Clock::now();
+            const auto timeout = WorkerActorTestAccess::pollTimeout(worker);
+            const auto after = Clock::now();
+            const auto expected = [&](TimePoint now)
+            {
+                if (!item.selected)
+                    return 500ms;
+                return std::clamp(std::chrono::ceil<std::chrono::milliseconds>(base + *item.selected - now), 0ms, 500ms);
+            };
+            assert(timeout && *timeout >= expected(after) && *timeout <= expected(before));
+            assert(sink.queries == (item.actors && item.configured_sink && !item.stop && !item.shutdown ? 1U : 0U));
+            assert(sink.calls == 0);
+        }
+        NullRequestSink defaults;
+        assert(!defaults.nextActorConnectionCloseRetryDeadline());
+        defaults.retryActorConnectionClosed(Clock::now(), {64, 100us});
+    }
+
+    void test_close_retry_idle_wakeup_phase_budget_and_iteration_limit()
+    {
+        CloseRetryProbe sink;
+        std::size_t turns = 0;
+        FunctionalActorFactory factory(
+            [&](ActorKey)
+            {
+                return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(
+                    [&](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
+                    {
+                        ++turns;
+                        return CompletedTurn{.effects = {}};
+                    }
+                ));
+            }
+        );
+        auto budgets = WorkerBudgets::defaults();
+        budgets.max_poll_timeout = 5s;
+        Worker worker(WorkerId{0}, 1, budgets, WorkerInboxConfig{}, WorkerNetworkConfig{}, sink, WorkerActorConfig{}, factory);
+        std::mutex mutex;
+        std::condition_variable completed;
+        bool done = false;
+        std::uint64_t last_iteration = 0;
+        sink.deadline = Clock::now() + 30ms;
+        std::thread::id owner;
+        sink.retry = [&](TimePoint now, const CountTimeBudget& budget)
+        {
+            assert(std::this_thread::get_id() == owner);
+            assert(now >= *sink.deadline);
+            assert(budget.max_count == 64 && budget.max_duration == 100us);
+            assert(worker.progress().sample().phase == WorkerPhase::Inbox);
+            const auto iteration = worker.metrics().loop_iterations;
+            assert(iteration > last_iteration);
+            last_iteration = iteration;
+            assert(turns == sink.calls - 1);
+            assert(worker.tell(ActorKey{ActorKind::Player, 1}, makeEnvelope()) == DeliveryResult::Accepted);
+            assert(turns == sink.calls - 1); // Actor phase, never inline.
+            if (sink.calls == 3)
+            {
+                // Intentionally leave the deadline due: neither this iteration
+                // nor shutdown may invoke the hook again after stop.
+                worker.requestStop();
+                std::lock_guard lock(mutex);
+                done = true;
+                completed.notify_one();
+            }
+        };
+        std::thread thread(
+            [&]
+            {
+                owner = std::this_thread::get_id();
+                worker.run();
+            }
+        );
+        bool observed;
+        {
+            std::unique_lock lock(mutex);
+            observed = completed.wait_for(
+                lock,
+                2s,
+                [&]
+                {
+                    return done;
+                }
+            );
+        }
+        worker.requestStop();
+        thread.join();
+        assert(observed); // 5s fallback poll cannot satisfy the 2s bound.
+        assert(sink.calls == 3 && turns == 3);
+        assert(worker.metrics().inbox_events == 0 && worker.metrics().timers_fired == 0);
+        assert(worker.metrics().loop_iterations == last_iteration);
+    }
+
+    void test_close_retry_runs_before_due_timer()
+    {
+        CloseRetryProbe sink;
+        Worker* active_worker = nullptr;
+        FunctionalActorFactory factory(
+            [&](ActorKey)
+            {
+                return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(
+                    [&](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
+                    {
+                        assert(active_worker->metrics().timers_fired == 1);
+                        active_worker->requestStop();
+                        return CompletedTurn{.effects = {}};
+                    }
+                ));
+            }
+        );
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{}, WorkerNetworkConfig{}, sink, WorkerActorConfig{}, factory);
+        active_worker = &worker;
+        sink.deadline = Clock::now() - 1s;
+        sink.retry = [&](TimePoint, const CountTimeBudget&)
+        {
+            assert(worker.metrics().timers_fired == 0);
+            sink.deadline.reset();
+        };
+        assert(worker.trySchedule(*sink.deadline, AwaitTimeout{}));
+        assert(worker.tell(ActorKey{ActorKind::Player, 1}, makeEnvelope()) == DeliveryResult::Accepted);
+        worker.run();
+        assert(sink.calls == 1);
+    }
+
+    void test_close_retry_inbox_precedes_hook_and_stop_gates()
+    {
+        // Receipt handlers run inside the real main loop inbox phase. They can
+        // cancel/postpone the deadline or request stop before the retry phase.
+        for (int mode = 0; mode < 6; ++mode)
+        {
+            CloseRetryProbe sink;
+            Worker* active_worker = nullptr;
+            FunctionalActorFactory factory(
+                [&](ActorKey)
+                {
+                    return ActorConstructionResult::ready(std::make_unique<FunctionalActor>(
+                        [&](ActorEnvelope&&, const ActorTurnContext&) -> TurnResult
+                        {
+                            active_worker->requestStop();
+                            return CompletedTurn{.effects = {}};
+                        }
+                    ));
+                }
+            );
+            auto budgets = WorkerBudgets::defaults();
+            budgets.max_poll_timeout = 0ms;
+            Worker worker(WorkerId{0}, 1, budgets, WorkerInboxConfig{}, WorkerNetworkConfig{}, sink);
+            active_worker = &worker;
+            if (mode != 3)
+                worker.configureActors(WorkerActorConfig{}, factory);
+            sink.deadline = Clock::now() - 1s;
+            std::size_t receipts = 0;
+            sink.receipt = [&]
+            {
+                ++receipts;
+                if (mode == 0)
+                    sink.deadline.reset();
+                if (mode == 1)
+                    sink.deadline = Clock::now() + 1h;
+                if (mode == 2)
+                    worker.requestStop();
+                if (mode == 5)
+                    WorkerActorTestAccess::beginShutdownPhaseA(worker);
+            };
+            auto port = worker.bindInboxSource(WorkerId{0});
+            assert(
+                port.tryPush(WorkerEnvelope{
+                    .event =
+                        RemoteActorConnectionClosedReceipt{
+                            ActorKey{ActorKind::Player, 1},
+                            ConnectionRef{ConnectionId{7}, ConnectionGeneration{1}, WorkerId{0}},
+                            ActorConnectionClosedResult::ActorAbsent
+                        },
+                    .charged_bytes = sizeof(RemoteActorConnectionClosedReceipt)
+                }) == InboxPushResult::Accepted
+            );
+            // Stop after the retry check, via the actor phase (or a fallback
+            // timer callback when there is deliberately no actor runtime).
+            if (mode != 3)
+                assert(worker.tell(ActorKey{ActorKind::Player, 1}, makeEnvelope()) == DeliveryResult::Accepted);
+            else
+            {
+                worker.setTimerHandler(
+                    [&](TimerPayload&&)
+                    {
+                        worker.requestStop();
+                    }
+                );
+                assert(worker.trySchedule(Clock::now(), AwaitTimeout{}));
+            }
+            if (mode == 4)
+                worker.requestStop();
+            worker.run();
+            assert(sink.calls == 0);
+            assert(receipts == 1);
+            if (mode == 3 || mode == 4)
+                assert(sink.queries == 0);
+        }
+    }
+
     class CloseReceiptSink final : public RequestSink
     {
     public:
@@ -4990,6 +5270,10 @@ void run_worker_actor_tests()
     test_tell_local_mailbox_non_reentrancy_and_no_self_lane();
     test_tell_remote_routes_to_target_inbox_fifo_and_bounds();
     test_connection_closed_receipts_local_remote_and_fifo();
+    test_close_retry_poll_deadline_matrix();
+    test_close_retry_idle_wakeup_phase_budget_and_iteration_limit();
+    test_close_retry_inbox_precedes_hook_and_stop_gates();
+    test_close_retry_runs_before_due_timer();
     test_connection_closed_absent_and_state_admission();
     test_connection_closed_mailbox_limits_and_recovery();
     test_connection_closed_inbox_failures_and_lost_receipt_retry();

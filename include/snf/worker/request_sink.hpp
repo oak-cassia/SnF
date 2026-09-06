@@ -1,10 +1,13 @@
 #pragma once
 
 #include "snf/protocol/frame.hpp"
+#include "snf/worker/budget.hpp"
 #include "snf/worker/connection.hpp"
 #include "snf/worker/worker_event.hpp"
 
+#include <chrono>
 #include <cstdint>
+#include <optional>
 
 namespace snf::worker
 {
@@ -44,6 +47,23 @@ namespace snf::worker
         // This acknowledges mailbox admission or actor absence, never execution
         // or domain cleanup completion. Duplicate and late receipts are possible.
         virtual void onActorConnectionClosedReceipt(ActorKey, ConnectionRef, ActorConnectionClosedResult)
+        {
+        }
+
+        // Owner Worker thread only.
+        // Deadline lookup is an O(1), state-preserving, non-blocking check.
+        // The actual pending store and retry policy are owned by the Sink.
+        [[nodiscard]] virtual std::optional<std::chrono::steady_clock::time_point> nextActorConnectionCloseRetryDeadline() const noexcept
+        {
+            return std::nullopt;
+        }
+
+        // Owner Worker thread only.
+        // Retry must observe the supplied count and time budget.
+        // Local receipt callbacks may be invoked synchronously during retry.
+        // This hook does not inline-execute or await Actor handlers.
+        // The actual pending store and retry policy are owned by the Sink.
+        virtual void retryActorConnectionClosed(std::chrono::steady_clock::time_point /*now*/, const CountTimeBudget& /*budget*/)
         {
         }
     };

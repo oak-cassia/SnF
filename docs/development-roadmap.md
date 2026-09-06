@@ -190,6 +190,9 @@ production 전환 뒤에는 11단계에서 실제 MySQL을 포함해 같은 게�
   - 11G-3A: close 통지의 mailbox admission/ActorAbsent receipt와 두 owner thread 전달 검증 완료.
     receipt는 cleanup 완료가 아니며 Sink 재시도 연동은 11G-3B에 남아 있다.
     [검증 결과](./stage-11-workflow-migration-plan.md#11g-3a-결과--close-통지의-mailbox-admission-receipt).
+  - 11G-3B1: Worker retry hook/deadline 연동과 무트래픽 poll wakeup 검증 완료.
+    실제 Sink pending 보존·재전송은 B2에 남아 있다.
+    [검증 결과](./stage-11-workflow-migration-plan.md#11g-3b1-결과--worker-retry-hook과-poll-deadline-연동).
 
 - [ ] production server의 connection/game request 경로를 신규 Worker로 100% 전환한다.
 - [ ] 전환된 production 경로에서 10단계의 load scenario와 전체 품질 게이트를 다시 통과한다.
