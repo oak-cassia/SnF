@@ -3,10 +3,13 @@
 #include "snf/adapter/game_payloads.hpp"
 #include "snf/game/player_command.hpp"
 #include "snf/game/player_id.hpp"
+#include "snf/worker/budget.hpp"
 #include "snf/worker/request_sink.hpp"
 #include "snf/worker/worker.hpp"
 
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -27,6 +30,8 @@ namespace snf::adapter
     class GameRequestSink final : public snf::worker::RequestSink
     {
     public:
+        static constexpr std::size_t MAX_TRACKED_SESSIONS = 1024;
+
         GameRequestSink() = default;
         explicit GameRequestSink(snf::worker::Worker& worker) noexcept
             : _worker(&worker)
@@ -42,6 +47,16 @@ namespace snf::adapter
 
         void onConnectionClosed(snf::worker::ConnectionRef connection, snf::worker::CloseReason reason) override;
 
+        void onActorConnectionClosedReceipt(
+            snf::worker::ActorKey key,
+            snf::worker::ConnectionRef connection,
+            snf::worker::ActorConnectionClosedResult result
+        ) override;
+
+        [[nodiscard]] std::optional<std::chrono::steady_clock::time_point> nextActorConnectionCloseRetryDeadline() const noexcept override;
+
+        void retryActorConnectionClosed(std::chrono::steady_clock::time_point now, const snf::worker::CountTimeBudget& budget) override;
+
         // Live session count, bounded by the connection table because an entry
         // only exists while its connection is open. This mirror is atomic so it
         // can be observed while the Worker runs; the map itself stays
@@ -49,6 +64,13 @@ namespace snf::adapter
         [[nodiscard]] std::size_t sessionCount() const noexcept
         {
             return _live_sessions.load(std::memory_order_relaxed);
+        }
+
+        // Pending connection-closed notifications awaiting receipt. Atomic mirror
+        // for safe cross-thread inspection while the Worker runs.
+        [[nodiscard]] std::size_t pendingConnectionCloseCount() const noexcept
+        {
+            return _pending_closes_atomic.load(std::memory_order_relaxed);
         }
 
         // Owner thread only.
@@ -81,6 +103,20 @@ namespace snf::adapter
             RoomRequestDecoder decoder
         );
 
+        enum class SessionRecordState : std::uint8_t
+        {
+            Free = 0,
+            Tracked = 1,
+            Closing = 2,
+        };
+
+        struct SessionRecord
+        {
+            SessionRecordState state{SessionRecordState::Free};
+            snf::worker::ConnectionRef connection{};
+            snf::server::PlayerId player{};
+        };
+
         // Keyed by connection id, but the generation is stored and verified on
         // every lookup. A connection slot is reused with a new generation, so a
         // stale entry that outlived its close notification fails closed instead
@@ -89,6 +125,7 @@ namespace snf::adapter
         {
             snf::worker::ConnectionGeneration generation{};
             snf::server::PlayerId player{};
+            std::size_t record_index{0};
         };
 
         snf::worker::Worker* _worker{nullptr};
@@ -96,5 +133,12 @@ namespace snf::adapter
         // Updated once per session bind and release, never per frame.
         std::atomic<std::size_t> _live_sessions{0};
         std::thread::id _owner_thread{};
+
+        // Bounded connection-close retry state (owner thread only, except atomic mirror).
+        std::array<SessionRecord, MAX_TRACKED_SESSIONS> _records{};
+        std::size_t _pending_closes{0};
+        std::atomic<std::size_t> _pending_closes_atomic{0};
+        std::optional<std::chrono::steady_clock::time_point> _next_retry_deadline{std::nullopt};
+        std::size_t _retry_cursor{0};
     };
 }

@@ -3,6 +3,7 @@
 #include "snf/adapter/game_payloads.hpp"
 #include "snf/game/arena.hpp"
 
+#include <algorithm>
 #include <cassert>
 
 namespace snf::adapter
@@ -243,13 +244,73 @@ namespace snf::adapter
         // Re-authentication on the same connection. The legacy directory answered
         // AlreadyAttached for the same player and ConnectionConflict for a
         // different one, and only the first of those was allowed to proceed.
-        if (const auto bound = playerFor(connection))
+        const auto session_it = _sessions.find(connection.id.value);
+        if (session_it != _sessions.end())
         {
-            if (*bound != *player)
+            if (session_it->second.generation != connection.generation)
+            {
+                return snf::worker::RequestPostResult::Invalid;
+            }
+
+            if (session_it->second.player != *player)
+            {
+                return snf::worker::RequestPostResult::Invalid;
+            }
+
+            auto envelope = GameActorPayloadRegistry::create(PlayerCommandMessage{
+                .connection = connection,
+                .request_id = frame.request_id,
+                .command = snf::server::PlayerCommand{snf::server::AuthenticateCommand{.player = *player}},
+            });
+            if (_worker->tell(playerKey(*player), std::move(envelope)) != snf::worker::DeliveryResult::Accepted)
+            {
+                return snf::worker::RequestPostResult::Rejected;
+            }
+            return snf::worker::RequestPostResult::Accepted;
+        }
+
+        // Do not register a new session if the exact full ConnectionRef is still Closing.
+        for (std::size_t i = 0; i < MAX_TRACKED_SESSIONS; ++i)
+        {
+            if (_records[i].state == SessionRecordState::Closing && _records[i].connection == connection)
             {
                 return snf::worker::RequestPostResult::Invalid;
             }
         }
+
+        // Find a free record slot. Capacity is strictly bounded to MAX_TRACKED_SESSIONS.
+        std::optional<std::size_t> free_index;
+        for (std::size_t i = 0; i < MAX_TRACKED_SESSIONS; ++i)
+        {
+            if (_records[i].state == SessionRecordState::Free)
+            {
+                free_index = i;
+                break;
+            }
+        }
+
+        if (!free_index.has_value())
+        {
+            return snf::worker::RequestPostResult::Rejected;
+        }
+
+        const std::size_t record_idx = *free_index;
+
+        // Reserve record and session map entry before telling the actor.
+        _records[record_idx] = SessionRecord{
+            .state = SessionRecordState::Tracked,
+            .connection = connection,
+            .player = *player,
+        };
+        _sessions.insert_or_assign(
+            connection.id.value,
+            Session{
+                .generation = connection.generation,
+                .player = *player,
+                .record_index = record_idx,
+            }
+        );
+        _live_sessions.fetch_add(1, std::memory_order_relaxed);
 
         auto envelope = GameActorPayloadRegistry::create(PlayerCommandMessage{
             .connection = connection,
@@ -258,19 +319,15 @@ namespace snf::adapter
         });
 
         // The actor decides whether this player is already bound to another live
-        // connection, so the session entry is only written once the command is
-        // accepted. A rejected delivery must not leave the connection looking
-        // authenticated.
+        // connection, so the session entry is rolled back if rejected.
         if (_worker->tell(playerKey(*player), std::move(envelope)) != snf::worker::DeliveryResult::Accepted)
         {
+            _sessions.erase(connection.id.value);
+            _records[record_idx] = SessionRecord{};
+            _live_sessions.fetch_sub(1, std::memory_order_relaxed);
             return snf::worker::RequestPostResult::Rejected;
         }
 
-        const auto inserted = _sessions.insert_or_assign(connection.id.value, Session{.generation = connection.generation, .player = *player});
-        if (inserted.second)
-        {
-            _live_sessions.fetch_add(1, std::memory_order_relaxed);
-        }
         return snf::worker::RequestPostResult::Accepted;
     }
 
@@ -439,21 +496,155 @@ namespace snf::adapter
     void GameRequestSink::onConnectionClosed(const snf::worker::ConnectionRef connection, const snf::worker::CloseReason)
     {
         assertOwnerThread();
-        const auto session = _sessions.find(connection.id.value);
-        if (session == _sessions.end() || session->second.generation != connection.generation)
+        if (_worker == nullptr || connection.owner != _worker->id())
         {
             return;
         }
 
-        // Release the other half of the identity too. Without this the actor keeps
-        // the dead ConnectionRef and refuses this player's next connection as a
-        // conflict, so a disconnected player could never reconnect. A refused
-        // delivery is ignored: it means the actor is already gone, which releases
-        // the binding anyway.
-        const snf::server::PlayerId player = session->second.player;
-        _sessions.erase(session);
+        const auto session_it = _sessions.find(connection.id.value);
+        if (session_it == _sessions.end() || session_it->second.generation != connection.generation)
+        {
+            return;
+        }
+
+        const std::size_t record_idx = session_it->second.record_index;
+        if (record_idx >= MAX_TRACKED_SESSIONS)
+        {
+            return;
+        }
+
+        auto& record = _records[record_idx];
+        if (record.state != SessionRecordState::Tracked || record.connection != connection || record.player != session_it->second.player)
+        {
+            return;
+        }
+
+        // 1. Transition record to Closing and configure pending count and deadline first.
+        record.state = SessionRecordState::Closing;
+        ++_pending_closes;
+        _pending_closes_atomic.fetch_add(1, std::memory_order_release);
+
+        const auto now = std::chrono::steady_clock::now();
+        const auto pass_deadline = now + std::chrono::milliseconds(10);
+        if (!_next_retry_deadline.has_value())
+        {
+            _next_retry_deadline = pass_deadline;
+        }
+        else
+        {
+            _next_retry_deadline = std::min(*_next_retry_deadline, pass_deadline);
+        }
+
+        // 2. Remove open session map entry and decrement live session count.
+        const snf::server::PlayerId player = record.player;
+        const snf::worker::ConnectionRef orig_connection = record.connection;
+        _sessions.erase(session_it);
         _live_sessions.fetch_sub(1, std::memory_order_relaxed);
-        static_cast<void>(_worker->tell(playerKey(player), GameActorPayloadRegistry::create(PlayerConnectionClosedMessage{.connection = connection}))
-        );
+
+        // 3. Attempt first notification via notifyActorConnectionClosed.
+        auto envelope = GameActorPayloadRegistry::create(PlayerConnectionClosedMessage{
+            .connection = orig_connection,
+        });
+        static_cast<void>(_worker->notifyActorConnectionClosed(playerKey(player), orig_connection, std::move(envelope)));
+    }
+
+    void GameRequestSink::onActorConnectionClosedReceipt(
+        const snf::worker::ActorKey key,
+        const snf::worker::ConnectionRef connection,
+        const snf::worker::ActorConnectionClosedResult result
+    )
+    {
+        assertOwnerThread();
+        if (_worker == nullptr || connection.owner != _worker->id())
+        {
+            return;
+        }
+
+        if (result != snf::worker::ActorConnectionClosedResult::MailboxAccepted && result != snf::worker::ActorConnectionClosedResult::ActorAbsent)
+        {
+            return;
+        }
+
+        for (std::size_t i = 0; i < MAX_TRACKED_SESSIONS; ++i)
+        {
+            auto& rec = _records[i];
+            if (rec.state == SessionRecordState::Closing && rec.connection == connection && playerKey(rec.player) == key)
+            {
+                rec.state = SessionRecordState::Free;
+                rec.connection = snf::worker::ConnectionRef{};
+                rec.player = snf::server::PlayerId{};
+                assert(_pending_closes > 0);
+                --_pending_closes;
+                _pending_closes_atomic.fetch_sub(1, std::memory_order_release);
+                if (_pending_closes == 0)
+                {
+                    _next_retry_deadline = std::nullopt;
+                }
+                break;
+            }
+        }
+    }
+
+    std::optional<std::chrono::steady_clock::time_point> GameRequestSink::nextActorConnectionCloseRetryDeadline() const noexcept
+    {
+        if (_pending_closes == 0)
+        {
+            return std::nullopt;
+        }
+        return _next_retry_deadline;
+    }
+
+    void GameRequestSink::retryActorConnectionClosed(const std::chrono::steady_clock::time_point now, const snf::worker::CountTimeBudget& budget)
+    {
+        assertOwnerThread();
+        if (_worker == nullptr || _pending_closes == 0)
+        {
+            return;
+        }
+
+        if (!_next_retry_deadline.has_value() || *_next_retry_deadline > now)
+        {
+            return;
+        }
+
+        const std::size_t scan_limit = std::min(budget.max_count, MAX_TRACKED_SESSIONS);
+        std::size_t scanned = 0;
+        const auto start_time = std::chrono::steady_clock::now();
+
+        if (budget.max_count > 0 && budget.max_duration > std::chrono::nanoseconds{0})
+        {
+            while (scanned < scan_limit && _pending_closes > 0)
+            {
+                if (scanned > 0 && (std::chrono::steady_clock::now() - start_time >= budget.max_duration))
+                {
+                    break;
+                }
+
+                const std::size_t idx = _retry_cursor;
+                _retry_cursor = (_retry_cursor + 1) % MAX_TRACKED_SESSIONS;
+                ++scanned;
+
+                if (_records[idx].state == SessionRecordState::Closing)
+                {
+                    const snf::worker::ConnectionRef conn = _records[idx].connection;
+                    const snf::server::PlayerId player = _records[idx].player;
+
+                    auto envelope = GameActorPayloadRegistry::create(PlayerConnectionClosedMessage{
+                        .connection = conn,
+                    });
+                    static_cast<void>(_worker->notifyActorConnectionClosed(playerKey(player), conn, std::move(envelope)));
+                }
+            }
+        }
+
+        const auto finished_at = std::chrono::steady_clock::now();
+        if (_pending_closes > 0)
+        {
+            _next_retry_deadline = std::max(now, finished_at) + std::chrono::milliseconds(10);
+        }
+        else
+        {
+            _next_retry_deadline = std::nullopt;
+        }
     }
 }

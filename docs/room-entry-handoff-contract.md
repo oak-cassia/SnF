@@ -126,7 +126,9 @@ PlayerActor에 도착하면 outcome을 기다리거나 복귀 Enter를 발행하
 
 이는 effect 발행 순서이며 다른 owner 사이의 처리 완료 순서나 cleanup 성공 확인을 뜻하지 않는다.
 통지와 cleanup tell이 전달됐을 때 좌석·점유 제거를 실제 adapter로 검증했다.
-통지 유실, cleanup tell 실패, 최종 저장 보장과 shutdown은 남은 11G/11I 범위다.
+11G-3B2에서 정상 Worker loop의 close 통지/receipt 유실에 대한 bounded Sink 재시도를 검증했다.
+receipt는 Actor mailbox admission일 뿐 cleanup 완료가 아니다. 실제 workflow 통합 과부하 검증,
+cleanup tell 실패, 최종 저장 보장과 shutdown은 남은 11G/11I 범위다.
 전체 상태별 증거는 [11G-1 결과](./stage-11-workflow-migration-plan.md#11g-1-결과--도착한-disconnect-통지의-cleanup)를 따른다.
 
 ### Legacy 경로 설명

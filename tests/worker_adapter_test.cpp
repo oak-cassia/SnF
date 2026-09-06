@@ -12,6 +12,7 @@
 #include "snf/net/tcp_listener.hpp"
 #include "snf/protocol/frame_codec.hpp"
 #include "snf/worker/actor.hpp"
+#include "snf/worker/actor_table.hpp"
 #include "snf/worker/timer_queue.hpp"
 #include "snf/worker/worker.hpp"
 
@@ -20,10 +21,12 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -45,6 +48,26 @@ namespace snf::worker
         static void expireTimers(Worker& worker, const TimePoint now)
         {
             worker.expireTimers(now, CountTimeBudget{128, 1s});
+        }
+
+        static void drainInbox(Worker& worker)
+        {
+            worker.drainInbox({4096, 1024, 1s});
+        }
+
+        static void discardInbox(Worker& worker)
+        {
+            static_cast<void>(worker._inbox.drain(
+                {4096, 1024, 1s},
+                [](WorkerEvent&&)
+                {
+                }
+            ));
+        }
+
+        static ActorSlot* findSlot(Worker& worker, const ActorKey key)
+        {
+            return worker._actors->find(key);
         }
     };
 }
@@ -3764,6 +3787,392 @@ namespace
         };
     }
 
+    // These actors observe transport admission/execution only. Domain cleanup
+    // semantics are covered separately by test_disconnect_cleanup_state_matrix.
+    struct CloseRetryFactory final : snf::worker::ActorFactory
+    {
+        struct Actor final : snf::worker::ActorInstance
+        {
+            CloseRetryFactory& factory;
+            explicit Actor(CloseRetryFactory& owner)
+                : factory(owner)
+            {
+            }
+
+            snf::worker::TurnResult dispatch(snf::worker::ActorEnvelope&& envelope, const snf::worker::ActorTurnContext&) override
+            {
+                if (envelope.is<snf::adapter::PlayerConnectionClosedMessage>())
+                {
+                    ++factory.closes;
+                    if (factory.stop_on_close != nullptr)
+                    {
+                        {
+                            const std::lock_guard lock(factory.mutex);
+                            factory.observed = true;
+                        }
+                        factory.changed.notify_one();
+                        factory.stop_on_close->requestStop();
+                    }
+                }
+                return snf::worker::CompletedTurn{.effects = {}};
+            }
+        };
+
+        snf::worker::ActorConstructionResult construct(snf::worker::ActorKey) override
+        {
+            ++constructions;
+            return snf::worker::ActorConstructionResult::ready(std::make_unique<Actor>(*this));
+        }
+
+        unsigned closes{0};
+        unsigned constructions{0};
+        snf::worker::Worker* stop_on_close{nullptr};
+        std::mutex mutex;
+        std::condition_variable changed;
+        bool observed{false};
+    };
+
+    struct CloseRetryFixture
+    {
+        using Access = snf::worker::WorkerActorTestAccess;
+        snf::adapter::GameRequestSink sink;
+        CloseRetryFactory factory;
+        snf::worker::Worker source;
+        snf::worker::Worker target;
+        snf::worker::Worker& destination;
+        snf::worker::ActorKey key{snf::worker::ActorKind::Player, 1};
+        snf::worker::ConnectionRef connection{snf::worker::ConnectionId{1}, snf::worker::ConnectionGeneration{1}, snf::worker::WorkerId{0}};
+
+        static snf::worker::WorkerActorConfig config(const bool small)
+        {
+            snf::worker::WorkerActorConfig result{};
+            result.actor_table_capacity = 8;
+            result.max_mailbox_messages_per_actor = small ? 1 : 4096;
+            return result;
+        }
+
+        explicit CloseRetryFixture(const bool local = false, const bool small = false)
+            : source(snf::worker::WorkerId{0}, 2, snf::worker::WorkerBudgets::defaults(), {}, config(small), factory)
+            , target(snf::worker::WorkerId{1}, 2, snf::worker::WorkerBudgets::defaults(), {}, config(small), factory)
+            , destination(local ? source : target)
+        {
+            sink.setWorker(source);
+            source.configureNetwork({}, sink);
+            source.bindRemoteTarget(target.id(), target.bindInboxSource(source.id()));
+            target.bindRemoteTarget(source.id(), source.bindInboxSource(target.id()));
+            while (snf::worker::ownerOf(key, 2, 0) != destination.id())
+            {
+                ++key.entity;
+            }
+        }
+
+        auto authenticate(const snf::worker::ConnectionRef conn)
+        {
+            return sink.tryPost(conn, authenticateFrame(1, key.entity));
+        }
+
+        void settle()
+        {
+            Access::drainInbox(target);
+            Access::runReadyActors(destination);
+            Access::drainInbox(source);
+        }
+
+        void close(const snf::worker::ConnectionRef conn)
+        {
+            sink.onConnectionClosed(conn, snf::worker::CloseReason::PeerClosed);
+        }
+
+        void retry(const snf::worker::CountTimeBudget budget = {1024, 1s})
+        {
+            const auto deadline = sink.nextActorConnectionCloseRetryDeadline();
+            assert(deadline);
+            sink.retryActorConnectionClosed(*deadline, budget);
+        }
+    };
+
+    void test_sink_close_local_receipt_and_retry_budgets()
+    {
+        using namespace snf::worker;
+        {
+            CloseRetryFixture f(true);
+            assert(f.authenticate(f.connection) == RequestPostResult::Accepted);
+            f.sink.onActorConnectionClosedReceipt(f.key, f.connection, ActorConnectionClosedResult::ActorAbsent);
+            assert(f.sink.sessionCount() == 1); // A receipt cannot release a Tracked record.
+            f.close(f.connection);
+            assert(f.sink.pendingConnectionCloseCount() == 0 && f.sink.sessionCount() == 0);
+            assert(!f.sink.nextActorConnectionCloseRetryDeadline());
+            assert(f.factory.closes == 0); // Synchronous receipt, never inline Actor dispatch.
+            f.settle();
+            assert(f.factory.closes == 1);
+            f.close(f.connection);
+            f.settle();
+            assert(f.factory.closes == 1);
+        }
+        {
+            CloseRetryFixture f(true, true);
+            assert(f.authenticate(f.connection) == RequestPostResult::Accepted);
+            f.close(f.connection); // Authentication occupies the only mailbox slot.
+            assert(f.sink.pendingConnectionCloseCount() == 1);
+            const auto due = *f.sink.nextActorConnectionCloseRetryDeadline();
+            f.sink.retryActorConnectionClosed(due - 1ms, {1024, 1s});
+            assert(*f.sink.nextActorConnectionCloseRetryDeadline() == due);
+            const auto rejected = f.source.metrics().actor.actor_connection_closed_rejections;
+            f.retry({0, 1s});
+            assert(*f.sink.nextActorConnectionCloseRetryDeadline() >= due + 10ms);
+            f.retry({1, 0ns});
+            assert(f.source.metrics().actor.actor_connection_closed_rejections == rejected);
+            f.settle();
+            f.retry({1, 1s});
+            assert(f.sink.pendingConnectionCloseCount() == 0);
+            f.settle();
+            assert(f.factory.closes == 1);
+        }
+    }
+
+    void test_sink_close_remote_loss_and_inbox_recovery()
+    {
+        using namespace snf::worker;
+        using namespace snf::adapter;
+        using Access = CloseRetryFixture::Access;
+        // A missing receipt (including a full receipt inbox) never releases pending.
+        for (const bool full_receipt_inbox : {false, true})
+        {
+            CloseRetryFixture f;
+            assert(f.authenticate(f.connection) == RequestPostResult::Accepted);
+            f.settle();
+            if (full_receipt_inbox)
+            {
+                ActorKey local{ActorKind::Player, 1};
+                while (ownerOf(local, 2, 0) != f.source.id())
+                    ++local.entity;
+                for (unsigned i = 0; i < 1024; ++i)
+                {
+                    assert(
+                        f.target.tell(local, GameActorPayloadRegistry::create(PlayerConnectionClosedMessage{f.connection})) ==
+                        DeliveryResult::Accepted
+                    );
+                }
+            }
+            f.close(f.connection);
+            assert(f.sink.pendingConnectionCloseCount() == 1); // Remote inbox Accepted is not a receipt.
+            Access::drainInbox(f.target);
+            Access::runReadyActors(f.target);
+            assert(f.factory.closes == 1);
+            assert(f.target.metrics().actor.actor_connection_closed_receipt_send_failures == (full_receipt_inbox ? 1 : 0));
+            Access::discardInbox(f.source);
+            assert(f.sink.pendingConnectionCloseCount() == 1);
+            f.retry();
+            f.settle();
+            assert(f.sink.pendingConnectionCloseCount() == 0 && f.factory.closes == 2);
+            f.sink.onActorConnectionClosedReceipt(f.key, f.connection, ActorConnectionClosedResult::MailboxAccepted);
+            assert(f.sink.pendingConnectionCloseCount() == 0);
+        }
+        {
+            CloseRetryFixture f;
+            assert(f.authenticate(f.connection) == RequestPostResult::Accepted);
+            f.settle();
+            for (unsigned i = 0; i < 1024; ++i)
+            {
+                assert(
+                    f.source.tell(f.key, GameActorPayloadRegistry::create(PlayerConnectionClosedMessage{f.connection})) == DeliveryResult::Accepted
+                );
+            }
+            f.close(f.connection);
+            assert(f.sink.pendingConnectionCloseCount() == 1);
+            assert(f.source.metrics().actor.actor_connection_closed_notification_rejections == 1);
+            Access::discardInbox(f.target);
+            f.retry();
+            f.settle();
+            assert(f.sink.pendingConnectionCloseCount() == 0 && f.factory.closes == 1);
+        }
+        {
+            CloseRetryFixture f;
+            assert(f.authenticate(f.connection) == RequestPostResult::Accepted);
+            Access::discardInbox(f.target); // Authentication never activated the remote Actor.
+            f.close(f.connection);
+            f.settle();
+            assert(f.sink.pendingConnectionCloseCount() == 0);
+            assert(f.factory.constructions == 0);
+            assert(f.target.metrics().actor.actor_connection_closed_actor_absent == 1);
+        }
+    }
+
+    void test_sink_close_capacity_fairness_and_generation()
+    {
+        using namespace snf::worker;
+        using Access = CloseRetryFixture::Access;
+        {
+            CloseRetryFixture f;
+            for (unsigned i = 1; i <= snf::adapter::GameRequestSink::MAX_TRACKED_SESSIONS; ++i)
+            {
+                auto conn = f.connection;
+                conn.id = ConnectionId{i};
+                assert(f.authenticate(conn) == RequestPostResult::Accepted);
+                if (i % 64 == 0)
+                    f.settle();
+            }
+            assert(f.authenticate(f.connection) == RequestPostResult::Accepted); // Reauthentication reuses capacity.
+            f.settle();
+            auto extra = f.connection;
+            extra.id = ConnectionId{1025};
+            assert(f.authenticate(extra) == RequestPostResult::Rejected);
+            auto last = f.connection;
+            last.id = ConnectionId{1024};
+            Access::findSlot(f.target, f.key)->setState(ActorState::Stopping);
+            f.close(last);
+            f.settle();
+            assert(f.sink.sessionCount() == 1023 && f.sink.pendingConnectionCloseCount() == 1);
+            assert(f.authenticate(extra) == RequestPostResult::Rejected);
+            assert(f.authenticate(last) == RequestPostResult::Invalid);
+            for (unsigned i = 0; i < 50; ++i)
+            {
+                f.retry();
+                f.settle();
+                assert(f.sink.pendingConnectionCloseCount() == 1); // No TTL or retry-count eviction.
+            }
+            Access::findSlot(f.target, f.key)->setState(ActorState::Idle);
+            for (unsigned i = 0; i < 16; ++i)
+            {
+                f.retry({64, 1s});
+                f.settle();
+                assert(f.sink.pendingConnectionCloseCount() == (i < 15 ? 1 : 0));
+            }
+            assert(f.authenticate(extra) == RequestPostResult::Accepted);
+            assert(f.sink.sessionCount() == 1024);
+        }
+        {
+            CloseRetryFixture f;
+            assert(f.authenticate(f.connection) == RequestPostResult::Accepted);
+            f.settle();
+            f.close(f.connection);
+            auto fresh = f.connection;
+            fresh.generation = ConnectionGeneration{2};
+            assert(f.authenticate(fresh) == RequestPostResult::Accepted);
+            assert(f.sink.sessionCount() == 1 && f.sink.pendingConnectionCloseCount() == 1);
+            f.close(f.connection); // Late old close cannot erase the new open session.
+            auto wrong_owner = f.connection;
+            wrong_owner.owner = WorkerId{1};
+            for (const auto wrong : {fresh, wrong_owner})
+                f.sink.onActorConnectionClosedReceipt(f.key, wrong, ActorConnectionClosedResult::MailboxAccepted);
+            f.sink.onActorConnectionClosedReceipt(
+                ActorKey{ActorKind::Player, f.key.entity + 100}, f.connection, ActorConnectionClosedResult::MailboxAccepted
+            );
+            assert(f.sink.pendingConnectionCloseCount() == 1);
+            f.settle();
+            assert(f.sink.pendingConnectionCloseCount() == 0 && f.sink.playerFor(fresh));
+            f.sink.onActorConnectionClosedReceipt(f.key, f.connection, ActorConnectionClosedResult::ActorAbsent);
+            assert(f.sink.sessionCount() == 1 && f.sink.playerFor(fresh));
+        }
+        {
+            CloseRetryFixture f(true, true);
+            assert(f.authenticate(f.connection) == RequestPostResult::Accepted);
+            auto other = f.connection;
+            other.id = ConnectionId{2};
+            for (unsigned i = 0; i < 1025; ++i)
+                assert(f.authenticate(other) == RequestPostResult::Rejected);
+            assert(f.sink.sessionCount() == 1 && !f.sink.playerFor(other));
+            f.settle();
+            assert(f.authenticate(other) == RequestPostResult::Accepted); // Rejected auth never leaks reserved slots.
+            f.settle();
+            f.source.requestStop();
+            f.close(f.connection);
+            for (unsigned i = 0; i < 50; ++i)
+                f.retry();
+            assert(f.sink.pendingConnectionCloseCount() == 1); // Stop is not an acknowledgement.
+        }
+    }
+
+    void test_sink_close_all_pending_remains_bounded()
+    {
+        using namespace snf::worker;
+        using Access = CloseRetryFixture::Access;
+        CloseRetryFixture f;
+        for (unsigned i = 1; i <= 1024; ++i)
+        {
+            auto conn = f.connection;
+            conn.id = ConnectionId{i};
+            assert(f.authenticate(conn) == RequestPostResult::Accepted);
+            if (i % 64 == 0)
+                f.settle();
+        }
+        Access::findSlot(f.target, f.key)->setState(ActorState::Stopping);
+        for (unsigned i = 1; i <= 1024; ++i)
+        {
+            auto conn = f.connection;
+            conn.id = ConnectionId{i};
+            f.close(conn);
+            if (i % 64 == 0)
+                f.settle();
+            assert(f.sink.sessionCount() + f.sink.pendingConnectionCloseCount() == 1024);
+        }
+        assert(f.sink.sessionCount() == 0 && f.sink.pendingConnectionCloseCount() == 1024);
+        auto fresh = f.connection;
+        fresh.generation = ConnectionGeneration{2};
+        assert(f.authenticate(fresh) == RequestPostResult::Rejected);
+        const auto sent = f.source.metrics().actor.actor_connection_closed_notifications_sent;
+        f.retry({1024, 1ns}); // One attempt may overshoot; a second scan must check elapsed time.
+        assert(f.source.metrics().actor.actor_connection_closed_notifications_sent == sent + 1);
+        f.settle();
+        for (unsigned i = 0; i < 50; ++i)
+        {
+            f.retry({64, 1s});
+            f.settle();
+            assert(f.sink.pendingConnectionCloseCount() == 1024);
+        }
+        Access::findSlot(f.target, f.key)->setState(ActorState::Idle);
+        for (unsigned i = 0; i < 16; ++i)
+        {
+            f.retry({64, 1s});
+            f.settle();
+            assert(f.sink.pendingConnectionCloseCount() == 1024 - 64 * (i + 1));
+        }
+        assert(!f.sink.nextActorConnectionCloseRetryDeadline());
+        assert(f.authenticate(fresh) == RequestPostResult::Accepted);
+    }
+
+    void test_sink_close_retries_from_idle_worker_loop()
+    {
+        using namespace snf::worker;
+        snf::adapter::GameRequestSink sink;
+        CloseRetryFactory factory;
+        auto budgets = WorkerBudgets::defaults();
+        budgets.max_poll_timeout = 5s;
+        Worker worker(WorkerId{0}, 1, budgets, {}, CloseRetryFixture::config(true), factory);
+        worker.configureNetwork({}, sink);
+        sink.setWorker(worker);
+        factory.stop_on_close = &worker;
+        const ConnectionRef conn{ConnectionId{1}, ConnectionGeneration{1}, WorkerId{0}};
+        std::thread owner(
+            [&]
+            {
+                assert(sink.tryPost(conn, authenticateFrame(1, 1)) == RequestPostResult::Accepted);
+                sink.onConnectionClosed(conn, CloseReason::PeerClosed);
+                assert(sink.pendingConnectionCloseCount() == 1); // The only mailbox slot still contains auth.
+                worker.run();                                    // Auth frees capacity; the Sink deadline is the only subsequent wakeup.
+            }
+        );
+        bool observed = false;
+        {
+            std::unique_lock lock(factory.mutex);
+            observed = factory.changed.wait_for(
+                lock,
+                2s,
+                [&]
+                {
+                    return factory.observed;
+                }
+            );
+        }
+        worker.requestStop();
+        owner.join();
+        assert(observed);
+        assert(factory.closes == 1);
+        assert(sink.sessionCount() == 0 && sink.pendingConnectionCloseCount() == 0);
+        assert(worker.metrics().actor.actor_connection_closed_rejections == 1);
+        assert(worker.metrics().actor.actor_connection_closed_mailbox_accepted == 1);
+    }
+
     void test_ping_request_sink_vertical_slice()
     {
         snf::worker::WorkerActorConfig actor_config{
@@ -3993,6 +4402,13 @@ int main()
 
     test_shutdown_cancels_application_timers();
     std::cout << "  - test_shutdown_cancels_application_timers PASSED" << std::endl;
+
+    test_sink_close_local_receipt_and_retry_budgets();
+    test_sink_close_remote_loss_and_inbox_recovery();
+    test_sink_close_capacity_fairness_and_generation();
+    test_sink_close_all_pending_remains_bounded();
+    test_sink_close_retries_from_idle_worker_loop();
+    std::cout << "  - GameRequestSink disconnect retry regressions PASSED" << std::endl;
 
     test_ping_request_sink_vertical_slice();
     std::cout << "  - test_ping_request_sink_vertical_slice PASSED" << std::endl;

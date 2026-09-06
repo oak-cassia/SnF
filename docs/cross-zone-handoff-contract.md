@@ -131,7 +131,9 @@ epoch을 사용한다. 추가 restore Enter, client 응답, close effect나 work
 실제 양쪽 Zone adapter로 각 단계의 disconnect 점유 제거 및 stale event no-op을 검증했다.
 
 다음 흐름은 전체 계약의 목표이며, 11G-1은 **통지 및 cleanup tell 정상 전달 시**의 점유 제거만 검증했다.
-cleanup 성공 확인, 통지/timeout 전달 보장, final snapshot과 shutdown cancel은 아직 완료하지 않았다.
+11G-2는 application timeout의 일시적 mailbox 포화 재시도, 11G-3B2는 정상 loop의 close 통지/receipt
+유실에 대한 bounded Sink 재시도를 검증했다. 이들은 실행 시간 상한이나 cleanup 완료 확인이 아니다.
+실제 workflow 통합 과부하 검증, cleanup 성공 확인, final snapshot과 shutdown cancel은 아직 완료하지 않았다.
 
 ```text
 새 client input 차단

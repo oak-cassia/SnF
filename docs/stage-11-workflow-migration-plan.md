@@ -145,7 +145,7 @@ room 상태를 갖지 않으면 대상을 결정할 수 없다.
 | 11E | **완료** | 아래 "11E 결과" 참고 |
 | 11D | **완료** | 아래 "11D 결과" 참고 |
 | 11F | **완료** | source Leave/Restore의 stale epoch cleanup 회귀 검증 포함. 아래 "11F 결과" 참고 |
-| 11G | **진행 중** | 11G-1 disconnect cleanup, 11G-2 timer 재시도, 11G-3A mailbox receipt, 11G-3B1 retry hook/deadline 검증 완료. B2 Sink 재시도·cleanup 전달 보장·전체 terminal 대조·shutdown은 남음 |
+| 11G | **진행 중** | 11G-1 disconnect cleanup, 11G-2 timer 재시도, 11G-3A mailbox receipt, 11G-3B1 hook/deadline, 11G-3B2 Sink pending 보존·재시도 검증 완료. 실제 workflow 통합 실패 주입·cleanup 전달 보장·전체 terminal 대조·shutdown은 남음 |
 | 11H~11K | 미착수 | |
 
 ### 11A 결과
@@ -478,6 +478,49 @@ ASan/UBSan worker **8 PASS / MySQL 3 SKIP**(sanitizer 오류 0), Debug Worker �
 **B1 호출 기반만 완료**다. GameRequestSink는 아직 기본 훅을 상속하므로 실제 disconnect 재전송은 없다.
 B2에서 사전 용량 확보, pending 보존, receipt 기반 해제와 bounded retry를 구현·검증한다. 지속적으로 due인
 deadline을 반환하면 정상 loop가 반복되므로 backoff·공정성은 B2의 책임이며, shutdown 전달 보장은 별도다.
+
+### 11G-3B2 결과 — Sink disconnect 통지 보존과 bounded 재시도
+
+- 인증 tell 전에 고정 record를 확보한다. 열린 세션(Tracked)과 receipt 대기(Closing)를 합쳐 Worker당
+  1,024개이며, 용량 초과 신규 인증은 Actor tell 없이 Rejected로 끝난다. 동일 연결/Player 재인증은
+  기존 record를 재사용하고, 신규 인증 tell 거절은 해당 record와 map entry만 롤백한다.
+- disconnect는 Closing 상태·pending count·deadline을 먼저 설치하고 열린 map entry를 제거한 뒤
+  통지를 보낸다. 로컬 동기 receipt의 재진입에 안전하며, 원격 inbox Accepted만으로 pending을 해제하지 않는다.
+  정확한 Player ActorKey와 full ConnectionRef의 MailboxAccepted/ActorAbsent receipt만 해제한다.
+- retry는 persistent cursor로 Free/Tracked도 포함해 슬롯 수를 계상한다. 정상 Worker budget은 64칸/100us,
+  시간 검사는 각 슬롯 사이에 수행하며 한 슬롯의 처리 시간만 초과할 수 있다. pending이 남으면 pass 종료와
+  전달받은 now 중 늦은 시각 +10ms로 연기한다. TTL·횟수 제한 폐기·overflow queue는 없다.
+- 원격 통지/receipt 유실, mailbox 포화와 Stopping/Closed 반환에도 pending을 유지한다.
+  새 generation은 별도 record를 사용하며, 늦은 이전 close/receipt가 새 열린 세션을 삭제하지 않는다.
+- 메모리 설명: Linux aarch64 Debug 측정에서 `sizeof(GameRequestSink) = 41,088` bytes다.
+  1,024칸 배열은 해당 ABI에서 40,960 bytes이며, 열린 map의 동적 node/bucket 메모리는 sizeof에 포함되지 않는다.
+  map entry 수는 1,024개 이하이나 allocator를 포함한 총 메모리의 “80~90KB” 상한을 실측한 것은 아니다.
+
+정식 회귀 증거 (`worker_adapter_test.cpp`):
+
+- `test_sink_close_local_receipt_and_retry_budgets`: 동기 receipt, Actor inline 실행 없음, 중복 close,
+  mailbox 포화 후 회복, 미래 deadline 및 count/time 0 budget.
+- `test_sink_close_remote_loss_and_inbox_recovery`: 통지 inbox 포화, receipt inbox 포화와 유실 후 중복 전달,
+  실제 ActorAbsent receipt와 불필요한 Actor 생성 없음.
+- `test_sink_close_capacity_fairness_and_generation`: 용량 1,024, 재인증, 마지막 슬롯까지 16회×64칸 scan,
+  50회 Stopping 재시도 보존, wrong identity/이전 generation no-op, 1,025회 인증 거절 후 용량 회수,
+  stop 중 50회 시도에도 pending 보존.
+- `test_sink_close_all_pending_remains_bounded`: 1,024칸 모두 Closing인 상태에서 신규 인증 차단,
+  양수 최소 시간 budget, 50회 포화 유지, 용량 회복 뒤 16 pass에 걸친 전체 receipt 회수.
+- `test_sink_close_retries_from_idle_worker_loop`: 실제 owner thread의 Worker loop에서 auth가 mailbox 한 칸을
+  점유해 최초 close 통지가 거절된 뒤, 외부 트래픽 없이 retry deadline으로 깨어나 통지 실행과 pending 0을
+  확인한다. 5초 fallback poll보다 빠른 2초 안에 완료되며 owner-thread 규칙을 유지한다.
+
+위 신규 테스트는 관찰용 Actor로 transport 경계를 검증한다. 실제 Player/Zone/Room 점유 제거는 기존 11G-1
+테스트를 함께 재실행했으며, 두 경계를 합친 과부하 workflow 통합 검증은 다음 작업에서 보강한다.
+
+검증: Debug **13 PASS / MySQL 4 SKIP**, TSan worker **8 PASS / MySQL 3 SKIP**(race 0),
+ASan/UBSan worker **8 PASS / MySQL 3 SKIP**(sanitizer 오류 0), TCP 포함 Debug adapter **5회 연속 PASS**,
+변경 줄 clang-format 및 `git diff --check` 통과.
+
+**B2만 완료**다. receipt는 mailbox admission이지 Actor 실행·cleanup 성공 증명이 아니다. 정상 loop의 재시도
+보존은 용량 회복과 대상 Actor의 진행을 전제로 하며 전달 시간 상한, shutdown drain, 최종 persistence를
+보장하지 않는다. 다음은 [11G-4A 실패 주입·계약 대조 계획](./stage-11g-next-work-plan.md)이다.
 
 ## 검증
 
