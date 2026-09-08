@@ -101,6 +101,8 @@ namespace snf::protocol
     {
         // TCP는 메시지 경계를 보존하지 않는다. 미완성 프레임 뒤에 새 수신 바이트를 이어 붙인다.
         compactConsumedPrefix();
+
+        // insert에서 span의 값들 복사
         _buffer.insert(_buffer.end(), bytes.begin(), bytes.end());
     }
 
