@@ -155,36 +155,45 @@ namespace snf::server
 
     void TcpServer::run(const int termination_signal_descriptor)
     {
+        // 종료 시그널용 FD가 주어지면 소켓들과 같은 epoll에서 알림을 받도록 등록한다.
         if (termination_signal_descriptor != snf::net::UniqueFileDescriptor::INVALID_FD)
         {
             registerControlDescriptor(termination_signal_descriptor, TERMINATION_SIGNAL_EVENT_TOKEN);
         }
 
+        // epoll_wait가 결과를 써 넣을 배열. 이번에 반환된 이벤트들을 담는다.
         std::array<epoll_event, MAX_READY_EVENTS> events{};
         if (hasMetricsReporting())
         {
             _next_metrics_report = std::chrono::steady_clock::now() + _metrics_report_interval;
         }
 
+        // 한 차례: 종료 조건 확인 -> 이벤트 대기 -> 제어 이벤트 -> 연결 이벤트 -> 통계 보고.
         while (true)
         {
+            // 큐 포화로 로직 측에 전달하지 못했던 연결 종료 통지를 제한된 개수만 재시도한다.
             retryPendingConnectionCloses();
 
+            // 종료 요청이 있을 때 남은 로직 및 제어 작업과 모든 Session이 정리되면 종료
             if (_is_stopping && _logic_runtime_drained && isControlDrained() && _sessions.empty())
             {
                 break;
             }
 
+            // 종료 유예 시간이 지나면 큐를 취소하고 루프를 끝낸다.
             if (_is_stopping && hasShutdownDeadlineExpired())
             {
                 cancelQueues();
                 break;
             }
 
+            // 반환값: 양수=채워진 개수, 0=시간 만료, -1=오류. 유효한 구간만 아래에서 순회한다.
+            // 소켓 I/O는 논블로킹이지만 여기서는 대기할 수 있다. timeout은 종료·재시도·보고 시점을 반영한다.
             const int ready_event_count = ::epoll_wait(_epoll.getDescriptor(), events.data(), static_cast<int>(events.size()), getEpollWaitTimeout());
 
             if (ready_event_count == -1)
             {
+                // 시그널로 대기가 중단되면 바깥 while로 돌아가 종료 조건부터 다시 확인한다.
                 if (errno == EINTR)
                 {
                     continue;
@@ -193,10 +202,14 @@ namespace snf::server
                 snf::net::throw_system_error("epoll_wait");
             }
 
+            // epoll 대기 시간을 제외하고, 반환된 이벤트 묶음의 처리 시간을 측정한다.
             const auto turn_started_at = std::chrono::steady_clock::now();
 
+            // 1차 순회: 종료 요청·시그널·송신 작업 알림을 연결 이벤트보다 먼저 처리한다.
+            // 같은 묶음에 종료 요청과 새 연결이 있으면 종료 상태를 먼저 반영할 수 있다.
             for (int event_index = 0; event_index < ready_event_count; ++event_index)
             {
+                // epoll_ctl 등록 시 넣어둔 식별 값이 그대로 돌아온다. 제어 FD에는 전용 토큰을 사용한다.
                 const std::uint64_t event_token = events[event_index].data.u64;
 
                 if (event_token == STOP_EVENT_TOKEN)
@@ -209,20 +222,24 @@ namespace snf::server
                 }
                 else if (event_token == OUTBOUND_EVENT_TOKEN)
                 {
+                    // 로직으로 만든 송신 작업 등을 가져온다. 클라이언트의 EPOLLOUT(쓰기 가능 상턔) 이벤트와는 별개다.
                     handleOutboundActions();
                 }
             }
 
+            // 2차 순회: 새 연결과 기존 클라이언트의 I/O를 처리한다.
             for (int event_index = 0; event_index < ready_event_count; ++event_index)
             {
                 const epoll_event& event = events[event_index];
                 const std::uint64_t event_token = event.data.u64;
 
+                // 1차 순회에서 처리한 제어 이벤트는 중복 처리하지 않는다.
                 if (event_token == STOP_EVENT_TOKEN || event_token == TERMINATION_SIGNAL_EVENT_TOKEN || event_token == OUTBOUND_EVENT_TOKEN)
                 {
                     continue;
                 }
 
+                // 리스너의 읽기 가능 알림은 새 연결을 accept
                 if (event_token == LISTENER_EVENT_TOKEN)
                 {
                     if (!_is_stopping)
@@ -233,13 +250,16 @@ namespace snf::server
                     continue;
                 }
 
+                // 클라이언트 토큰은 연결의 generation. FD가 재사용돼도 이전 연결 이벤트와 구분
                 const auto descriptor_iterator = _client_descriptors_by_event_token.find(event_token);
+                // 앞선 이벤트 처리에서 이미 제거된 연결의 이벤트라면 건너뛴다.
                 if (descriptor_iterator == _client_descriptors_by_event_token.end())
                 {
                     continue;
                 }
 
                 const int client_descriptor = descriptor_iterator->second;
+                // token으로 "어느 연결인지" 찾았고, events 비트로 "수신·송신·종료 중 무엇인지" 전달한다.
                 handleClientEvent(client_descriptor, event.events);
             }
 
@@ -250,9 +270,11 @@ namespace snf::server
                 );
             }
 
+            // timeout으로 이벤트가 0개여도 보고 시점은 확인한다.
             reportMetricsIfDue();
         }
 
+        // 정상 루프 종료 후 남은 연결을 정리한다. 종료 시간 초과로 빠져나온 경우도 포함한다.
         closeRemainingSessions();
     }
 
