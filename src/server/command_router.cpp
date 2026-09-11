@@ -26,28 +26,33 @@ namespace snf::server
     PostResult CommandRouter::tryPost(RoutedCommand command)
     {
         return std::visit(
-            [this, connection = command.connection](auto route) mutable -> PostResult
+            [this, connection = command.connection]<typename CommandRoute>(CommandRoute route) mutable -> PostResult
             {
+                // 비교를 위해 const 제거
                 using Route = std::decay_t<decltype(route)>;
                 if constexpr (std::is_same_v<Route, PlayerCommandRoute>)
                 {
-                    return _player_commands.tryPost(PlayerInboundCommand{
-                        .actor = route.actor,
-                        .connection = connection,
-                        .command = std::move(route.command),
-                        .request_id = route.request_id,
-                        .room_entry = route.room_entry,
-                    });
+                    return _player_commands.tryPost(
+                        PlayerInboundCommand{
+                            .actor = route.actor,
+                            .connection = connection,
+                            .command = std::move(route.command),
+                            .request_id = route.request_id,
+                            .room_entry = route.room_entry,
+                        }
+                    );
                 }
                 else if constexpr (std::is_same_v<Route, ConnectionClosedRoute>)
                 {
-                    return _player_commands.tryPostConnectionClosed(route.actor,
-                                                                    ConnectionClosed{
-                                                                        .connection = connection,
-                                                                        .cause = route.cause,
-                                                                        .has_location_snapshot = route.has_location_snapshot,
-                                                                        .last_location = route.last_location,
-                                                                    });
+                    return _player_commands.tryPostConnectionClosed(
+                        route.actor,
+                        ConnectionClosed{
+                            .connection = connection,
+                            .cause = route.cause,
+                            .has_location_snapshot = route.has_location_snapshot,
+                            .last_location = route.last_location,
+                        }
+                    );
                 }
                 else if constexpr (std::is_same_v<Route, ZoneCommandRoute>)
                 {
@@ -66,12 +71,14 @@ namespace snf::server
                         };
                     }
 
-                    return _zone_commands->tryPost(ZoneInboundCommand{
-                        .zone = route.zone,
-                        .command = std::move(route.command),
-                        .reply = std::move(reply),
-                        .handoff = std::nullopt,
-                    });
+                    return _zone_commands->tryPost(
+                        ZoneInboundCommand{
+                            .zone = route.zone,
+                            .command = std::move(route.command),
+                            .reply = std::move(reply),
+                            .handoff = std::nullopt,
+                        }
+                    );
                 }
                 else if constexpr (std::is_same_v<Route, RoomCommandRoute>)
                 {
@@ -89,11 +96,13 @@ namespace snf::server
                             .kind = *route.reply_kind,
                         };
                     }
-                    return _room_commands->tryPost(RoomInboundCommand{
-                        .room = route.room,
-                        .command = std::move(route.command),
-                        .reply = std::move(reply),
-                    });
+                    return _room_commands->tryPost(
+                        RoomInboundCommand{
+                            .room = route.room,
+                            .command = std::move(route.command),
+                            .reply = std::move(reply),
+                        }
+                    );
                 }
                 else if constexpr (std::is_same_v<Route, ZoneHandoffCommandRoute>)
                 {
@@ -108,7 +117,8 @@ namespace snf::server
                     static_assert(always_false_v<Route>, "Unhandled CommandRoute alternative");
                 }
             },
-            std::move(command.route));
+            std::move(command.route)
+        );
     }
 
     void CommandRouter::close() noexcept
