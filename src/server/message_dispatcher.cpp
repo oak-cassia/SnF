@@ -9,6 +9,8 @@ namespace snf::server
 {
     MessageDispatcher::MessageDispatcher()
     {
+        // 생성 시 Ping 타입과 변환 함수를 연결해 둔다. 여기서는 등록만 하고 요청 도착 시 호출한다.
+        // 이 핸들러는 payload를 PingCommand로 이동할 뿐, Pong 응답을 직접 보내지는 않는다.
         const bool ping_registered = registerHandler(snf::protocol::MessageType::Ping,
                                                      [](snf::protocol::Frame request) -> std::optional<PlayerCommand>
                                                      {
@@ -90,6 +92,7 @@ namespace snf::server
 
     DispatchResult MessageDispatcher::dispatch(snf::protocol::Frame request) const
     {
+        // 프레임의 메시지 종류로 변환 함수를 찾는다. 등록된 함수가 없으면 HandlerNotFound다.
         const auto handler_iterator = _handlers.find(request.type);
         if (handler_iterator == _handlers.end())
         {
@@ -99,6 +102,8 @@ namespace snf::server
             };
         }
 
+        // 맵의 second에 저장된 함수를 현재 호출 흐름에서 실행한다. 별도 스레드로 보내는 코드는 아니다.
+        // optional에 명령이 있으면 Handled, 비어 있으면 InvalidPayload로 반환한다.
         auto command = handler_iterator->second(std::move(request));
         return command
                    ? DispatchResult{

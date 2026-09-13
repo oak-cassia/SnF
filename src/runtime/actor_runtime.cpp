@@ -544,20 +544,25 @@ namespace snf::runtime
     {
         Worker* target_worker = nullptr;
         {
+            // 입력 상태 확인과 큐 등록을 같은 락 안에서 수행해 close/cancel과의 경합을 조정한다.
             std::lock_guard lock{_state_mutex};
+            // 대상 Actor 종류에 등록된 Binding이 이 작업을 만든 Binding과 일치해야 한다.
             const auto binding_iterator = _bindings.find(submission.target().kind);
             if (binding_iterator == _bindings.end() || binding_iterator->second != submission._binding)
             {
                 throw std::invalid_argument{"ActorSubmission was not made by the registered ActorBinding"};
             }
 
+            // 입력이 닫힌 상태면 새 작업을 받지 않는다.
             if (_input_state != InputState::Running)
             {
                 return PostResult::Closed;
             }
 
+            // hash(ActorKey) % worker_count로 선택하므로 같은 Actor의 작업은 같은 Worker로 간다.
             Worker& worker = *_workers[workerIndexFor(submission.target())];
             const ActorAccounting accounting = submission.accounting();
+            // 큐에 넣기 전에 Worker의 outstanding 용량을 한 자리 예약한다. Control도 이 제한을 받는다.
             if (!reserveOutstanding(worker))
             {
                 if (accounting == ActorAccounting::Command)
@@ -570,6 +575,7 @@ namespace snf::runtime
             bool pushed = false;
             try
             {
+                // 아직 Actor를 실행하지 않는다. Worker 입력 큐로 소유권을 넘기고 대기 시간 측정용 시각을 기록한다.
                 pushed = worker.ingress.tryPush(QueuedSubmission{
                     .submission = std::move(submission),
                     .enqueued_at = std::chrono::steady_clock::now(),
@@ -577,10 +583,12 @@ namespace snf::runtime
             }
             catch (...)
             {
+                // 삽입 중 예외가 나면 예약한 용량을 돌려준 뒤 예외를 전파한다.
                 releaseOutstanding(worker);
                 throw;
             }
 
+            // outstanding 예약에 성공해도 실제 입력 큐 삽입은 실패할 수 있으므로 예약을 취소한다.
             if (!pushed)
             {
                 releaseOutstanding(worker);
@@ -591,6 +599,7 @@ namespace snf::runtime
                 return PostResult::Full;
             }
 
+            // 일반 명령만 accepted 통계에 포함한다. Control도 큐 등록 자체는 동일하게 수행한다.
             if (accounting == ActorAccounting::Command)
             {
                 worker.counters.accepted.fetch_add(1, std::memory_order_relaxed);
@@ -598,7 +607,9 @@ namespace snf::runtime
             target_worker = &worker;
         }
 
+        // 위 블록을 벗어나 잠금을 해제한 뒤 새 작업을 알린다. Worker가 큐를 소비해 실행을 진행한다.
         target_worker->wakeup.notify();
+        // 큐 등록 승인이지 Actor 처리나 응답 송신의 완료가 아니다.
         return PostResult::Accepted;
     }
 
@@ -772,6 +783,7 @@ namespace snf::runtime
                 _on_worker_start(worker_index);
             }
 
+            // 입력·완료 통지·타이머를 반영해 실행할 Actor를 준비한 뒤, Actor 하나의 실행 차례를 진행한다.
             while (pumpWorker(worker))
             {
                 if (!runReadyActorTurn(worker, worker_index))
@@ -785,6 +797,7 @@ namespace snf::runtime
                 }
             }
 
+            // 정상 종료 경로에서도 남은 작업·타이머·중단된 코루틴을 정리한 뒤 Actor 상태를 파괴한다.
             discardWorkerSubmissions(worker);
             discardWorkerTimers(worker);
             cancelSuspendedTasks(worker);
@@ -809,9 +822,11 @@ namespace snf::runtime
                 return false;
             }
 
+            // 취소와 비동기 완료를 먼저 반영해 중단된 Actor가 재개 가능한지 확인한다.
             applyCancelRequests(worker);
             static_cast<void>(drainContinuations(worker));
 
+            // Worker 공용 입력 큐에서 Actor별 mailbox로 이동한다. 배치 상한을 두어 다른 처리에도 차례를 준다.
             std::size_t routed = 0;
             while (routed < INGRESS_BATCH_SIZE)
             {
@@ -828,8 +843,10 @@ namespace snf::runtime
                 ++routed;
             }
 
+            // 만료된 타이머도 대상 Actor의 mailbox에 넣는다. 여기서 게임 로직을 직접 실행하지 않는다.
             dispatchDueTimers(worker);
 
+            // true는 실행 준비 완료를 뜻한다. 실제 실행은 runWorker의 runReadyActorTurn에서 한다.
             if (hasReadyActor(worker))
             {
                 return true;
@@ -840,6 +857,7 @@ namespace snf::runtime
                 discardWorkerTimers(worker);
             }
 
+            // 입력 큐가 잠시 비었다는 것만으로 종료하지 않고, 닫힘과 남은 작업의 정리를 함께 확인한다.
             if (isWorkerDrained(worker))
             {
                 return false;
@@ -854,6 +872,7 @@ namespace snf::runtime
                 }
             }
 
+            // 실행할 Actor가 없으면 알림을 기다린다. 타이머가 있으면 가장 이른 만료 시각에도 깨어난다.
             if (earliest_deadline)
             {
                 worker.wakeup.waitUntil(*earliest_deadline);
@@ -1018,6 +1037,7 @@ namespace snf::runtime
         bool discarded = false;
         bool consumed_without_slot = false;
         bool activation_required = false;
+        // 액터 상태 파악을 위해 락을 획득
         {
             std::lock_guard lock{worker.scheduling_mutex};
             if (worker.ingress.isCancelled())
@@ -1026,6 +1046,7 @@ namespace snf::runtime
             }
             else if (worker.actors.find(key) == worker.actors.end())
             {
+                // 대상이 없을 때 ExistingOnly 작업은 생성 없이 소비하고, ActivateIfMissing이면 활성화한다.
                 if (submission.submission.activation() == ActorActivation::ExistingOnly)
                 {
                     consumed_without_slot = true;
@@ -1049,6 +1070,7 @@ namespace snf::runtime
         {
             if (activation_required)
             {
+                // 도메인별 상태 생성은 owning Worker에서,
                 activated_state = binding->activate(key.entity);
                 if (!activated_state)
                 {
@@ -1073,6 +1095,7 @@ namespace snf::runtime
                         throw std::logic_error{"ActorRuntime lost an existing slot while routing"};
                     }
 
+                    // 같은 키가 재생성돼도 이전 비동기 완료·타이머와 구분하도록 새 incarnation을 부여한다.
                     actor_iterator = worker.actors
                                          .emplace(
                                              key,
@@ -1095,9 +1118,11 @@ namespace snf::runtime
                     throw std::logic_error{"ActorRuntime slot binding invariant violated"};
                 }
 
+                // ingress는 여러 Actor의 입력, mailbox는 이 Actor의 FIFO 작업 목록이다.
                 entry.mailbox.push_back(std::move(submission));
                 try
                 {
+                    // Idle일 때만 ready 큐에 추가해 중복 등록을 막는다. Suspended의 후속 명령은 mailbox에서 기다린다.
                     if (entry.execution == ActorExecutionState::Idle)
                     {
                         worker.ready_actors.push_back(actor_iterator->first);
@@ -1145,6 +1170,7 @@ namespace snf::runtime
                 return true;
             }
 
+            // ready 큐에는 명령이 아니라 실행 가능한 ActorKey가 들어 있다.
             key = worker.ready_actors.front();
             worker.ready_actors.pop_front();
             const auto actor_iterator = worker.actors.find(key);
@@ -1159,6 +1185,7 @@ namespace snf::runtime
         }
 
         std::size_t handled_submissions = 0;
+        // 한 Actor의 처리량을 차례당 제한한다. 실행 중인 handler를 시간 기준으로 강제 선점하는 것은 아니다.
         while (handled_submissions < ACTOR_TURN_BUDGET)
         {
             bool resuming = false;
@@ -1170,6 +1197,7 @@ namespace snf::runtime
                     return false;
                 }
 
+                // 중단된 작업의 재개를 다음 mailbox 명령보다 먼저 처리해 같은 Actor의 순서를 유지한다.
                 if (entry->pending_resume)
                 {
                     entry->pending_resume = false;
@@ -1226,6 +1254,7 @@ namespace snf::runtime
                 throw;
             }
 
+            // 이 Actor만 중단하고 Worker는 다른 Actor를 처리한다. 후속 명령은 현재 작업을 앞지르지 않는다.
             if (result == ActorDispatchResult::Suspended)
             {
                 std::lock_guard lock{worker.scheduling_mutex};
@@ -1280,6 +1309,7 @@ namespace snf::runtime
                 bool retained_for_accepted_work = false;
                 {
                     std::lock_guard lock{worker.scheduling_mutex};
+                    // 일반 idle 정리는 이미 승인된 후속 명령을 버리지 않는다. 강제 Evict와 구분한다.
                     if (result == ActorDispatchResult::PassivateIfIdle && !entry->mailbox.empty())
                     {
                         retained_for_accepted_work = true;
@@ -1332,8 +1362,8 @@ namespace snf::runtime
             }
         }
 
-        std::lock_guard lock{worker.scheduling_mutex};
-        if (worker.ingress.isCancelled())
+        std::lock_guard lock{worker.scheduling_mutex}; // 실행할 Actor 선택과 상태 변경을 위한 락
+        if (worker.ingress.isCancelled()) // 내부에서 ingress mutex, 순서 주의
         {
             entry->execution = ActorExecutionState::Idle;
             return false;

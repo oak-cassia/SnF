@@ -1,9 +1,7 @@
 #include "snf/server/protocol_gateway.hpp"
 
 #include <cstddef>
-#include <cstdint>
 #include <span>
-#include <stdexcept>
 #include <utility>
 
 namespace
@@ -52,6 +50,14 @@ namespace snf::server
         , _room_entries(room_entries)
     {
     }
+
+    /**
+     * 컨트롤러 역할: 요청 값(payload 길이·ID 등)과 현재 연결 상태에서 요청이 가능한지 확인하고 처리를 위임한다.
+     * 프레임 형식 검사는 Decoder가, 실제 게임 규칙 검증은 이후 도메인 처리가 담당한다.
+     * Player 요청은 Dispatcher, Room·Zone 요청은 전용 분기에서 해석해 CommandRouter로 전달한다.
+     * 입장·Zone 간 이동은 전용 서비스가 단계별 명령을 전달한다. 검증 실패 등은 그 전에 반환한다.
+     * 현재 파싱·검증·라우팅이 혼재해 있으며, Accepted는 게임 처리 완료를 뜻하지 않는다.
+     */
     FramePostResult ProtocolGateway::tryPost(FrameEnvelope envelope)
     {
         const auto post_zone = [this, connection = envelope.connection](ZoneCommandRoute route) -> FramePostResult
@@ -379,12 +385,14 @@ namespace snf::server
             return result;
         }
 
+        // Ping은 앞의 Room·Zone 분기를 지나 여기로 온다. Dispatcher가 Frame을 PingCommand로 변환한다.
         DispatchResult dispatch_result = _dispatcher.dispatch(std::move(envelope.frame));
         if (!dispatch_result.handled())
         {
             return dispatch_result.status == DispatchStatus::HandlerNotFound ? FramePostResult::UnsupportedMessage : FramePostResult::InvalidPayload;
         }
 
+        // Player가 연결되지 않은 Ping은 연결별 임시 Player Actor로 보낸다.
         PlayerActorId actor = provisionalActorIdFor(envelope.connection);
         std::optional<PlayerId> new_attachment;
         if (const auto* authenticate = std::get_if<AuthenticateCommand>(&*dispatch_result.command))
@@ -400,6 +408,7 @@ namespace snf::server
             }
             actor = authenticate->player;
         }
+        // 이미 Player가 연결돼 있으면 Ping도 해당 Player Actor로 보낸다.
         else if (const auto player = _sessions.playerFor(envelope.connection))
         {
             actor = *player;
@@ -412,6 +421,8 @@ namespace snf::server
         PostResult post_result;
         try
         {
+            // 연결·대상 Actor·요청 ID와 함께 명령을 다음 입력 단계로 이동 전달한다.
+            // Accepted는 명령 전달이 승인됐다는 뜻이며, 게임 처리나 응답 송신 완료는 아니다.
             post_result = _commands.tryPost(RoutedCommand{
                 .connection = envelope.connection,
                 .route =
@@ -435,6 +446,7 @@ namespace snf::server
         {
             if (actor.kind() == snf::runtime::ActorKind::ProvisionalPlayer)
             {
+                // 임시 Actor로 전달이 승인됐으면 연결 디렉터리에 해당 활동을 기록한다.
                 static_cast<void>(_sessions.noteProvisionalActivity(envelope.connection));
             }
         }
@@ -443,6 +455,7 @@ namespace snf::server
             _sessions.rollbackAttach(envelope.connection, *new_attachment);
         }
 
+        // 전달 결과를 TcpServer가 사용하는 FramePostResult로 바꿔 돌려준다.
         switch (post_result)
         {
         case PostResult::Accepted:

@@ -77,7 +77,12 @@ namespace
 namespace snf::server
 {
     TcpServer::TcpServer(
-        const TcpServerConfig& config, FrameIngress& frame_ingress, OutboundChannel& outbound, snf::runtime::RuntimeCompletionSource& runtime_completion, const int outbound_event_descriptor)
+        const TcpServerConfig& config,
+        FrameIngress& frame_ingress,
+        OutboundChannel& outbound,
+        snf::runtime::RuntimeCompletionSource& runtime_completion,
+        const int outbound_event_descriptor
+    )
         : _listener(snf::net::create_tcp_listener(config.port))
         , _epoll(create_epoll_instance())
         , _stop_event(create_stop_event())
@@ -95,8 +100,9 @@ namespace snf::server
         , _runtime_completion(runtime_completion)
         , _outbound_event_descriptor(outbound_event_descriptor)
     {
-        if (_shutdown_grace_period < std::chrono::milliseconds::zero() || _metrics_report_interval < std::chrono::milliseconds::zero() || _max_pending_send_bytes == 0 ||
-            (_client_send_buffer_size && *_client_send_buffer_size <= 0) || _connection_lifecycle_capacity == 0 || _outbound_event_descriptor == snf::net::UniqueFileDescriptor::INVALID_FD)
+        if (_shutdown_grace_period < std::chrono::milliseconds::zero() || _metrics_report_interval < std::chrono::milliseconds::zero() ||
+            _max_pending_send_bytes == 0 || (_client_send_buffer_size && *_client_send_buffer_size <= 0) || _connection_lifecycle_capacity == 0 ||
+            _outbound_event_descriptor == snf::net::UniqueFileDescriptor::INVALID_FD)
         {
             throw std::invalid_argument{"Invalid TCP server configuration"};
         }
@@ -149,36 +155,45 @@ namespace snf::server
 
     void TcpServer::run(const int termination_signal_descriptor)
     {
+        // 종료 시그널용 FD가 주어지면 소켓들과 같은 epoll에서 알림을 받도록 등록한다.
         if (termination_signal_descriptor != snf::net::UniqueFileDescriptor::INVALID_FD)
         {
             registerControlDescriptor(termination_signal_descriptor, TERMINATION_SIGNAL_EVENT_TOKEN);
         }
 
+        // epoll_wait가 결과를 써 넣을 배열. 이번에 반환된 이벤트들을 담는다.
         std::array<epoll_event, MAX_READY_EVENTS> events{};
         if (hasMetricsReporting())
         {
             _next_metrics_report = std::chrono::steady_clock::now() + _metrics_report_interval;
         }
 
+        // 한 차례: 종료 조건 확인 -> 이벤트 대기 -> 제어 이벤트 -> 연결 이벤트 -> 통계 보고.
         while (true)
         {
+            // 큐 포화로 로직 측에 전달하지 못했던 연결 종료 통지를 제한된 개수만 재시도한다.
             retryPendingConnectionCloses();
 
+            // 종료 요청이 있을 때 남은 로직 및 제어 작업과 모든 Session이 정리되면 종료
             if (_is_stopping && _logic_runtime_drained && isControlDrained() && _sessions.empty())
             {
                 break;
             }
 
+            // 종료 유예 시간이 지나면 큐를 취소하고 루프를 끝낸다.
             if (_is_stopping && hasShutdownDeadlineExpired())
             {
                 cancelQueues();
                 break;
             }
 
+            // 반환값: 양수=채워진 개수, 0=시간 만료, -1=오류. 유효한 구간만 아래에서 순회한다.
+            // 소켓 I/O는 논블로킹이지만 여기서는 대기할 수 있다. timeout은 종료·재시도·보고 시점을 반영한다.
             const int ready_event_count = ::epoll_wait(_epoll.getDescriptor(), events.data(), static_cast<int>(events.size()), getEpollWaitTimeout());
 
             if (ready_event_count == -1)
             {
+                // 시그널로 대기가 중단되면 바깥 while로 돌아가 종료 조건부터 다시 확인한다.
                 if (errno == EINTR)
                 {
                     continue;
@@ -187,10 +202,14 @@ namespace snf::server
                 snf::net::throw_system_error("epoll_wait");
             }
 
+            // epoll 대기 시간을 제외하고, 반환된 이벤트 묶음의 처리 시간을 측정한다.
             const auto turn_started_at = std::chrono::steady_clock::now();
 
+            // 1차 순회: 종료 요청·시그널·송신 작업 알림을 연결 이벤트보다 먼저 처리한다.
+            // 같은 묶음에 종료 요청과 새 연결이 있으면 종료 상태를 먼저 반영할 수 있다.
             for (int event_index = 0; event_index < ready_event_count; ++event_index)
             {
+                // epoll_ctl 등록 시 넣어둔 식별 값이 그대로 돌아온다. 제어 FD에는 전용 토큰을 사용한다.
                 const std::uint64_t event_token = events[event_index].data.u64;
 
                 if (event_token == STOP_EVENT_TOKEN)
@@ -203,20 +222,24 @@ namespace snf::server
                 }
                 else if (event_token == OUTBOUND_EVENT_TOKEN)
                 {
+                    // 로직으로 만든 송신 작업 등을 가져온다. 클라이언트의 EPOLLOUT(쓰기 가능 상턔) 이벤트와는 별개다.
                     handleOutboundActions();
                 }
             }
 
+            // 2차 순회: 새 연결과 기존 클라이언트의 I/O를 처리한다.
             for (int event_index = 0; event_index < ready_event_count; ++event_index)
             {
                 const epoll_event& event = events[event_index];
                 const std::uint64_t event_token = event.data.u64;
 
+                // 1차 순회에서 처리한 제어 이벤트는 중복 처리하지 않는다.
                 if (event_token == STOP_EVENT_TOKEN || event_token == TERMINATION_SIGNAL_EVENT_TOKEN || event_token == OUTBOUND_EVENT_TOKEN)
                 {
                     continue;
                 }
 
+                // 리스너의 읽기 가능 알림은 새 연결을 accept
                 if (event_token == LISTENER_EVENT_TOKEN)
                 {
                     if (!_is_stopping)
@@ -227,24 +250,31 @@ namespace snf::server
                     continue;
                 }
 
+                // 클라이언트 토큰은 연결의 generation. FD가 재사용돼도 이전 연결 이벤트와 구분
                 const auto descriptor_iterator = _client_descriptors_by_event_token.find(event_token);
+                // 앞선 이벤트 처리에서 이미 제거된 연결의 이벤트라면 건너뛴다.
                 if (descriptor_iterator == _client_descriptors_by_event_token.end())
                 {
                     continue;
                 }
 
                 const int client_descriptor = descriptor_iterator->second;
+                // token으로 "어느 연결인지" 찾았고, events 비트로 "수신·송신·종료 중 무엇인지" 전달한다.
                 handleClientEvent(client_descriptor, event.events);
             }
 
             if (ready_event_count > 0)
             {
-                _reactor_turn_nanoseconds.record(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - turn_started_at));
+                _reactor_turn_nanoseconds.record(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - turn_started_at)
+                );
             }
 
+            // timeout으로 이벤트가 0개여도 보고 시점은 확인한다.
             reportMetricsIfDue();
         }
 
+        // 정상 루프 종료 후 남은 연결을 정리한다. 종료 시간 초과로 빠져나온 경우도 포함한다.
         closeRemainingSessions();
     }
 
@@ -332,7 +362,8 @@ namespace snf::server
                 .descriptor = client_descriptor,
                 .generation = ++_next_connection_generation,
             };
-            const bool inserted = _sessions.emplace(client_descriptor, snf::net::Session{std::move(client_socket), connection, _max_pending_send_bytes}).second;
+            const bool inserted =
+                _sessions.emplace(client_descriptor, snf::net::Session{std::move(client_socket), connection, _max_pending_send_bytes}).second;
 
             if (!inserted)
             {
@@ -363,6 +394,7 @@ namespace snf::server
 
     void TcpServer::handleClientEvent(const int client_descriptor, const std::uint32_t event_flags)
     {
+        // 종료 사유를 기록하고 함수 끝에서 Session을 제거한다. 수신 처리 중에는 Session 참조를 유지한다.
         std::optional<ConnectionCloseCause> close_cause;
         if ((event_flags & EPOLLERR) != 0)
         {
@@ -370,28 +402,37 @@ namespace snf::server
         }
         bool should_update_events = false;
 
+        // 종료 알림과 함께 마지막 데이터가 올 수 있어 HUP 계열도 수신 시도
+        // 서버 종료 중에는 새로운 입력을 받지 않는다.
         const bool has_read_event = !_is_stopping && (event_flags & (EPOLLIN | EPOLLRDHUP | EPOLLHUP)) != 0;
 
+        // optional close_cause에 값 들어있는지 체크
         if (!close_cause && has_read_event)
         {
+            // recv 한 번에 사용할 임시 버퍼. 미완성 프레임의 보존은 Session 내부 디코더가 담당
             std::array<std::byte, RECEIVE_BUFFER_SIZE> receive_buffer{};
 
-            const auto session_iterator = _sessions.find(client_descriptor);
+            const std::unordered_map<int, net::Session>::iterator session_iterator = _sessions.find(client_descriptor);
             if (session_iterator == _sessions.end())
             {
                 return;
             }
 
+            // 소켓은 논블로킹이다. 한 번의 이벤트에서 당장 읽을 수 있는 데이터를 반복해서 꺼낸다.
             while (true)
             {
                 const auto received_byte_count = ::recv(client_descriptor, receive_buffer.data(), receive_buffer.size(), 0);
 
                 if (received_byte_count > 0)
                 {
+                    // 임시 버퍼 중 유효한 구간
                     const std::span<const std::byte> received_bytes{receive_buffer.data(), static_cast<std::size_t>(received_byte_count)};
 
-                    auto decode_result = session_iterator->second.appendReceivedBytes(received_bytes);
+                    // 세션 내의 디코더가 바이트를 내부 버퍼에 복사하고 완성된 프레임들을 반환
+                    // 프레임이 덜 도착했다면 오류 없이 frames가 비어 있을 수 있다.
+                    protocol::DecodeResult decode_result = session_iterator->second.appendReceivedBytes(received_bytes);
 
+                    // 잘못된 길이·메시지 종류 등 디코딩 오류는 연결 종료로 처리한다.
                     if (!decode_result.ok())
                     {
                         ++_stats.protocol_errors;
@@ -400,14 +441,17 @@ namespace snf::server
                         break;
                     }
 
+                    // 한 번에 여러 프레임이 완성될 수 있다. 연결 식별자와 묶어 다음 처리 단계에 이동 전달한다.
                     for (auto& frame : decode_result.frames)
                     {
                         ++_stats.received_frames;
-                        const snf::net::ConnectionId connection = session_iterator->second.getConnectionId();
-                        const FramePostResult post_result = _frame_ingress.tryPost(FrameEnvelope{
-                            .connection = connection,
-                            .frame = std::move(frame),
-                        });
+                        const FramePostResult post_result = _frame_ingress.tryPost(
+                            FrameEnvelope{
+                                .connection = session_iterator->second.getConnectionId(),
+                                .frame = std::move(frame),
+                            }
+                        );
+                        // 전달 거절 시 원인을 구분한다. 큐 포화도 조용히 버리지 않고 이 연결을 종료한다.
                         if (post_result != FramePostResult::Accepted)
                         {
                             if (post_result == FramePostResult::UnsupportedMessage || post_result == FramePostResult::InvalidPayload)
@@ -430,6 +474,7 @@ namespace snf::server
                         }
                     }
 
+                    // 내부 for만 빠져나온 경우 recv 반복문도 종료해야 한다.
                     if (close_cause)
                     {
                         break;
@@ -438,27 +483,33 @@ namespace snf::server
                     continue;
                 }
 
+                // 0은 상대가 송신 방향을 정상 종료했고 더 읽을 바이트가 없다는 뜻이다.
+                // 이 서버는 이를 연결 종료로 처리한다. "지금 데이터가 없음"과는 다르다.
                 if (received_byte_count == 0)
                 {
                     close_cause = ConnectionCloseCause::PeerClosed;
                     break;
                 }
 
+                // 여기부터는 recv가 -1을 반환한 경우다. EINTR은 시그널에 의한 중단이므로 재시도한다.
                 if (errno == EINTR)
                 {
                     continue;
                 }
 
+                // 지금 읽을 데이터가 없다는 뜻이다. 연결은 유지하고 이벤트 루프로 돌아간다.
                 if (errno == EAGAIN || errno == EWOULDBLOCK)
                 {
                     break;
                 }
 
+                // 그 밖의 수신 오류는 이 구현에서 PeerClosed 사유로 연결을 종료한다.
                 close_cause = ConnectionCloseCause::PeerClosed;
                 break;
             }
         }
 
+        // 종료 사유가 없고 소켓이 쓰기 가능하면 송신한다. EPOLLIN과 EPOLLOUT은 함께 올 수 있다.
         if (!close_cause && (event_flags & EPOLLOUT) != 0)
         {
             const auto session_iterator = _sessions.find(client_descriptor);
@@ -467,21 +518,26 @@ namespace snf::server
                 return;
             }
 
+            // 큐가 빌 때까지 보내거나 EAGAIN(송신 버퍼 full)에서 멈춘다. true여도 미전송 데이터가 남을 수 있다.
             if (!flushPendingSend(session_iterator->second))
             {
+                // false는 송신 실패
                 close_cause = ConnectionCloseCause::PeerClosed;
             }
             else
             {
+                // 송신 후 남은 데이터 유무에 맞춰 함수 끝에서 EPOLLOUT 등록을 갱신한다.
                 should_update_events = true;
             }
 
+            // 서버 종료 중이고 로직 작업이 정리됐으며 이 연결의 송신 큐도 비었다면 종료한다.
             if (_is_stopping && _logic_runtime_drained && !session_iterator->second.hasPendingSend())
             {
                 close_cause = ConnectionCloseCause::ServerShutdown;
             }
         }
 
+        // EPOLLRDHUP은 상대의 송신 방향 종료, EPOLLHUP은 hang-up 알림이다.
         if (!close_cause && (event_flags & (EPOLLRDHUP | EPOLLHUP)) != 0)
         {
             close_cause = _is_stopping ? ConnectionCloseCause::ServerShutdown : ConnectionCloseCause::PeerClosed;
@@ -489,10 +545,12 @@ namespace snf::server
 
         if (close_cause)
         {
+            // 기록한 사유로 실제 Session을 제거. *는 optional 안의 종료 사유를 참조
             removeSession(client_descriptor, *close_cause);
         }
         else if (should_update_events)
         {
+            // 송신 데이터가 남으면 EPOLLOUT을 유지하고, 비었으면 제외해 불필요한 알림을 피한다.
             updateClientEvents(_sessions.at(client_descriptor));
         }
     }
@@ -532,7 +590,9 @@ namespace snf::server
 
             for (PostedOutboundAction& posted : _drained_outbound_actions)
             {
-                _outbound_queue_wait_nanoseconds.record(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - posted.posted_at));
+                _outbound_queue_wait_nanoseconds.record(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - posted.posted_at)
+                );
                 handleOutboundAction(std::move(posted.action));
             }
 
@@ -615,11 +675,13 @@ namespace snf::server
                     }
 
                     ++_stats.protocol_errors;
-                    std::cerr << "Closing client FD " << network_action.connection.descriptor << " because Logic runtime requested " << to_string(network_action.reason) << '\n';
+                    std::cerr << "Closing client FD " << network_action.connection.descriptor << " because Logic runtime requested "
+                              << to_string(network_action.reason) << '\n';
                     removeSession(network_action.connection.descriptor, ConnectionCloseCause::ProtocolError);
                 }
             },
-            std::move(action));
+            std::move(action)
+        );
     }
 
     void TcpServer::handleRuntimeCompletion()
@@ -721,7 +783,8 @@ namespace snf::server
             }
         }
 
-        _stats.pending_connection_closes_high_water_mark = std::max(_stats.pending_connection_closes_high_water_mark, _pending_connection_closes.size());
+        _stats.pending_connection_closes_high_water_mark =
+            std::max(_stats.pending_connection_closes_high_water_mark, _pending_connection_closes.size());
         retryPendingConnectionCloses();
 
         if (_logic_runtime_drained && isControlDrained())
@@ -767,10 +830,17 @@ namespace snf::server
 
     bool TcpServer::flushPendingSend(snf::net::Session& session)
     {
+        // send 한 번은 맨 앞 PendingSend의 남은 구간만 요청한다.
+        // 이 반복문은 부분 전송의 나머지나 다음 프레임을 연속해서 요청할 수 있다.
         while (session.hasPendingSend())
         {
             const std::span<const std::byte> pending_bytes = session.getPendingSendBytes();
+            // data()는 span 구간의 첫 바이트 주소, size()는 그 구간의 바이트 수다.
+            // offset=30인 100바이트 프레임이면 원본의 30번 위치부터 70바이트를 요청한다.
+            // data() 자체는 복사나 전송을 하지 않는다. MSG_NOSIGNAL은 송신 시 SIGPIPE 발생을 막는다.
             const auto sent_byte_count = ::send(session.getDescriptor(), pending_bytes.data(), pending_bytes.size(), MSG_NOSIGNAL);
+
+            // 양수는 커널이 받아들인 바이트 수로, 요청량보다 작을 수 있고 상대방의 수신 완료를 뜻하지 않는다.
 
             if (sent_byte_count > 0)
             {
@@ -781,6 +851,7 @@ namespace snf::server
                 continue;
             }
 
+            // -1이면 errno로 원인을 구분한다. 인터럽트는 재시도하고, 지금 보낼 수 없으면 위치를 보존한다.
             if (sent_byte_count == -1 && errno == EINTR)
             {
                 continue;
@@ -832,7 +903,8 @@ namespace snf::server
         if (::epoll_ctl(_epoll.getDescriptor(), EPOLL_CTL_DEL, client_descriptor, nullptr) == -1)
         {
             const int error_number = errno;
-            std::cerr << "Failed to remove client FD " << client_descriptor << " from epoll: " << std::generic_category().message(error_number) << '\n';
+            std::cerr << "Failed to remove client FD " << client_descriptor << " from epoll: " << std::generic_category().message(error_number)
+                      << '\n';
         }
 
         _client_descriptors_by_event_token.erase(connection.generation);
@@ -843,12 +915,14 @@ namespace snf::server
 
         if (!_is_stopping)
         {
-            notifyConnectionClosed(ConnectionClosed{
-                .connection = connection,
-                .cause = cause,
-                .has_location_snapshot = false,
-                .last_location = std::nullopt,
-            });
+            notifyConnectionClosed(
+                ConnectionClosed{
+                    .connection = connection,
+                    .cause = cause,
+                    .has_location_snapshot = false,
+                    .last_location = std::nullopt,
+                }
+            );
         }
     }
 
@@ -878,7 +952,8 @@ namespace snf::server
                 throw std::logic_error{"Connection lifecycle capacity invariant violated"};
             }
             _pending_connection_closes.push_back(std::move(closed));
-            _stats.pending_connection_closes_high_water_mark = std::max(_stats.pending_connection_closes_high_water_mark, _pending_connection_closes.size());
+            _stats.pending_connection_closes_high_water_mark =
+                std::max(_stats.pending_connection_closes_high_water_mark, _pending_connection_closes.size());
             return;
         }
     }
@@ -931,7 +1006,8 @@ namespace snf::server
 
     bool TcpServer::hasAvailableConnectionLifecycleSlot() const noexcept
     {
-        return _sessions.size() < _connection_lifecycle_capacity && _pending_connection_closes.size() < _connection_lifecycle_capacity - _sessions.size();
+        return _sessions.size() < _connection_lifecycle_capacity &&
+               _pending_connection_closes.size() < _connection_lifecycle_capacity - _sessions.size();
     }
 
     bool TcpServer::isControlDrained() const noexcept
