@@ -292,6 +292,14 @@ admission을 모두 확인한다.
 
 - 완료된 continuation 하나를 resume
 - mailbox의 새 command 하나를 dispatch
+- Actor가 스스로 요청한 lifecycle turn 하나
+
+lifecycle turn은 Actor가 소유한 유지보수 작업(도달하지 못한 cleanup 재시도, shutdown 종결)을 위한 것이며
+Actor phase와 turn budget 안에서만 실행한다. mailbox 용량도 timer admission도 소비하지 않으므로 포화된
+mailbox나 가득 찬 `TimerQueue`가 유지보수를 봉쇄할 수 없다. Worker는 lifecycle 작업이 있는 Actor를
+색인(`_lifecycle_armed`)으로 찾는다. 색인은 각 turn 직후 그 Actor에게 한 번 질의해 갱신하고 shutdown
+시작 시 한 번 전체를 채운다. ActorTable을 매 loop iteration마다 훑는 구현은 16,384칸 빈 table에서
+Actor phase 1ms 예산의 200~500us를 소비해 일반 mailbox turn을 굶겼다.
 
 turn이 DB에서 suspend되면 `SuspendedDbCommand`를 `ActorSlot.blocked`에 저장하고 await timeout을
 예약한다. completion은 slot을 `Queued`로 전환할 뿐이며 실제 resume는 다음 Actor phase에서 수행한다.

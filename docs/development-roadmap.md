@@ -196,7 +196,11 @@ production 전환 뒤에는 11단계에서 실제 MySQL을 포함해 같은 게�
   - 11G-3B2: Sink의 1,024개 bounded record, receipt 기반 해제, 포화·유실 후 재시도와 실제 Worker loop
     무트래픽 재전송 검증 완료. receipt는 cleanup 완료가 아니며 shutdown/persistence 보장은 별도다.
     [검증 결과](./stage-11-workflow-migration-plan.md#11g-3b2-결과--sink-disconnect-통지-보존과-bounded-재시도).
-    다음은 [11G-4A 실제 workflow 실패 주입·계약 대조](./stage-11g-next-work-plan.md)다.
+  - 11G-4: 실패 terminal identity fence, known-none 종료, Player가 소유하는 cleanup 재시도와 재적 fence,
+    shutdown의 cleanup 후 최종 저장 검증 완료. Actor의 lifecycle turn은 Actor phase와 turn budget 안에서만
+    실행하며 mailbox·timer 용량을 소비하지 않는다. cleanup tell 자체의 적용 실패는 여전히 metric 관측이고,
+    계약 조항별 전체 failure terminal 대조표는 남아 있다.
+    [검증 결과](./stage-11-workflow-migration-plan.md#11g-4-결과--실패-terminal-identity-fence-player-소유-cleanup-재시도-shutdown-종결).
 
 - [ ] production server의 connection/game request 경로를 신규 Worker로 100% 전환한다.
 - [ ] 전환된 production 경로에서 10단계의 load scenario와 전체 품질 게이트를 다시 통과한다.

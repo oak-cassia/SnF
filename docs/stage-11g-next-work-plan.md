@@ -1,8 +1,12 @@
 # 11G 후속 작업 계획 — 실제 workflow 실패 경로 대조
 
-> 상태: 다음 작업 계획. 11G 전체 완료를 의미하지 않는다.
+> 상태: 부분 완료. 11G 전체 완료를 의미하지 않는다.
 > 기준: 11G-3B2의 Sink pending 보존·재시도 검증 이후.
 > 최종 실행 기준은 [stage-11 계획](./stage-11-workflow-migration-plan.md)이다.
+>
+> 2026-09-16 진행: 아래 4B·4C·11G-5에 해당하는 제품 수정과 회귀 테스트를 완료했다
+> ([11G-4 결과](./stage-11-workflow-migration-plan.md#11g-4-결과--실패-terminal-identity-fence-player-소유-cleanup-재시도-shutdown-종결)).
+> 남은 것은 아래 "수행 순서"의 재현 결과를 계약 조항별 대조표 문서로 정리하는 일과 11G 마감 게이트다.
 
 ## 다음 작업: 11G-4A — 실패 주입과 계약 대조표
 
@@ -62,9 +66,9 @@ cleanup 테스트와 연결되는 통합 증거는 아래에서 보강한다.
 
 | 순서 | 작업 | 진입 조건 / 역할 |
 | --- | --- | --- |
-| 11G-4B | 대조표에서 재현된 Player terminal·stale 검증 결함의 최소 수정 | 이 세션에서 기대 동작·허용 함수 확정 → 다른 세션에 제품 코드만 위임 → 이 세션에서 회귀 검증·커밋 |
-| 11G-4C | cleanup 전달 실패 계약과 구현 | cleanup owner·용량 사전 확보·완료 기준·세대/epoch fence·종결 불가 정책을 먼저 합의 |
-| 11G-5 | shutdown workflow cancel과 최종 persistence | admission 차단 → 승인 작업 drain → 명시적 cancel → resource 해제의 순서 및 absolute deadline 정책을 먼저 확정 |
+| 11G-4B | **완료** — Player terminal·stale 검증 결함의 최소 수정 | identity fence와 known-none 종료로 확정했다 |
+| 11G-4C | **완료** — cleanup 전달 실패 계약과 구현 | Player 소유 재시도, 고정 19칸, 세대·epoch·재적 fence, 일반 tell 계약 불변 |
+| 11G-5 | **완료** — shutdown workflow cancel과 최종 persistence | phase A arm → cleanup 해제 → 최종 저장 1회 → 시한 초과·commit 불명은 별도 실패 지표 |
 | 11G 마감 | 전체 failure terminal 대조표 및 완료 게이트 | 미보장 항목을 완료로 표기하지 않고 11I 과부하 실측 항목과 구분 |
 | 11H | production Worker 경로 전환 | 11G 완료 후 시작 |
 

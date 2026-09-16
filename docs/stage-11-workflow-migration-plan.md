@@ -145,7 +145,7 @@ room 상태를 갖지 않으면 대상을 결정할 수 없다.
 | 11E | **완료** | 아래 "11E 결과" 참고 |
 | 11D | **완료** | 아래 "11D 결과" 참고 |
 | 11F | **완료** | source Leave/Restore의 stale epoch cleanup 회귀 검증 포함. 아래 "11F 결과" 참고 |
-| 11G | **진행 중** | 11G-1 disconnect cleanup, 11G-2 timer 재시도, 11G-3A mailbox receipt, 11G-3B1 hook/deadline, 11G-3B2 Sink pending 보존·재시도 검증 완료. 실제 workflow 통합 실패 주입·cleanup 전달 보장·전체 terminal 대조·shutdown은 남음 |
+| 11G | **진행 중** | 11G-1 disconnect cleanup, 11G-2 timer 재시도, 11G-3A mailbox receipt, 11G-3B1 hook/deadline, 11G-3B2 Sink pending 보존·재시도, 11G-4 실패 terminal identity fence·Player 소유 cleanup 재시도·shutdown 최종 저장 완료. 계약 조항별 전체 failure terminal 대조표와 11G 마감 게이트는 남음 |
 | 11H~11K | 미착수 | |
 
 ### 11A 결과
@@ -521,6 +521,93 @@ ASan/UBSan worker **8 PASS / MySQL 3 SKIP**(sanitizer 오류 0), TCP 포함 Debu
 **B2만 완료**다. receipt는 mailbox admission이지 Actor 실행·cleanup 성공 증명이 아니다. 정상 loop의 재시도
 보존은 용량 회복과 대상 Actor의 진행을 전제로 하며 전달 시간 상한, shutdown drain, 최종 persistence를
 보장하지 않는다. 다음은 [11G-4A 실패 주입·계약 대조 계획](./stage-11g-next-work-plan.md)이다.
+
+### 11G-4 결과 — 실패 terminal identity fence, Player 소유 cleanup 재시도, shutdown 종결
+
+세션에서 확정한 계약 결정 3건(2026-09-16):
+
+1. **known-none 종료.** source Leave가 `PlayerMissing` 또는 `StaleRoute`로 끝나면 추측한 source route를
+   유지하지 않는다. 관측한 epoch를 반영하고 last location을 비운 뒤 정확한 epoch의 cleanup Leave를 보내고
+   연결을 닫는다. 남은 좌석을 정상 완료로 취급하지 않는다.
+2. **cleanup 재시도는 PlayerActor가 소유한다.** 일반 `TellActorEffect`의 계약은 바꾸지 않는다. 범용
+   reliable tell이나 무기한 재전송 queue도 추가하지 않는다. 재시도 상태와 응답 판정은 cleanup을 발행한
+   Player가 보유하며, shutdown에서는 단순 객체 삭제와 구분해 명시적으로 종결한다.
+3. **shutdown 최종 저장.** 절대 종료 시한 안에서 cleanup 후 final snapshot 저장을 한 번 시도한다. DB 장애,
+   commit 결과 불명, 시한 초과는 성공으로 숨기지 않고 별도 실패 지표로 남긴다. 프로세스 장애까지 견디는
+   durable 재처리는 이번 범위가 아니다.
+
+**Worker의 lifecycle turn.** Actor가 스스로 요청하는 turn을 Actor phase와 turn budget 안에서 실행한다.
+mailbox 용량도 timer admission도 소비하지 않으므로 포화된 mailbox나 가득 찬 `TimerQueue`가 cleanup 재시도를
+봉쇄하지 못한다. 한 turn은 여전히 resume 하나, mailbox command 하나, lifecycle turn 하나 중 하나만 실행한다.
+
+- 구현 중 결함 1건을 발견해 수정했다. 최초 구현은 매 loop iteration마다 `ActorTable` 전체를 훑어 lifecycle
+  작업을 찾았고, 16,384칸 빈 table에서 그 scan만 Actor phase 1ms 예산의 200~500us를 소비해 일반 mailbox
+  turn을 굶겼다. 기존 `test_close_retry_idle_wakeup_phase_budget_and_iteration_limit`가 이를 잡았다
+  (`turns == sink.calls - 1` 실패, Debug/ASan/TSan 세 preset).
+- 수정: Worker가 lifecycle 작업이 있는 Actor만 색인(`_lifecycle_armed`)으로 보유한다. 색인은 각 turn 직후
+  그 Actor에게 한 번 질의해 갱신하고, shutdown 시작 시 한 번 전체를 채우며, Actor 제거 시 항목을 지운다.
+  `pollTimeout`과 Actor phase는 색인만 본다.
+
+**실패 terminal identity fence.** Room Join 1단계 outcome은 request·step·room·`request_id`와 결과의
+player까지 대조하고 `Applied`만 진행한다. `AlreadyJoined`는 더 이상 성공으로 보지 않는다. cross-zone과
+Return의 zone outcome은 zone·epoch·`request_id`·player를 대조하며, pending zone op도 같은 4개를 대조한 뒤
+소비한다. close 결정 이후 도착한 zone/room outcome과 queued 입력은 새 점유를 만들지 않는다.
+`RoomTerminalNotification`은 현재 재적 식별자와 일치할 때만 적용한다.
+
+**Player 소유 cleanup.** cleanup Leave는 correlation id, connection generation, zone route epoch 또는 room
+재적 식별자를 함께 싣고 Player의 고정 19칸 배열에 남는다. lifecycle turn이 10ms마다 남은 cleanup 전체를
+다시 보내고, 대상·correlation·epoch 또는 재적·generation·`request_id == 0`·player가 모두 일치하는 응답만
+해제한다. 해제 조건은 zone이 `Applied`/`PlayerMissing`/`StaleRoute`, room이 `Applied`/`NotJoined`/
+`WrongPhase(Cleared|Failed)`다. 19칸을 넘기면 조용히 버리지 않고 `std::logic_error`로 끝낸다.
+
+cleanup 완료 전 재입장은 막는다. 다른 연결의 `Authenticate`는 닫고, 같은 연결의 zone 요청은
+`TransitionInProgress`, room 입장은 `EntryFailed`로 답한다. cleanup 중 도착한 Return의 성공 outcome은
+버리지 않고 보류한 뒤 cleanup이 끝난 turn에서 적용한다.
+
+**재적 식별자.** Room은 `JoinRoom`이 `Applied`일 때 `RoomMembership{incarnation, join correlation}`을
+저장하고 `Applied` Leave에서 지운다. 재적이 일치하지 않는 Leave는 좌석을 건드리지 않고 `NotJoined`로
+답한다. 늦게 도착한 이전 cleanup이 같은 플레이어의 새 좌석을 지우지 못한다. Room 결과의 audience route도
+참가자별 재적을 실어 Player가 오래된 terminal 통지를 구분한다.
+
+**shutdown.** phase A에서 모든 Actor에 shutdown turn을 예약한다. shutdown turn은 bound connection의 close
+경로를 먼저 실행해 cleanup을 발행하고, cleanup이 모두 해제된 뒤 location·session을 포함한 final
+`SavePlayerRequest` 하나를 낸다. 일반 DB submit은 `_shutting_down`으로 막힌 상태이며, 이 최종 저장만
+phase B 동안 통과한다. `DbClient::beginShutdown()`은 phase B 이후로 옮겼다. phase B는 이 최종 저장을 일반
+blocked 작업의 cancel과 구분하며, 시한 초과로 강제 제거되면 `lifecycle_forced_cancellations`,
+commit 실패·불명은 `lifecycle_finalization_failures`로 남는다. 불명 commit을 자동 재시도하지 않는다.
+최종 저장이 성공한 뒤 도착한 cross-worker 경험치 지급은 한 번 더 저장한다. Sink의 보존된 close 통지는
+phase D에서 `cancelConnectionCloseRetries()`로 명시적으로 종결한다.
+
+정식 회귀 증거:
+
+- `worker_actor_test.cpp` `test_lifecycle_index_arms_only_actors_with_work`: lifecycle 작업이 없는 Actor는
+  색인에 들어가지 않고, 작업을 만든 turn이 arm하며, 도래 전에는 turn을 쓰지 않는다. 빈 mailbox에서
+  lifecycle turn이 실행되고 deadline을 비우면 disarm된다. Actor 제거는 항목을 지우고, shutdown은 남은
+  Actor를 한 번에 arm하며 색인이 phase B의 남은 작업 여부를 답한다.
+- `worker_adapter_test.cpp` `test_workflow_outcome_identity_matrix`: Room Join·Return·cross-zone의 outcome을
+  필드별로 어긋나게 주입해 각 단계가 무시되는지 대조한다.
+- `test_room_return_stale_route_cleans_observed_epoch`: Return의 `StaleRoute`가 관측한 epoch로 cleanup을
+  보내고 알려진 좌석 없이 종료하는지 확인한다.
+- `test_non_cross_close_decision_gates_queued_input`: close 결정 이후 queued 입력이 새 점유를 만들지 않고,
+  충돌 연결의 close가 기존 세션을 막지 않는지 확인한다.
+- `test_cleanup_retry_fences_and_deferred_return`: cleanup 응답을 유실시킨 뒤 50회 재시도에서 같은 재적과
+  correlation을 유지하고, 8개 필드 오염 응답을 모두 무시하며, 동일 명령 재전송의 `NotJoined`로 해제된다.
+  해제 뒤 보류한 Return이 적용되고, 재입장으로 새 재적을 얻은 뒤 도착한 이전 cleanup과 이전 terminal
+  통지가 새 좌석을 지우지 못한다.
+- `test_shutdown_final_save_failure_and_late_grant`: `Committed`/`FailedBeforeCommit`/`CommitOutcomeUnknown`
+  세 결과에 대해 cleanup 후 location 포함 최종 저장이 한 번 실행되고, 실패·불명은 `finalizationFailed()`로
+  남되 자동 재시도하지 않으며, 성공 뒤 도착한 경험치 지급만 한 번 더 저장한다.
+- 실제 Worker 통합은 기존 cross-zone 테스트에서 1칸 mailbox로 cleanup 응답 하나를 유실시킨 뒤 정상 loop의
+  lifecycle turn 재시도로 pending cleanup이 0이 되는 것까지 확인한다
+  (`effect_tell_failures >= 1`, `lifecycle_turns >= 1`).
+
+검증: Debug 전체 **13 PASS / MySQL 4 SKIP**(실패 0), `snf_worker_tests` **10회 연속 PASS**,
+TCP 포함 Debug adapter **5회 연속 PASS**, ASan/UBSan worker **8 PASS / MySQL 3 SKIP**(sanitizer 오류 0),
+TSan worker **8 PASS / MySQL 3 SKIP**(race 0), 변경 줄 clang-format 및 `git diff --check` 통과.
+
+**11G-4는 여기까지다.** 위 경로들은 검증했으나 계약 조항별 전체 failure terminal 대조표는 아직 문서로
+정리하지 않았고, 11G 체크박스는 닫지 않는다. cleanup `TellActorEffect` 자체의 적용 실패는 여전히
+metric으로만 관측되며, 전달 시간 상한과 프로세스 장애를 견디는 최종 persistence는 보장하지 않는다.
 
 ## 검증
 
