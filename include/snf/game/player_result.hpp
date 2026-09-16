@@ -1,5 +1,6 @@
 #pragma once
 
+#include "snf/game/equip_skill.hpp"
 #include "snf/game/player_id.hpp"
 #include "snf/game/purchase.hpp"
 #include "snf/game/room_join_request.hpp"
@@ -27,7 +28,7 @@ namespace snf::server
         PurchaseTransactionResult result;
     };
 
-    using PlayerResponse = std::variant<PongResponse, AuthenticatedResponse, PurchaseResponse>;
+    using PlayerResponse = std::variant<PongResponse, AuthenticatedResponse, PurchaseResponse, EquipSkillResponse>;
 
     struct SendResponse
     {

@@ -43,34 +43,67 @@ namespace
         snf::server::ReservationTicket _ticket{};
     };
 
-    snf::runtime::ActorTask<snf::server::OutboundReservation>
-    awaitOutboundReservation(snf::server::OutboundSink& outbound, snf::runtime::ActorContext& context, const snf::net::ConnectionId connection, const std::size_t slots)
+    snf::runtime::ActorTask<snf::server::OutboundReservation> awaitOutboundReservation(
+        snf::server::OutboundSink& outbound,
+        snf::runtime::ActorContext& context,
+        const snf::net::ConnectionId connection,
+        const std::size_t slots
+    )
     {
         ReservationWaiterGuard guard;
         auto reservation = co_await snf::runtime::awaitAsyncOperation<snf::server::OutboundReservation>(
             context,
             [&guard, &outbound, connection, slots](snf::runtime::AsyncOperationProducer<snf::server::OutboundReservation> producer)
-            { guard.arm(outbound, outbound.registerWaiter(connection, slots, std::move(producer))); });
+            {
+                guard.arm(outbound, outbound.registerWaiter(connection, slots, std::move(producer)));
+            }
+        );
 
         guard.disarm();
         co_return std::move(reservation);
     }
 
-    snf::runtime::ActorTask<snf::server::PlayerLoadResult> awaitPlayerLoad(snf::server::PlayerRepository& repository, snf::runtime::ActorContext& context, const snf::server::PlayerId player)
+    snf::runtime::ActorTask<snf::server::PlayerLoadResult> awaitPlayerLoad(
+        snf::server::PlayerRepository& repository,
+        snf::runtime::ActorContext& context,
+        const snf::server::PlayerId player
+    )
     {
         auto result = co_await snf::runtime::awaitAsyncOperation<snf::server::PlayerLoadResult>(
             context,
             [&repository, player](snf::runtime::AsyncOperationProducer<snf::server::PlayerLoadResult> producer)
-            { repository.asyncLoad(player, [producer = std::move(producer)](snf::server::PlayerLoadResult result) mutable noexcept { producer.complete(std::move(result)); }); });
+            {
+                repository.asyncLoad(
+                    player,
+                    [producer = std::move(producer)](snf::server::PlayerLoadResult result) mutable noexcept
+                    {
+                        producer.complete(std::move(result));
+                    }
+                );
+            }
+        );
         co_return std::move(result);
     }
 
-    snf::runtime::ActorTask<snf::server::PlayerSaveResult> awaitPlayerSave(snf::server::PlayerPersistenceService& persistence, snf::runtime::ActorContext& context, snf::server::PlayerRecord record)
+    snf::runtime::ActorTask<snf::server::PlayerSaveResult> awaitPlayerSave(
+        snf::server::PlayerPersistenceService& persistence,
+        snf::runtime::ActorContext& context,
+        snf::server::PlayerRecord record
+    )
     {
         auto result = co_await snf::runtime::awaitAsyncOperation<snf::server::PlayerSaveResult>(
             context,
             [&persistence, record = std::move(record)](snf::runtime::AsyncOperationProducer<snf::server::PlayerSaveResult> producer)
-            { persistence.asyncSave(std::move(record), [producer = std::move(producer)](snf::server::PlayerSaveResult result) mutable noexcept { producer.complete(std::move(result)); }); });
+            {
+                persistence.asyncSave(
+                    std::move(record),
+                    [producer = std::move(producer)](snf::server::PlayerSaveResult result) mutable noexcept
+                    {
+                        producer.complete(std::move(result));
+                    }
+                );
+            }
+        );
         co_return std::move(result);
     }
 }
@@ -148,7 +181,10 @@ namespace snf::server
     };
 
     PlayerActorBinding::PlayerActorBinding(
-        PlayerResponseSink& response_sink, OutboundSink& outbound, CommandLifecycleSink& lifecycle, PlayerActorBindingConfig config
+        ProtocolPlayerResponseSink& response_sink,
+        OutboundSink& outbound,
+        CommandLifecycleSink& lifecycle,
+        PlayerActorBindingConfig config
     )
         : _response_sink(response_sink)
         , _outbound(outbound)
@@ -224,7 +260,8 @@ namespace snf::server
             CommandPayload{
                 .command = std::move(command),
                 .release = CommandReleaseToken{_lifecycle, connection},
-            });
+            }
+        );
     }
 
     snf::runtime::ActorSubmission PlayerActorBinding::makeConnectionClosed(const PlayerActorId actor, ConnectionClosed closed) const
@@ -243,7 +280,8 @@ namespace snf::server
             snf::runtime::ActorAccounting::Control,
             ConnectionClosedPayload{
                 .closed = std::move(closed),
-            });
+            }
+        );
     }
 
     std::optional<snf::runtime::ActorSubmission> PlayerActorBinding::makeTell(const snf::runtime::ActorKey target, snf::runtime::TellPayload payload)
@@ -264,17 +302,27 @@ namespace snf::server
             return std::nullopt;
         }
 
-        return makeSubmission(target, snf::runtime::ActorActivation::ActivateIfMissing, snf::runtime::ActorAccounting::Command, StreetExperienceGrantPayload{.grant = *grant});
+        return makeSubmission(
+            target,
+            snf::runtime::ActorActivation::ActivateIfMissing,
+            snf::runtime::ActorAccounting::Command,
+            StreetExperienceGrantPayload{.grant = *grant}
+        );
     }
 
     std::unique_ptr<snf::runtime::ActorState> PlayerActorBinding::activate(const snf::runtime::EntityId entity)
     {
-        const PlayerActorId identity = kind() == snf::runtime::ActorKind::Player ? PlayerActorId{PlayerId{.value = entity}} : PlayerActorId{ProvisionalActorId{.value = entity}};
+        const PlayerActorId identity =
+            kind() == snf::runtime::ActorKind::Player ? PlayerActorId{PlayerId{.value = entity}} : PlayerActorId{ProvisionalActorId{.value = entity}};
         return std::make_unique<PlayerActorState>(identity, _on_actor_deactivated, _max_purchase_idempotency_records_per_player);
     }
 
-    snf::runtime::ActorDispatchResult
-    PlayerActorBinding::dispatch(snf::runtime::ActorState& state, const snf::runtime::ActorSubmission& submission, snf::runtime::ActorContext& context, const std::stop_token stop_token)
+    snf::runtime::ActorDispatchResult PlayerActorBinding::dispatch(
+        snf::runtime::ActorState& state,
+        const snf::runtime::ActorSubmission& submission,
+        snf::runtime::ActorContext& context,
+        const std::stop_token stop_token
+    )
     {
         auto& player_state = dynamic_cast<PlayerActorState&>(state);
         if (submission.accounting() == snf::runtime::ActorAccounting::Control)
@@ -355,7 +403,7 @@ namespace snf::server
             return advance(player_state, context, stop_token);
         }
 
-        if (std::holds_alternative<PurchaseCommand>(payload.command.command))
+        if (std::holds_alternative<PurchaseCommand>(payload.command.command) || std::holds_alternative<EquipSkillCommand>(payload.command.command))
         {
             if (kind() != snf::runtime::ActorKind::Player)
             {
@@ -367,7 +415,11 @@ namespace snf::server
         return advance(player_state, context, stop_token);
     }
 
-    snf::runtime::ActorDispatchResult PlayerActorBinding::resume(snf::runtime::ActorState& state, snf::runtime::ActorContext& context, const std::stop_token stop_token)
+    snf::runtime::ActorDispatchResult PlayerActorBinding::resume(
+        snf::runtime::ActorState& state,
+        snf::runtime::ActorContext& context,
+        const std::stop_token stop_token
+    )
     {
         auto& player_state = dynamic_cast<PlayerActorState&>(state);
         if (player_state.stage == PlayerActorState::Stage::Idle)
@@ -378,7 +430,11 @@ namespace snf::server
         return advance(player_state, context, stop_token);
     }
 
-    snf::runtime::ActorDispatchResult PlayerActorBinding::advance(PlayerActorState& state, snf::runtime::ActorContext& context, const std::stop_token stop_token)
+    snf::runtime::ActorDispatchResult PlayerActorBinding::advance(
+        PlayerActorState& state,
+        snf::runtime::ActorContext& context,
+        const std::stop_token stop_token
+    )
     {
         if (state.stage == PlayerActorState::Stage::Loading)
         {
@@ -505,7 +561,11 @@ namespace snf::server
         return applyResponses(state, reservation, stop_token);
     }
 
-    snf::runtime::ActorDispatchResult PlayerActorBinding::applyResponses(PlayerActorState& state, OutboundReservation& reservation, const std::stop_token stop_token)
+    snf::runtime::ActorDispatchResult PlayerActorBinding::applyResponses(
+        PlayerActorState& state,
+        OutboundReservation& reservation,
+        const std::stop_token stop_token
+    )
     {
         PlayerResult result = std::move(state.pending_result);
         const snf::net::ConnectionId connection = state.connection;
@@ -567,8 +627,11 @@ namespace snf::server
         state.stage = PlayerActorState::Stage::Reserving;
     }
 
-    PlayerActorBinding::SnapshotPublishOutcome
-    PlayerActorBinding::publishDirtySnapshot(PlayerActorState& state, snf::runtime::ActorContext& context, const bool retry_attempt) noexcept
+    PlayerActorBinding::SnapshotPublishOutcome PlayerActorBinding::publishDirtySnapshot(
+        PlayerActorState& state,
+        snf::runtime::ActorContext& context,
+        const bool retry_attempt
+    ) noexcept
     {
         if (retry_attempt)
         {

@@ -21,7 +21,7 @@ namespace snf::server
     {
         ProjectileId id{};
         PlayerId owner{};
-        SkillId skill{};
+        SkillId skill_id{};
         EnemyId target{};
         ArenaPosition position{};
         std::uint32_t speed_per_tick{0};

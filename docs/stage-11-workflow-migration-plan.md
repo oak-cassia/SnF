@@ -1,0 +1,648 @@
+# 11단계 — Application workflow 이전, production 전환과 legacy 제거
+
+> 문서 상태: **확정 실행 계획**. 승인 2026-09-03.
+>
+> 상위 단계와 완료 조건은 [개발 로드맵 11단계](./development-roadmap.md), 런타임 불변식은
+> [Unified Worker Runtime](./architecture/unified-worker-runtime.md)를 따른다. 이 문서는 11A~11K의
+> 실행 기준이다.
+>
+> 10단계 결과는 [품질 게이트 리포트](./worker-runtime-quality-gates.md)에 있고, §11의 남은 한계 3건이
+> 이 단계의 11I에서 닫힌다.
+
+## 사전 확인 사항
+
+계획 수립 시점에 직접 확인한 사실이다.
+
+| 사실 | 근거 | 영향 |
+| --- | --- | --- |
+| 신규 경로 inbound는 `Ping` 하나만 처리했다 | `src/adapter/game_request_sink.cpp` (11A 이전) | 최대 작업량. frame 8종 라우팅 신설 |
+| **outbound는 이미 완성됐다** | `protocol_encoder.hpp:30`~50, `to_effects.hpp:64`~68 | 응답 매핑 재작성 불필요 |
+| Player/Zone/Room adapter와 tick·deadline payload가 이미 있다 | `include/snf/adapter/{player,zone,room}_actor_adapter.hpp`, `game_payloads.hpp:28`~80 | domain turn 실행부 재사용 |
+| transition state machine은 신규 경로에 없다 | Entering/InRoom/Returning/correlation grep 0건 | 로드맵 1~5번 체크박스의 구현 대상 |
+| `PlayerSessionDirectory`는 mutex 공유 map이다 | `player_session_directory.hpp:65` | 그대로 못 옮긴다. 아키텍처 §4 위반 |
+| `RequestSink::onConnectionClosed`가 owner-thread hook으로 있다 | `request_sink.hpp` | 세션 정리 자리 확보됨 |
+| **`Rejected`/`Invalid`는 연결을 끊는다** | `worker.cpp:1109`~1118 → `forceClose` | 도메인 실패를 여기에 매핑하면 계약이 깨진다 |
+| `beginGracefulClose`는 항상 `forceClose`로 끝난다 | `worker.cpp:2743`~2777 | actor가 요청한 close도 세션을 반드시 해제한다 |
+| `closeConnection`은 remote owner로 라우팅된다 | `worker.cpp:525`~541 | 다른 Worker의 연결도 effect로 닫을 수 있다 |
+| DB 연산 격차 없음 | legacy `asyncLoad`/`asyncSave` ↔ `LoadPlayerRequest`/`SavePlayerRequest` | DB 확장 불필요 |
+| domain 타입은 `snf_game`에 있고 이름만 `snf::server`다 | `include/snf/game/player.hpp:12` | 제거 대상은 `snf_server_runtime`뿐 |
+| 제거 대상 legacy | `.cpp` 약 7,100 LOC + 헤더 + 테스트 17개 파일 | 전환과 제거를 같은 커밋에 두지 않는다 |
+| `Distribution` 사용처는 전부 legacy | runtime/server 헤더 + `server_main.cpp` + mysql repo + `distribution_test` | 10단계에서 미룬 정리가 여기서 풀린다 |
+| parity oracle이 이미 존재한다 | `tests/tcp_server_integration_test.cpp` | parity를 손으로 정의하지 않아도 된다 |
+| `LoadClient`는 무한 누적한다 | `load_client.hpp:53`~55, `vector<duration>` 3개 | 게이트에 쓰려면 bounded로 고쳐야 한다 |
+| `LoadScenario`는 Ping/Zone/Battle | `load_scenario.hpp:9`~11 | 프로토콜이 서빙되면 10단계가 미룬 이유가 사라진다 |
+| `snf_server`는 `GameServer`를 구동한다 | `server_main.cpp:192` | production 전환 대상 |
+
+## 핵심 설계 결정
+
+### D1. Transition owner = PlayerActor, Coordinator Actor 미채택
+
+계약 문서가 target owner 결정을 이 단계로 위임했고([room-entry-handoff-contract.md:3](./room-entry-handoff-contract.md)),
+아키텍처 §12가 절차를 규정한다. §12 규칙 2를 적용한다.
+
+```text
+PlayerActor
+  workflow state + correlation ID
+Zone/Room
+  ↕ mailbox message
+ActorSlot.blocked 사용 안 함
+```
+
+근거: 계약의 상태(`Stable`/`Transferring`/`Entering`/`InRoom`/`Returning`)는 전부 한 Player에 귀속되고,
+connection마다 진행 중 transition은 최대 하나다(room 계약 §2). 제3자가 조회·취소하지 않고 transition이
+PlayerActor보다 오래 살지 않으므로 §12 규칙 3(Coordinator)의 조건을 하나도 만족하지 않는다.
+
+correlation ID는 `ActorSlot.blocked`를 쓰지 않는다. actor-to-actor 응답은 suspend하지 않으므로(§12 첫 문장)
+INV-06과 무관하게 workflow state 안의 별도 필드다.
+
+party/group transition처럼 여러 Player를 독립적으로 조정하는 요구가 생기면 그때 Coordinator를 검토한다.
+
+### D2. Session identity — 공유 directory를 없애고 양방향으로 쪼갠다
+
+| 방향 | 소유자 | 이유 |
+| --- | --- | --- |
+| connection → player | owner worker의 sink-local map (owner thread 전용) | worker가 이미 connection owner다 |
+| player → connection | PlayerActor가 보유한 `ConnectionRef` | 서버 주도 unsolicited 프레임의 대상이 여기다 |
+| PlayerConflict | PlayerActor의 turn 결정 | 충돌 상대 connection이 다른 Worker일 수 있다 |
+
+`WorkerGroup`은 factory를 worker index마다 1회 호출해 sink를 별개로 소유하므로(`worker_group.cpp:78`,
+`worker_group.hpp:78`) owner thread 전용 map이 성립한다. 다만 단일 `Worker` 생성자는 `RequestSink&`를
+받으므로 타입 시스템이 공유를 막지 않는다. 계약을 `request_sink.hpp`에 명시하고 sink가 owner thread를
+debug assertion으로 고정한다.
+
+### D3. 인증 전후로 ActorKey가 달라진다
+
+인증 후 `entity = player_id`다. 인증 전 game frame은 PlayerActor를 만들지 않고 sink가 거절한다.
+
+### D4. 도메인 실패는 `Rejected`로 반환하지 않는다
+
+```text
+mailbox full / 용량 초과   → Rejected  (overload는 연결 종료가 맞다)
+프로토콜/프레임 순서 위반  → Invalid
+도메인 실패(좌석 없음 등)  → Accepted + 실패 프레임
+```
+
+### D5. Parity oracle = 기존 통합 테스트를 신규 경로로 포팅
+
+`tcp_server_integration_test.cpp`의 시나리오를 worker 경로용으로 복제하고, legacy 테스트는 11J까지 그대로
+돌린다. 두 경로가 같은 시나리오를 통과하는 것이 parity의 정의다.
+
+### D6. 순서: 단일 도메인 서빙(11A~11C) → PlayerActor Workflow 기반(11E) → Room/Battle 프레임 공개(11D) → 전환 → 게이트 → 제거
+
+11D와 11E의 실행 순서를 교체한다. `RoomJoin` 결과가 `RoomActor`에서 직접 클라이언트로 전달되면 `PlayerActor`가
+입장 성공 여부를 모르게 되고, `BattleStart`에는 요청자 정보가 없어 `PlayerActor`의 `InRoom(room)` 검증 없이
+직접 라우팅하면 타 방 전투를 시작할 수 있으며, `RoomLeave`는 0바이트 payload여서 `PlayerActor`가 authoritative
+room 상태를 갖지 않으면 대상을 결정할 수 없다.
+
+따라서 임시/낙관적 `_current_room` 상태를 두지 않고, **11E(PlayerActor workflow 및 Zone/Room 응답 채널)를
+먼저 구축한 뒤 11D(Room/Battle 외부 프레임 공개)를 진행**한다.
+- 모든 Room/Battle 외부 요청은 반드시 `PlayerActor`를 통과한다.
+- 클라이언트가 보낸 room id를 검증 없이 `RoomActorKey`로 사용하지 않는다.
+- 11D와 11E가 모두 끝나 테스트 증거가 확보될 때까지 Room/Battle 경로는 완료로 표시하지 않는다.
+
+## 서브 스텝
+
+### Phase 1 — 단일 도메인 서빙 격차 (production 미변경)
+
+| 스텝 | 커밋 | 닫는 테스트 |
+| --- | --- | --- |
+| 11A | `feat(adapter): bind sessions and authenticate on the worker path` | 신규 `tests/worker_session_test.cpp` |
+| 11B | `feat(adapter): route player commands to the owning PlayerActor` | Purchase / EquipSkill |
+| 11C | `feat(adapter): route zone commands and AOI results` | EnterZone / Move / LeaveZone |
+
+### Phase 2 — Workflow와 Room/Battle 라우팅
+
+| 스텝 | 커밋 | 닫는 테스트 |
+| --- | --- | --- |
+| 11E | `feat(adapter): own room entry and return in the PlayerActor workflow state` | room 계약 §3·§4, Zone→Player 응답 채널 기반 (a) location R1/R3 복원, (b) tell 실패 롤백·실패 프레임 |
+| 11D | `feat(adapter): route room and battle commands through the PlayerActor` | RoomJoin / BattleStart / UseSkill / SetMoveIntent / RoomLeave |
+| 11F | `feat(adapter): own cross-zone transition in the same workflow state` | cross-zone 계약 §3·§4 |
+| 11G | `test(adapter): match failure, disconnect and shutdown terminals to the contracts` | room §5·§6 + cross-zone §5·§6, 계약 조항별 대조표 |
+
+### Phase 3 — Production 전환과 게이트
+
+| 스텝 | 커밋 | 닫는 테스트 |
+| --- | --- | --- |
+| 11H | `feat(server): serve production traffic from the Worker runtime` | `server_main.cpp` → `WorkerGroup` |
+| 11I | `test(worker): re-run the stage 10 gates on the production path` | production 기본값 + MySQL 실측 + `LoadClient` bounded |
+
+### Phase 4 — 제거와 문서
+
+| 스텝 | 커밋 | 비고 |
+| --- | --- | --- |
+| 11J | `refactor: remove the legacy ActorRuntime, bindings and shared outbound` | `snf_runtime` + `snf_server_runtime` legacy + `Distribution` + 테스트 17개. `snf_game`은 유지 |
+| 11K | `docs: retarget the README and close stage 11` | README 배너 제거, 실제 코드 링크와 새 측정값 |
+
+의존: 11A → 11B → 11C → 11E → 11D → 11F → 11G → 11H → 11I → 11J → 11K.
+
+## 진행 상황
+
+| 스텝 | 상태 | 비고 |
+| --- | --- | --- |
+| 11A | **완료** | 아래 "11A 결과" 참고 |
+| 11B | **완료** | 아래 "11B 결과" 참고 |
+| 11C | **완료** | 아래 "11C 결과" 참고 |
+| 11E | **완료** | 아래 "11E 결과" 참고 |
+| 11D | **완료** | 아래 "11D 결과" 참고 |
+| 11F | **완료** | source Leave/Restore의 stale epoch cleanup 회귀 검증 포함. 아래 "11F 결과" 참고 |
+| 11G | **진행 중** | 11G-1 disconnect cleanup, 11G-2 timer 재시도, 11G-3A mailbox receipt, 11G-3B1 hook/deadline, 11G-3B2 Sink pending 보존·재시도, 11G-4 실패 terminal identity fence·Player 소유 cleanup 재시도·shutdown 최종 저장 완료. 계약 조항별 전체 failure terminal 대조표와 11G 마감 게이트는 남음 |
+| 11H~11K | 미착수 | |
+
+### 11A 결과
+
+- sink가 session identity의 connection → player를 소유하고, PlayerActor가 `ConnectionRef`를 보유한다.
+- legacy `PlayerAttachResult` 6개 결과값에 각각 owner를 배정하고 `worker_session_test.cpp`로 고정했다.
+- session entry는 connection id로 키를 잡고 generation을 함께 검증한다. close 통지를 놓친 stale entry가
+  재사용된 slot에 이전 player의 세션을 넘기지 않고 fail closed된다.
+- `RequestSink`에 "Worker마다 1 인스턴스" 계약을 명시하고 sink가 owner thread를 debug assertion으로 고정했다.
+- 관측용 live session count만 atomic mirror다. map 자체는 다른 thread에서 읽지 않는다. 이 규칙을 어긴
+  **테스트 자신이 TSan data race로 잡혔고**, 제품 코드를 우회하지 않고 테스트가 계약을 따르도록 고쳤다.
+
+#### 의도적 parity 변경 2건 (승인 2026-09-03)
+
+**Pre-auth `Ping`은 state-free liveness operation으로 정의한다.** sink가 직접 `Pong`으로 답하고 ActorSlot,
+DB activation, session state를 하나도 만들지 않는다. `Ping`은 gameplay command가 아니라 connection/liveness
+protocol이기 때문이다.
+
+**Legacy의 pre-auth provisional activity는 architecture artifact로 판단하여 parity 대상에서 제외한다.**
+legacy는 인증 전 `Ping`을 connection 키 provisional actor로 보냈고, 그 활동이 이후 그 연결의 인증을 막았다.
+이는 gameplay 계약이 아니라 옛 ActorRuntime 구조가 외부 동작으로 새어 나온 것이며, 보존하려면 새 구조에
+불필요한 상태를 다시 만들어야 한다.
+
+인증 경계는 그대로 유지한다.
+
+```text
+Unauthenticated
+  Ping         → Pong, actor 생성 없음, session entry 없음
+  Authenticate → 정상 인증
+  그 외 전부    → Invalid, 연결 종료
+```
+
+`worker_session_test.cpp`가 고정하는 것:
+
+| 테스트 | 고정 내용 |
+| --- | --- |
+| `test_pre_auth_ping_is_answered_without_an_actor` | Pong 수신, `actor_turns == 0`, session entry 없음 |
+| `test_pre_auth_ping_does_not_block_authentication` | Ping → Pong → Authenticate 성공, 전체 흐름에서 `actor_turns == 1` (Ping은 turn을 만들지 않았다) |
+| `test_only_ping_and_authenticate_cross_the_pre_auth_boundary` | 나머지 client frame 10종 전부 인증 전 거절. **11B 이후 라우팅이 추가돼도 계속 성립해야 한다** |
+
+### 11B 결과
+
+- `Purchase`(12바이트: 8바이트 idempotency key + 4바이트 product id)와 `EquipSkill`(4바이트 skill id)을
+  legacy dispatcher와 같은 wire form으로 디코딩해 세션의 player actor로 라우팅한다. 둘 다 non-zero 검사까지
+  동일하다.
+- 도메인 실패는 D4대로 `Accepted` + 응답 프레임이다. `SkillNotOwned`가 응답으로 돌아오는 것을 테스트가
+  확인한다. `Rejected`는 mailbox full 같은 overload에만 쓴다.
+- 라우팅이 실제 도메인에 닿았는지는 **같은 idempotency key 재전송**으로 증명한다. 두 번째 응답이
+  `replayed = 1`이고 잔액이 두 번 줄지 않았다는 것은 두 프레임이 같은 Player 상태를 봤다는 뜻이다.
+
+#### 구현 중 발견한 격차 (수정함)
+
+`PlayerActor`가 **bound connection이 닫힌 것을 알 방법이 없었다.** 그래서 한 번 접속한 player는 연결이
+끊긴 뒤 재접속하면 자기 자신과 PlayerConflict가 나서 영구히 로그인할 수 없었다. legacy는
+`PlayerSessionDirectory`가 close 시 양방향 entry를 지웠고 통합 테스트
+`test_authenticates_one_session_and_allows_reconnect_after_passivation`이 이를 덮고 있었다.
+
+수정: sink가 `onConnectionClosed`에서 `PlayerConnectionClosedMessage`를 player actor에게 보내고, actor는
+`ConnectionRef`가 정확히 일치할 때만 binding을 해제한다(generation까지 비교하므로 이전 incarnation의 close
+통지가 현재 세션을 끊지 못한다). `test_the_same_player_can_reconnect_after_disconnecting`이 고정한다.
+
+이 release가 turn을 하나 만들기 때문에, 정확한 turn 수를 검사하는 테스트는 먼저 연결을 끊고 session release가
+끝나기를 기다린 뒤에 검사한다. shutdown 순서에 의존하지 않게 하려는 것이다.
+
+### 11C 결과
+
+- `EnterZone`(16바이트: 8바이트 zone id + 4바이트 x + 4바이트 y), `Move`(8바이트: 4바이트 x + 4바이트 y),
+  `LeaveZone`(0바이트)을 디코딩하여 세션의 `PlayerActor`로 라우팅한다.
+- `RouteCoordinator`가 가졌던 per-player route state(`_current_zone`, `_route_epoch`)를 `PlayerActorAdapter`로
+  옮겨, `PlayerActor`가 epoch을 관리하고 대상 `ZoneActor`로 `ZoneCommandMessage`를 tell한다.
+- `ZoneActorAdapter` 및 `to_effects` zone overload를 통해 client로 27바이트 고정 규격의 유니캐스트 응답이 전달된다.
+- legacy 조사 결과와 일치하게 **broadcast가 없음을 검증했다**: 두 번째 플레이어의 진입 시 첫 번째 플레이어에게
+  unsolicited 프레임이 전달되지 않으며, AOI는 응답자의 `visible_players` 필드로만 전달된다.
+- zone-to-zone 진입 시도 시 `TransferFailed`(5)를 반환하고 연결을 유지하며, 동일 zone 재입장은 epoch 불변 상태로
+  전달되어 `AlreadyPresent`(1)와 기존 위치를 반환한다.
+- zone id 0 및 zone 없는 Move/Leave는 `PlayerActor`에서 `CloseConnectionEffect`로 안전하게 거절하여 worker의
+  throw(`invariant_violations == 0`)를 방지한다.
+- 연결 종료 시 `PlayerConnectionClosedMessage`에서 `_current_zone`이 있으면 암묵적 `LeaveZoneCommand`를
+  전달하여 Zone participant에서 제거됨을 후속 Move의 AOI `visible_count == 0`으로 고정했다.
+- 테스트 결과: Debug 17개 중 13 PASS / 4 SKIP (MySQL), TSan worker 비-MySQL 8개를 5회 연속 PASS / 3 SKIP (MySQL), ASan-UBSan worker 8 PASS / 3 SKIP (MySQL). MySQL 실측은 계획대로 11I에서 수행.
+
+#### 알려진 격차 (11E에서 수정)
+
+1. **`TellActorEffect` 실패 시 route state 롤백 미처리**
+   `applyEffectBatch`는 tell 실패 시 `effect_tell_failures`만 올리고(`worker.cpp:1759`), effect는 turn이 반환된
+   뒤 적용되므로 adapter가 실패를 관측할 수 없다. 반면 route state(`_route_epoch`, `_current_zone`)는 tell 전에
+   커밋된다.
+   Zone mailbox / remote inbox / actor table 포화 시:
+   - `EnterZone`: `_route_epoch += 1`, `_current_zone = zone`이 커밋되지만 `TellActorEffect`가 조용히 실패하면
+     Player는 들어간 적 없는 zone에 있다고 믿고, client는 응답을 받지 못한다.
+   - `LeaveZone`: `_current_zone.reset()`이 커밋되지만 `TellActorEffect`가 조용히 실패하면 Zone에 participant가
+     남는다 (재입장 시 epoch이 더 커서 re-seat되므로 피해는 작다).
+   legacy는 이 지점에서 명시적으로 롤백했다(`rollbackEnter`, `protocol_gateway.cpp:289`).
+
+2. **Location R1 / R3 미반영**
+   - **R1 (재입장 위치 복원, `protocol_gateway.cpp:255`)**: 플레이어가 연결 해제 후 동일 Zone에 재입장할 때
+     클라이언트가 보낸 임의 좌표 대신 서버에 저장된 마지막 유효 위치(`last_location.position`)를 복원하는 규칙.
+   - **R3 (영속 복귀지점, `room-entry-handoff-contract.md:49`)**: PlayerActor가 dirty 상태를 DB에 플러시할 때
+     최근 머문 Zone/좌표가 `PlayerRecord.last_location`으로 영속화되어, 액터 패시베이션 후 활성화 시 복구되는 규칙.
+   - **원인**: 11C 현재 `ZoneResult`는 ZoneActor에서 클라이언트로 직접 unicast되므로 PlayerActor를 거치지 않는다.
+     따라서 `Player::last_location` 갱신, DB 영속화, 재활성화 복원이 동작하지 않는다.
+
+**11E 해결 방안 및 검증 기준**:
+adapter가 실패를 관측하고 location을 갱신하려면 **Zone→Player 응답 채널**이 필수적이다. 이 채널은 11E가
+transition correlation을 위해 이미 만들 예정이므로, 11E에서 한 번에 만들어 다음을 함께 닫는다:
+- (a) Zone 결과 수신 시 `Player::last_location` 갱신 및 DB 영속화 (`test_player_persists_zone_location_on_save`)
+- (b) 재접속 후 재입장 시 이전 위치 복원 (`test_reconnect_restores_last_zone_position`)
+- (c) Zone tell 실패 시 timer 기반 timeout 검출 후 route state 롤백 및 에러 응답 프레임 발송
+과부하 및 위치 복원 외에 11C의 정상 경로는 정확하므로 부채로 남기며, 11I 게이트 재실행에서 과부하 주입 시
+관측될 수 있다.
+
+### 11E 결과
+
+- **Actor 응답 채널 구성**:
+  - `GameActorPayloadRegistry`에 `ZoneOutcomeMessage`(12), `RoomOutcomeMessage`(13), `PlayerWorkflowTimeoutMessage`(14), `PlayerRoomRequestMessage`(15)를 등록했다.
+  - `ZoneActorAdapter` 및 `RoomActorAdapter`의 `toEffects`에 `WorkflowReplyTo` 응답 채널 및 audience 대상 `RoomOutcomeMessage` 브로드캐스트를 연결했다.
+- **11C 알려진 격차 해소**:
+  - Zone tell 및 비동기 처리 실패 시 `TimerAdmission::tryReserve`로 사전 예약된 타이머 기반 timeout(1s, `WORKFLOW_TIMEOUT`)으로 미확정 route를 롤백하고 연결을 유지한다 (`test_zone_tell_timeout_rolls_back_unconfirmed_route`, `test_zone_timeout_cleans_up_zone_participant`).
+  - 일반 `ZoneLeave` 타임아웃 발생 시 결과 불확실성에 대응하여 Zone에 cleanup tell(`LeaveZoneCommand`)을 발행하고, 허위 zone route를 유지하지 않고 nullopt로 확정한 뒤 `CloseConnectionEffect`로 안전하게 fail-closed 처리한다 (`test_zone_leave_timeout_sends_terminal_outcome`).
+  - Stale epoch/correlation 응답을 무시해 레이스를 방지한다 (`test_stale_correlation_and_epoch_ignored`).
+- **Zone 요청 파이프라이닝 (`_pending_zone_ops`, 최대 16개)**:
+  - 단일 read loop에서 여러 frame 수신 시 이전 correlation_id가 덮어쓰여지지 않도록 vector로 관리한다.
+  - Move 요청 파이프라이닝 및 correlation별 개별 응답 처리를 단위 테스트(`test_pipelined_zone_moves_handled_individually`)와 TCP 통합 테스트(`test_pipelined_zone_moves_over_session`)로 검증했다.
+- **Location R1 / R3 복원**:
+  - Zone 입장/이동 및 Room 복귀 시 `Player::setLastLocation`을 갱신하고 DB flush 시 영속화한다 (`test_player_persists_zone_location_on_save`).
+  - 재접속 후 재입장 시 클라이언트의 임의 좌표 대신 서버의 마지막 유효 위치를 복원한다 (`test_reconnect_restores_last_zone_position`).
+- **Room 입장/복귀 Saga 및 보상 트랜잭션**:
+  - PlayerActor `WorkflowState`(`StableRoute`, `EnteringRoute`, `InRoomRoute`, `ReturningRoute`)를 도입하여 Room 입장 시 `JoinRoom` → `LeaveZone` 순서로 안전하게 전이한다.
+  - Room 거절 시 Zone route를 유지하며 (`test_room_join_refusal_keeps_zone_route`), Zone leave 실패 시 `LeaveRoom` 보상 트랜잭션을 실행하고 좌석을 반환한다 (`test_room_join_zone_leave_failure_compensates_and_keeps_zone_route`).
+  - Room 입장 1단계(`RoomJoinStep1_JoinRoom`) 타임아웃은 join 미적용과 적용 후 outcome 유실을 구분할 수 없으므로, 멱등 `LeaveRoom` cleanup을 발행한 뒤 source Zone route를 유지하고 `EntryFailed`를 반환한다. 실제 `RoomActor`에 join을 적용하고 outcome을 폐기한 실패 주입으로 좌석이 제거됨을 검증한다 (`test_room_join_step1_timeout_compensates_applied_room_join`).
+  - Room 입장 2단계(`RoomJoinStep2_LeaveZone`) 진입 시 별도 1초 타임아웃 타이머를 예약하며, Zone 응답 유실 시 Room에 `LeaveRoom` 보상 및 Zone에 cleanup tell을 발행하고, 허위 source zone route 복귀 대신 route를 nullopt로 확정하고 연결을 안전하게 닫는다 (`test_room_join_step2_leave_zone_timeout_compensates`).
+  - Room 복귀 1단계(`RoomReturnStep1_ZoneEnter`) 타임아웃 시 Zone에 cleanup tell(`LeaveZoneCommand`)을 발행하여 outcome 유실로 인한 Zone ghost participant를 제거하고 연결을 닫는다 (`test_room_return_timeout_cleans_up_zone_participant`).
+  - Room 퇴장 및 전투 종료(`RoomTerminalNotification`) 자동 복귀 시 `TimerAdmission::tryReserve` 사전 검사 후 상태를 커밋하며, 실제 `InRoom` 상태에서 admission 실패 시 상태 오염 없이 세션을 닫음을 검증했다 (`test_room_return_timer_admission_failure_safely_closes`).
+  - `RoomOutcomeMessage` dynamic charge에 `BattleDigest` 용량(`digest->events.capacity() * sizeof(BattleEvent)`)을 반영하여 bounded mailbox 계상을 일치시키고, `MAX_ROOM_EFFECTS`를 4인 clear 최대 effect 수(17개: 4×4 + stop 1)로 정확화했다.
+- **테스트 결과**:
+  - Debug: 13 PASS / 4 SKIP (MySQL)
+  - TSan worker: 8 PASS / 3 SKIP (MySQL)
+  - ASan-UBSan worker: 8 PASS / 3 SKIP (MySQL)
+
+### 11D 결과
+
+- **Wire 프레임 5종 라우팅**:
+  - `GameRequestSink`에 `RoomJoin`(17), `BattleStart`(19), `RoomLeave`(22), `UseSkill`(25), `SetMoveIntent`(30) wire frame의 디코더 및 PlayerActor 라우팅(`postRoomRequest`)을 구현했다.
+  - 불필요한 payload나 규격 외의 프레임(BattleStart 0바이트, UseSkill 0/21바이트, SetMoveIntent 0/18바이트 등 포함)은 sink 단계에서 거절(`RequestPostResult::Invalid`)되어 액터 턴을 소모하지 않는다 (`test_malformed_room_payloads_rejected`).
+- **Authoritative 상태 검증**:
+  - 클라이언트가 임의의 room id를 전달하거나 방에 없는 상태에서 `BattleStart`, `UseSkill`, `SetMoveIntent`, `RoomLeave`를 전달할 경우 침묵 대신 legacy 프로토콜 계약(`InvalidPayload -> close`)에 맞춰 `CloseConnectionEffect`로 세션을 닫는다 (`test_battle_start_only_allowed_when_in_room`).
+  - `InRoom` 상태 중 수신된 Zone 프레임(`Move` 등)은 `ZoneCommandStatus::InRoom`으로 안전하게 거절되며 세션 연결이 유지된다.
+- **E2E TCP 세션 검증**:
+  - `worker_session_test.cpp`를 통해 정상 입장/퇴장 왕복 (`test_room_join_and_leave_over_session`), 전투 라이프사이클 및 스킬/이동 (`test_battle_lifecycle_over_session`), 전투 종료 후 unsolicited `ReturnedToZone` 수신 및 Zone 복귀 (`test_boss_defeat_or_timeout_returns_to_zone_over_session`), Room 0 입장 시 안전한 종료 (`test_room_join_zero_closes_connection`), 파이프라인된 TCP Move 연속 수발신 (`test_pipelined_zone_moves_over_session`)을 검증했다.
+
+### 11F 결과
+
+- **PlayerActor 소유 교차 Zone 상태 머신**:
+  - `WorkflowState`에 bounded `TransferringRoute`를 추가하고 `LeaveSource` → `EnterTarget` → 필요 시
+    `RestoreSource`를 correlation ID, connection generation, step, Zone, request ID와 route epoch으로 검증한다.
+  - 전환 중 `currentZone()`은 `nullopt`라 target 완료 전 route가 공개되지 않는다. 이때 들어온 Zone 요청은
+    ZoneActor로 전달하지 않고 `TransitionInProgress`, Room 입장은 `EntryFailed`로 끝낸다.
+- **정상 전환과 FIFO drain**:
+  - 기존 source route의 Move만 pending인 경우 handoff를 허용한다. 같은 PlayerActor에서 source Zone으로 먼저
+    발행된 Move tell 뒤에 Leave tell이 놓이므로 source mailbox FIFO drain을 보존한다.
+  - target `Applied`/`AlreadyPresent`와 authoritative position을 확인한 뒤에만 target route와
+    `last_location`을 공개하고 최초 `EnterZone`에 `ZoneEntered`를 정확히 한 번 반환한다.
+- **실패 보상과 known-none terminal**:
+  - target의 확정 실패는 target epoch보다 큰 restore epoch으로 source를 재입장시키고, 복구 성공 뒤 source
+    route와 위치를 공개하며 `TransferFailed`를 한 번 반환한다.
+  - target `StaleRoute`는 일반 확정 실패와 구분한다. outcome에 실린 authoritative higher epoch으로 target을
+    cleanup하고 source를 추측 복구하지 않은 채 known-none close로 끝낸다.
+  - source Leave/Restore의 `StaleRoute`도 공통 처리한다. identity 검증을 통과한 outcome의 실제 source epoch으로
+    cleanup하고 `_route_epoch`을 관측값 이상으로 유지해 재접속 후 더 높은 epoch으로 입장한다.
+  - source leave, target enter 또는 source restore의 적용 여부를 알 수 없는 timeout과 복구 실패는 source와
+    target에 멱등 cleanup Leave를 발행하고 pending source operation을 폐기한 뒤 route/location을
+    `known none`으로 확정하고 connection을 닫는다. 전환 중 disconnect도 같은 cleanup 경로를 사용한다.
+- **단계별 timeout admission**:
+  - `LeaveSource`, `EnterTarget`, `RestoreSource` 각각은 해당 내부 command를 발행하기 전에
+    `TimerAdmission::tryReserve`로 독립된 1초 timeout 예산을 확보한다. 후속 단계 admission 실패는 source가
+    이미 변경된 상태이므로 양쪽 cleanup과 known-none close로 끝낸다.
+  - 등록된 one-shot timer의 조기 취소 API가 없어 완료된 이전 단계 timer는 만료 때까지 잠시 남지만,
+    correlation과 현재 step을 함께 검사해 stale no-op으로 처리한다. handoff당 예약 수는 최대 3개로 고정된다.
+    Actor-to-Actor tell 적용 실패와 outcome 유실은 현재 단계 timeout이 cleanup terminal로 바꾼다.
+- **close 결정 이후 입력 차단**:
+  - known-none terminal에서 bound connection을 닫기로 결정한 즉시 closing gate를 세운다. owner Worker의
+    `PlayerConnectionClosedMessage`가 뒤늦게 도착하기 전에 이미 mailbox에 있던 client 요청도 drop하며, 정확히
+    일치하는 generation의 close 통지가 binding을 해제할 때 gate를 초기화한다.
+- **검증**:
+  - 실제 source/target `ZoneActorAdapter`를 사용해 route 비공개, 전환 중 입력 차단, stale outcome 무시, epoch 2
+    target 성공, epoch 3 source 보상, higher-epoch target `StaleRoute` cleanup, target outcome 유실 후 양쪽
+    participant cleanup과 close-before-notice 입력 차단, 각 후속 단계 timer admission 실패의 known-none 종료,
+    시작 전 timer admission 실패 시 source route 유지를 검증했다.
+  - `test_cross_zone_stale_source_leave_cleans_observed_epoch_and_closes`와
+    `test_cross_zone_stale_source_restore_cleans_observed_epoch_and_closes`는 실제 source epoch 7을 주입한다.
+    양쪽 participant가 0명이 되는 cleanup, known-none/close, 중복 outcome 및 이전 timeout의 no-op,
+    재접속 후 epoch 8 입장을 검증했다. 수정 전에는 관측 epoch 반영 assertion에서 실패함을 확인했다.
+  - 2-Worker `WorkerGroup`에서 PlayerActor와 두 ZoneActor를 서로 다른 owner에 배치하고, 실제 TCP로 source
+    Move와 target Enter를 한 번의 `sendAll`로 파이프라인해 remote inbox를 거친 Move 응답이 먼저 오며 target
+    Zone의 새 epoch에서 Move/Leave까지 이어짐을
+    `test_cross_zone_handoff_orders_source_move_and_serves_target`으로 고정했다.
+  - Debug: 13 PASS / 4 SKIP (MySQL)
+  - TSan worker: 8 PASS / 3 SKIP (MySQL), data race 0건
+  - ASan-UBSan worker: 8 PASS / 3 SKIP (MySQL), sanitizer 오류 0건
+  - Debug adapter 반복: 5회 연속 PASS (`--repeat until-fail:5`)
+
+### 11G-1 결과 — 도착한 disconnect 통지의 cleanup
+
+범위는 `PlayerConnectionClosedMessage`가 PlayerActor에 도착한 뒤다. 정확히 일치하는 bound connection만
+처리하며, pending/workflow 정보를 지우기 전에 다음 cleanup을 발행한다. 새 API·상태·timer는 추가하지 않았다.
+
+| close 당시 상태 | cleanup 순서 | 회귀 증거 (`DisconnectPoint`) |
+| --- | --- | --- |
+| Stable(None), pending Enter | pending Enter의 target Zone·epoch으로 Leave | `StableNone`, `PendingEnter` |
+| Stable(zone) | pending Enter cleanup → stable Zone Leave(`_route_epoch`) | `StableZone`, `PendingReenter`, `PendingMoves`(16개), `PendingLeave`, `AppliedLeave` |
+| Entering 두 단계 | target Room Leave → source Zone Leave(`source_epoch`) | `RoomJoin1`, `RoomJoin2`, `RoomJoin2AppliedLeave` |
+| InRoom | Room Leave | `InRoom` |
+| Returning | source Room Leave → return Zone Leave(`return_epoch`) | `Returning`, `ReturningAppliedRoomLeave` |
+| Transferring | 기존 known-none helper로 source → target Zone Leave, restore 중 source에는 restore epoch 사용 | `CrossLeave`, `CrossAppliedLeave`, `CrossTarget`, `CrossRestore` |
+
+- `test_disconnect_cleanup_state_matrix`는 실제 Zone/Room adapter에서 위 17개 시점을 재현한다. 명령 적용 후
+  outcome을 보류한 경우를 포함해 cleanup을 전달하면 양쪽 Zone participant와 Room 좌석이 모두 0이 된다.
+  생성되는 tell의 player, 대상, epoch, 순서, `connection/reply_to = nullopt`, `request_id = 0`을 검사한다.
+  현재 admission으로 도달 가능한 상태에서는 cleanup tell 최대 2개와 save timer 최대 1개다. pending Move/Leave는
+  추가 cleanup을 만들지 않으며, 동일 Zone 재입장의 중복 Leave는 허용한다.
+- close 뒤 binding과 pending/workflow를 해제하지만 route epoch과 correlation sequence는 보존한다. 이전 generation
+  close, 중복 close, 늦은 Zone/Room outcome과 이전 timer가 effect를 내지 않는 것을 재접속 전후 모두 확인했다.
+  재접속 Enter의 correlation은 직전 값 +1, epoch은 보존한 값 +1이며, non-transfer는 저장된 위치를 복원한다.
+  Transferring만 기존 정책대로 location을 known-none으로 바꾼다. identity가 없는 actor의 close도 no-op이다.
+- `test_disconnect_preserves_dirty_location_save`는 기존 `scheduleSaveIfDirty` 호출을 고정한다. Session/location만
+  dirty인 경우는 기존에도 flush 대상이 아니며, flushable progression 변경이 있으면 close에서 save를 예약하고
+  location을 유지한다. 최종 persistence 보장을 추가한 것은 아니다.
+- 기준 `bf29027`의 PlayerActor를 임시 object로 컴파일해 새 테스트에 연결하면 `PendingEnter`의 cleanup 개수
+  assertion에서 실패한다. 작업 트리의 제품 코드를 되돌리지 않고 회귀 탐지력을 확인했다.
+- 검증: Debug **13 PASS / MySQL 4 SKIP**, TSan worker **8 PASS / MySQL 3 SKIP**(race 0),
+  ASan/UBSan worker **8 PASS / MySQL 3 SKIP**(sanitizer 오류 0), TCP 세션 테스트를 포함한 Debug adapter
+  **5회 연속 PASS**, 변경 줄 clang-format 및 `git diff --check` 통과.
+
+**완료 조건은 close 통지와 cleanup tell이 정상 전달됐을 때 점유가 남지 않는 것**이다. Room→Zone 순서는 effect
+발행 순서이며, 서로 다른 owner의 실행 완료 순서를 보장하지 않는다. close 통지 유실, cleanup tell 실패,
+application timeout 전달 보장, 최종 persistence와 shutdown cancel은 이번 패치로 해결하지 않았다.
+11G 전체 계약 대조와 11I production 품질 게이트는 여전히 남아 있다.
+
+### 11G-2 결과 — Application timer의 일시적 mailbox 포화 재시도
+
+- `Worker::onTimer`는 per-actor/전체 mailbox의 count·byte 사용량으로 admission이 막힌 application timer를
+  폐기하지 않고 동일 activation·payload로 재등록한다. deadline은 expiry pass의 `now + 1ms`이며, 기존
+  TimerQueue에서 반환한 entry/byte를 다시 사용한다. 별도 queue, reservation, Actor inline 실행은 없다.
+- 없는 Actor·다른 incarnation은 stale, Stopping·payload 자체의 mailbox byte 상한 초과는 기존 terminal
+  failure를 유지한다. 재등록은 `application_timer_delivery_retries`로만 추가 계상하며 scheduled/delivered/
+  failure와 구분한다. deferred timer의 shutdown cancellation도 기존 경로를 사용한다.
+- 아키텍처 §11의 기존 "mailbox full이면 폐기" 정책을 위 정책으로 명시적으로 변경했다. 보장은 activation이
+  유지되고 충분한 mailbox 여유가 회복될 때의 전달 보존이다. 지속 과부하에서의 전달 시간 상한은 아니다.
+
+정식 회귀 증거:
+
+- `test_application_timer_backpressure_and_terminal_matrix` (`worker_actor_test.cpp`): 실제
+  `TimerAdmission` → `ScheduleTimerEffect`를 거친 9개 조건을 검증한다. 포화 4종, 재시도 중 shutdown,
+  없는 Actor, 재활성화된 incarnation, Stopping, oversized를 포함한다. 각 포화 및 shutdown 사례는
+  50회 재시도에도 timer 1개·동일 byte, mailbox accounting 불변과 scheduled 1회를 확인한다.
+  미래 시각으로 expiry를 호출해도 같은 pass/같은 시각에 재시도하지 않으며, 용량 회복 뒤 mailbox에
+  정확히 한 번 전달되고 Actor phase에서만 실행된다. terminal 뒤 timer/reservation accounting은 0이다.
+- `test_worker_retried_workflow_timeout_cleans_cross_zone_transfer` (`worker_adapter_test.cpp`): 실제
+  Player/Zone adapter를 Worker에서 구동하고 target Enter 적용 뒤 outcome만 보류한다. Player의 1칸 mailbox를
+  채운 상태에서 timeout을 만료시켜 재시도를 확인한 다음, mailbox를 비우면 known-none과 양쪽 Zone 점유 0,
+  close effect 1회로 종결된다. 늦은 target outcome과 이전 timeout은 추가 terminal을 만들지 않는다.
+  네트워크 effect는 테스트 관찰 지점에서 수집하며, 실제 TCP lifecycle은 기존 session suite를 함께 재실행했다.
+- 최종 검증: Debug **13 PASS / MySQL 4 SKIP**, TSan worker **8 PASS / MySQL 3 SKIP**(race 0),
+  ASan/UBSan worker **8 PASS / MySQL 3 SKIP**(sanitizer 오류 0), TCP 포함 Debug adapter **5회 연속 PASS**,
+  변경 줄 clang-format 및 `git diff --check` 통과.
+
+11G-2만 완료다. disconnect 통지와 cleanup tell의 전달 보장, 최종 persistence, workflow shutdown cancel 및
+전체 failure terminal 계약 대조는 남아 있다. 다음 제품 코드 위임 대상은 11G-3 disconnect 통지 전달 보장이다.
+
+### 11G-3A 결과 — Close 통지의 mailbox admission receipt
+
+- `Worker::notifyActorConnectionClosed`는 opaque envelope를 기존 WorkerInbox로 전달한다. 대상 Actor가
+  없으면 재활성화 없이 `ActorAbsent`, 존재하면 bounded mailbox admission 뒤 `MailboxAccepted`를
+  connection owner의 `RequestSink`에 반환한다. Stopping·mailbox 포화·잘못된 owner에는 receipt가 없다.
+- **원격 API의 `Accepted`는 inbox 접수일 뿐**이다. receipt도 Actor 실행이나 Zone/Room cleanup 완료를
+  뜻하지 않는다. 로컬 receipt는 API 반환 전 동기 호출될 수 있으며, 재전송은 중복 통지와 receipt를 만들 수 있다.
+- 통지와 receipt 모두 byte accounting 및 성공 publication의 `barrier.notePublished`를 적용한다.
+  8개 전용 counter로 발신, admission, 부재, 거절, receipt 발신 실패와 수신을 구분한다. 자동 재시도는 없다.
+
+`worker_actor_test.cpp`의 정식 회귀 증거:
+
+- `test_connection_closed_receipts_local_remote_and_fifo`: 로컬 동기 callback과 원격 2-hop receipt 시점,
+  기존 mailbox 메시지 뒤의 FIFO, Actor inline 실행 금지, count/byte 복구, publication epoch.
+- `test_connection_closed_absent_and_state_admission`: 미존재 Actor의 무생성, Idle의 Queued 전이 및
+  Running/Loading/Suspended 상태 보존, Stopping 거절. 상태별 admission은 합성 상태로 격리해 검사하며
+  fabricated blocked operation의 resume 성공을 주장하지 않는다.
+- `test_connection_closed_mailbox_limits_and_recovery`: 로컬·원격 각각 per-actor/전체 count·byte 포화
+  4종에서 receipt 없음과 회계 불변, 용량 회복 뒤 명시적 재전송의 성공.
+- `test_connection_closed_inbox_failures_and_lost_receipt_retry`: 통지·receipt 양방향 inbox의 byte·count
+  포화 및 closed 상태, receipt 발행 실패에도 대상 메시지 보존, receipt 유실 후 중복 전달 허용.
+- `test_connection_closed_validation_and_charge_overflow`: 발신/수신 owner, 미설정 runtime/Sink,
+  charge overflow, stop 및 shutdown admission 거절.
+- `test_connection_closed_receipts_across_owner_threads`: 두 실제 owner thread에서 128회 통지·receipt를
+  교환하고 callback thread, 메시지 수, 256회 publication을 검사한다. Worker phase는 테스트 harness로 구동한다.
+
+검증: Debug **13 PASS / MySQL 4 SKIP**, 신규 경로 포함 TSan worker **8 PASS / MySQL 3 SKIP**(race 0),
+ASan/UBSan worker **8 PASS / MySQL 3 SKIP**(sanitizer 오류 0), TCP 포함 Debug adapter **5회 연속 PASS**,
+변경 줄 clang-format 및 `git diff --check` 통과.
+
+**11G-3A만 완료**다. GameRequestSink는 아직 기존 tell 경로를 사용한다. 다음 11G-3B는 B1(Worker의
+owner-thread retry hook/deadline 연동) → B2(Sink의 사전 용량 확보·pending 보존·receipt 기반 재시도)로
+분리하고 각각 검증한다. cleanup tell 실패, 최종 persistence, shutdown 종결과 전체 terminal 대조는 남는다.
+
+### 11G-3B1 결과 — Worker retry hook과 poll deadline 연동
+
+- `RequestSink`에 기본 nullopt deadline 조회와 no-op retry 훅을 추가했다. 정상 Worker loop는 inbox drain
+  뒤, timer phase 전에 due deadline일 때만 iteration당 한 번 호출한다. budget은 64건/100us이며 실제
+  count/time 준수는 후속 Sink 구현의 책임이다. 실행 시간은 Inbox phase에 포함한다.
+- `pollTimeout`은 TimerQueue와 Sink deadline 중 빠른 것을 선택한다. 지난 deadline은 0ms, 미래 값은
+  millisecond 올림 후 `max_poll_timeout`으로 제한한다. 둘 다 없으면 기존 최대 poll 대기를 유지한다.
+- Actor runtime/Sink 미설정, stop 관측 또는 shutdown 상태에서는 Sink 훅을 사용하지 않는다.
+  shutdown phase, 기존 timer admission, Actor mailbox와 publication 경로는 변경하지 않았다.
+
+정식 회귀 증거 (`worker_actor_test.cpp`):
+
+- `test_close_retry_poll_deadline_matrix`: 12가지 조합에서 nullopt/due/future, 올림·최대 대기 제한,
+  timer와 retry 우선순위, stop/shutdown 및 미설정 상태를 검사한다. 기본 NullRequestSink 훅도 확인한다.
+- `test_close_retry_idle_wakeup_phase_budget_and_iteration_limit`: 실제 `Worker::run`을 별도 owner thread에서
+  실행한다. 외부 event·timer 없이 30ms retry deadline을 설정하고, 5초 fallback poll보다 빠른 2초 안에
+  호출됨을 확인한다. due deadline을 남겨도 세 번의 callback이 서로 다른 iteration에서 실행되며,
+  Inbox phase, 64건/100us budget, Actor inline 실행 금지와 stop 이후 추가 호출 없음도 검사한다.
+- `test_close_retry_runs_before_due_timer`: 같은 iteration에서 retry → due timer → Actor 순서를 검사한다.
+- `test_close_retry_inbox_precedes_hook_and_stop_gates`: inbox receipt에서 deadline 취소·미래로 연기,
+  stop 요청·shutdown 진입, Actor runtime 미설정, run 이전 stop의 6개 조건에서 retry가 실행되지 않는다.
+
+검증: Debug **13 PASS / MySQL 4 SKIP**, TSan worker **8 PASS / MySQL 3 SKIP**(race 0),
+ASan/UBSan worker **8 PASS / MySQL 3 SKIP**(sanitizer 오류 0), Debug Worker 및 TCP 포함 adapter
+**각각 5회 연속 PASS**, 변경 줄 clang-format 및 `git diff --check` 통과.
+
+**B1 호출 기반만 완료**다. GameRequestSink는 아직 기본 훅을 상속하므로 실제 disconnect 재전송은 없다.
+B2에서 사전 용량 확보, pending 보존, receipt 기반 해제와 bounded retry를 구현·검증한다. 지속적으로 due인
+deadline을 반환하면 정상 loop가 반복되므로 backoff·공정성은 B2의 책임이며, shutdown 전달 보장은 별도다.
+
+### 11G-3B2 결과 — Sink disconnect 통지 보존과 bounded 재시도
+
+- 인증 tell 전에 고정 record를 확보한다. 열린 세션(Tracked)과 receipt 대기(Closing)를 합쳐 Worker당
+  1,024개이며, 용량 초과 신규 인증은 Actor tell 없이 Rejected로 끝난다. 동일 연결/Player 재인증은
+  기존 record를 재사용하고, 신규 인증 tell 거절은 해당 record와 map entry만 롤백한다.
+- disconnect는 Closing 상태·pending count·deadline을 먼저 설치하고 열린 map entry를 제거한 뒤
+  통지를 보낸다. 로컬 동기 receipt의 재진입에 안전하며, 원격 inbox Accepted만으로 pending을 해제하지 않는다.
+  정확한 Player ActorKey와 full ConnectionRef의 MailboxAccepted/ActorAbsent receipt만 해제한다.
+- retry는 persistent cursor로 Free/Tracked도 포함해 슬롯 수를 계상한다. 정상 Worker budget은 64칸/100us,
+  시간 검사는 각 슬롯 사이에 수행하며 한 슬롯의 처리 시간만 초과할 수 있다. pending이 남으면 pass 종료와
+  전달받은 now 중 늦은 시각 +10ms로 연기한다. TTL·횟수 제한 폐기·overflow queue는 없다.
+- 원격 통지/receipt 유실, mailbox 포화와 Stopping/Closed 반환에도 pending을 유지한다.
+  새 generation은 별도 record를 사용하며, 늦은 이전 close/receipt가 새 열린 세션을 삭제하지 않는다.
+- 메모리 설명: Linux aarch64 Debug 측정에서 `sizeof(GameRequestSink) = 41,088` bytes다.
+  1,024칸 배열은 해당 ABI에서 40,960 bytes이며, 열린 map의 동적 node/bucket 메모리는 sizeof에 포함되지 않는다.
+  map entry 수는 1,024개 이하이나 allocator를 포함한 총 메모리의 “80~90KB” 상한을 실측한 것은 아니다.
+
+정식 회귀 증거 (`worker_adapter_test.cpp`):
+
+- `test_sink_close_local_receipt_and_retry_budgets`: 동기 receipt, Actor inline 실행 없음, 중복 close,
+  mailbox 포화 후 회복, 미래 deadline 및 count/time 0 budget.
+- `test_sink_close_remote_loss_and_inbox_recovery`: 통지 inbox 포화, receipt inbox 포화와 유실 후 중복 전달,
+  실제 ActorAbsent receipt와 불필요한 Actor 생성 없음.
+- `test_sink_close_capacity_fairness_and_generation`: 용량 1,024, 재인증, 마지막 슬롯까지 16회×64칸 scan,
+  50회 Stopping 재시도 보존, wrong identity/이전 generation no-op, 1,025회 인증 거절 후 용량 회수,
+  stop 중 50회 시도에도 pending 보존.
+- `test_sink_close_all_pending_remains_bounded`: 1,024칸 모두 Closing인 상태에서 신규 인증 차단,
+  양수 최소 시간 budget, 50회 포화 유지, 용량 회복 뒤 16 pass에 걸친 전체 receipt 회수.
+- `test_sink_close_retries_from_idle_worker_loop`: 실제 owner thread의 Worker loop에서 auth가 mailbox 한 칸을
+  점유해 최초 close 통지가 거절된 뒤, 외부 트래픽 없이 retry deadline으로 깨어나 통지 실행과 pending 0을
+  확인한다. 5초 fallback poll보다 빠른 2초 안에 완료되며 owner-thread 규칙을 유지한다.
+
+위 신규 테스트는 관찰용 Actor로 transport 경계를 검증한다. 실제 Player/Zone/Room 점유 제거는 기존 11G-1
+테스트를 함께 재실행했으며, 두 경계를 합친 과부하 workflow 통합 검증은 다음 작업에서 보강한다.
+
+검증: Debug **13 PASS / MySQL 4 SKIP**, TSan worker **8 PASS / MySQL 3 SKIP**(race 0),
+ASan/UBSan worker **8 PASS / MySQL 3 SKIP**(sanitizer 오류 0), TCP 포함 Debug adapter **5회 연속 PASS**,
+변경 줄 clang-format 및 `git diff --check` 통과.
+
+**B2만 완료**다. receipt는 mailbox admission이지 Actor 실행·cleanup 성공 증명이 아니다. 정상 loop의 재시도
+보존은 용량 회복과 대상 Actor의 진행을 전제로 하며 전달 시간 상한, shutdown drain, 최종 persistence를
+보장하지 않는다. 다음은 [11G-4A 실패 주입·계약 대조 계획](./stage-11g-next-work-plan.md)이다.
+
+### 11G-4 결과 — 실패 terminal identity fence, Player 소유 cleanup 재시도, shutdown 종결
+
+세션에서 확정한 계약 결정 3건(2026-09-16):
+
+1. **known-none 종료.** source Leave가 `PlayerMissing` 또는 `StaleRoute`로 끝나면 추측한 source route를
+   유지하지 않는다. 관측한 epoch를 반영하고 last location을 비운 뒤 정확한 epoch의 cleanup Leave를 보내고
+   연결을 닫는다. 남은 좌석을 정상 완료로 취급하지 않는다.
+2. **cleanup 재시도는 PlayerActor가 소유한다.** 일반 `TellActorEffect`의 계약은 바꾸지 않는다. 범용
+   reliable tell이나 무기한 재전송 queue도 추가하지 않는다. 재시도 상태와 응답 판정은 cleanup을 발행한
+   Player가 보유하며, shutdown에서는 단순 객체 삭제와 구분해 명시적으로 종결한다.
+3. **shutdown 최종 저장.** 절대 종료 시한 안에서 cleanup 후 final snapshot 저장을 한 번 시도한다. DB 장애,
+   commit 결과 불명, 시한 초과는 성공으로 숨기지 않고 별도 실패 지표로 남긴다. 프로세스 장애까지 견디는
+   durable 재처리는 이번 범위가 아니다.
+
+**Worker의 lifecycle turn.** Actor가 스스로 요청하는 turn을 Actor phase와 turn budget 안에서 실행한다.
+mailbox 용량도 timer admission도 소비하지 않으므로 포화된 mailbox나 가득 찬 `TimerQueue`가 cleanup 재시도를
+봉쇄하지 못한다. 한 turn은 여전히 resume 하나, mailbox command 하나, lifecycle turn 하나 중 하나만 실행한다.
+
+- 구현 중 결함 1건을 발견해 수정했다. 최초 구현은 매 loop iteration마다 `ActorTable` 전체를 훑어 lifecycle
+  작업을 찾았고, 16,384칸 빈 table에서 그 scan만 Actor phase 1ms 예산의 200~500us를 소비해 일반 mailbox
+  turn을 굶겼다. 기존 `test_close_retry_idle_wakeup_phase_budget_and_iteration_limit`가 이를 잡았다
+  (`turns == sink.calls - 1` 실패, Debug/ASan/TSan 세 preset).
+- 수정: Worker가 lifecycle 작업이 있는 Actor만 색인(`_lifecycle_armed`)으로 보유한다. 색인은 각 turn 직후
+  그 Actor에게 한 번 질의해 갱신하고, shutdown 시작 시 한 번 전체를 채우며, Actor 제거 시 항목을 지운다.
+  `pollTimeout`과 Actor phase는 색인만 본다.
+
+**실패 terminal identity fence.** Room Join 1단계 outcome은 request·step·room·`request_id`와 결과의
+player까지 대조하고 `Applied`만 진행한다. `AlreadyJoined`는 더 이상 성공으로 보지 않는다. cross-zone과
+Return의 zone outcome은 zone·epoch·`request_id`·player를 대조하며, pending zone op도 같은 4개를 대조한 뒤
+소비한다. close 결정 이후 도착한 zone/room outcome과 queued 입력은 새 점유를 만들지 않는다.
+`RoomTerminalNotification`은 현재 재적 식별자와 일치할 때만 적용한다.
+
+**Player 소유 cleanup.** cleanup Leave는 correlation id, connection generation, zone route epoch 또는 room
+재적 식별자를 함께 싣고 Player의 고정 19칸 배열에 남는다. lifecycle turn이 10ms마다 남은 cleanup 전체를
+다시 보내고, 대상·correlation·epoch 또는 재적·generation·`request_id == 0`·player가 모두 일치하는 응답만
+해제한다. 해제 조건은 zone이 `Applied`/`PlayerMissing`/`StaleRoute`, room이 `Applied`/`NotJoined`/
+`WrongPhase(Cleared|Failed)`다. 19칸을 넘기면 조용히 버리지 않고 `std::logic_error`로 끝낸다.
+
+cleanup 완료 전 재입장은 막는다. 다른 연결의 `Authenticate`는 닫고, 같은 연결의 zone 요청은
+`TransitionInProgress`, room 입장은 `EntryFailed`로 답한다. cleanup 중 도착한 Return의 성공 outcome은
+버리지 않고 보류한 뒤 cleanup이 끝난 turn에서 적용한다.
+
+**재적 식별자.** Room은 `JoinRoom`이 `Applied`일 때 `RoomMembership{incarnation, join correlation}`을
+저장하고 `Applied` Leave에서 지운다. 재적이 일치하지 않는 Leave는 좌석을 건드리지 않고 `NotJoined`로
+답한다. 늦게 도착한 이전 cleanup이 같은 플레이어의 새 좌석을 지우지 못한다. Room 결과의 audience route도
+참가자별 재적을 실어 Player가 오래된 terminal 통지를 구분한다.
+
+**shutdown.** phase A에서 모든 Actor에 shutdown turn을 예약한다. shutdown turn은 bound connection의 close
+경로를 먼저 실행해 cleanup을 발행하고, cleanup이 모두 해제된 뒤 location·session을 포함한 final
+`SavePlayerRequest` 하나를 낸다. 일반 DB submit은 `_shutting_down`으로 막힌 상태이며, 이 최종 저장만
+phase B 동안 통과한다. `DbClient::beginShutdown()`은 phase B 이후로 옮겼다. phase B는 이 최종 저장을 일반
+blocked 작업의 cancel과 구분하며, 시한 초과로 강제 제거되면 `lifecycle_forced_cancellations`,
+commit 실패·불명은 `lifecycle_finalization_failures`로 남는다. 불명 commit을 자동 재시도하지 않는다.
+최종 저장이 성공한 뒤 도착한 cross-worker 경험치 지급은 한 번 더 저장한다. Sink의 보존된 close 통지는
+phase D에서 `cancelConnectionCloseRetries()`로 명시적으로 종결한다.
+
+정식 회귀 증거:
+
+- `worker_actor_test.cpp` `test_lifecycle_index_arms_only_actors_with_work`: lifecycle 작업이 없는 Actor는
+  색인에 들어가지 않고, 작업을 만든 turn이 arm하며, 도래 전에는 turn을 쓰지 않는다. 빈 mailbox에서
+  lifecycle turn이 실행되고 deadline을 비우면 disarm된다. Actor 제거는 항목을 지우고, shutdown은 남은
+  Actor를 한 번에 arm하며 색인이 phase B의 남은 작업 여부를 답한다.
+- `worker_adapter_test.cpp` `test_workflow_outcome_identity_matrix`: Room Join·Return·cross-zone의 outcome을
+  필드별로 어긋나게 주입해 각 단계가 무시되는지 대조한다.
+- `test_room_return_stale_route_cleans_observed_epoch`: Return의 `StaleRoute`가 관측한 epoch로 cleanup을
+  보내고 알려진 좌석 없이 종료하는지 확인한다.
+- `test_non_cross_close_decision_gates_queued_input`: close 결정 이후 queued 입력이 새 점유를 만들지 않고,
+  충돌 연결의 close가 기존 세션을 막지 않는지 확인한다.
+- `test_cleanup_retry_fences_and_deferred_return`: cleanup 응답을 유실시킨 뒤 50회 재시도에서 같은 재적과
+  correlation을 유지하고, 8개 필드 오염 응답을 모두 무시하며, 동일 명령 재전송의 `NotJoined`로 해제된다.
+  해제 뒤 보류한 Return이 적용되고, 재입장으로 새 재적을 얻은 뒤 도착한 이전 cleanup과 이전 terminal
+  통지가 새 좌석을 지우지 못한다.
+- `test_shutdown_final_save_failure_and_late_grant`: `Committed`/`FailedBeforeCommit`/`CommitOutcomeUnknown`
+  세 결과에 대해 cleanup 후 location 포함 최종 저장이 한 번 실행되고, 실패·불명은 `finalizationFailed()`로
+  남되 자동 재시도하지 않으며, 성공 뒤 도착한 경험치 지급만 한 번 더 저장한다.
+- 실제 Worker 통합은 기존 cross-zone 테스트에서 1칸 mailbox로 cleanup 응답 하나를 유실시킨 뒤 정상 loop의
+  lifecycle turn 재시도로 pending cleanup이 0이 되는 것까지 확인한다
+  (`effect_tell_failures >= 1`, `lifecycle_turns >= 1`).
+
+검증: Debug 전체 **13 PASS / MySQL 4 SKIP**(실패 0), `snf_worker_tests` **10회 연속 PASS**,
+TCP 포함 Debug adapter **5회 연속 PASS**, ASan/UBSan worker **8 PASS / MySQL 3 SKIP**(sanitizer 오류 0),
+TSan worker **8 PASS / MySQL 3 SKIP**(race 0), 변경 줄 clang-format 및 `git diff --check` 통과.
+
+**11G-4는 여기까지다.** 위 경로들은 검증했으나 계약 조항별 전체 failure terminal 대조표는 아직 문서로
+정리하지 않았고, 11G 체크박스는 닫지 않는다. cleanup `TellActorEffect` 자체의 적용 실패는 여전히
+metric으로만 관측되며, 전달 시간 상한과 프로세스 장애를 견디는 최종 persistence는 보장하지 않는다.
+
+## 검증
+
+각 스텝마다 Docker 안에서:
+
+```bash
+docker run --rm -v "$PWD:/workspace" -w /workspace snf-server-dev bash -lc 'cmake --build --preset debug && ctest --preset debug --output-on-failure'
+```
+
+Phase 2·3 직후에는 세 preset 전부:
+
+```bash
+docker run --rm -v "$PWD:/workspace" -w /workspace snf-server-dev bash -lc 'cmake --build --preset tsan && TSAN_OPTIONS=halt_on_error=1 ctest --preset tsan -L worker --output-on-failure'
+```
+
+```bash
+docker run --rm -v "$PWD:/workspace" -w /workspace snf-server-dev bash -lc 'cmake --build --preset asan-ubsan && ctest --preset asan-ubsan -L worker --output-on-failure'
+```
+
+## 리스크
+
+- **cross-worker transition ordering.** 11F의 2-Worker TCP 테스트에서 Player와 Zone을 다른 owner에 배치해
+  source Move → Leave와 Zone outcome의 remote inbox 순서를 재확인했다. 포화 시 backpressure와 cleanup tell
+  failure metric은 11I 과부하 게이트에서 다시 확인한다.
+- **cleanup tell은 best-effort다.** 11E는 `TimerAdmission::tryReserve`로 terminal timeout 예산을 먼저 확보해
+  primary Zone/Room tell 또는 outcome 유실을 감지하고, idempotent cleanup tell과 안전한 local route를
+  결정한다. 다만 cleanup `TellActorEffect` 자체의 적용 실패는 metric으로만 관측되므로, 11G에서
+  disconnect/shutdown terminal과 함께 실패 계약을 대조하고 11I 과부하 게이트에서 해당 metric을 확인한다.
+- **D4 함정.** 도메인 실패를 잘못 매핑하면 부하 중 연결이 끊기고 parity 실패로 나타난다.
+- **11I의 MySQL 실측이 처음이다.** `mysql_close()` boundedness를 포함해 새로 드러날 문제가 있을 수 있다.
+- **11J 후 `snf::server::Player` 이름과 `snf_game` 위치의 불일치가 남는다.** 네임스페이스 정리는 범위 밖이다.
+
+## 범위 밖
+
+- `snf::server::Player` → `snf::game::Player` 네임스페이스 정리
+- durable workflow system (§12 규칙 4)
+- actor live migration, dynamic worker scaling, idle passivation
+- matchmaking, group 동시 입장, 프로세스 간 이동, mid-battle reconnect (계약 §1의 명시적 범위 밖)

@@ -3,11 +3,17 @@
 
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <stdexcept>
 #include <sys/socket.h>
 
 namespace snf::net
 {
-    UniqueFileDescriptor create_tcp_listener(std::uint16_t port)
+    UniqueFileDescriptor create_tcp_listener(const std::uint16_t port)
+    {
+        return create_tcp_listener(port, false);
+    }
+
+    UniqueFileDescriptor create_tcp_listener(const std::uint16_t port, const bool reuse_port)
     {
         const int listener_fd = ::socket(AF_INET, SOCK_STREAM, 0);
         if (listener_fd == -1)
@@ -22,6 +28,19 @@ namespace snf::net
         if (::setsockopt(listener.getDescriptor(), SOL_SOCKET, SO_REUSEADDR, &reuse_address, sizeof(reuse_address)) == -1)
         {
             throw_system_error("setsockopt(SO_REUSEADDR)");
+        }
+
+        if (reuse_port)
+        {
+#ifdef SO_REUSEPORT
+            constexpr int reuse_port_value = 1;
+            if (::setsockopt(listener.getDescriptor(), SOL_SOCKET, SO_REUSEPORT, &reuse_port_value, sizeof(reuse_port_value)) == -1)
+            {
+                throw_system_error("setsockopt(SO_REUSEPORT)");
+            }
+#else
+            throw std::invalid_argument{"SO_REUSEPORT is not available on this platform"};
+#endif
         }
 
         const int file_status_flags = ::fcntl(listener.getDescriptor(), F_GETFL);

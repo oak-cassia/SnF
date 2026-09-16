@@ -1,124 +1,155 @@
 # Player 상태 소유권과 persistence 계약
 
-## 1. 원칙
+> 문서 상태: **domain authority 보존 / persistence 실행 경로 전환 예정**
+> Player gameplay state와 durability 의미는 이 문서가 소유한다. thread, queue, coroutine과 DB 진행
+> 방식은 [Unified Worker Runtime](./architecture/unified-worker-runtime.md)이 우선한다. 현행
+> `PlayerPersistenceService`와 blocking MySQL worker는 target 구조가 아니다.
 
-Live Server가 실행 중 Player gameplay state의 authority다. DB는 snapshot 저장과 login/reconnect
-복구를 담당하며 정상 command를 다시 판정하지 않는다.
+## 1. Authority
+
+Live server가 실행 중 Player gameplay state의 authority다. DB는 snapshot 저장과 login/reconnect 복구를
+담당하며 정상 command를 다시 판정하지 않는다.
 
 ```text
 PlayerActor
-├── Session
-│   ├── identity
-│   ├── handled command count
-│   └── last Zone location
-└── Economy
-    ├── currency balance
-    ├── purchased item count
-    └── bounded purchase evidence
+├─ Session
+│  ├─ identity
+│  ├─ handled command count
+│  └─ last Zone location
+├─ Economy
+│  ├─ currency balance
+│  ├─ purchased item count
+│  └─ bounded purchase evidence
+└─ Skills
+   └─ sorted owned skill IDs + equipped skill ID
 ```
 
-Session과 Economy는 별도 Actor가 아니라 PlayerActor 내부 구성 단위다. 잔액 차감과 상품 지급처럼
-하나의 불변식으로 변경되는 값은 같은 mailbox에서 처리한다.
+Session, Economy와 Skills는 별도 Actor가 아니다. 잔액 차감과 상품 지급처럼 하나의 불변식으로 바뀌는
+값은 같은 Actor turn에서 처리한다.
 
 ## 2. Command 규칙
 
-- PlayerActor만 PlayerState를 수정한다.
-- 다른 thread는 const reference를 읽지 않고 command 또는 immutable snapshot을 사용한다.
-- `restore()`는 login/복구 시 owning Worker에서만 실행한다.
+- PlayerActor만 Player gameplay state를 수정한다.
+- 다른 Worker는 const reference나 pointer를 읽지 않고 message 또는 immutable snapshot을 사용한다.
+- `restore()`는 activation load를 소유한 Worker에서만 실행한다.
 - `PurchaseCommand`는 상품 정의, 잔액, 지급량과 idempotency를 한 turn에서 판정한다.
-- 같은 key와 product는 저장된 outcome을 replay한다.
-- 같은 key와 다른 product는 `IdempotencyConflict`다.
+- 스킬 상품은 이미 보유했는지를 잔액보다 먼저 판정하고 성공할 때만 잔액과 보유 목록을 함께 확정한다.
+- `EquipSkillCommand`는 알려진 보유 스킬만 장착하며 Room 입장 뒤 변경은 다음 입장부터 적용한다.
+- 같은 key와 product는 저장된 outcome을 replay하고 같은 key와 다른 product는
+  `IdempotencyConflict`로 끝낸다.
 - evidence 상한에 도달하면 기존 증거를 지우지 않고 새 key를 거부한다.
 
-현재 evidence의 수명은 Actor activation과 같다. process crash 또는 passivation 뒤 같은 key가 다시
-오면 신규 command로 처리될 수 있다. 이 범위를 넘어서는 멱등성이 필요하면 별도 durable 요구사항을
-정의해야 한다.
+현재 evidence의 수명은 Actor activation과 같다. process crash 또는 향후 passivation 뒤 같은 key가
+다시 오면 새 command로 처리될 수 있다. 이 범위를 넘는 멱등성은 별도 durable 요구사항이다.
 
 ## 3. Connection lifecycle
 
-Connection identity는 Player 도메인 상태가 아니다. reactor의 Gateway와 `PlayerSessionDirectory`가
-generation을 포함한 `ConnectionId`로 admission, persistent Player routing과 one-live-session을
-판정한다. stale generation은 이 경계에서 persistent PlayerActor에 도달하지 않는다.
+Connection identity는 Player domain state가 아니다. connection owner Worker의 `ConnectionSlot.session`과
+application routing state가 `ConnectionRef{id, generation, owner}`로 admission, persistent Player routing과
+one-live-session을 판정한다. Actor owner가 다르면 concrete message로 전달한다.
 
-- connection이 닫히면 directory는 `Closing`을 유지해 final save와 Actor 제거 전에 reconnect가
-  이전 mailbox 뒤로 들어가지 못하게 한다.
-- `PlayerActorState`는 `ConnectionClosed`의 connection을 command 응답용 scratch와 분리해 보관한다.
-- Actor 소멸 callback은 Player와 그 connection이 모두 현재 `Closing` 세션과 정확히 같을 때만
-  directory의 양방향 index를 제거한다.
-- disconnect 전에 admission된 FIFO command는 connection이 닫힌 뒤 실행돼 Player state를 바꿀 수
-  있다. 이는 이미 승인된 mailbox tail을 보존하는 정책이며 새 command의 admission을 허용한다는 뜻은
-  아니다.
-- shutdown 중 `abandon`은 connection index를 먼저 해제할 수 있다. 이때 이전 Actor의 늦은
-  deactivation은 exact match 실패로 새 session에 영향을 주지 않는다.
+- stale generation은 Player command admission 전에 거부한다.
+- connection이 닫히면 session route는 final persistence와 Actor cleanup 정책이 끝날 때까지 Closing을
+  유지해 이전 mailbox tail과 reconnect가 섞이지 않게 한다.
+- disconnect 전에 수락된 FIFO command는 connection close 뒤 실행돼 Player state를 바꿀 수 있다. 이는
+  이미 수락된 tail을 보존하는 정책이지 신규 command를 허용한다는 뜻이 아니다.
+- cleanup은 Player identity와 `ConnectionRef`가 현재 Closing session과 모두 일치할 때만 route index를
+  제거한다.
+- 이전 activation이나 connection의 늦은 completion은 incarnation/generation 검증 실패로 state를
+  변경하지 않는다.
 
-## 4. Dirty snapshot
+구체 route/transition owner는 application workflow 전환 단계에서 확정하되, 별도 global Reactor가 모든
+connection mutable state를 소유하는 구조로 되돌리지 않는다.
 
-성공한 Economy 변경은 Economy dirty bit을 설정한다. owning Worker는 flat `PlayerRecord` snapshot을
-만들어 `PlayerPersistenceService`의 bounded queue에 non-blocking으로 제출한다.
+## 4. Snapshot 의미
 
-- admission 성공: 제출 시점의 dirty bit을 지운다.
-- admission 실패: dirty bit을 복원해 다음 command에서 재시도한다.
-- DB completion은 PlayerActor state를 다시 덮어쓰지 않는다.
-- location과 economy는 같은 authoritative snapshot으로 저장한다.
+성공한 Economy, Progression과 Skills 변경은 해당 dirty bit을 설정하고, 저장할 때는 전체
+`PlayerRecord` immutable snapshot을 만든다.
 
-## 5. PlayerPersistenceService
+- location, economy, progression과 skill loadout은 하나의 authoritative snapshot으로 저장한다.
+- snapshot은 저장 시점의 Player state를 복사한 값이며 DB/backend가 Actor state를 다시 읽지 않는다.
+- DB completion은 Player gameplay state를 덮어쓰지 않는다.
+- mutation save의 자동 retry는 금지한다. retry하려면 overwrite가 안전하다는 계약이나 idempotency key를
+  명시한다.
+- save admission 실패, timeout과 connection loss가 dirty state와 client outcome에 미치는 의미를 각
+  use case가 명시해야 한다.
 
-Service는 production에서 Player snapshot을 저장하는 유일한 경로다.
+## 5. Target persistence 실행
 
-- 같은 Player의 pending snapshot은 최신 값으로 coalesce한다.
-- 같은 Player save는 동시에 두 개 실행하지 않는다.
-- 다른 Player save는 repository Worker에서 병렬 실행될 수 있다.
-- background save 실패는 snapshot을 유지하고 retry한다.
-- logout final save는 이전 background save 뒤에 직렬화한다.
-- shutdown은 accepted snapshot과 final request가 terminal 결과에 도달할 때까지 flush한다.
-
-## 6. Repository
-
-```cpp
-asyncLoad(PlayerId, PlayerLoadCompletion)
-asyncSave(PlayerRecord, PlayerSaveCompletion)
-```
-
-Repository는 Actor, ActorState, mutable state 또는 coroutine handle을 받지 않는다. in-memory adapter는
-결정적 기본 실행에 사용하고, MySQL adapter는 bounded queue와 전용 Worker Pool 뒤에서 blocking C API를
-실행한다.
-
-## 7. Durability 한계와 다음 확장
-
-현재 구매 성공은 snapshot 저장 완료 전에 응답된다. 따라서 flush 전 process crash에서는 최근 economy
-변경이 사라질 수 있다. 이는 무료/게임 내 NPC 상품을 가정한 명시적 정책이지 durable transaction과
-동일한 보장이 아니다.
-
-구현 순서 4의 battle reward도 이 한계를 없애지 않고 책임 경계만 명확히 한다. Room은 새 테이블을
-만들지 않고 grant를 tell할 뿐이며, tell이 수락되고 최초 record load가 성공한 순간 보상의 책임은
-대상 PlayerActor로 넘어간다.
+기본 production 경로는 Player owner Worker의 poller에서 진행하는 Worker-local native async
+`DbClient`다.
 
 ```text
-tell 수락 + 최초 load 성공 → PlayerActor가 메모리에 반영하고 스냅샷 큐 수락까지 상주
-큐 수락 이후             → PlayerPersistenceService가 프로세스 생존 범위에서 재시도
-tell 거절                 → 계측된 허용 유실. Room은 재전달 timer를 갖지 않는다
-최초 load 실패            → 계측된 허용 유실. grant를 적용하지 않는다
+Player command 또는 activation
+-> immutable DbRequest 생성
+-> DbClient.tryStart(request, AwaitKey)
+-> Rejected / CompletedInline / Pending
+-> Pending이면 ActorSlot.blocked = ActivationLoad | SuspendedDbCommand
+-> DB readiness progress
+-> Worker.completeDb(AwaitKey, DbResult)
+-> Actor phase에서 activation 완료 또는 coroutine resume
 ```
 
-PlayerActor는 저장 성공을 기다리지 않는다. 큐에 들어간 스냅샷은 서비스가 자체 타이머로 재시도하므로
-actor 수명과 무관하고, 저장 성공까지 붙잡으면 DB 장애 동안 actor가 상주로 누적된다. 전달이
-at-most-once이고 저장이 record 전체 덮어쓰기이므로 멱등 키는 이 경로에 들어갈 자리가 없다.
+`DbClient`는 DB connection과 wire/protocol 진행 상태만 소유한다. Actor pointer, coroutine handle,
+Player state나 retry policy를 보관하지 않는다. 동기 MySQL API를 즉시 제거할 수 없을 때만 선택
+`BlockingAdapterExecutor`를 사용하고, job queue와 completion slot을 submit 시점에 함께 예약한다.
 
-구매나 외부 결제의 durability는 이 계약으로 해결된 것으로 간주하지 않는다. 고가치 보상과 결제는
-durable 원장과 멱등 키가 필요하며, 기존 handler에 boolean 옵션을 추가하지 않고 필요한 atomicity,
-retry window와 authority를 별도 vertical slice로 정의한다.
+Target core에는 다음을 두지 않는다.
+
+- `PlayerPersistenceService`를 runtime 필수 계층으로 두는 구조
+- 여러 Worker가 공유하는 blocking repository worker pool을 기본 DB 경로로 사용하는 구조
+- Actor continuation/deadline을 담는 repository-side pending table
+- 의미가 불명확한 `StartDetachedEffect`
+
+## 6. Deferred durability 결정
+
+현재 구매·장착 성공은 snapshot 저장 완료 전에 응답될 수 있다. flush 전 process crash에서 최근
+economy나 skill loadout 변경이 사라질 수 있다는 명시적 정책이며 durable transaction과 같은 보장이
+아니다.
+
+새 runtime에서 이 정책을 구현할 때 background save를 generic detached effect로 숨기지 않는다. 각
+use case는 다음 중 하나를 명시적으로 선택한다.
+
+1. 현재 Player command가 DB save를 await하고 terminal outcome을 저장 결과 뒤에 낸다.
+2. 독립 lifecycle이 필요하면 persistence Coordinator Actor가 immutable snapshot, Player별 ordering과
+   retry state를 소유하고 자신의 DB command만 await한다.
+3. process restart를 넘는 보장이 필요하면 durable ledger/outbox를 별도 subsystem으로 설계한다.
+
+2번에서 PlayerActor는 snapshot message를 보낸 뒤 현재 turn을 끝내며 Coordinator의 mailbox 응답을
+suspended coroutine으로 기다리지 않는다. Coordinator의 필요성은 deferred durability와 PlayerActor
+응답성 요구로 증명해야 한다. 정확한 Player save 정책은 개발 로드맵 8단계의 승인 항목이다.
+
+## 7. Battle reward
+
+일반 battle reward는 다음 gameplay 책임 경계를 유지한다.
+
+```text
+grant tell 수락 + 최초 load 성공
+-> PlayerActor가 reward 적용 책임을 인수
+-> immutable snapshot 또는 explicit dirty/save state로 persistence 진행
+
+grant tell 거절
+-> 계측된 허용 유실
+
+최초 load 실패
+-> 계측된 허용 유실; reward를 적용하지 않음
+```
+
+Room은 terminal 정리 뒤 generic retry timer를 소유하지 않는다. 고가치 보상과 외부 결제는 durable
+원장과 멱등 키가 필요하며, 기존 handler에 boolean 옵션을 추가하지 않고 atomicity, retry window와
+authority를 별도 vertical slice로 설계한다.
 
 ## 8. 검증
 
 - 구매 성공/잔액 부족/없는 상품/inventory overflow
-- 같은 key replay와 다른 product conflict
-- evidence capacity
-- snapshot queue rejection 시 dirty 복원
-- Player별 coalescing과 non-overlap
-- background retry와 final save ordering
-- disconnect/save/reconnect 복원
-- Closing 중 reconnect 거부와 connection exact-match passivation
+- 스킬 구매/중복 보유/장착 성공·실패와 보유·장착 round trip
+- 같은 key replay, 다른 product conflict와 evidence capacity
+- activation load success/failure와 queued command 종결
+- save admission rejection, timeout, late completion과 dirty-state 정책
+- old incarnation/generation/operation completion의 safe drop
+- disconnect/save/reconnect 복원과 exact-match cleanup
 - 서로 다른 battle grant의 누적과 대상 Player가 다른 grant 거부
-- grant tell 거절·최초 load 실패 계측과 snapshot admission retry·give-up
-- shutdown final flush
-- Debug, TCP integration과 TSan
+- grant tell 거절·최초 load 실패 계측
+- native DB partial I/O와 slow-server conformance
+- shutdown 중 DB completion/cancel race
+- Debug, TCP/MySQL integration, ASan·UBSan과 TSan

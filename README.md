@@ -1,6 +1,10 @@
 # SnF - C++ 비동기 MORPG 서버
 
 > epoll 기반 네트워크, Actor 실행 모델과 MySQL 영속화 설계 및 구현
+>
+> **아키텍처 전환 안내 (2026-08-29):** 이 README의 구조와 코드 링크는 현재 구현을 설명합니다.
+> 앞으로 구현할 기준은 [Unified Worker Runtime 아키텍처](docs/architecture/unified-worker-runtime.md)이며,
+> 문서 분류는 [docs/README](docs/README.md)를 따릅니다.
 
 ---
 
@@ -16,7 +20,7 @@ SnF는 Linux에서 실행되는 C++20 기반 MORPG 서버입니다.
 
 ---
 
-## 2. 전체 아키텍처
+## 2. 현행 구현 아키텍처
 
 SnF는 네트워크 입출력, 게임 상태 변경, 데이터베이스 작업을 서로 다른 실행 경계로 나눕니다.
 요청은 네트워크 Reactor에서 해석한 뒤 대상 Actor로 전달하고, 처리 결과는 클라이언트 응답이나
@@ -605,6 +609,12 @@ PlayerActor
 교체하고, 저장 중인 Player는 다음 저장 대상으로 선택하지 않습니다. 따라서 같은 Player의 저장은
 직렬화되지만 서로 다른 Player는 Repository Worker에서 병렬로 저장할 수 있습니다.
 
+schema v8에서는 `snf_players.equipped_skill_id`와
+`snf_player_skills(player_id, skill_id)`를 함께 사용합니다. 전체 Player snapshot 저장은 main row
+upsert, 기존 skill row 삭제, 정렬된 owned skill row 삽입을 하나의 READ COMMITTED transaction으로
+처리합니다. 어느 SQL에서든 실패하면 rollback되어 main row와 skill row가 서로 다른 버전으로 남지
+않습니다. 기존 v7 Player는 migration에서 Slash 보유·장착 상태로 이관됩니다.
+
 - 실행 중 스냅샷 저장이 실패하면 해당 스냅샷을 다시 대기 상태로 돌립니다.
 - 새 스냅샷이 들어오면 실패한 이전 값보다 최신 값으로 교체할 수 있습니다.
 - 연결·서버 종료 시의 최종 스냅샷은 진행 중인 저장을 추월하지 않고, 이전 대기 값은 대체합니다.
@@ -673,6 +683,7 @@ PlayerActor
 
 ```bash
 # Docker 개발 이미지 빌드
+# 이미지에는 Clang sanitizer runtime(libclang-rt-dev)이 포함된다. 이전에 만든 이미지는 다시 빌드한다.
 docker build -t snf-server-dev .
 
 # Docker에서 C++ 서버 빌드 (ASan·UBSan)

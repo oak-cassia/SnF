@@ -5,6 +5,7 @@
 
 #include <limits>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <variant>
 
@@ -40,6 +41,11 @@ namespace snf::server
         return _progression.street_experience;
     }
 
+    const SkillLoadout& PlayerState::getSkillLoadout() const noexcept
+    {
+        return _skills.skill_loadout;
+    }
+
     PlayerStateComponentMask PlayerState::dirtyComponents() const noexcept
     {
         return _dirty_components;
@@ -62,6 +68,7 @@ namespace snf::server
         _state._economy.currency_balance = record.currency_balance;
         _state._economy.purchased_item_count = record.purchased_item_count;
         _state._progression.street_experience = record.street_experience;
+        _state._skills.skill_loadout = record.skill_loadout;
         _state._dirty_components = 0;
         _purchase_evidence.clear();
     }
@@ -81,7 +88,9 @@ namespace snf::server
 
     bool Player::hasFlushableDirtyState() const noexcept
     {
-        constexpr PlayerStateComponentMask flushable = componentMask(PlayerStateComponent::Economy) | componentMask(PlayerStateComponent::Progression);
+        constexpr PlayerStateComponentMask flushable = componentMask(PlayerStateComponent::Economy) |
+                                                       componentMask(PlayerStateComponent::Progression) |
+                                                       componentMask(PlayerStateComponent::Skills);
         return (_state._dirty_components & flushable) != 0;
     }
 
@@ -131,6 +140,7 @@ namespace snf::server
             .currency_balance = _state._economy.currency_balance,
             .purchased_item_count = _state._economy.purchased_item_count,
             .street_experience = _state._progression.street_experience,
+            .skill_loadout = _state._skills.skill_loadout,
         };
     }
 
@@ -203,6 +213,46 @@ namespace snf::server
                 RoomJoinRequest{
                     .room = command.room,
                     .stats = combatStats(streetLevel(_state._progression.street_experience)),
+                    .equipped_skill_id = _state._skills.skill_loadout.getEquippedSkillId(),
+                },
+        };
+    }
+
+    PlayerResult Player::handleCommand(const EquipSkillCommand& command)
+    {
+        if (!_state._session.identity)
+        {
+            throw std::logic_error{"EquipSkillCommand reached a provisional Player actor"};
+        }
+
+        EquipSkillStatus status = EquipSkillStatus::UnknownSkill;
+        switch (_state._skills.skill_loadout.equipSkillId(command.skill_id))
+        {
+        case EquipSkillResult::Equipped:
+            status = EquipSkillStatus::Equipped;
+            _state._dirty_components |= componentMask(PlayerStateComponent::Skills);
+            break;
+        case EquipSkillResult::AlreadyEquipped:
+            status = EquipSkillStatus::AlreadyEquipped;
+            break;
+        case EquipSkillResult::SkillNotOwned:
+            status = EquipSkillStatus::SkillNotOwned;
+            break;
+        case EquipSkillResult::UnknownSkill:
+            status = EquipSkillStatus::UnknownSkill;
+            break;
+        }
+
+        return PlayerResult{
+            .responses =
+                {
+                    SendResponse{
+                        .response =
+                            EquipSkillResponse{
+                                .status = status,
+                                .equipped_skill_id = _state._skills.skill_loadout.getEquippedSkillId(),
+                            },
+                    },
                 },
         };
     }
@@ -252,19 +302,53 @@ namespace snf::server
             result.status = PurchaseStatus::Committed;
             std::uint64_t next_balance = _state._economy.currency_balance;
             std::uint64_t next_item_count = _state._economy.purchased_item_count;
-            if (next_balance < definition->price)
-            {
-                result.status = PurchaseStatus::InsufficientFunds;
-            }
-            else if (next_item_count > std::numeric_limits<std::uint64_t>::max() - definition->grant_count)
-            {
-                result.status = PurchaseStatus::InventoryCapacityExceeded;
-            }
-            else
-            {
-                next_balance -= definition->price;
-                next_item_count += definition->grant_count;
-            }
+            SkillLoadout next_skill_loadout = _state._skills.skill_loadout;
+            bool skills_changed = false;
+
+            std::visit(
+                [definition = *definition, &result, &next_balance, &next_item_count, &next_skill_loadout, &skills_changed](const auto& reward)
+                {
+                    using Reward = std::decay_t<decltype(reward)>;
+                    if constexpr (std::is_same_v<Reward, AddPurchasedItemCountReward>)
+                    {
+                        if (next_balance < definition.price)
+                        {
+                            result.status = PurchaseStatus::InsufficientFunds;
+                        }
+                        else if (next_item_count > std::numeric_limits<std::uint64_t>::max() - reward.item_count)
+                        {
+                            result.status = PurchaseStatus::InventoryCapacityExceeded;
+                        }
+                        else
+                        {
+                            next_balance -= definition.price;
+                            next_item_count += reward.item_count;
+                        }
+                    }
+                    else if constexpr (std::is_same_v<Reward, AddOwnedSkillReward>)
+                    {
+                        const AddOwnedSkillResult add_result = next_skill_loadout.addOwnedSkillId(reward.skill_id);
+                        if (add_result == AddOwnedSkillResult::AlreadyOwned)
+                        {
+                            result.status = PurchaseStatus::AlreadyOwned;
+                        }
+                        else if (add_result == AddOwnedSkillResult::UnknownSkill)
+                        {
+                            result.status = PurchaseStatus::ProductNotFound;
+                        }
+                        else if (next_balance < definition.price)
+                        {
+                            result.status = PurchaseStatus::InsufficientFunds;
+                        }
+                        else
+                        {
+                            next_balance -= definition.price;
+                            skills_changed = true;
+                        }
+                    }
+                },
+                definition->reward
+            );
 
             result.currency_balance = next_balance;
             result.purchased_item_count = next_item_count;
@@ -278,6 +362,11 @@ namespace snf::server
                 _state._economy.currency_balance = next_balance;
                 _state._economy.purchased_item_count = next_item_count;
                 _state._dirty_components |= componentMask(PlayerStateComponent::Economy);
+                if (skills_changed)
+                {
+                    _state._skills.skill_loadout = std::move(next_skill_loadout);
+                    _state._dirty_components |= componentMask(PlayerStateComponent::Skills);
+                }
             }
         }
 

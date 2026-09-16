@@ -43,7 +43,7 @@ class Entity:
 class ProjectileState:
     id: int
     owner: int
-    skill: int
+    skill_id: int
     target: int
     x: float
     y: float
@@ -245,7 +245,7 @@ class World:
                 projectile = ProjectileState(
                     id=ev["projectile"],
                     owner=ev["owner"],
-                    skill=ev["skill"],
+                    skill_id=ev["skill_id"],
                     target=ev["target"],
                     x=float(ev["x"]),
                     y=float(ev["y"]),
@@ -307,7 +307,7 @@ class World:
                 self.add_log(f"Player {pid} left the room")
 
             elif tag == EventTag.SkillWhiffed:
-                self.add_log(f"Player {ev['actor']} whiffed skill #{ev['skill']}")
+                self.add_log(f"Player {ev['actor']} whiffed skill #{ev['skill_id']}")
 
         if phase in (RoomPhase.Cleared, RoomPhase.Failed):
             self.projectiles.clear()

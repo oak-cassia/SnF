@@ -2,6 +2,7 @@
 #include "snf/game/skill_id.hpp"
 #include "snf/server/outbound_channel.hpp"
 #include "snf/server/protocol_gateway.hpp"
+#include "snf/server/protocol_room_result_sink.hpp"
 
 #include <cassert>
 #include <deque>
@@ -68,9 +69,17 @@ namespace
             , room_transitions(config.max_room_entries, wake.getDescriptor())
             , outbound(snf::server::OutboundChannelConfig{.capacity = 4, .max_slots_per_connection = 4}, wake.getDescriptor())
             , zone_results(outbound)
+            , room_results(outbound, sessions)
             , handoffs(commands, sessions, routes, transitions, lifecycle, zone_results, config.max_zone_completions_per_turn)
             , room_entries(
-                  commands, sessions, routes, room_transitions, lifecycle, outbound, zone_results, config.max_room_entry_completions_per_turn
+                  commands,
+                  sessions,
+                  routes,
+                  room_transitions,
+                  lifecycle,
+                  room_results,
+                  zone_results,
+                  config.max_room_entry_completions_per_turn
               )
             , gateway(
                   commands,
@@ -93,6 +102,7 @@ namespace
         snf::server::RoomTransitionChannel room_transitions;
         snf::server::OutboundChannel outbound;
         snf::server::ProtocolZoneResultSink zone_results;
+        snf::server::ProtocolRoomResultSink room_results;
         snf::server::CountingCommandLifecycleSink lifecycle;
         snf::server::ZoneHandoffService handoffs;
         snf::server::RoomEntryService room_entries;
@@ -138,8 +148,12 @@ namespace
         append_u32(payload, static_cast<std::uint32_t>(value));
     }
 
-    snf::server::FrameEnvelope
-    make_enter_frame(const snf::net::ConnectionId connection, const std::uint64_t zone, const std::int32_t x, const std::int32_t y)
+    snf::server::FrameEnvelope make_enter_frame(
+        const snf::net::ConnectionId connection,
+        const std::uint64_t zone,
+        const std::int32_t x,
+        const std::int32_t y
+    )
     {
         std::vector<std::byte> payload;
         append_u64(payload, zone);
@@ -196,6 +210,21 @@ namespace
                 snf::protocol::Frame{
                     .type = snf::protocol::MessageType::Purchase,
                     .request_id = 9,
+                    .payload = std::move(payload),
+                },
+        };
+    }
+
+    snf::server::FrameEnvelope make_equip_skill_frame(const snf::net::ConnectionId connection, const std::uint32_t skill_id)
+    {
+        std::vector<std::byte> payload;
+        append_u32(payload, skill_id);
+        return snf::server::FrameEnvelope{
+            .connection = connection,
+            .frame =
+                snf::protocol::Frame{
+                    .type = snf::protocol::MessageType::EquipSkill,
+                    .request_id = 10,
                     .payload = std::move(payload),
                 },
         };
@@ -320,6 +349,23 @@ namespace
         assert(route->request_id == 9);
         assert(purchase->idempotency_key.value == 3);
         assert(purchase->product == snf::server::BASIC_PRODUCT);
+    }
+
+    void test_equip_skill_requires_authentication_and_routes_to_the_attached_player()
+    {
+        GatewayFixture fixture;
+        const snf::net::ConnectionId connection{.descriptor = 56, .generation = 26};
+        const snf::server::PlayerId player{.value = 91};
+
+        assert(fixture.gateway.tryPost(make_equip_skill_frame(connection, 2)) == snf::server::FramePostResult::InvalidPayload);
+        assert(fixture.commands.post_count == 0);
+        assert(fixture.gateway.tryPost(make_auth_frame(connection, player)) == snf::server::FramePostResult::Accepted);
+        assert(fixture.gateway.tryPost(make_equip_skill_frame(connection, 2)) == snf::server::FramePostResult::Accepted);
+
+        const auto* route = std::get_if<snf::server::PlayerCommandRoute>(&fixture.commands.posted->route);
+        assert(route != nullptr && route->actor == player && route->request_id == 10);
+        const auto* equip = std::get_if<snf::server::EquipSkillCommand>(&route->command);
+        assert(equip != nullptr && equip->skill_id == snf::server::ARCANE_BOLT_SKILL_ID);
     }
 
     void test_rejects_duplicate_player_and_auth_after_provisional_activity()
@@ -822,12 +868,16 @@ namespace
         };
     }
 
-    snf::server::FrameEnvelope
-    make_use_skill_frame(const snf::net::ConnectionId connection, const std::uint64_t room, const std::uint32_t skill, const std::uint64_t sequence)
+    snf::server::FrameEnvelope make_use_skill_frame(
+        const snf::net::ConnectionId connection,
+        const std::uint64_t room,
+        const std::uint32_t skill_id,
+        const std::uint64_t sequence
+    )
     {
         std::vector<std::byte> payload;
         append_u64(payload, room);
-        append_u32(payload, skill);
+        append_u32(payload, skill_id);
         append_u64(payload, sequence);
         return snf::server::FrameEnvelope{
             .connection = connection,
@@ -841,7 +891,10 @@ namespace
     }
 
     snf::server::FrameEnvelope make_set_move_intent_frame(
-        const snf::net::ConnectionId connection, const std::uint64_t room, const std::uint8_t direction, const std::uint64_t sequence
+        const snf::net::ConnectionId connection,
+        const std::uint64_t room,
+        const std::uint8_t direction,
+        const std::uint64_t sequence
     )
     {
         std::vector<std::byte> payload;
@@ -1235,6 +1288,7 @@ void run_protocol_gateway_tests()
     test_routes_connection_closed_with_the_same_provisional_actor_id();
     test_authentication_attaches_and_routes_to_a_persistent_player();
     test_purchase_requires_authentication_and_routes_to_the_attached_player();
+    test_equip_skill_requires_authentication_and_routes_to_the_attached_player();
     test_rejects_duplicate_player_and_auth_after_provisional_activity();
     test_rolls_back_refused_auth_and_keeps_close_retry_target();
     test_routes_authenticated_zone_enter_move_leave_with_one_epoch();

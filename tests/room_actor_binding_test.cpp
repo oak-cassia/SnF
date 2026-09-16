@@ -227,6 +227,89 @@ namespace
         assert(rejected);
     }
 
+    void test_room_join_tell_preserves_the_equipped_skill_id()
+    {
+        std::promise<snf::server::RoomResult> skill_result;
+        auto skill_result_future = skill_result.get_future();
+        bool skill_result_set = false;
+        snf::server::CountingCommandLifecycleSink lifecycle;
+        snf::server::RoomActorBinding binding{
+            snf::server::RoomActorBindingConfig{
+                .actor =
+                    snf::server::RoomConfig{
+                        .battle_duration = 2s,
+                        .tick_interval = 100ms,
+                        .wave_interval = 1s,
+                        .wave_count = 1,
+                        .minions_per_wave = 1,
+                        .boss_spawn_after = 1500ms,
+                        .max_spawned_enemies = 2,
+                    },
+                .on_result =
+                    [&skill_result, &skill_result_set](
+                        const snf::server::RoomInboundCommand& command, const snf::server::RoomResult& result
+                    )
+                {
+                    if (!skill_result_set && std::holds_alternative<snf::server::UseSkill>(command.command))
+                    {
+                        skill_result_set = true;
+                        skill_result.set_value(result);
+                    }
+                },
+            },
+            lifecycle
+        };
+        RecordingCompletion completion;
+        snf::runtime::ActorRuntime runtime{runtime_config(), completion};
+        runtime.registerBinding(binding);
+        snf::server::RoomActorIngress ingress{runtime, binding, lifecycle};
+        runtime.start();
+
+        const snf::server::RoomId room{.value = 9};
+        const snf::server::PlayerId player{.value = 90};
+        assert(runtime.tryTell(
+                   snf::runtime::ActorKey{.kind = snf::runtime::ActorKind::Room, .entity = room.value},
+                   snf::runtime::TellPayload::of(snf::server::RoomJoinTell{
+                       .player = player,
+                       .request =
+                           snf::server::RoomJoinRequest{
+                               .room = room,
+                               .stats = {.attack = 10, .health = 100},
+                               .equipped_skill_id = snf::server::ARCANE_BOLT_SKILL_ID,
+                           },
+                       .reply =
+                           snf::server::RoomReplyContext{
+                               .connection = {.descriptor = 9, .generation = 1},
+                               .request_id = 1,
+                               .kind = snf::server::RoomReplyKind::Joined,
+                           },
+                   })
+               ) == snf::runtime::PostResult::Accepted);
+        assert(ingress.tryPost(snf::server::RoomInboundCommand{
+                   .room = room,
+                   .command = snf::server::StartBattle{},
+                   .reply = std::nullopt,
+               }) == snf::runtime::PostResult::Accepted);
+        assert(ingress.tryPost(snf::server::RoomInboundCommand{
+                   .room = room,
+                   .command =
+                       snf::server::UseSkill{
+                           .player = player,
+                           .skill_id = snf::server::ARCANE_BOLT_SKILL_ID,
+                           .request_sequence = 1,
+                       },
+                   .reply = std::nullopt,
+               }) == snf::runtime::PostResult::Accepted);
+
+        assert(skill_result_future.wait_for(5s) == std::future_status::ready);
+        const auto result = skill_result_future.get();
+        assert(result.status == snf::server::RoomCommandStatus::Applied);
+
+        runtime.close();
+        runtime.join();
+        assert(completion.failed.load() == 0);
+    }
+
     void test_killing_the_boss_rewards_every_participant()
     {
         RecordingPlayerBinding player_binding;
@@ -841,6 +924,7 @@ void test_a_join_naming_another_room_is_refused()
 void run_room_actor_binding_tests()
 {
     test_a_negative_tick_budget_is_rejected();
+    test_room_join_tell_preserves_the_equipped_skill_id();
     test_a_join_naming_another_room_is_refused();
     test_killing_the_boss_rewards_every_participant();
     test_a_room_fails_from_its_own_timer_when_the_boss_survives();

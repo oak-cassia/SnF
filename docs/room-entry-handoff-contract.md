@@ -1,10 +1,13 @@
 # Room 입장 Handoff 계약
 
+> 문서 상태: **gameplay 전이 의미 보존 / target runtime topology 미확정**
+> 이 문서의 입장·복귀·보상 결과는 전환 중 보존한다. `reactor`, `RouteCoordinator`, 별도 completion
+> channel과 service 이름은 현행 구현 설명일 뿐 새 구조의 권한이 아니다. 새 실행 주체는
+> [Unified Worker Runtime](./architecture/unified-worker-runtime.md)의 ownership와 workflow 우선순위에 따라
+> [개발 로드맵 11단계](./development-roadmap.md)의 Application workflow 이전에서 결정한다.
+>
 > 범위: 한 프로세스 안에서 Player를 `ZoneActor`에서 `RoomActor`로 옮기고, 전투가 끝나면 되돌리는
 > 상태 전이
->
-> 구성요소별 역할과 tell·completion·saga 선택 기준은
-> [Actor 상호작용 아키텍처](./actor-interaction-architecture.md)에 있다.
 
 ## 1. 해결하는 문제
 
@@ -109,6 +112,26 @@ BattleCleared(boss 사망) | BattleFailed(Deadline | ParticipantsDefeated) | Lea
 자리를 바꾸지 않는다.
 
 ## 6. Disconnect와 reconnect
+
+### Worker 경로의 검증된 범위 (11G-1)
+
+아래 legacy 설명의 "단계를 먼저 끝내고 보상"과 달리, Worker 경로는 일치하는 generation의 close 통지가
+PlayerActor에 도착하면 outcome을 기다리거나 복귀 Enter를 발행하지 않는다.
+
+- Entering 두 단계 모두 target Room에 `LeaveRoom`, source Zone에 `LeaveZone(source_epoch)`를 순서대로 발행한다.
+- InRoom은 `LeaveRoom`만 발행한다. Returning은 source Room `LeaveRoom` 뒤 return Zone
+  `LeaveZone(return_epoch)`을 발행한다.
+- binding/pending/workflow는 해제하고 `Stable(None)`으로 끝낸다. 기존 `last_location`은 유지하므로
+  재접속 후 동일 Zone Enter는 저장된 복귀 위치를 사용한다. 새 client 응답이나 close effect는 만들지 않는다.
+
+이는 effect 발행 순서이며 다른 owner 사이의 처리 완료 순서나 cleanup 성공 확인을 뜻하지 않는다.
+통지와 cleanup tell이 전달됐을 때 좌석·점유 제거를 실제 adapter로 검증했다.
+11G-3B2에서 정상 Worker loop의 close 통지/receipt 유실에 대한 bounded Sink 재시도를 검증했다.
+receipt는 Actor mailbox admission일 뿐 cleanup 완료가 아니다. 실제 workflow 통합 과부하 검증,
+cleanup tell 실패, 최종 저장 보장과 shutdown은 남은 11G/11I 범위다.
+전체 상태별 증거는 [11G-1 결과](./stage-11-workflow-migration-plan.md#11g-1-결과--도착한-disconnect-통지의-cleanup)를 따른다.
+
+### Legacy 경로 설명
 
 - `Entering` 중 disconnect: 진행 중 단계를 먼저 끝내고 보상한다. `JoinRoom`이 이미 적용됐으면
   `LeaveRoom`을 낸다.

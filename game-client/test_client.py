@@ -3,16 +3,19 @@ from __future__ import annotations
 import struct
 import unittest
 
+import snf_session
 import snf_wire
 from snf_bot import BotPlayer
-from snf_play import join_party_room, zone_render_position_after_response
+from snf_play import SKILL_SPECS, join_party_room, skill_name, skill_rejection_log, zone_render_position_after_response
 from snf_wire import (
     BattleFailureReason,
     Direction,
     EnemyKind,
+    EquipSkillStatus,
     EventTag,
     FrameDecoder,
     MessageType,
+    PurchaseStatus,
     ProjectileRemovalReason,
     RoomPhase,
     RoomStatus,
@@ -77,12 +80,17 @@ class TestWireProtocol(unittest.TestCase):
         self.assertEqual(d, int(Direction.NorthEast))
         self.assertEqual(sq, 5)
 
-        skill = snf_wire.use_skill(7, 1, 10)
-        self.assertEqual(len(skill), 20)
-        rm, sk, sq = struct.unpack(">QIQ", skill)
+        use_skill_payload = snf_wire.use_skill(7, 1, 10)
+        self.assertEqual(len(use_skill_payload), 20)
+        rm, sk, sq = struct.unpack(">QIQ", use_skill_payload)
         self.assertEqual(rm, 7)
         self.assertEqual(sk, 1)
         self.assertEqual(sq, 10)
+
+        purchase = snf_wire.purchase(123, snf_wire.ARCANE_BOLT_PRODUCT_ID)
+        self.assertEqual(struct.unpack(">QI", purchase), (123, 2))
+        equip = snf_wire.equip_skill(snf_wire.ARCANE_BOLT_SKILL_ID)
+        self.assertEqual(struct.unpack(">I", equip), (2,))
 
     def test_response_parsers(self) -> None:
         self.assertEqual(snf_wire.parse_authenticated(struct.pack(">Q", 99)), 99)
@@ -107,6 +115,16 @@ class TestWireProtocol(unittest.TestCase):
         self.assertEqual(phase, RoomPhase.Running)
 
         self.assertEqual(snf_wire.parse_cleared(struct.pack(">Q", 500)), 500)
+
+        purchase_result = snf_wire.parse_purchase_result(
+            struct.pack(">BBQIQQ", int(PurchaseStatus.Committed), 0, 123, 2, 500, 0)
+        )
+        self.assertEqual(purchase_result["status"], PurchaseStatus.Committed)
+        self.assertEqual(purchase_result["currency_balance"], 500)
+        self.assertEqual(
+            snf_wire.parse_equip_skill_result(struct.pack(">BI", int(EquipSkillStatus.Equipped), 2)),
+            (EquipSkillStatus.Equipped, 2),
+        )
 
         hp, spawned, reason = snf_wire.parse_failed(
             struct.pack(">QBB", 250, 1, int(BattleFailureReason.ParticipantsDefeated))
@@ -166,7 +184,7 @@ class TestWireProtocol(unittest.TestCase):
             events[3],
             (
                 EventTag.ProjectileSpawned,
-                {"projectile": 7, "owner": 1, "skill": 2, "target": 10, "x": 50, "y": 50},
+                {"projectile": 7, "owner": 1, "skill_id": 2, "target": 10, "x": 50, "y": 50},
             ),
         )
         self.assertEqual(events[4], (EventTag.ProjectileMoved, {"projectile": 7, "x": 50, "y": 46}))
@@ -240,7 +258,7 @@ class TestWorldState(unittest.TestCase):
             (EventTag.ArenaStarted, {"width": 120, "height": 120}),
             (EventTag.EnemySpawned, {"id": 1, "kind": int(EnemyKind.Boss), "hp": 1000}),
             (EventTag.ParticipantSpawned, {"player": 1, "x": 60, "y": 60, "hp": 100}),
-            (EventTag.ProjectileSpawned, {"projectile": 7, "owner": 1, "skill": 2, "target": 1, "x": 60, "y": 60}),
+            (EventTag.ProjectileSpawned, {"projectile": 7, "owner": 1, "skill_id": 2, "target": 1, "x": 60, "y": 60}),
         ]
         world.apply_digest(1, RoomPhase.Running, events, now=10.0)
 
@@ -257,12 +275,14 @@ class TestWorldState(unittest.TestCase):
         events2 = [
             (EventTag.ParticipantMoved, {"player": 1, "x": 64, "y": 60}),
             (EventTag.ProjectileMoved, {"projectile": 7, "x": 60, "y": 56}),
-            (EventTag.EnemyDamaged, {"target": 1, "actor": 1, "skill": 1, "amount": 10, "hp": 990}),
+            (EventTag.EnemyDamaged, {"target": 1, "actor": 1, "skill_id": 1, "amount": 10, "hp": 990}),
+            (EventTag.SkillWhiffed, {"actor": 1, "skill_id": 1}),
         ]
         world.apply_digest(2, RoomPhase.Running, events2, now=10.05)
         self.assertEqual(world.players[1].x, 64.0)
         self.assertEqual(world.enemies[1].hp, 990)
         self.assertEqual(world.projectiles[7].y, 56.0)
+        self.assertIn("skill #1", world.log[-1])
         projectile_x, projectile_y = world.projectiles[7].interpolated_pos(now=10.1)
         self.assertAlmostEqual(projectile_x, 60.0)
         self.assertAlmostEqual(projectile_y, 58.0)
@@ -271,8 +291,8 @@ class TestWorldState(unittest.TestCase):
             3,
             RoomPhase.Running,
             [
-                (EventTag.ProjectileSpawned, {"projectile": 8, "owner": 1, "skill": 2, "target": 1, "x": 60, "y": 60}),
-                (EventTag.ProjectileSpawned, {"projectile": 9, "owner": 1, "skill": 2, "target": 1, "x": 60, "y": 60}),
+                (EventTag.ProjectileSpawned, {"projectile": 8, "owner": 1, "skill_id": 2, "target": 1, "x": 60, "y": 60}),
+                (EventTag.ProjectileSpawned, {"projectile": 9, "owner": 1, "skill_id": 2, "target": 1, "x": 60, "y": 60}),
             ],
         )
         world.apply_digest(
@@ -289,17 +309,16 @@ class TestWorldState(unittest.TestCase):
         world.apply_digest(
             5,
             RoomPhase.Running,
-            [(EventTag.ProjectileSpawned, {"projectile": 10, "owner": 1, "skill": 2, "target": 1, "x": 60, "y": 60})],
+            [(EventTag.ProjectileSpawned, {"projectile": 10, "owner": 1, "skill_id": 2, "target": 1, "x": 60, "y": 60})],
         )
         world.apply_digest(6, RoomPhase.Failed, [])
         self.assertEqual(world.projectiles, {})
 
 
 class TestBotDefaults(unittest.TestCase):
-    def test_bot_uses_arcane_bolt_by_default(self) -> None:
+    def test_bot_uses_starter_slash_by_default(self) -> None:
         bot = BotPlayer(player_id=2, room_id=1)
-        self.assertEqual(bot.attack_skill_id, snf_wire.ARCANE_BOLT_SKILL_ID)
-        self.assertEqual(bot.attack_interval, 1.5)
+        self.assertEqual(bot.attack_skill_id, snf_wire.SLASH_SKILL_ID)
 
     def test_party_reentry_joins_bots_before_main_starts_battle(self) -> None:
         calls: list[tuple[str, bool]] = []
@@ -338,6 +357,47 @@ class TestBotDefaults(unittest.TestCase):
         self.assertFalse(joined)
         self.assertEqual(world.mode, "zone")
         self.assertIn("WrongPhase", world.log[-1])
+
+
+class TestSkillLoadout(unittest.TestCase):
+    def test_skill_specs_mirror_the_server_catalog(self) -> None:
+        self.assertEqual(set(SKILL_SPECS), {snf_wire.SLASH_SKILL_ID, snf_wire.ARCANE_BOLT_SKILL_ID})
+        self.assertEqual(SKILL_SPECS[snf_wire.SLASH_SKILL_ID]["cooldown"], 1.0)
+        self.assertEqual(SKILL_SPECS[snf_wire.SLASH_SKILL_ID]["range"], 12)
+        self.assertEqual(SKILL_SPECS[snf_wire.ARCANE_BOLT_SKILL_ID]["cooldown"], 1.5)
+        self.assertEqual(SKILL_SPECS[snf_wire.ARCANE_BOLT_SKILL_ID]["range"], 40)
+        self.assertEqual(skill_name(snf_wire.ARCANE_BOLT_SKILL_ID), "ARCANE BOLT")
+        self.assertEqual(skill_name(999), "SKILL #999")
+
+    def test_only_a_refused_cast_is_logged(self) -> None:
+        self.assertIsNone(skill_rejection_log(RoomStatus.Applied))
+        self.assertEqual(skill_rejection_log(RoomStatus.SkillNotEquipped), "Skill rejected: SkillNotEquipped")
+        self.assertEqual(skill_rejection_log(RoomStatus.WrongPhase), "Skill rejected: WrongPhase")
+
+    def test_equipped_skill_query_reads_the_loadout_without_changing_it(self) -> None:
+        session = Session()
+        sent: list[tuple[MessageType, bytes]] = []
+
+        def fake_request(msg_type: MessageType, payload: bytes, expect: MessageType) -> snf_wire.Frame:
+            sent.append((msg_type, payload))
+            return snf_wire.Frame(expect, 1, struct.pack(">BI", int(EquipSkillStatus.UnknownSkill), 2))
+
+        session.request = fake_request  # type: ignore[assignment]
+
+        self.assertEqual(session.query_equipped_skill_id(), snf_wire.ARCANE_BOLT_SKILL_ID)
+        self.assertEqual(sent[0][0], MessageType.EquipSkill)
+        self.assertEqual(struct.unpack(">I", sent[0][1])[0], snf_session.UNKNOWN_SKILL_PROBE_ID)
+
+    def test_equipped_skill_query_refuses_a_mutating_response(self) -> None:
+        session = Session()
+
+        def fake_request(msg_type: MessageType, payload: bytes, expect: MessageType) -> snf_wire.Frame:
+            return snf_wire.Frame(expect, 1, struct.pack(">BI", int(EquipSkillStatus.Equipped), 1))
+
+        session.request = fake_request  # type: ignore[assignment]
+
+        with self.assertRaises(RuntimeError):
+            session.query_equipped_skill_id()
 
 
 if __name__ == "__main__":

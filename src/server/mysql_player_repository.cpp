@@ -13,6 +13,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -163,11 +164,18 @@ namespace
     [[nodiscard]] std::string player_select(const snf::server::PlayerId player)
     {
         return "SELECT handled_command_count, zone_id, position_x, position_y, "
-               "currency_balance, purchased_item_count, street_experience FROM snf_players WHERE player_id=" +
+               "currency_balance, purchased_item_count, street_experience, equipped_skill_id "
+               "FROM snf_players WHERE player_id=" +
                std::to_string(player.value);
     }
 
-    [[nodiscard]] snf::server::PlayerRecord decode_player(const snf::server::PlayerId player, MYSQL_ROW row)
+    struct DecodedPlayerRow
+    {
+        snf::server::PlayerRecord record;
+        snf::server::SkillId equipped_skill_id;
+    };
+
+    [[nodiscard]] DecodedPlayerRow decode_player(const snf::server::PlayerId player, MYSQL_ROW row)
     {
         const bool has_zone = row[1] != nullptr;
         if (has_zone != (row[2] != nullptr) || has_zone != (row[3] != nullptr))
@@ -188,13 +196,17 @@ namespace
             };
         }
 
-        return snf::server::PlayerRecord{
-            .player = player,
-            .handled_command_count = parse_integer<std::uint64_t>(row[0], "handled_command_count"),
-            .last_location = location,
-            .currency_balance = parse_integer<std::uint64_t>(row[4], "currency_balance"),
-            .purchased_item_count = parse_integer<std::uint64_t>(row[5], "purchased_item_count"),
-            .street_experience = parse_integer<std::uint64_t>(row[6], "street_experience"),
+        return DecodedPlayerRow{
+            .record =
+                snf::server::PlayerRecord{
+                    .player = player,
+                    .handled_command_count = parse_integer<std::uint64_t>(row[0], "handled_command_count"),
+                    .last_location = location,
+                    .currency_balance = parse_integer<std::uint64_t>(row[4], "currency_balance"),
+                    .purchased_item_count = parse_integer<std::uint64_t>(row[5], "purchased_item_count"),
+                    .street_experience = parse_integer<std::uint64_t>(row[6], "street_experience"),
+                },
+            .equipped_skill_id = snf::server::SkillId{.value = parse_integer<std::uint32_t>(row[7], "equipped_skill_id")},
         };
     }
 
@@ -224,9 +236,25 @@ namespace
             {
                 throw std::runtime_error{"Player identity returned more than one row"};
             }
+            DecodedPlayerRow decoded = decode_player(player, ::mysql_fetch_row(result.get()));
+            result.reset();
+
+            auto skill_rows = _connection.query(
+                "SELECT skill_id FROM snf_player_skills WHERE player_id=" + std::to_string(player.value) + " ORDER BY skill_id"
+            );
+            std::vector<snf::server::SkillId> owned_skill_ids;
+            owned_skill_ids.reserve(static_cast<std::size_t>(::mysql_num_rows(skill_rows.get())));
+            while (MYSQL_ROW skill_row = ::mysql_fetch_row(skill_rows.get()))
+            {
+                owned_skill_ids.push_back(
+                    snf::server::SkillId{.value = parse_integer<std::uint32_t>(skill_row[0], "skill_id")}
+                );
+            }
+            decoded.record.skill_loadout = snf::server::SkillLoadout{std::move(owned_skill_ids), decoded.equipped_skill_id};
+
             return snf::server::PlayerLoadResult{
                 .status = snf::server::PlayerRepositoryStatus::Success,
-                .record = decode_player(player, ::mysql_fetch_row(result.get())),
+                .record = std::move(decoded.record),
             };
         }
 
@@ -235,16 +263,50 @@ namespace
             const std::string zone = record.last_location ? std::to_string(record.last_location->zone.value) : "NULL";
             const std::string position_x = record.last_location ? std::to_string(record.last_location->position.x) : "NULL";
             const std::string position_y = record.last_location ? std::to_string(record.last_location->position.y) : "NULL";
-            _connection.execute("INSERT INTO snf_players (player_id, handled_command_count, zone_id, "
-                                "position_x, position_y, currency_balance, purchased_item_count, street_experience) VALUES (" +
-                                std::to_string(record.player.value) + "," + std::to_string(record.handled_command_count) + "," + zone + "," + position_x + "," + position_y + "," +
-                                std::to_string(record.currency_balance) + "," + std::to_string(record.purchased_item_count) + "," + std::to_string(record.street_experience) +
-                                ") ON DUPLICATE KEY UPDATE "
-                                "handled_command_count=VALUES(handled_command_count), "
-                                "zone_id=VALUES(zone_id), position_x=VALUES(position_x), "
-                                "position_y=VALUES(position_y), currency_balance=VALUES(currency_balance), "
-                                "purchased_item_count=VALUES(purchased_item_count), "
-                                "street_experience=VALUES(street_experience)");
+            _connection.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
+            _connection.execute("START TRANSACTION");
+            try
+            {
+                _connection.execute("INSERT INTO snf_players (player_id, handled_command_count, zone_id, "
+                                    "position_x, position_y, currency_balance, purchased_item_count, street_experience, equipped_skill_id) VALUES (" +
+                                    std::to_string(record.player.value) + "," + std::to_string(record.handled_command_count) + "," + zone + "," + position_x + "," + position_y + "," +
+                                    std::to_string(record.currency_balance) + "," + std::to_string(record.purchased_item_count) + "," + std::to_string(record.street_experience) + "," +
+                                    std::to_string(record.skill_loadout.getEquippedSkillId().value) + ") ON DUPLICATE KEY UPDATE "
+                                    "handled_command_count=VALUES(handled_command_count), "
+                                    "zone_id=VALUES(zone_id), position_x=VALUES(position_x), "
+                                    "position_y=VALUES(position_y), currency_balance=VALUES(currency_balance), "
+                                    "purchased_item_count=VALUES(purchased_item_count), "
+                                    "street_experience=VALUES(street_experience), equipped_skill_id=VALUES(equipped_skill_id)");
+
+                _connection.execute("DELETE FROM snf_player_skills WHERE player_id=" + std::to_string(record.player.value));
+                const std::span<const snf::server::SkillId> owned_skill_ids = record.skill_loadout.getOwnedSkillIds();
+                if (owned_skill_ids.empty())
+                {
+                    throw std::logic_error{"A PlayerRecord cannot save an empty skill loadout"};
+                }
+                std::string insert_skills = "INSERT INTO snf_player_skills (player_id, skill_id) VALUES ";
+                for (std::size_t index = 0; index < owned_skill_ids.size(); ++index)
+                {
+                    if (index != 0)
+                    {
+                        insert_skills += ',';
+                    }
+                    insert_skills += '(' + std::to_string(record.player.value) + ',' + std::to_string(owned_skill_ids[index].value) + ')';
+                }
+                _connection.execute(insert_skills);
+                _connection.execute("COMMIT");
+            }
+            catch (...)
+            {
+                try
+                {
+                    _connection.execute("ROLLBACK");
+                }
+                catch (...)
+                {
+                }
+                throw;
+            }
             return snf::server::PlayerSaveResult{
                 .status = snf::server::PlayerRepositoryStatus::Success,
             };
@@ -263,7 +325,7 @@ namespace
                 throw std::runtime_error{"MySQL schema version is unsupported"};
             }
             const std::uint32_t schema_version = parse_integer<std::uint32_t>(version_row[0], "schema version");
-            if (schema_version == 0 || schema_version > 7)
+            if (schema_version == 0 || schema_version > 8)
             {
                 throw std::runtime_error{"MySQL schema version is unsupported"};
             }
@@ -275,6 +337,7 @@ namespace
                                 "currency_balance BIGINT UNSIGNED NOT NULL, "
                                 "purchased_item_count BIGINT UNSIGNED NOT NULL, "
                                 "street_experience BIGINT UNSIGNED NOT NULL DEFAULT 0, "
+                                "equipped_skill_id INT UNSIGNED NOT NULL DEFAULT 1, "
                                 "CONSTRAINT snf_player_location_complete CHECK ((zone_id IS NULL AND "
                                 "position_x IS NULL AND position_y IS NULL) OR (zone_id IS NOT NULL AND "
                                 "position_x IS NOT NULL AND position_y IS NOT NULL))) ENGINE=InnoDB");
@@ -318,6 +381,23 @@ namespace
                     _connection.execute("ALTER TABLE snf_players ADD COLUMN street_experience BIGINT UNSIGNED NOT NULL DEFAULT 0");
                 }
                 _connection.execute("INSERT INTO snf_schema_version (version) VALUES (7)");
+            }
+
+            if (schema_version < 8)
+            {
+                auto equipped_skill_id = _connection.query("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() "
+                                                           "AND table_name=\"snf_players\" AND column_name=\"equipped_skill_id\"");
+                if (parse_integer<std::uint64_t>(::mysql_fetch_row(equipped_skill_id.get())[0], "equipped skill column count") == 0)
+                {
+                    _connection.execute("ALTER TABLE snf_players ADD COLUMN equipped_skill_id INT UNSIGNED NOT NULL DEFAULT 1");
+                }
+                _connection.execute("CREATE TABLE IF NOT EXISTS snf_player_skills ("
+                                    "player_id BIGINT UNSIGNED NOT NULL, skill_id INT UNSIGNED NOT NULL, "
+                                    "PRIMARY KEY (player_id, skill_id), "
+                                    "CONSTRAINT snf_player_skills_player_fk FOREIGN KEY (player_id) REFERENCES snf_players(player_id) ON DELETE CASCADE"
+                                    ") ENGINE=InnoDB");
+                _connection.execute("INSERT IGNORE INTO snf_player_skills (player_id, skill_id) SELECT player_id, 1 FROM snf_players");
+                _connection.execute("INSERT INTO snf_schema_version (version) VALUES (8)");
             }
         }
 

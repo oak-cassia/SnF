@@ -21,7 +21,7 @@ class BotPlayer:
         host: str = "127.0.0.1",
         port: int = 7777,
         attack_interval: float = 1.5,
-        attack_skill_id: int = snf_wire.ARCANE_BOLT_SKILL_ID,
+        attack_skill_id: int = snf_wire.SLASH_SKILL_ID,
         zone_first: bool = False,
     ) -> None:
         self.player_id = player_id
@@ -240,7 +240,7 @@ def spawn_bots(
     zone_id: int = 1,
     host: str = "127.0.0.1",
     port: int = 7777,
-    attack_skill_id: int = snf_wire.ARCANE_BOLT_SKILL_ID,
+    attack_skill_id: int = snf_wire.SLASH_SKILL_ID,
     zone_first: bool = False,
 ) -> list[BotPlayer]:
     bots = []
@@ -269,7 +269,7 @@ def main() -> None:
     parser.add_argument("--zone", type=int, default=1, help="Zone ID (default: 1)")
     parser.add_argument("--count", type=int, default=3, help="Number of bots to spawn (default: 3)")
     parser.add_argument("--start-id", type=int, default=2, help="Starting Player ID for bots (default: 2)")
-    parser.add_argument("--skill", type=int, default=snf_wire.ARCANE_BOLT_SKILL_ID, help="Attack SkillId for bots (default: 2, ArcaneBolt)")
+    parser.add_argument("--skill", type=int, default=snf_wire.SLASH_SKILL_ID, help="Attack SkillId for bots (default: 1, Slash)")
     parser.add_argument("--zone-first", action="store_true", help="Start bots in Zone open field first")
 
     args = parser.parse_args()

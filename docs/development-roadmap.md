@@ -1,277 +1,241 @@
 # SnF 개발 로드맵
 
-> 이 문서는 현재 완료 범위와 바로 다음 콘텐츠만 기록한다. 과거 Phase별 구현 과정은 Git
-> history가 보존하며, 측정되지 않은 Runtime 최적화는 로드맵에 미리 추가하지 않는다.
+> 현재 우선순위: **Unified Worker Runtime 전환**
+> 목표 구조: [Unified Worker Runtime 아키텍처](./architecture/unified-worker-runtime.md)
+> 원칙: wire/gameplay 의미와 기존 검증 가능한 동작을 보존하면서 실행 경계를 단계적으로 교체한다.
+> 단계 번호와 산출물은 목표 구조 문서의 [14. 구현 전환 순서](./architecture/unified-worker-runtime.md#14-구현-전환-순서)를
+> 따른다. 이 문서는 각 단계의 세부 작업과 진행 상태만 관리하며 기준 문서의 순서나 완료 기준을 바꾸지 않는다.
 
-## 완료된 기반
+## 1. 전환 전 기준
 
-### Network와 protocol
+현재 코드는 별도 network Reactor, `ActorRuntime`, `ActorBinding`, shared `OutboundChannel`,
+`PlayerPersistenceService`와 blocking MySQL worker를 사용한다. 루트 README와 2026-08-23 Room 부하
+리포트는 이 구현의 설명과 baseline이다.
 
-- level-triggered `epoll` reactor와 non-blocking TCP
-- 길이 기반 binary frame, partial receive/send와 protocol validation
-- connection generation을 통한 stale outbound 차단
-- Session별 pending byte 상한과 bounded outbound channel
-- 실제 TCP 통합 테스트와 non-blocking load client
+목표 구조는 다음을 제거하거나 흡수한다.
 
-### Actor Runtime
+| 현행 구조 | 목표 |
+| --- | --- |
+| 별도 Reactor와 Actor Worker | connection, Actor와 native DB I/O를 소유하는 통합 Worker |
+| ActorRuntime registry/scheduler | Worker-local ActorTable + ReadyActorQueue |
+| ActorBinding | typed dispatch + 순수 `toEffects` overload |
+| shared OutboundChannel | connection owner의 bounded write buffer |
+| 별도 continuation/completion bookkeeping | `ActorSlot.blocked` 하나 |
+| PlayerPersistenceService + blocking MySQL worker | Worker-local native async DbClient; 동기 API는 선택 adapter |
+| reactor-owned workflow table/service | 자연스러운 Actor의 explicit state, 필요 시 Coordinator Actor |
 
-- `ActorKey{Kind, EntityId}` 고정 shard와 Actor별 FIFO mailbox
-- Worker turn budget과 mailbox-safe passivation
-- lazy C++20 coroutine handler와 owning-Worker 전용 resume/destroy
-- bounded in-flight/continuation reservation
-- completion, cancel, late completion과 shutdown 경합 처리
-- queue wait, suspension, depth와 high-water metric
-- Worker 소유 일회성 timer와 incarnation 기반 stale 폐기
-- Actor 간 비동기 tell과 대상 Binding의 submission 조립
+전환 도중 두 런타임 경로가 같은 command나 outcome을 이중 실행하지 않게 한다. 한 vertical slice는 한
+경로에서만 authority를 가진다.
 
-### Player
+## 2. 보존할 동작
 
-- provisional authentication에서 persistent Player route로 전환
-- PlayerActor의 Session/Economy 단일 소유권
-- Actor 수명 범위 idempotent NPC 구매
-- dirty snapshot 제출, Player별 coalescing과 save 직렬화
-- disconnect final save와 reconnect 복원
-- connection generation 기반 one-live-session과 exact-match passivation
-- in-memory 및 bounded MySQL load/save adapter
-- street 누적 경험치 영속화와, 그로부터 파생되는 레벨·공격/체력
+- binary frame, request ID와 server-push 의미
+- connection generation을 통한 stale session 차단
+- Player, Zone, Room별 단일 mutable-state owner와 FIFO 처리
+- Room 입장·실패 보상·Zone 복귀의 gameplay 결과
+- cross-zone handoff의 epoch와 stale completion 방어
+- Player snapshot의 domain authority와 현재 명시된 durability 한계
+- slow consumer가 다른 connection과 Room 진행을 멈추지 않는 정책
+- Actor와 resource admission의 bounded/backpressure 의미
+- 현재 Debug, sanitizer, TCP, MySQL과 load test의 재현 가능한 시나리오
 
-### Shared state
+구현 타입 이름, queue topology와 thread 배치는 보존 대상이 아니다.
 
-- Zone enter/move/leave, periodic tick, AOI와 빈 Actor passivation
-- route epoch과 failure-safe cross-zone handoff
-- Room `Waiting → Running → Cleared | Failed`. 100ms tick이 정수 좌표 이동, wave/minion/boss spawn,
-  가장 가까운 생존 대상 추격·공격과 ordered `BattleDigest`를 진행한다. damage, HP, cooldown과
-  중복 판정은 서버가 소유하며 clear 시 참가자 보상 tell, 종결 뒤 passivation한다
-- Zone과 Room 사이의 보상 있는 입장·복귀 handoff. 전투 중 Player는 Zone에 없고, clear·leave·
-  disconnect가 원래 Zone의 원래 좌표로 되돌린다
-- Room 입장·시작·퇴장 요청, 2바이트 skill ack와 요청 없이 나가는 digest·clear·복귀 알림
-  (`request_id = 0`)
+## 3. 구현 순서
 
-### 빌드 경계
+### 0단계 — 문서 기준 정리
 
-- `snf_game`: 도메인 상태 기계와 값. runtime·net·protocol·MySQL·threads를 링크하지 않는다
-- `snf_mysql_player_repository`: MySQL을 아는 유일한 target
-- `snf_game_tests`(링크)와 `snf_game_layer`(include 검사)가 경계를 강제한다
+- [x] Unified Worker Runtime을 유일한 target runtime 문서로 등록한다.
+- [x] 기존 ActorRuntime/OutcomeHandler 중심 설계 문서를 제거한다.
+- [x] 루트 README와 부하 리포트를 현행 구현/baseline으로 명시한다.
+- [x] domain handoff/persistence 계약에서 legacy topology의 권한을 내린다.
 
-## 현재 정리 기준
+종료 조건: 새 구현 결정이 어느 문서를 따라야 하는지 한 곳에서 찾을 수 있다.
 
-- Repository는 Player snapshot의 `load/save`만 담당한다. gameplay 판정은 PlayerActor에서 한다.
-  구현 순서 4도 이 기준을 넓히지 않는다. 보상은 새 저장 경로 없이 기존 snapshot 경로로만 내려간다.
-- Runtime, network와 콘텐츠는 typed command/result로만 연결한다.
-- 구현되지 않은 executor, network backend와 분산 구조는 문서에도 선행 설계하지 않는다.
-- 기능 수보다 하나의 콘텐츠가 정상·포화·disconnect·shutdown까지 종결되는지를 우선한다.
+### 1단계 — Core identity
 
-## 다음 콘텐츠: 4인 협동 Wave Battle
+- [x] `ActorKey`, `ActivationRef`, `ConnectionRef`, `AwaitKey`를 확정한다.
+- [x] Actor incarnation, connection generation과 operation ID의 생성·비교 규칙을 고정한다.
+- [x] old incarnation/generation/operation event가 state를 변경하지 않는 connection/registration test를 만든다.
 
-최대 4명의 Player가 개별 입장하는 작은 협동 인스턴스다. MMORPG 월드 기능을 넓히지 않고, Actor 상태 소유권이
-공유 콘텐츠에서 주는 장점과 비용을 보여주는 것이 목적이다. 처음에는 위치 없는 wave 전투로
-계획했지만 2a가 tick, ordered digest, fanout, payload 상한과 비용 metric을 먼저 완성한 뒤 범위를
-바꿨다. 정수 좌표는 적의 가장 가까운 생존 참가자 선택과 Slash의 범위 내 전체 적 판정이라는 관찰
-가능한 targeting 근거를 주고, 빠르게 변하는 좌표와 HP를 Room Actor 하나가 직렬화하는 비용도
-드러낸다. 대신 직선 이동만 허용하며 충돌·장애물·pathfinding·projectile·Room AOI·resync snapshot은
-계속 만들지 않는다.
+종료 조건: 모든 delayed event의 stale 여부를 pointer 없이 value identity로 판정한다.
 
-> **구현 순서 2b 완료.** 실제 TCP에서 이동, 적 추격·피해, boss clear와 `ParticipantsDefeated` 실패가
-> `BattleDigest`로 관찰되고 두 종결 모두 원래 Zone 좌표로 복귀한다. 입장·복귀 saga와 그 보상은
-> `docs/room-entry-handoff-contract.md`에 기록돼 있다.
+### 2단계 — Worker skeleton
 
-### 상태와 명령
+- [x] Worker-local Poller, WorkerInbox와 TimerQueue를 만든다.
+- [x] poll, inbox, timer, Actor, write phase와 count/byte/time budget을 구현한다.
+- [x] `stop_requested + wakeup`과 empty-loop shutdown을 검증한다.
+- [x] owner-thread assertion을 추가한다. watchdog stall metric은 Actor/DB phase에서 보강한다.
 
-```text
-Waiting → Running → Cleared
-                  └→ Failed
-           ↓
-        Closing → Passivated
-```
+종료 조건: runnable phase가 서로 starvation시키지 않고 Worker가 잠재적 blocking 호출을 하지 않는다.
 
-- `JoinRoom`, `LeaveRoom`, `StartBattle`, `UseSkill`, `SetMoveIntent`, `RoomSimulationTick`, `BattleDeadline`
-- Room이 participant combat snapshot·현재 HP·좌표·이동 의도, enemy HP·좌표·spawn 순서·공격
-  cooldown, boss phase와 skill/movement request sequence를 소유한다
-- PlayerActor는 영속 progression과 session을 계속 소유
-- client는 damage 값을 보내지 않고 skill ID만 보낸다
+### 3단계 — Connection path
 
-### 구현 순서
+- [x] accept 시 connection owner를 정하고 `ConnectionRef`에 generation과 owner를 저장한다.
+- [x] read/decode/request translation 경계를 owner Worker의 `RequestSink`로 구현한다.
+- [x] local send는 write buffer에 직접 append하고 remote send/close는 WorkerInbox event로 전달한다.
+- [x] read/write/frame/table 상한과 slow-consumer close 경로를 검증한다.
 
-1. **최소 전투** — `UseSkill`, boss HP, deadline 기반 cooldown, request sequence 중복 방어,
-   `Cleared`/`Failed`, 참가자 fanout. enemy도 tick도 없다. (완료)
-2. **Wave simulation**
-   - **2a — Wave와 관찰 경계:** 100ms tick, minion/boss spawn, 범위 내 전체 적 대상 즉시 cast와
-     ordered `BattleDigest`, hard deadline, tick 예산 측정. (완료)
-   - **2b — Minimal Arena와 생사:** 8방향 persistent movement, enemy nearest-live targeting,
-     Slash 범위 판정, enemy attack/cooldown, participant HP/death와 결정적 ID 순서. (완료)
-3. **Session 안정성** — generation 기반 admission/routing 방어, Closing 동안 reconnect 차단과
-   Player·Connection exact-match passivation. Actor 내부에 중복 generation guard를 두지 않는다. (완료)
-4. **보상 인계 책임 전달** — tell 수락과 최초 load 성공 뒤의 책임 이전, 스냅샷 큐 수락까지
-   PlayerActor 상주, tell·load·큐 거절 계측. 프로세스 장애를 넘는 보상 복구는 보장하지 않는다. (완료)
-5. **Room 부하 실측 (완료)** — hot Room 하나와 분산 Room N개 비교, 느린 client의 outbound 포화 격리.
-   shutdown은 시나리오 종료 smoke로만 확인하고 별도 부하 축으로 만들지 않는다
+종료 조건: shared OutboundChannel 없이 partial I/O와 기존 protocol 통합 테스트를 통과한다.
 
-각 단계는 wire에서 관찰 가능한 상태로 끝난다. tick과 브로드캐스트를 한 단계로 묶은 이유가
-그것이다. 내부에서 몬스터가 spawn하고 공격하는데 client가 알 수 없으면 그 단계는 완결된
-vertical slice가 아니다.
+### 4단계 — Actor path
 
-### Step 4 보상 인계 계약
+- [x] Worker-local ActorTable, bounded mailbox와 ReadyActorQueue를 만든다.
+- [x] `Idle/Queued/Running/Stopping` 상태 전이와 synchronous immediate construction을 구현한다.
+- [x] local delivery primitive(`tryDeliverLocal`)와 mailbox 기반 non-reentrant FIFO command turn(`CompletedTurn`)을 실행한다.
+- [x] `SendFrame`, `CloseConnection`, `TellActor`, `StopActor` 네 concrete effect의 ordered batch 적용을 검증한다.
+- [x] Actor quiescence와 connection drain을 단일 absolute deadline으로 통합한 graceful shutdown을 구현한다.
 
-현재 보상 전달에는 아무도 책임지지 않는 지점이 세 곳이다. reward tell이 거절되면 Room은 반환값을
-버리고 passivate한다. offline Player를 tell로 활성화한 뒤 최초 record load가 실패하면
-`pending_grant`를 지운다. load가 성공해 전달을 인수해도 `publishDirtySnapshot`의 큐 admission이
-거절되면 dirty mask를 되돌린 직후 `PassivateIfIdle`로 떠나므로 그 mask를 flush할 주체가 함께
-사라진다. await하는 최종 저장은 연결 close 경로에만 있다. Step 4는 durable grant 테이블 없이 큐
-거절 뒤의 구멍을 닫고 tell·load 실패를 계측된 허용 유실로 확정한다.
+종료 조건: single-worker 결정성, non-reentrancy, duplicate-ready 방지와 concrete effect ordered application을 검증한다.
 
-- 일반 전투 보상은 tell이 수락되고 최초 record load가 성공한 순간 PlayerActor가 책임을 인수한다.
-  PlayerActor는 보상을 메모리에 반영하고 스냅샷이 저장 큐에 수락될 때까지 상주한다
-- 큐 수락 이후에는 `PlayerPersistenceService`가 프로세스 생존 범위에서 저장을 재시도하므로
-  PlayerActor는 저장 성공을 기다리지 않는다. 저장 성공까지 붙잡으면 DB 장애 동안 clear한 방마다
-  actor가 상주로 누적되고, 보호하려던 용량이 먼저 무너진다
-- 큐 수락 재시도는 tick과 같은 방식이다. `trySchedule`로 one-shot timer를 걸고 `ExistingOnly`로
-  자기에게 돌아온다. 새 mechanism을 만들지 않는다. tick과 달리 backstop이 없으므로 timer 예약이
-  거절되면 그 보상은 아래 허용 유실로 떨어지고 같은 카운터에 남는다
-- tell 거절, 최초 load 실패와 저장 큐 거절은 각각 계측한다. `_tick_schedule_rejections`와 같은
-  방식이며, 유실을 허용한다는 정책과 유실을 관측하지 못하는 상태를 구분하는 장치다
-- tell 거절, 최초 load 실패와 프로세스 장애로 인한 보상 유실은 허용한다. mailbox는 Actor별이고,
-  그 mailbox로 들어갈 submission은 worker별 공유 outstanding/admission 예산인
-  `queue_capacity_per_worker`(현재 4096)를 먼저 차지한다. clear 하나가 만드는 tell은 최대 참가자
-  수다. 거절되려면 그 worker 예산이 이미 포화여야 하며, 그 상태에서 무너지는 것은 보상 하나가 아니다
-- Room은 terminal 정리와 passivation을 유지하고 재전달 timer를 갖지 않는다. 프로세스가 살아 있어도
-  Room에 재시도를 얹을 자리가 없다. 같은 turn 안의 반복은 대상 mailbox를 비워줄 주체를 돌리지
-  못하고, timer는 이미 충족된 terminal passivation 조건을 무른다
-- 고가치 보상은 durable 원장과 멱등 키로 별도 처리한다. 진행 중 전투 자체가 프로세스 장애로
-  사라지는 세션형 서버에서 일반 경험치만 완전 복구하는 것은 비대칭이다
+### 5단계 — BlockedTask와 async activation
 
-Step 4에서는 durable grant 테이블, 여러 Player progression의 all-or-nothing transaction, 범용
-transaction framework, 범용 saga/outbox, 과거 전체 `Transaction` abstraction 복원, 새 client
-protocol과 reward 적용 순서 보장을 만들지 않는다. 전달이 at-most-once이고 저장이 record 전체
-덮어쓰기이므로 이 범위에는 멱등 키가 들어갈 자리가 없다.
+- [x] `Loading`, `Suspended` 상태와 nullable ActorSlot의 실제 비동기 activation을 구현한다.
+- [x] `ActivationLoad`와 suspended command를 `ActorSlot.blocked`에 저장한다. 지금 저장하는 것은 synthetic
+  scaffold이며 concrete `SuspendedDbCommand`는 8단계에서 이를 대체한다.
+- [x] `SuspendedTurn`, continuation, concurrent Loading cap을 추가한다.
+- [x] timeout 후 late completion과 completion 후 stale timeout을 모두 no-op으로 만든다.
 
-### Step 5 Room 부하 측정 계약
+종료 조건: Actor가 기다리는 상태를 `ActorSlot.blocked` 한 곳에서만 찾을 수 있고 비동기 continuation이 시작한 Worker에서 재개된다.
 
-Room 정원은 4명이므로 참가자를 더 넣어 hot actor를 만드는 축은 없다. Step 5는 서로 다른 병목을
-섞지 않도록 아래 두 축을 따로 측정한다.
+### 6단계 — Cross-worker event와 Public Tell
 
-- **단일 actor 직렬화 한계:** 1 Room × 4 client에서 client별 전투 요청 빈도를 올린다. Room command
-  지연과 tick turn p50/p99/max, tick budget 초과를 함께 보고 한 Room이 100ms simulation tick을
-  유지하는 범위를 찾는다
-- **worker 확장 한계:** client는 Room마다 최대 4명으로 나누고 `actor_worker_count`를 1로 고정한 채
-  Room 수를 늘려 tick budget 초과가 처음 나타나는 지점을 찾는다. 같은 sweep을 worker 2·4에서
-  반복해 수용 Room 수가 worker 수에 따라 확장되는지 비교한다
+- [x] 최종 public `Worker::tell()`을 추가하고 `WrongOwner` 분기를 remote delivery로 전환한다.
+- [x] remote actor message, connection send/close와 실제 필요한 application completion을 concrete
+  `WorkerEvent`로 정의한다.
+- [x] 논리적 multi-producer WorkerInbox를 source별 count/byte-bounded SPSC lane으로 구성하고 enqueue 실패를 caller에게 반환한다.
+- [x] cross-worker Actor publication 손실을 막는 최소 WorkerGroup quiescence barrier를 구현한다. watchdog, 장시간 shutdown
+  부하와 운영 품질 게이트는 10단계에서 마무리한다.
 
-두 축 모두 tick budget 경계보다 load generator나 공유 server 자원의 경계가 먼저 나타날 수 있다.
-그 경우 관측하지 못한 tick 붕괴점을 외삽하지 않고, 마지막 성공점과 먼저 나타난 경계 및 그 근거를
-기록하는 것으로 측정을 닫는다. 실제 측정에서는 축 A의 client generator 퇴행과 축 B의 player close
-reservation·shared outbound 포화가 tick budget 초과보다 먼저 나타났다.
+종료 조건: 다른 Worker가 owner object pointer를 보관하거나 queue 자리를 기다리지 않는다.
 
-측정 workload는 `RoomJoin` 뒤 방별 leader 하나가 `BattleStart`를 보내고, 모든 참가자가
-`UseSkill`과 `SetMoveIntent`를 반복한다. `request_id == 0`인 `BattleDigest`, `BattleCleared`,
-`BattleFailed`, `ReturnedToZone`은 request/response 오류가 아닌 server push다. load client는 push
-frame 수와 bytes, digest 도착 간격을 별도 집계한다. `players_per_room`은 Room id 배분만 결정하며
-hash를 역산해 특정 worker에 Room을 몰아넣지 않는다.
+### 7단계 — Result와 Effect Adapter
 
-리포트에는 worker별 queue와 mailbox high-water, `rejected_full`, Room tick/command 분포와 초과 수,
-digest fanout, 그리고 `grant_tell_rejections`, `reward_snapshot_admission_rejections`,
-`reward_snapshot_retry_giveups`, `grant_load_failures`를 포함한다. 느린 client 격리는 4인 전투에서
-한 연결만 읽기를 멈춘 뒤 그 연결만 닫히고, 남은 세 client가 연속 digest와 `ParticipantLeft`를
-받아 clear까지 진행하는 통합 테스트로 판정한다.
+- [x] Player/Zone/Room domain adapter에서 typed result를 `toEffects(context, result)` overload로 변환한다.
+- [x] `ScheduleTimerEffect` 등 추가 Effect별 failure semantics와 stop-batch 정책을 적용한다.
+- [x] 실제 fan-out 측정에 따라 `EffectBatch` cap을 재결정한다.
+- [x] `RequestSink`에서 실제 game request translation과 Actor ingress를 연결한다.
+- [x] Domain 코드에서 Worker, ActorTable, ConnectionTable과 send/tell 직접 호출을 제거한다.
+- [x] legacy/new 경로가 같은 protocol encoder를 사용하고 TCP Ping 왕복으로 ingress → Actor → effect → outbound를 검증한다.
+- [x] Room critical deadline을 exact logical charge로 turn-local pre-admission하고, reserved commit의 no-fail/invariant 경계를 고정한다.
+- [x] application timer 만료·shutdown cancellation에서 TimerQueue accounting을 반환한 뒤 mailbox admission을 별도로 수행한다.
+- [x] Room의 4명/16 effect domain proof와 `EffectBatch`의 64개 runtime hard cap을 분리해 검증한다.
 
-Step 5에서는 범용 benchmark framework, actor hash co-location knob, shutdown 부하 축과 주기적
-resync snapshot을 만들지 않는다. shutdown은 측정 종료 smoke로만 확인한다. resync는 느린 client
-격리 결과가 살아 있는 참가자의 event 유실을 보일 때만 다시 설계한다.
+종료 조건: Worker가 typed domain result 의미를 알지 않고 별도 OutcomeHandler hierarchy가 없다.
 
-### 확정한 계약
+### 8단계 — Native async DB
 
-- **시간은 deadline이다.** cooldown은 tick마다 감소시키지 않고 `ready_at`으로 둔다.
-  `ActorContext::observedAt()`이 turn 시작 시각을 주므로 Room은 clock 없이 남고, Step 1이 tick
-  없이 성립한다. 전투의 절대 deadline은 `UseSkill`, tick과 deadline timer 모두가 확인한다
-- **cast 적용과 관찰은 분리한다.** `UseSkill` turn에서 targeting·damage·cooldown·sequence를 즉시
-  적용하고 요청자에게 `SkillAcknowledged`를 보낸다. 발생 이벤트는 ordered buffer에 쌓여 tick 또는
-  threshold/terminal 경계에서 `BattleDigest`로 전 참가자에게 fanout된다
-- **한 command의 인과 그룹은 갈라지지 않는다.** 범위 안 대상을 EnemyId 순서로 돌며 각 Damage 뒤
-  선택적인 Died를 전부 buffer에 추가한 다음 threshold를 검사한다. event를 drop하지 않으며 digest
-  sequence는 실제 방출 때만 증가한다
-- **좌표는 Room 안에서만 유효하다.** `SetMoveIntent`는 의도만 저장하고 다음 tick이 생존 참가자를
-  움직인다. Slash는 현재 좌표에서 사거리 안의 모든 생존 적을 EnemyId 순서로 공격하고, 적은 가장
-  가까운 생존 참가자를 고르며 동률은 작은 PlayerId다. Room 종료 뒤에는 입장 전 Zone 좌표로 복귀한다
-- **적 행동은 적별로 인터리브한다.** EnemyId 순서로 대상 선택 → 이동 → 선택적 피해 → 선택적
-  사망을 끝낸 다음 다음 적이 살아 있는 대상을 다시 고른다. 마지막 생존 참가자가 죽으면
-  `ParticipantsDefeated`로 즉시 종결하며 deadline 실패와 wire reason을 구분한다
-- **tick은 one-shot 사슬이다.** binding이 deadline을 먼저 예약한 다음 `ExistingOnly` tick을 예약한다.
-  deadline 예약이 거절되면 Room을 `Waiting`에 둔 채 `RuntimeOverloaded`로 시작을 거절하고
-  `deadline_schedule_rejections`를 올린다. tick 예약 거절은 metric으로 남기고 이미 확보한 deadline을
-  backstop으로 쓴다
-- **outbound 포화는 연결을 닫고 Room은 계속 진행한다.** Room을 suspend시키면 느린 client 하나가
-  4인 전투를 멈춘다. Step 5 실측에서 느린 연결 하나만 닫힌 뒤 남은 세 client의 digest sequence가
-  연속으로 clear까지 진행했다. 살아 있는 연결의 event gap이 없으므로 resync snapshot은 만들지
-  않는다. 대규모 분산 부하에서 먼저 나타난 shared outbound admission 포화는 snapshot이 아니라
-  capacity/credit 문제다
-- **죽음과 퇴장은 다른 상태다.** 죽은 participant는 audience와 clear 보상 대상에 남아 관전하지만
-  이동·cast·target 대상에서는 빠진다. leave와 disconnect는 participant를 제거하고 보상을 포기하며
-  `ParticipantLeft`가 남은 client의 유령 상태를 지운다
-- **시작은 명시적 `StartBattle`이다.** Room은 현재 참가자 수와 상한만 알고 있으며, 입장한
-  client 중 하나가 명시적으로 전투를 시작한다
+- [x] production DB driver의 acquire, DNS, connect, TLS/auth, query, fetch, cancel과 reconnect가 모두
+  non-blocking인지 conformance test로 증명한다.
+- [x] Worker-local DbClient, DbInFlight와 `completeDb()`를 구현한다.
+- [x] `Rejected/CompletedInline/Pending` submit 계약과 DB-local capacity를 적용한다.
+- [x] Player activation/load/save 의미를 새 DB 경로에 맞게 확정한다.
+- [x] result를 streaming fetch로 받고 row/byte 상한을 fetch 도중에 강제한다.
+- [x] DB event 하나의 progress를 step/row/byte/duration으로 bound한다.
+- [x] queued timeout은 connection을 유지하고 in-flight timeout만 connection을 폐기한다.
+- [x] `SavePlayer`의 COMMIT 결과를 Committed/FailedBeforeCommit/CommitOutcomeUnknown으로 구분하고
+  자동 retry를 금지한다.
 
-### 완료 조건
+종료 조건: DB progress는 Worker poller에서 진행하고 DbClient는 Actor pointer나 coroutine을 소유하지 않는다.
 
-- 같은 Room 명령이 FIFO로 결정적으로 적용되고 handler 동시 실행이 없다. (충족)
-- 중복 request sequence가 damage나 clear를 두 번 적용하지 않는다. (충족)
-- stale connection generation이 admission/routing 경계에서 이전 Player를 조작하지 못하며, 이전
-  connection의 늦은 deactivation이 새 Closing 세션을 제거하지 않는다. (충족)
-- 보상 tell이 수락되고 최초 record load가 성공하면 스냅샷이 저장 큐에 수락될 때까지 PlayerActor가
-  상주한다. (충족)
-- tell 거절, 최초 load 실패와 저장 큐 거절이 각각 카운터로 남는다. 프로세스 장애를 넘는 보상 복구는
-  완료 조건이 아니다. (충족)
-- 같은 입력에서 같은 `BattleDigest` 이벤트 순서가 나온다. (충족)
-- disconnect/reconnect와 timeout 정책이 명시돼 있다. (충족: 입장 handoff 계약 §6. disconnect는
-  좌석을 해제하고 보상을 포기하며, Room 재적을 영속화하지 않으므로 reconnect는 저장된 Zone으로
-  복원된다. mid-battle reconnect는 명시적 비범위다)
-- clear/fail 결과는 한 번만 생성되고 Room은 timer와 mailbox를 정리한 뒤 passivate된다. (충족)
-- 여러 Room 분산 부하와 하나의 hot Room 부하를 비교한다. (충족:
-  [Step 5 Room 부하 측정 리포트](room-load-measurement.md))
-- 부하 리포트가 보상 tell 거절, 최초 load 실패와 저장 큐 거절 카운터 값을 포함한다. 카운터를 만드는 것은 구현
-  순서 4이고, 포화 상황에서 그 값을 보고하는 것이 이 축이다. (충족: 네 카운터 모두 0)
-- 느린 client가 outbound를 포화시키면 해당 연결만 종료되고 Room과 건강한 참가자는 계속 진행한다.
-  (충족: 1개 연결 종료, 3개 참가자의 연속 digest와 clear 확인)
-- deadline/Tick 예약 포화와 terminal 뒤 stale timer 정리를 포함한다. (충족: deadline 포화는
-  `RuntimeOverloaded`로 해당 시작만 거절하고 Logic Runtime은 계속되며, tick 포화는 deadline을
-  backstop으로 사용한다)
-- Debug, TCP integration, ASan·UBSan과 TSan을 통과한다. (충족)
+### 9단계 — 선택 adapter (조건 불충족으로 생략)
 
-두 계층의 중복 방어와 명시된 유실 경계를 하나의 콘텐츠에서 보여주는 것이 이 목록의 핵심이다.
+- [x] target runtime에 native async로 교체하지 못한 동기 API가 없음을 확인하고
+  `BlockingAdapterExecutor`를 만들지 않는다.
+- [x] executor를 만들지 않으므로 immutable job, `AwaitKey`, completion reservation, saturation과 cancel
+  검증은 적용 대상 없음으로 닫는다.
+- [x] 별도 `CpuExecutor`가 필요한 CPU-heavy 작업은 확인되지 않아 만들지 않는다.
 
-```text
-request_sequence       → transport/요청 중복
-connection generation  → admission/routing에서 session 수명을 넘긴 stale 명령
-계측된 허용 유실       → 프로세스 장애를 넘는 영속 보장의 명시적 비범위
-```
+현행 blocking `MySqlPlayerRepository`와 `PlayerPersistenceService`는 선택 adapter로 이전하지 않고
+11단계의 production 경로 전환 뒤 제거한다. TLS 연결이 Worker budget을 깨거나, 동기 file/legacy SDK가
+새로 필요하거나, 신규 runtime 부하 측정에서 CPU-heavy turn이 확인될 때만 이 단계를 다시 연다.
 
-### 측정으로 확인한 후속 용량 경계
+종료 조건: adapter가 없는 build/configuration에서도 core runtime이 완전하다. **충족.**
 
-- **player close reservation:** worker별 async in-flight 상한 1,024가 대량 동시 종료에서 먼저
-  찼다. active 전투 부하는 처리하더라도 종료 drain은 별도 admission 부하가 되므로, 더 큰 동시 접속
-  목표를 잡을 때 close burst의 backpressure와 capacity 계약을 먼저 정한다
-- **shared outbound:** 모든 worker가 공유하는 queue capacity 4,096은 전체 대상 Slash fanout을
-  포함한 Step 5 측정 설정에서 4 workers × 750 Room에서 포화됐고, 4 workers × 700
-  Room은 high-water 3,232로 정상 종료했다. worker 수만 늘려서는 비례 확장되지 않으므로
-  더 큰 Room 수를 목표로 할 때 capacity·credit 또는 sharding 계약을 먼저 정한다. 현재
-  기본 밸런스의 정확한 경계가 필요하면 리포트에 명시한 설정과 구분해 재측정한다
+### 10단계 — metrics, watchdog, shutdown과 load test
 
-두 항목은 Step 5의 미완료 조건이 아니라 리포트의 측정 구성에서 확인한 확장 경계다. 목표 규모가 이 경계에
-도달하기 전에는 TimerService, Room hash co-location이나 resync snapshot 작업을 열지 않는다.
+> **최종 상세 실행 기준:** [10단계 Worker runtime 품질 게이트 최종 계획](./stage-10-quality-gate-plan.md)
+>
+> 10A~10H의 구현 순서, 확정된 설계 결정, threshold, 테스트 시나리오와 재현 명령은 위 문서를 따른다.
+> 구현 중 전제가 달라지면 코드 변경과 함께 최종 계획도 갱신한다.
 
-### 비범위
+- [x] Worker/Actor/Inbox/DB/Connection/Timer/Completion의 bounded counter, gauge, high-water mark와 latency
+  snapshot을 추가한다.
+- [x] event-loop phase별 budget 소진과 progress 시각을 기록하고, Worker stall을 검출하는 watchdog을
+  구현한다. watchdog 자체는 Worker를 block하거나 owner object를 cross-thread로 읽지 않는다.
+- [x] graceful shutdown의 phase, absolute deadline, 남은 resource와 forced cleanup을 계측하고 장시간
+  publication/DB/connection 부하에서 검증한다.
+- [x] client I/O, hot Actor, 느린 DB와 slow consumer를 동시에 주입하는 bounded load scenario를 만든다.
+- [x] Debug, ASan·UBSan, TSan, TCP integration과 shutdown race를 통과한다. MySQL은 환경 미제공으로
+  미측정임을 명시하고 정확한 SKIP 수와 재현 명령을 기록한다.
+- [x] 4절의 품질 게이트별 재현 명령, 설정, 측정값과 판정을 기록한다.
 
-- 충돌, 장애물, pathfinding, projectile, Room AOI와 진행 중 resync snapshot
-- `Ready`, countdown과 자동 시작
-- 진행 중인 전투로의 reconnect와 주기적 resync snapshot
-- 대규모 seamless world와 process 간 migration
-- matchmaking service
-- 복잡한 전투 수치와 클라이언트 표현
-- skill unlock, loadout과 추가 skill 콘텐츠. 현재 단일 Slash 카탈로그를 유지한다
-- 별도 projection, read model, 보상 원장 테이블. 구현 순서 4도 새 테이블을 만들지 않는다
-- Runtime 통합, io_uring 또는 Actor 내부 병렬화
+종료 조건: 신규 Worker runtime test path에서 target architecture의 품질 게이트를 관측할 수 있고 모두
+통과한다. 이번 완료 범위는 **TCP 통과 / MySQL 미측정 및 재현 명령 기록**이다. 완료 후 리뷰에서 고친 6건과
+남은 한계는 리포트 §10·§11에 기록했다. Application workflow와
+production 전환 뒤에는 11단계에서 실제 MySQL을 포함해 같은 게이트를 다시 실행한다. **충족.**
 
-## 콘텐츠 완료 후 포트폴리오 산출물
+### 11단계 — Application workflow 이전, production 전환과 legacy 제거
 
-1. 요구사항 → 상태 → command/result → 예외 흐름을 담은 콘텐츠 계약
-2. Actor 소유권과 async/backpressure/lifecycle 결정만 담은 아키텍처 문서
-3. [정상·hot Room·분산 Room과 outbound 포화 측정 결과](room-load-measurement.md)
-4. 5분 안에 재현 가능한 TCP demo와 실행 명령
+- [x] Room entry/return과 cross-zone transition의 natural owner를 결정한다.
+- [x] natural domain owner가 있으면 explicit Actor state + correlation ID로 구현한다.
+- [x] 독립 lifecycle이 실제 필요한 흐름만 Coordinator Actor로 만든다.
+- [x] Actor-to-Actor mailbox 응답을 suspended coroutine이 기다리게 하지 않는다.
+- [ ] disconnect, timeout, compensation과 shutdown terminal을 기존 contract와 대조한다.
+
+  - 11G-1: close 통지가 도착한 뒤의 상태별 cleanup과 재접속 회귀 검증 완료. 통지/cleanup 전달 보장과
+    shutdown을 포함한 전체 terminal 대조는 남아 있다. [검증 결과](./stage-11-workflow-migration-plan.md#11g-1-결과--도착한-disconnect-통지의-cleanup).
+  - 11G-2: application timer의 일시적 mailbox 포화 재시도와 실제 Player workflow timeout 종결 검증 완료.
+    지속 과부하에서의 전달 시간 상한은 보장하지 않는다. [검증 결과](./stage-11-workflow-migration-plan.md#11g-2-결과--application-timer의-일시적-mailbox-포화-재시도).
+  - 11G-3A: close 통지의 mailbox admission/ActorAbsent receipt와 두 owner thread 전달 검증 완료.
+    receipt는 cleanup 완료가 아니며 Sink 재시도 연동은 11G-3B에 남아 있다.
+    [검증 결과](./stage-11-workflow-migration-plan.md#11g-3a-결과--close-통지의-mailbox-admission-receipt).
+  - 11G-3B1: Worker retry hook/deadline 연동과 무트래픽 poll wakeup 검증 완료.
+    실제 Sink pending 보존·재전송은 B2에 남아 있다.
+    [검증 결과](./stage-11-workflow-migration-plan.md#11g-3b1-결과--worker-retry-hook과-poll-deadline-연동).
+  - 11G-3B2: Sink의 1,024개 bounded record, receipt 기반 해제, 포화·유실 후 재시도와 실제 Worker loop
+    무트래픽 재전송 검증 완료. receipt는 cleanup 완료가 아니며 shutdown/persistence 보장은 별도다.
+    [검증 결과](./stage-11-workflow-migration-plan.md#11g-3b2-결과--sink-disconnect-통지-보존과-bounded-재시도).
+  - 11G-4: 실패 terminal identity fence, known-none 종료, Player가 소유하는 cleanup 재시도와 재적 fence,
+    shutdown의 cleanup 후 최종 저장 검증 완료. Actor의 lifecycle turn은 Actor phase와 turn budget 안에서만
+    실행하며 mailbox·timer 용량을 소비하지 않는다. cleanup tell 자체의 적용 실패는 여전히 metric 관측이고,
+    계약 조항별 전체 failure terminal 대조표는 남아 있다.
+    [검증 결과](./stage-11-workflow-migration-plan.md#11g-4-결과--실패-terminal-identity-fence-player-소유-cleanup-재시도-shutdown-종결).
+
+- [ ] production server의 connection/game request 경로를 신규 Worker로 100% 전환한다.
+- [ ] 전환된 production 경로에서 10단계의 load scenario와 전체 품질 게이트를 다시 통과한다.
+- [ ] 전환 뒤 ActorRuntime, Binding, shared Outbound와 legacy completion 코드를 제거한다.
+- [ ] 루트 README를 목표 구조의 실제 코드 링크와 새 측정값으로 갱신한다.
+
+종료 조건: 별도 WorkflowTable 없이 모든 accepted transition이 성공, 명시적 실패, close 또는 cancel로
+끝나고, 신규 경로가 production traffic의 100% authority를 가진다. target architecture의 전체 품질 게이트를
+통과하며 README가 더 이상 legacy 배너를 필요로 하지 않는다.
+
+## 4. 품질 게이트
+
+| 게이트 | 통과 조건 |
+| --- | --- |
+| Thread ownership | TSAN과 owner assertion에서 cross-thread mutable access 0건 |
+| No Worker blocking | active phase CPU residence가 correctness 상한 미만이고 Debug voluntary context switch 0건. sanitizer preset은 fairness와 별개의 active-phase wall 상한을 지킨다. 상한에는 독립 witness thread로 실측한 환경 stall만 더하며, 판정 불가 window는 재측정한다. active wall/fairness와 watchdog wall stall도 상한 준수 |
+| Memory bound | inbox, mailbox, ActorTable, Loading, timer, DB queue와 buffers가 설정 상한을 넘지 않음 |
+| Single await state | continuation/deadline을 `ActorSlot.blocked` 밖에 중복 저장하지 않음 |
+| Stale safety | stale event가 state mutation을 만들지 않음 |
+| Fairness | 지속 부하에서도 모든 event-loop phase가 반복 실행되고 wall `max_entry_gap` 상한 준수 |
+| Shutdown | async progress deadline 준수, final teardown conformance 범위 안에서 coroutine/resource leak 없이 종료 |
+| Behavior parity | 보존 대상으로 정한 protocol, gameplay와 failure outcome의 회귀 없음 |
+
+10단계에서는 신규 Worker runtime test path로 모든 게이트를 측정하고 통과시켰다. MySQL 환경은 제공되지 않아
+미측정 상태와 재현 명령을 기록했다. 11단계의 Application workflow 이전과 production 경로 전환이 끝나면
+같은 표를 전체 TCP/MySQL 경로에서 다시 실행한 뒤 legacy를 제거한다.
+
+## 5. 전환 중 열지 않는 작업
+
+- Actor live migration과 dynamic Worker scaling
+- reentrant Actor
+- generic async backend interface와 범용 completion dispatcher
+- 범용 workflow engine, durable saga/outbox
+- idle passivation 선행 구현
+- 별도 TimerService와 shared OutboundQueue 재도입
+- Projectile 전용 Worker 또는 물리 partition
+
+이 항목은 실제 부하, 두 번째 backend 또는 process-restart durability 요구가 생겼을 때 별도 설계한다.

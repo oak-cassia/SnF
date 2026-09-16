@@ -32,8 +32,8 @@ namespace
     using snf::server::PlayerId;
     using snf::server::ProjectileId;
     using snf::server::ProjectileMoved;
-    using snf::server::ProjectileRemoved;
     using snf::server::ProjectileRemovalReason;
+    using snf::server::ProjectileRemoved;
     using snf::server::ProjectileSpawned;
     using snf::server::RoomCommandStatus;
     using snf::server::RoomId;
@@ -41,6 +41,8 @@ namespace
     using snf::server::RoomPhase;
     using snf::server::RoomResult;
     using snf::server::SkillWhiffed;
+    using snf::server::ZoneId;
+    using snf::server::ZonePosition;
 
     struct SinkFixture
     {
@@ -150,12 +152,12 @@ namespace
                     EnemyDamaged{
                         .target = EnemyId{.value = 1},
                         .actor = PlayerId{.value = 10},
-                        .skill = snf::server::SLASH,
+                        .skill_id = snf::server::SLASH,
                         .amount = 10,
                         .health = 20,
                     },
                     EnemyDied{.id = EnemyId{.value = 1}},
-                    SkillWhiffed{.actor = PlayerId{.value = 20}, .skill = snf::server::SLASH},
+                    SkillWhiffed{.actor = PlayerId{.value = 20}, .skill_id = snf::server::SLASH},
                     ArenaStarted{.width = 100, .height = 100},
                     ParticipantSpawned{.player = PlayerId{.value = 10}, .position = {.x = 50, .y = 50}, .health = 100},
                     ParticipantMoved{.player = PlayerId{.value = 10}, .position = {.x = 54, .y = 46}},
@@ -166,7 +168,7 @@ namespace
                     ProjectileSpawned{
                         .projectile = ProjectileId{.value = 7},
                         .owner = PlayerId{.value = 20},
-                        .skill = snf::server::ARCANE_BOLT,
+                        .skill_id = snf::server::ARCANE_BOLT,
                         .target = EnemyId{.value = 3},
                         .position = {.x = 54, .y = 46},
                     },
@@ -393,7 +395,7 @@ namespace
                 .phase = RoomPhase::Failed,
                 .boss_health = 40,
                 .boss_spawned = true,
-                .digest = BattleDigest{.sequence = 2, .events = {SkillWhiffed{.actor = first, .skill = snf::server::SLASH}}},
+                .digest = BattleDigest{.sequence = 2, .events = {SkillWhiffed{.actor = first, .skill_id = snf::server::SLASH}}},
                 .outcome = BattleOutcome::Failed,
                 .failure_reason = BattleFailureReason::Deadline,
                 .audience = {first, second},
@@ -533,9 +535,7 @@ namespace
         events.reserve(128);
         for (std::uint32_t projectile = 1; projectile <= 128; ++projectile)
         {
-            events.emplace_back(
-                ProjectileMoved{.projectile = ProjectileId{.value = projectile}, .position = {.x = projectile, .y = projectile}}
-            );
+            events.emplace_back(ProjectileMoved{.projectile = ProjectileId{.value = projectile}, .position = {.x = projectile, .y = projectile}});
         }
 
         fixture.sink.accept(
@@ -621,7 +621,7 @@ namespace
             EnemyDamaged{
                 .target = EnemyId{.value = 1},
                 .actor = first,
-                .skill = snf::server::SLASH,
+                .skill_id = snf::server::SLASH,
                 .amount = 1,
                 .health = 1,
             }
@@ -645,6 +645,55 @@ namespace
         assert(std::ranges::find(failures, first_connection) != failures.end());
         assert(std::ranges::find(failures, second_connection) != failures.end());
     }
+
+    void test_reply_joined_encodes_status_phase_and_room_id()
+    {
+        SinkFixture fixture{2};
+        const PlayerId player{.value = 10};
+        const auto connection = fixture.attach(4, player);
+
+        fixture.sink.replyJoined(connection, 88, RoomId{.value = 12345}, RoomCommandStatus::Applied, RoomPhase::Running);
+
+        const auto frame = fixture.pop();
+        assert(frame && frame->type == snf::protocol::MessageType::RoomJoined);
+        assert(frame->request_id == 88);
+        assert(frame->payload.size() == 10);
+        assert(frame->payload[0] == static_cast<std::byte>(RoomCommandStatus::Applied));
+        assert(frame->payload[1] == static_cast<std::byte>(RoomPhase::Running));
+        assert(payload_u64(*frame, 2) == 12345);
+        assert(!fixture.pop());
+    }
+
+    void test_reply_returned_to_zone_encodes_zone_id_and_coordinates()
+    {
+        SinkFixture fixture{2};
+        const PlayerId player{.value = 10};
+        const auto connection = fixture.attach(4, player);
+
+        fixture.sink.replyReturnedToZone(connection, ZoneId{.value = 999}, ZonePosition{.x = 120, .y = 340});
+
+        const auto frame = fixture.pop();
+        assert(frame && frame->type == snf::protocol::MessageType::ReturnedToZone);
+        assert(frame->request_id == snf::protocol::UNSOLICITED_REQUEST_ID);
+        assert(frame->payload.size() == 16);
+        assert(payload_u64(*frame, 0) == 999);
+        assert(payload_u32(*frame, 8) == 120);
+        assert(payload_u32(*frame, 12) == 340);
+        assert(!fixture.pop());
+    }
+
+    void test_report_admission_failure_records_connection()
+    {
+        SinkFixture fixture{2};
+        const PlayerId player{.value = 10};
+        const auto connection = fixture.attach(4, player);
+
+        fixture.sink.reportAdmissionFailure(connection);
+
+        std::vector<snf::net::ConnectionId> failures;
+        assert(!fixture.outbound.takePendingAdmissionFailures(failures));
+        assert(failures == std::vector<snf::net::ConnectionId>{connection});
+    }
 }
 
 void run_protocol_room_result_sink_tests()
@@ -661,4 +710,7 @@ void run_protocol_room_result_sink_tests()
     test_maximum_projectile_movement_fanout_stays_within_the_digest_payload_bound();
     test_a_saturated_client_does_not_block_a_healthy_client_or_terminal_result();
     test_an_oversized_digest_closes_its_audience_instead_of_encoding();
+    test_reply_joined_encodes_status_phase_and_room_id();
+    test_reply_returned_to_zone_encodes_zone_id_and_coordinates();
+    test_report_admission_failure_records_connection();
 }

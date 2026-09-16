@@ -34,11 +34,11 @@ export namespace snf::server
         AttackBehavior behavior{};
     };
 
-    inline constexpr SkillId SLASH{.value = 1};
+    inline constexpr SkillId SLASH = SLASH_SKILL_ID;
     inline constexpr std::uint64_t SLASH_ATTACK_PERCENT = 100;
     inline constexpr std::chrono::milliseconds SLASH_COOLDOWN{1000};
     inline constexpr std::uint32_t SLASH_RANGE = 12;
-    inline constexpr SkillId ARCANE_BOLT{.value = 2};
+    inline constexpr SkillId ARCANE_BOLT = ARCANE_BOLT_SKILL_ID;
     inline constexpr std::uint64_t ARCANE_BOLT_ATTACK_PERCENT = 160;
     inline constexpr std::chrono::milliseconds ARCANE_BOLT_COOLDOWN{1500};
     inline constexpr std::uint32_t ARCANE_BOLT_ACQUISITION_RANGE = 40;
@@ -47,7 +47,7 @@ export namespace snf::server
     inline constexpr std::chrono::milliseconds ARCANE_BOLT_LIFETIME{3000};
     inline constexpr std::uint64_t ATTACK_PERCENT_DENOMINATOR = 100;
 
-    [[nodiscard]] std::optional<SkillDefinition> findSkill(SkillId skill) noexcept;
+    [[nodiscard]] std::optional<SkillDefinition> findSkill(SkillId skill_id) noexcept;
     [[nodiscard]] std::uint64_t calculateSkillDamage(const SkillDefinition& skill, std::uint64_t attack) noexcept;
 }
 
@@ -82,13 +82,13 @@ namespace
         };
     }
 
-    [[nodiscard]] std::optional<SkillDefinition> findDefinition(const SkillId skill) noexcept
+    [[nodiscard]] std::optional<SkillDefinition> findDefinition(const SkillId skill_id) noexcept
     {
-        if (skill == SLASH)
+        if (skill_id == SLASH)
         {
             return makeSlash();
         }
-        if (skill == snf::server::ARCANE_BOLT)
+        if (skill_id == snf::server::ARCANE_BOLT)
         {
             return makeArcaneBolt();
         }
@@ -98,9 +98,9 @@ namespace
 
 namespace snf::server
 {
-    std::optional<SkillDefinition> findSkill(const SkillId skill) noexcept
+    std::optional<SkillDefinition> findSkill(const SkillId skill_id) noexcept
     {
-        return findDefinition(skill);
+        return findDefinition(skill_id);
     }
 
     std::uint64_t calculateSkillDamage(const SkillDefinition& skill, const std::uint64_t attack) noexcept

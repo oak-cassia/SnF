@@ -7,4 +7,5 @@
 namespace snf::net
 {
     [[nodiscard]] UniqueFileDescriptor create_tcp_listener(std::uint16_t port);
+    [[nodiscard]] UniqueFileDescriptor create_tcp_listener(std::uint16_t port, bool reuse_port);
 }

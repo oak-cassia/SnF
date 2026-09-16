@@ -3,8 +3,8 @@
 #include "snf/runtime/distribution.hpp"
 #include "snf/server/command_terminal.hpp"
 #include "snf/server/frame_ingress.hpp"
-#include "snf/server/outbound_sink.hpp"
 #include "snf/server/player_session_directory.hpp"
+#include "snf/server/protocol_room_result_sink.hpp"
 #include "snf/server/protocol_zone_result_sink.hpp"
 #include "snf/server/room_entry.hpp"
 #include "snf/server/room_transition_channel.hpp"
@@ -35,17 +35,18 @@ namespace snf::server
     class RoomEntryService
     {
     public:
-        RoomEntryService(RoutedCommandIngress& commands,
-                         PlayerSessionDirectory& sessions,
-                         RouteCoordinator& routes,
-                         RoomTransitionChannel& room_transitions,
-                         CommandLifecycleSink& lifecycle,
-                         OutboundSink& outbound,
-                         ProtocolZoneResultSink& zone_results,
-                         std::size_t max_completions_per_turn);
+        RoomEntryService(
+            RoutedCommandIngress& commands,
+            PlayerSessionDirectory& sessions,
+            RouteCoordinator& routes,
+            RoomTransitionChannel& room_transitions,
+            CommandLifecycleSink& lifecycle,
+            ProtocolRoomResultSink& room_results,
+            ProtocolZoneResultSink& zone_results,
+            std::size_t max_completions_per_turn
+        );
 
-        [[nodiscard]] FramePostResult
-        tryStart(snf::net::ConnectionId connection, std::uint32_t request_id, PlayerId player, RoomId room);
+        [[nodiscard]] FramePostResult tryStart(snf::net::ConnectionId connection, std::uint32_t request_id, PlayerId player, RoomId room);
 
         [[nodiscard]] bool tryReplyRoomBusy(snf::net::ConnectionId connection, std::uint32_t request_id, RoomReplyKind kind);
 
@@ -97,8 +98,6 @@ namespace snf::server
         void handleReturnZoneCompletion(const RoomTransitionCompletion& completion, ActiveReturn& active_return);
 
         void replyRoomJoined(snf::net::ConnectionId connection, std::uint32_t request_id, RoomId room, RoomCommandStatus status, RoomPhase phase);
-        void replyReturnedToZone(snf::net::ConnectionId connection, ZoneId zone, ZonePosition position);
-        [[nodiscard]] bool sendFrame(snf::net::ConnectionId connection, snf::protocol::Frame frame);
 
         void failEntryBeforeSourceLeave(snf::net::ConnectionId connection, RoomId room, std::uint32_t request_id, RoomCommandStatus status);
         void compensateFailedSourceLeave(ActiveEntry& active);
@@ -108,7 +107,7 @@ namespace snf::server
         RouteCoordinator& _routes;
         RoomTransitionChannel& _room_transitions;
         CommandLifecycleSink& _lifecycle;
-        OutboundSink& _outbound;
+        ProtocolRoomResultSink& _room_results;
         ProtocolZoneResultSink& _zone_results;
         std::size_t _max_completions_per_turn;
 

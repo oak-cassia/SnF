@@ -106,10 +106,12 @@ namespace snf::server
               _outbound_event.getDescriptor()
           )
         , _zone_transition_channel(
-              checked_zone_handoffs(config.max_zone_handoffs, config.connection_lifecycle_capacity), _outbound_event.getDescriptor()
+              checked_zone_handoffs(config.max_zone_handoffs, config.connection_lifecycle_capacity),
+              _outbound_event.getDescriptor()
           )
         , _room_transition_channel(
-              checked_zone_handoffs(config.max_room_entries, config.connection_lifecycle_capacity), _outbound_event.getDescriptor()
+              checked_zone_handoffs(config.max_room_entries, config.connection_lifecycle_capacity),
+              _outbound_event.getDescriptor()
           )
         , _player_responses(_outbound_channel)
         , _zone_results(_outbound_channel)
@@ -309,7 +311,7 @@ namespace snf::server
               _route_coordinator,
               _room_transition_channel,
               _command_lifecycle,
-              _outbound_channel,
+              _room_result_sink,
               _zone_results,
               config.max_room_entry_completions_per_turn
           )

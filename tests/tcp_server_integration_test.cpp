@@ -592,6 +592,17 @@ namespace
         };
     }
 
+    snf::protocol::Frame equip_skill_frame(const std::uint32_t request_id, const snf::server::SkillId skill_id)
+    {
+        std::vector<std::byte> payload;
+        append_u32(payload, skill_id.value);
+        return snf::protocol::Frame{
+            .type = snf::protocol::MessageType::EquipSkill,
+            .request_id = request_id,
+            .payload = std::move(payload),
+        };
+    }
+
     snf::protocol::Frame room_frame(const snf::protocol::MessageType type, const std::uint32_t request_id, const std::uint64_t room)
     {
         return snf::protocol::Frame{
@@ -616,10 +627,10 @@ namespace
     }
 
     snf::protocol::Frame
-    use_skill_frame(const std::uint32_t request_id, const std::uint64_t room, const snf::server::SkillId skill, const std::uint64_t sequence)
+    use_skill_frame(const std::uint32_t request_id, const std::uint64_t room, const snf::server::SkillId skill_id, const std::uint64_t sequence)
     {
         std::vector<std::byte> payload = player_id_payload(room);
-        append_u32(payload, skill.value);
+        append_u32(payload, skill_id.value);
         append_u64(payload, sequence);
         return snf::protocol::Frame{
             .type = snf::protocol::MessageType::UseSkill,
@@ -1294,6 +1305,88 @@ namespace
         assert(saved->purchased_item_count == 3);
     }
 
+    void test_skill_purchase_and_equip_survive_disconnect_and_reconnect()
+    {
+        RunningServer server;
+        constexpr std::uint64_t player_id = 791;
+        const snf::server::PlayerId player{.value = player_id};
+
+        auto client = connect_client(server.getPort());
+        const auto auth = authentication_frame(119, player_id);
+        const auto auth_bytes = snf::protocol::encode_frame(auth);
+        send_all(client.getDescriptor(), auth_bytes);
+        assert_authenticated(receive_exact(client.getDescriptor(), auth_bytes.size()), auth.request_id, player_id);
+
+        const auto purchase = purchase_frame(120, 1, snf::server::ARCANE_BOLT_PRODUCT.value);
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(purchase));
+        assert_purchase_response(
+            receive_purchase_response(client.getDescriptor()),
+            purchase.request_id,
+            snf::server::PurchaseStatus::Committed,
+            false,
+            1,
+            snf::server::ARCANE_BOLT_PRODUCT.value,
+            500,
+            0
+        );
+
+        const auto equip = equip_skill_frame(121, snf::server::ARCANE_BOLT_SKILL_ID);
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(equip));
+        const auto equipped = receive_frame(client.getDescriptor());
+        assert(equipped.type == snf::protocol::MessageType::EquipSkillResult);
+        assert(equipped.request_id == equip.request_id);
+        assert(equipped.payload.size() == 5);
+        assert(equipped.payload[0] == static_cast<std::byte>(snf::server::EquipSkillStatus::Equipped));
+        assert(read_u32(equipped.payload, 1) == snf::server::ARCANE_BOLT_SKILL_ID.value);
+
+        client.init();
+        const auto passivation_deadline = std::chrono::steady_clock::now() + 1s;
+        while (actor_count(server.getActorRuntimeStats()) != 0 && std::chrono::steady_clock::now() < passivation_deadline)
+        {
+            std::this_thread::sleep_for(1ms);
+        }
+        assert(actor_count(server.getActorRuntimeStats()) == 0);
+        const auto saved = server.getPlayerRecord(player);
+        assert(saved.has_value());
+        assert(saved->currency_balance == 500);
+        assert(saved->purchased_item_count == 0);
+        assert(saved->skill_loadout.hasOwnedSkillId(snf::server::ARCANE_BOLT_SKILL_ID));
+        assert(saved->skill_loadout.getEquippedSkillId() == snf::server::ARCANE_BOLT_SKILL_ID);
+
+        auto reconnected = connect_client(server.getPort());
+        const auto reconnect_auth = authentication_frame(122, player_id);
+        const auto reconnect_auth_bytes = snf::protocol::encode_frame(reconnect_auth);
+        send_all(reconnected.getDescriptor(), reconnect_auth_bytes);
+        assert_authenticated(
+            receive_exact(reconnected.getDescriptor(), reconnect_auth_bytes.size()), reconnect_auth.request_id, player_id
+        );
+
+        const auto duplicate_purchase = purchase_frame(123, 2, snf::server::ARCANE_BOLT_PRODUCT.value);
+        send_all(reconnected.getDescriptor(), snf::protocol::encode_frame(duplicate_purchase));
+        assert_purchase_response(
+            receive_purchase_response(reconnected.getDescriptor()),
+            duplicate_purchase.request_id,
+            snf::server::PurchaseStatus::AlreadyOwned,
+            false,
+            2,
+            snf::server::ARCANE_BOLT_PRODUCT.value,
+            500,
+            0
+        );
+
+        const auto equip_again = equip_skill_frame(124, snf::server::ARCANE_BOLT_SKILL_ID);
+        send_all(reconnected.getDescriptor(), snf::protocol::encode_frame(equip_again));
+        const auto already_equipped = receive_frame(reconnected.getDescriptor());
+        assert(already_equipped.type == snf::protocol::MessageType::EquipSkillResult);
+        assert(already_equipped.request_id == equip_again.request_id);
+        assert(already_equipped.payload.size() == 5);
+        assert(already_equipped.payload[0] == static_cast<std::byte>(snf::server::EquipSkillStatus::AlreadyEquipped));
+        assert(read_u32(already_equipped.payload, 1) == snf::server::ARCANE_BOLT_SKILL_ID.value);
+
+        reconnected.init();
+        server.stop();
+    }
+
     void test_two_players_kill_a_boss_and_are_told_without_asking()
     {
         RunningServer server{snf::server::GameServerConfig{
@@ -1567,6 +1660,28 @@ namespace
         send_all(client.getDescriptor(), auth_bytes);
         assert_authenticated(receive_exact(client.getDescriptor(), auth_bytes.size()), auth.request_id, player);
 
+        const auto purchase = purchase_frame(331, 1, snf::server::ARCANE_BOLT_PRODUCT.value);
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(purchase));
+        assert_purchase_response(
+            receive_purchase_response(client.getDescriptor()),
+            purchase.request_id,
+            snf::server::PurchaseStatus::Committed,
+            false,
+            1,
+            snf::server::ARCANE_BOLT_PRODUCT.value,
+            500,
+            0
+        );
+
+        const auto equip = equip_skill_frame(332, snf::server::ARCANE_BOLT);
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(equip));
+        const auto equipped = receive_frame(client.getDescriptor());
+        assert(equipped.type == snf::protocol::MessageType::EquipSkillResult);
+        assert(equipped.request_id == equip.request_id);
+        assert(equipped.payload.size() == 5);
+        assert(equipped.payload[0] == static_cast<std::byte>(snf::server::EquipSkillStatus::Equipped));
+        assert(read_u32(equipped.payload, 1) == snf::server::ARCANE_BOLT.value);
+
         std::vector<std::byte> enter_payload = player_id_payload(zone);
         append_u32(enter_payload, 10);
         append_u32(enter_payload, 20);
@@ -1574,7 +1689,7 @@ namespace
             client.getDescriptor(),
             snf::protocol::encode_frame(snf::protocol::Frame{
                 .type = snf::protocol::MessageType::EnterZone,
-                .request_id = 331,
+                .request_id = 333,
                 .payload = std::move(enter_payload),
             })
         );
@@ -1582,12 +1697,12 @@ namespace
         assert(entered.type == snf::protocol::MessageType::ZoneEntered);
         assert(entered.payload[0] == static_cast<std::byte>(snf::server::ZoneCommandStatus::Applied));
 
-        send_all(client.getDescriptor(), snf::protocol::encode_frame(room_frame(snf::protocol::MessageType::RoomJoin, 332, room)));
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(room_frame(snf::protocol::MessageType::RoomJoin, 334, room)));
         const auto joined = receive_room_frame(client.getDescriptor(), ROOM_REPLY_PAYLOAD_SIZE);
         assert(joined.type == snf::protocol::MessageType::RoomJoined);
         assert(joined.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::Applied));
 
-        send_all(client.getDescriptor(), snf::protocol::encode_frame(room_frame(snf::protocol::MessageType::BattleStart, 333, room)));
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(room_frame(snf::protocol::MessageType::BattleStart, 335, room)));
         const auto started = receive_room_frame(client.getDescriptor(), ROOM_REPLY_PAYLOAD_SIZE);
         assert(started.type == snf::protocol::MessageType::BattleStarted);
         assert(started.payload[1] == static_cast<std::byte>(snf::server::RoomPhase::Running));
@@ -1596,7 +1711,7 @@ namespace
         assert(initial.type == snf::protocol::MessageType::BattleDigest);
         assert(read_u64(initial.payload, 0) == 1);
 
-        send_all(client.getDescriptor(), snf::protocol::encode_frame(use_skill_frame(334, room, snf::server::ARCANE_BOLT, 1)));
+        send_all(client.getDescriptor(), snf::protocol::encode_frame(use_skill_frame(336, room, snf::server::ARCANE_BOLT, 1)));
 
         bool acknowledged = false;
         bool spawned = false;
@@ -1609,7 +1724,7 @@ namespace
         while (!acknowledged || !removed)
         {
             const auto frame = receive_frame(client.getDescriptor());
-            if (frame.type == snf::protocol::MessageType::SkillAcknowledged && frame.request_id == 334)
+            if (frame.type == snf::protocol::MessageType::SkillAcknowledged && frame.request_id == 336)
             {
                 assert(frame.payload == (std::vector<std::byte>{std::byte{0}, std::byte{1}}));
                 acknowledged = true;
@@ -2869,6 +2984,8 @@ int main()
         test_authenticates_one_session_and_allows_reconnect_after_passivation);
     run("test_reconnect_waits_while_the_previous_session_is_closing", test_reconnect_waits_while_the_previous_session_is_closing);
     run("test_live_purchase_is_memory_authoritative_and_flushes", test_live_purchase_is_memory_authoritative_and_flushes);
+    run("test_skill_purchase_and_equip_survive_disconnect_and_reconnect",
+        test_skill_purchase_and_equip_survive_disconnect_and_reconnect);
     run("test_two_players_kill_a_boss_and_are_told_without_asking", test_two_players_kill_a_boss_and_are_told_without_asking);
     run("test_arcane_bolt_spawn_move_hit_and_removal_are_observed_over_tcp",
         test_arcane_bolt_spawn_move_hit_and_removal_are_observed_over_tcp);

@@ -14,6 +14,7 @@ namespace snf::server
     {
         PlayerId player{};
         CombatStats stats{};
+        SkillId equipped_skill_id{SLASH_SKILL_ID};
     };
 
     struct LeaveRoom

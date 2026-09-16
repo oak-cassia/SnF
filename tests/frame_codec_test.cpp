@@ -371,6 +371,8 @@ void test_decodes_room_handoff_frames()
     const Frame returned{.type = MessageType::ReturnedToZone, .request_id = 0, .payload = {std::byte{0x01}, std::byte{0x02}}};
     const Frame move{.type = MessageType::SetMoveIntent, .request_id = 12, .payload = {std::byte{0x00}}};
     const Frame acknowledged{.type = MessageType::MoveAcknowledged, .request_id = 12, .payload = {std::byte{0x00}, std::byte{0x01}}};
+    const Frame equip{.type = MessageType::EquipSkill, .request_id = 13, .payload = {std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x02}}};
+    const Frame equipped{.type = MessageType::EquipSkillResult, .request_id = 13, .payload = {std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x02}}};
 
     FrameDecoder decoder{};
     decoder.push(encode_frame(leave));
@@ -378,6 +380,8 @@ void test_decodes_room_handoff_frames()
     decoder.push(encode_frame(returned));
     decoder.push(encode_frame(move));
     decoder.push(encode_frame(acknowledged));
+    decoder.push(encode_frame(equip));
+    decoder.push(encode_frame(equipped));
 
     const auto first = decoder.tryDecodeNext();
     assert(first.hasFrame() && first.frame->type == MessageType::RoomLeave);
@@ -389,6 +393,10 @@ void test_decodes_room_handoff_frames()
     assert(fourth.hasFrame() && fourth.frame->type == MessageType::SetMoveIntent);
     const auto fifth = decoder.tryDecodeNext();
     assert(fifth.hasFrame() && fifth.frame->type == MessageType::MoveAcknowledged);
+    const auto sixth = decoder.tryDecodeNext();
+    assert(sixth.hasFrame() && sixth.frame->type == MessageType::EquipSkill);
+    const auto seventh = decoder.tryDecodeNext();
+    assert(seventh.hasFrame() && seventh.frame->type == MessageType::EquipSkillResult);
     assert(decoder.tryDecodeNext().needsMoreData());
 }
 

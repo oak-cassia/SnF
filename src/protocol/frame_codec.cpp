@@ -1,26 +1,11 @@
 #include "snf/protocol/frame_codec.hpp"
+#include "snf/protocol/payload_writer.hpp"
 
 #include <stdexcept>
 #include <utility>
 
 namespace
 {
-    constexpr std::uint32_t BYTE_MASK = 0xFFU;
-
-    void append_u16_big_endian(std::vector<std::byte>& bytes, std::uint16_t value)
-    {
-        bytes.push_back(static_cast<std::byte>((value >> 8U) & BYTE_MASK));
-        bytes.push_back(static_cast<std::byte>(value & BYTE_MASK));
-    }
-
-    void append_u32_big_endian(std::vector<std::byte>& bytes, std::uint32_t value)
-    {
-        bytes.push_back(static_cast<std::byte>((value >> 24U) & BYTE_MASK));
-        bytes.push_back(static_cast<std::byte>((value >> 16U) & BYTE_MASK));
-        bytes.push_back(static_cast<std::byte>((value >> 8U) & BYTE_MASK));
-        bytes.push_back(static_cast<std::byte>(value & BYTE_MASK));
-    }
-
     std::uint32_t read_u32_big_endian(std::span<const std::byte> bytes, std::size_t offset)
     {
         return (std::to_integer<std::uint32_t>(bytes[offset]) << 24U) | (std::to_integer<std::uint32_t>(bytes[offset + 1]) << 16U) |
@@ -63,6 +48,8 @@ namespace
         case snf::protocol::MessageType::SkillAcknowledged:
         case snf::protocol::MessageType::SetMoveIntent:
         case snf::protocol::MessageType::MoveAcknowledged:
+        case snf::protocol::MessageType::EquipSkill:
+        case snf::protocol::MessageType::EquipSkillResult:
             return true;
         }
 
@@ -89,9 +76,9 @@ namespace snf::protocol
         std::vector<std::byte> encoded;
         encoded.reserve(FRAME_LENGTH_FIELD_SIZE + body_size);
 
-        append_u32_big_endian(encoded, body_size);
-        append_u16_big_endian(encoded, static_cast<std::uint16_t>(frame.type));
-        append_u32_big_endian(encoded, frame.request_id);
+        append_u32(encoded, body_size);
+        append_u16(encoded, static_cast<std::uint16_t>(frame.type));
+        append_u32(encoded, frame.request_id);
         encoded.insert(encoded.end(), frame.payload.begin(), frame.payload.end());
 
         return encoded;
@@ -197,6 +184,17 @@ namespace snf::protocol
         return result;
     }
 
+    std::size_t FrameDecoder::bufferedByteCount() const noexcept
+    {
+        return _buffer.size() - _read_offset;
+    }
+
+    void FrameDecoder::reset() noexcept
+    {
+        _buffer.clear();
+        _read_offset = 0;
+    }
+
     // _read_offset 앞의 해석 완료 구간만 제거하고, 아직 해석하지 못한 바이트는 남긴다.
     // 예: [완료된 A][미완성 B] -> [미완성 B]. 다음 해석 위치는 다시 0이 된다.
     void FrameDecoder::compactConsumedPrefix()
@@ -220,8 +218,7 @@ namespace snf::protocol
 
     DecodeNextResult FrameDecoder::fail(DecodeError error)
     {
-        _buffer.clear();
-        _read_offset = 0;
+        reset();
         return DecodeNextResult{.frame = std::nullopt, .error = error};
     }
 }

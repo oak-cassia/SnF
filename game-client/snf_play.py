@@ -7,8 +7,27 @@ import time
 
 import snf_wire
 from snf_session import Session
-from snf_wire import Direction, EnemyKind, MessageType, RoomPhase, ZoneCommandStatus
+from snf_wire import Direction, EnemyKind, EquipSkillStatus, MessageType, PurchaseStatus, RoomPhase, RoomStatus, ZoneCommandStatus
 from snf_world import World
+
+# Mirrors the server skill catalog so the panel can show the equipped skill's numbers.
+SKILL_SPECS = {
+    snf_wire.SLASH_SKILL_ID: {"name": "SLASH", "cooldown": 1.0, "range": 12, "attack_percent": 100},
+    snf_wire.ARCANE_BOLT_SKILL_ID: {"name": "ARCANE BOLT", "cooldown": 1.5, "range": 40, "attack_percent": 160},
+}
+ARCANE_BOLT_PRICE = 500
+
+
+def skill_name(skill_id: int) -> str:
+    spec = SKILL_SPECS.get(skill_id)
+    return spec["name"] if spec else f"SKILL #{skill_id}"
+
+
+def skill_rejection_log(status: RoomStatus) -> str | None:
+    # A cast can be refused for cooldown, phase, or a skill the Room did not snapshot.
+    if status == RoomStatus.Applied:
+        return None
+    return f"Skill rejected: {status.name}"
 
 
 def zone_render_position_after_response(
@@ -320,8 +339,17 @@ def run_gui(
 
     current_direction = Direction.Stop
     last_skill_time = 0.0
-    slash_cooldown = 1.0
-    slash_range = 12
+
+    try:
+        equipped_skill_id = session.query_equipped_skill_id()
+    except (ConnectionError, OSError, RuntimeError, TimeoutError) as error:
+        equipped_skill_id = snf_wire.SLASH_SKILL_ID
+        world.add_log(f"Loadout query failed: {error}")
+    owned_skill_ids = {snf_wire.SLASH_SKILL_ID, equipped_skill_id}
+    room_skill_id = equipped_skill_id
+    world.add_log(f"Loadout: {skill_name(equipped_skill_id)} equipped")
+    currency_balance: int | None = None
+    next_purchase_key = int(time.time())
 
     zone_local_x = float(world.zone_x)
     zone_local_y = float(world.zone_y)
@@ -359,24 +387,56 @@ def run_gui(
                                     port=port,
                                     zone_first=False,
                                 )
-                        join_party_room(
+                        if join_party_room(
                             session=session,
                             world=world,
                             bot_list=bot_list,
                             room_id=room_id,
                             start=start,
-                        )
+                        ):
+                            room_skill_id = equipped_skill_id
+                            last_skill_time = 0.0
 
                 elif event.key == pygame.K_r:
                     if world.mode == "room" and world.phase == RoomPhase.Waiting and session.in_room:
                         session.send_battle_start()
 
                 elif event.key == pygame.K_SPACE:
-                    if world.mode == "room" and session.in_room and now - last_skill_time >= slash_cooldown:
+                    cast_cooldown = SKILL_SPECS.get(room_skill_id, {"cooldown": 1.0})["cooldown"]
+                    if world.mode == "room" and session.in_room and now - last_skill_time >= cast_cooldown:
                         my_entity = world.players.get(player_id)
                         if my_entity and my_entity.alive:
-                            session.send_use_skill(snf_wire.SLASH_SKILL_ID)
+                            session.send_use_skill(room_skill_id)
                             last_skill_time = now
+
+                elif event.key == pygame.K_b:
+                    try:
+                        purchase_result = session.purchase(next_purchase_key, snf_wire.ARCANE_BOLT_PRODUCT_ID)
+                    except (ConnectionError, OSError, RuntimeError, TimeoutError) as error:
+                        world.add_log(f"Buy failed: {error}")
+                    else:
+                        next_purchase_key += 1
+                        owned_skill_ids.add(snf_wire.ARCANE_BOLT_SKILL_ID)
+                        currency_balance = purchase_result["currency_balance"]
+                        if purchase_result["status"] == PurchaseStatus.AlreadyOwned:
+                            world.add_log(f"Arcane Bolt already owned ({currency_balance}c)")
+                        else:
+                            world.add_log(f"Bought Arcane Bolt ({currency_balance}c left)")
+
+                elif event.key in (pygame.K_1, pygame.K_2):
+                    wanted_skill_id = snf_wire.SLASH_SKILL_ID if event.key == pygame.K_1 else snf_wire.ARCANE_BOLT_SKILL_ID
+                    try:
+                        equip_status, equipped_skill_id = session.equip_skill(wanted_skill_id)
+                    except (ConnectionError, OSError, RuntimeError, TimeoutError) as error:
+                        world.add_log(f"Equip failed: {error}")
+                    else:
+                        owned_skill_ids.add(equipped_skill_id)
+                        if equip_status == EquipSkillStatus.AlreadyEquipped:
+                            world.add_log(f"{skill_name(equipped_skill_id)} already equipped")
+                        elif session.in_room:
+                            world.add_log(f"Equipped {skill_name(equipped_skill_id)} - next room entry")
+                        else:
+                            world.add_log(f"Equipped {skill_name(equipped_skill_id)}")
 
         keys = pygame.key.get_pressed()
         dx = 0
@@ -473,6 +533,11 @@ def run_gui(
                 world.failure_reason = reason.name
                 world.boss_final_hp = boss_hp
                 world.add_log(f"FAILED! {reason.name}")
+            elif frame.type == MessageType.SkillAcknowledged:
+                ack_status, _ack_phase = snf_wire.parse_ack(frame.payload)
+                rejection = skill_rejection_log(ack_status)
+                if rejection:
+                    world.add_log(rejection)
             elif frame.type == MessageType.ReturnedToZone:
                 ret_zone, rx, ry = snf_wire.parse_returned(frame.payload)
                 world.return_to_zone_mode(ret_zone, rx, ry)
@@ -606,6 +671,24 @@ def run_gui(
             pygame.draw.line(screen, (40, 60, 55), (pad_x, py_offset), (panel_x + panel_w - 15, py_offset), 1)
             py_offset += 12
 
+            screen.blit(font_small.render("SKILL LOADOUT", True, (150, 175, 170)), (pad_x, py_offset))
+            py_offset += 16
+            screen.blit(font_medium.render(skill_name(equipped_skill_id), True, (255, 220, 120)), (pad_x, py_offset))
+            py_offset += 22
+            coin_text = "? (buy to reveal)" if currency_balance is None else str(currency_balance)
+            screen.blit(font_small.render(f"Coins: {coin_text}", True, (180, 210, 240)), (pad_x, py_offset))
+            py_offset += 18
+            bolt_owned = snf_wire.ARCANE_BOLT_SKILL_ID in owned_skill_ids
+            buy_hint = f"[B] Buy Arcane Bolt ({ARCANE_BOLT_PRICE})" if not bolt_owned else "[B] Arcane Bolt owned"
+            screen.blit(font_small.render(buy_hint, True, (160, 200, 230) if not bolt_owned else (110, 130, 125)), (pad_x, py_offset))
+            py_offset += 16
+            screen.blit(font_small.render("[1] Equip Slash  [2] Equip Bolt", True, (160, 200, 230)), (pad_x, py_offset))
+            py_offset += 10
+
+            py_offset += 10
+            pygame.draw.line(screen, (40, 60, 55), (pad_x, py_offset), (panel_x + panel_w - 15, py_offset), 1)
+            py_offset += 12
+
             screen.blit(font_small.render("BATTLE DUNGEON", True, (150, 175, 170)), (pad_x, py_offset))
             py_offset += 16
             dungeon_btn_rect = pygame.Rect(pad_x, py_offset, 210, 36)
@@ -618,7 +701,7 @@ def run_gui(
 
             ctrl_y = win_h - 55
             pygame.draw.line(screen, (40, 60, 55), (pad_x, ctrl_y - 8), (panel_x + panel_w - 15, ctrl_y - 8), 1)
-            screen.blit(font_small.render("WASD/Arrows: Move in Zone", True, (140, 170, 160)), (pad_x, ctrl_y))
+            screen.blit(font_small.render("WASD: Move | B: Buy | 1/2: Equip", True, (140, 170, 160)), (pad_x, ctrl_y))
             screen.blit(font_small.render("J/ENTER: Enter Room | ESC: Quit", True, (140, 170, 160)), (pad_x, ctrl_y + 16))
 
         else:
@@ -638,7 +721,7 @@ def run_gui(
                 my_x, my_y = my_entity.interpolated_pos(now)
                 center_x = int(my_x * scale)
                 center_y = int(my_y * scale)
-                range_px = slash_range * scale
+                range_px = SKILL_SPECS.get(room_skill_id, {"range": 12})["range"] * scale
                 range_surf = pygame.Surface((range_px * 2, range_px * 2), pygame.SRCALPHA)
                 pygame.draw.circle(range_surf, (60, 220, 120, 35), (range_px, range_px), range_px)
                 pygame.draw.circle(range_surf, (60, 220, 120, 90), (range_px, range_px), range_px, 1)
@@ -730,7 +813,8 @@ def run_gui(
             screen.blit(title_surf, (pad_x, py_offset))
             py_offset += 26
 
-            info_surf = font_small.render(f"Player #{player_id}  |  Room #{room_id}", True, (160, 170, 195))
+            coin_text = "?" if currency_balance is None else str(currency_balance)
+            info_surf = font_small.render(f"Player #{player_id}  |  Room #{room_id}  |  {coin_text}c", True, (160, 170, 195))
             screen.blit(info_surf, (pad_x, py_offset))
             py_offset += 20
 
@@ -779,18 +863,25 @@ def run_gui(
             screen.blit(b_surf, (pad_x + bar_w // 2 - b_surf.get_width() // 2, py_offset + 1))
             py_offset += 24
 
-            screen.blit(font_small.render("SLASH SKILL [SPACE]", True, (160, 170, 195)), (pad_x, py_offset))
+            room_spec = SKILL_SPECS.get(room_skill_id, {"cooldown": 1.0, "range": 12, "attack_percent": 100})
+            screen.blit(font_small.render(f"{skill_name(room_skill_id)} [SPACE]", True, (160, 170, 195)), (pad_x, py_offset))
             py_offset += 16
             cd_elapsed = now - last_skill_time
-            cd_ratio = max(0.0, min(1.0, cd_elapsed / slash_cooldown))
+            cd_ratio = max(0.0, min(1.0, cd_elapsed / room_spec["cooldown"]))
             pygame.draw.rect(screen, (40, 45, 60), (pad_x, py_offset, bar_w, bar_h))
             cd_color = (255, 200, 50) if cd_ratio >= 1.0 else (80, 110, 160)
             pygame.draw.rect(screen, cd_color, (pad_x, py_offset, int(bar_w * cd_ratio), bar_h))
             pygame.draw.rect(screen, (70, 80, 110), (pad_x, py_offset, bar_w, bar_h), 1)
-            cd_txt_str = "READY (10 DMG, RNG 12)" if cd_ratio >= 1.0 else f"Cooldown {slash_cooldown - cd_elapsed:.1f}s"
+            ready_text = f"READY ({room_spec['attack_percent']}% ATK, RNG {room_spec['range']})"
+            cd_txt_str = ready_text if cd_ratio >= 1.0 else f"Cooldown {room_spec['cooldown'] - cd_elapsed:.1f}s"
             cd_surf = font_small.render(cd_txt_str, True, (20, 20, 25) if cd_ratio >= 1.0 else (220, 220, 230))
             screen.blit(cd_surf, (pad_x + bar_w // 2 - cd_surf.get_width() // 2, py_offset + 1))
-            py_offset += 26
+            py_offset += 22
+            if equipped_skill_id != room_skill_id:
+                pending_text = f"Equipped {skill_name(equipped_skill_id)} - next room"
+                screen.blit(font_small.render(pending_text, True, (240, 180, 50)), (pad_x, py_offset))
+                py_offset += 16
+            py_offset += 4
 
             pygame.draw.line(screen, (45, 52, 72), (pad_x, py_offset), (panel_x + panel_w - 15, py_offset), 1)
             py_offset += 10
@@ -829,8 +920,9 @@ def run_gui(
 
             ctrl_y = win_h - 55
             pygame.draw.line(screen, (45, 52, 72), (pad_x, ctrl_y - 8), (panel_x + panel_w - 15, ctrl_y - 8), 1)
-            screen.blit(font_small.render("WASD/Arrows: Move | SPACE: Slash", True, (130, 140, 165)), (pad_x, ctrl_y))
-            screen.blit(font_small.render("R: Battle Start | ESC: Return to Zone", True, (130, 140, 165)), (pad_x, ctrl_y + 16))
+            screen.blit(font_small.render(f"WASD: Move | SPACE: {skill_name(room_skill_id)}", True, (130, 140, 165)), (pad_x, ctrl_y))
+            screen.blit(font_small.render("R: Start | ESC: Zone | B: Buy Bolt", True, (130, 140, 165)), (pad_x, ctrl_y + 16))
+            screen.blit(font_small.render("1/2: Equip Slash/Bolt (next room)", True, (130, 140, 165)), (pad_x, ctrl_y + 32))
 
             if world.phase in (RoomPhase.Cleared, RoomPhase.Failed):
                 overlay = pygame.Surface((arena_px_w, arena_px_h), pygame.SRCALPHA)

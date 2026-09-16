@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <span>
 #include <utility>
+#include <variant>
 
 namespace
 {
@@ -29,6 +30,12 @@ namespace
             return snf::server::FramePostResult::Closed;
         }
         return snf::server::FramePostResult::Closed;
+    }
+
+    bool requires_persistent_player(const snf::server::PlayerCommand& command) noexcept
+    {
+        return std::holds_alternative<snf::server::PurchaseCommand>(command) ||
+               std::holds_alternative<snf::server::EquipSkillCommand>(command);
     }
 }
 
@@ -413,7 +420,7 @@ namespace snf::server
         {
             actor = *player;
         }
-        else if (std::holds_alternative<PurchaseCommand>(*dispatch_result.command))
+        else if (requires_persistent_player(*dispatch_result.command))
         {
             return FramePostResult::InvalidPayload;
         }

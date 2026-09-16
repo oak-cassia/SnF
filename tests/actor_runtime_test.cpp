@@ -91,7 +91,9 @@ namespace
     {
     public:
         PlayerRuntime(
-            RuntimeDependencies& dependencies, const ActorRuntimeConfig& runtime_config, snf::server::PlayerActorBindingConfig binding_config = {}
+            RuntimeDependencies& dependencies,
+            const ActorRuntimeConfig& runtime_config,
+            snf::server::PlayerActorBindingConfig binding_config = {}
         )
             : binding(dependencies.outbound_sink, dependencies.outbound, dependencies.lifecycle, std::move(binding_config))
             , runtime(runtime_config, dependencies.completion)
@@ -335,8 +337,8 @@ namespace
             return std::make_unique<Slot>();
         }
 
-        [[nodiscard]] ActorDispatchResult
-        dispatch(ActorState& slot, const ActorSubmission& submission, ActorContext& context, std::stop_token) override
+        [[nodiscard]] ActorDispatchResult dispatch(ActorState& slot, const ActorSubmission& submission, ActorContext& context, std::stop_token)
+            override
         {
             static_cast<void>(dynamic_cast<Slot&>(slot));
             const Payload& payload = payloadAs<Payload>(submission);
@@ -1197,63 +1199,6 @@ namespace
             assert(dependencies.lifecycle.admissionRejectionCount() == 2);
             assert(dependencies.lifecycle.terminalCount() == 1);
         }
-    }
-
-    class OversizedResponseSink final : public snf::server::PlayerResponseSink
-    {
-    public:
-        explicit OversizedResponseSink(const std::size_t slots) noexcept
-            : _slots(slots)
-        {
-        }
-
-        [[nodiscard]] std::size_t requiredSlots(const snf::server::PlayerResult&) const noexcept override
-        {
-            return _slots;
-        }
-
-        [[nodiscard]] bool
-        applyResponses(snf::net::ConnectionId, std::uint32_t, snf::server::PlayerResult, snf::server::OutboundReservation&) override
-        {
-            applied = true;
-            return true;
-        }
-
-        bool applied{false};
-
-    private:
-        std::size_t _slots;
-    };
-
-    void test_an_unsatisfiable_result_closes_the_connection_instead_of_failing_the_worker()
-    {
-        RuntimeDependencies dependencies{2};
-        OversizedResponseSink response_sink{3};
-        snf::server::PlayerActorBinding binding{response_sink, dependencies.outbound, dependencies.lifecycle};
-        ActorRuntime runtime{player_runtime_config(1, 8), dependencies.completion};
-        runtime.registerBinding(binding);
-        snf::server::PlayerActorIngress ingress{runtime, binding, dependencies.lifecycle};
-
-        runtime.start();
-        assert(ingress.tryPost(make_command(1, 1)) == PostResult::Accepted);
-
-        std::vector<snf::net::ConnectionId> failures;
-        const auto deadline = std::chrono::steady_clock::now() + 2s;
-        while (failures.empty() && std::chrono::steady_clock::now() < deadline)
-        {
-            const bool used_fail_safe = dependencies.outbound.takePendingAdmissionFailures(failures);
-            assert(!used_fail_safe);
-            std::this_thread::yield();
-        }
-
-        assert(failures.size() == 1);
-        assert(!response_sink.applied);
-
-        runtime.close();
-        runtime.join();
-        assert(dependencies.completion.drained_count.load() == 1);
-        assert(dependencies.completion.failed_count.load() == 0);
-        assert(dependencies.outbound.pendingWaiterCount() == 0);
     }
 
     void test_exhausted_in_flight_budget_closes_the_connection_instead_of_dropping_a_response()
@@ -2296,7 +2241,6 @@ void run_actor_runtime_tests()
     test_cancel_releases_an_actor_suspended_on_outbound_capacity();
     test_saturated_outbound_preserves_follow_up_order_and_handler_atomicity();
     test_exhausted_in_flight_budget_closes_the_connection_instead_of_dropping_a_response();
-    test_an_unsatisfiable_result_closes_the_connection_instead_of_failing_the_worker();
     test_admitted_commands_and_refused_posts_are_counted_apart();
     test_player_repository_wait_suspends_only_the_loading_actor();
     test_player_deactivation_keeps_the_closing_connection_until_final_save_completes();

@@ -14,7 +14,6 @@ option(SNF_ENABLE_THREAD_SANITIZER "Enable ThreadSanitizer" OFF)
 if(SNF_ENABLE_SANITIZERS AND SNF_ENABLE_THREAD_SANITIZER)
     message(FATAL_ERROR "Address/Undefined sanitizers cannot be combined with ThreadSanitizer")
 endif()
-
 function(snf_configure_target target_name)
     target_compile_features(${target_name} PRIVATE cxx_std_20)
 
@@ -60,6 +59,7 @@ add_library(snf_game STATIC
     src/game/player.cpp
     src/game/zone.cpp
     src/game/room.cpp
+    src/game/skill_loadout.cpp
     src/game/street_progression.cpp
     src/game/product_catalog.cpp
 )
@@ -87,9 +87,50 @@ target_include_directories(snf_core
 )
 snf_configure_target(snf_core)
 
+add_library(snf_game_protocol STATIC
+    src/adapter/protocol_encoder.cpp
+)
+target_include_directories(snf_game_protocol PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(snf_game_protocol PUBLIC snf_game snf_core)
+snf_configure_target(snf_game_protocol)
+
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(MySQL REQUIRED IMPORTED_TARGET mysqlclient)
+
+add_library(snf_worker STATIC
+    src/worker/wakeup.cpp
+    src/worker/poller.cpp
+    src/worker/inbox.cpp
+    src/worker/connection.cpp
+    src/worker/connection_table.cpp
+    src/worker/connection_work_queue.cpp
+    src/worker/poll_registration.cpp
+    src/worker/actor_table.cpp
+    src/worker/barrier.cpp
+    src/worker/db_client.cpp
+    src/worker/watchdog.cpp
+    src/worker/worker_group.cpp
+    src/worker/worker.cpp
+)
+target_include_directories(snf_worker PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# The DbClient is a concrete part of the worker runtime rather than an injected
+# interface, so snf_worker links the client library directly. Driver calls stay
+# inside src/worker/db_client.cpp.
+target_link_libraries(snf_worker PUBLIC snf_core Threads::Threads PRIVATE PkgConfig::MySQL)
+snf_configure_target(snf_worker)
+
+add_library(snf_worker_game_runtime STATIC
+    src/adapter/to_effects.cpp
+    src/adapter/player_actor_adapter.cpp
+    src/adapter/zone_actor_adapter.cpp
+    src/adapter/room_actor_adapter.cpp
+    src/adapter/game_request_sink.cpp
+    src/adapter/game_actor_factory.cpp
+)
+target_include_directories(snf_worker_game_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(snf_worker_game_runtime PUBLIC snf_worker snf_game_protocol)
+snf_configure_target(snf_worker_game_runtime)
 
 add_library(snf_runtime STATIC
     src/runtime/runtime_completion.cpp
@@ -129,7 +170,7 @@ add_library(snf_server_runtime STATIC
     src/server/game_server.cpp
     src/server/tcp_server.cpp
 )
-target_link_libraries(snf_server_runtime PUBLIC snf_game snf_core snf_runtime)
+target_link_libraries(snf_server_runtime PUBLIC snf_game snf_core snf_game_protocol snf_runtime)
 snf_configure_target(snf_server_runtime)
 
 add_library(snf_mysql_player_repository STATIC
@@ -201,6 +242,7 @@ if(BUILD_TESTING)
         tests/game_test_main.cpp
         tests/arena_test.cpp
         tests/skill_catalog_test.cpp
+        tests/skill_loadout_test.cpp
         tests/street_progression_test.cpp
         tests/room_test.cpp
         tests/player_test.cpp
@@ -210,6 +252,145 @@ if(BUILD_TESTING)
     snf_configure_target(snf_game_tests)
 
     add_test(NAME snf_game_tests COMMAND snf_game_tests)
+
+    add_executable(snf_worker_tests
+        tests/worker_test_main.cpp
+        tests/worker_identity_test.cpp
+        tests/worker_poller_test.cpp
+        tests/worker_inbox_test.cpp
+        tests/worker_timer_queue_test.cpp
+        tests/worker_loop_test.cpp
+        tests/worker_connection_test.cpp
+        tests/worker_actor_test.cpp
+        tests/worker_metrics_test.cpp
+        tests/worker_progress_test.cpp
+        tests/worker_latency_histogram_test.cpp
+        tests/worker_watchdog_test.cpp
+    )
+    target_link_libraries(snf_worker_tests PRIVATE snf_worker)
+    snf_configure_target(snf_worker_tests)
+
+    add_test(NAME snf_worker_tests COMMAND snf_worker_tests)
+    set_tests_properties(snf_worker_tests PROPERTIES LABELS worker)
+
+    add_executable(snf_worker_network_integration_tests
+        tests/worker_network_integration_test.cpp
+    )
+    target_link_libraries(snf_worker_network_integration_tests
+        PRIVATE
+            snf_worker
+            Threads::Threads
+    )
+    snf_configure_target(snf_worker_network_integration_tests)
+
+    add_test(NAME snf_worker_network_integration_tests COMMAND snf_worker_network_integration_tests)
+    set_tests_properties(snf_worker_network_integration_tests PROPERTIES TIMEOUT 20 LABELS worker)
+
+    add_test(NAME snf_worker_slow_consumer_deterministic COMMAND snf_worker_network_integration_tests --slow-consumer)
+    set_tests_properties(snf_worker_slow_consumer_deterministic PROPERTIES TIMEOUT 20 LABELS worker)
+
+    add_executable(snf_worker_load_scenario_tests
+        tests/worker_load_scenario_test.cpp
+    )
+    target_link_libraries(snf_worker_load_scenario_tests
+        PRIVATE
+            snf_worker_game_runtime
+            PkgConfig::MySQL
+            Threads::Threads
+    )
+    if(SNF_ENABLE_THREAD_SANITIZER)
+        target_compile_definitions(
+            snf_worker_load_scenario_tests
+            PRIVATE
+                SNF_WORKER_CONTEXT_SWITCH_GATE=0
+                SNF_WORKER_GATE_MULTIPLIER=40
+        )
+    elseif(SNF_ENABLE_SANITIZERS)
+        target_compile_definitions(
+            snf_worker_load_scenario_tests
+            PRIVATE
+                SNF_WORKER_CONTEXT_SWITCH_GATE=0
+                SNF_WORKER_GATE_MULTIPLIER=20
+        )
+    else()
+        target_compile_definitions(
+            snf_worker_load_scenario_tests
+            PRIVATE
+                SNF_WORKER_CONTEXT_SWITCH_GATE=1
+                SNF_WORKER_GATE_MULTIPLIER=8
+        )
+    endif()
+    snf_configure_target(snf_worker_load_scenario_tests)
+
+    add_test(NAME snf_worker_load_stub COMMAND snf_worker_load_scenario_tests --stub)
+    set_tests_properties(snf_worker_load_stub PROPERTIES TIMEOUT 90 LABELS "worker;load")
+
+    add_test(NAME snf_worker_load_mysql COMMAND snf_worker_load_scenario_tests --mysql)
+    set_tests_properties(snf_worker_load_mysql PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77 LABELS "worker;load;mysql")
+
+    add_executable(snf_worker_adapter_tests
+        tests/worker_adapter_test.cpp
+        tests/worker_session_test.cpp
+    )
+    target_link_libraries(snf_worker_adapter_tests
+        PRIVATE
+            snf_worker_game_runtime
+            Threads::Threads
+    )
+    snf_configure_target(snf_worker_adapter_tests)
+
+    add_test(NAME snf_worker_adapter_tests COMMAND snf_worker_adapter_tests)
+    set_tests_properties(snf_worker_adapter_tests PROPERTIES TIMEOUT 20 LABELS worker)
+
+    add_executable(snf_db_conformance_tests
+        tests/db_driver_conformance_test.cpp
+    )
+    target_link_libraries(snf_db_conformance_tests
+        PRIVATE
+            snf_worker
+            PkgConfig::MySQL
+            Threads::Threads
+    )
+    snf_configure_target(snf_db_conformance_tests)
+
+    # The stall mode needs no database and always runs. The real-server mode is the
+    # one that closes the Stage 8A gate, so it is a separate test: a skip has to be
+    # visible as a skip rather than folded into a passing run.
+    add_test(NAME snf_db_conformance_stub COMMAND snf_db_conformance_tests --stub)
+    set_tests_properties(snf_db_conformance_stub PROPERTIES TIMEOUT 20 LABELS worker)
+
+    add_test(NAME snf_db_conformance_mysql COMMAND snf_db_conformance_tests --mysql)
+    set_tests_properties(snf_db_conformance_mysql PROPERTIES
+        TIMEOUT 30
+        SKIP_RETURN_CODE 77
+        LABELS "worker;mysql"
+    )
+
+    add_executable(snf_worker_db_client_tests
+        tests/worker_db_client_test.cpp
+    )
+    target_link_libraries(snf_worker_db_client_tests
+        PRIVATE
+            snf_worker_game_runtime
+            PkgConfig::MySQL
+            Threads::Threads
+    )
+    snf_configure_target(snf_worker_db_client_tests)
+
+    add_test(NAME snf_worker_db_client_stub COMMAND snf_worker_db_client_tests --stub)
+    set_tests_properties(snf_worker_db_client_stub PROPERTIES TIMEOUT 20 LABELS worker)
+
+    add_test(NAME snf_worker_db_client_mysql COMMAND snf_worker_db_client_tests --mysql)
+    set_tests_properties(snf_worker_db_client_mysql PROPERTIES
+        TIMEOUT 60
+        SKIP_RETURN_CODE 77
+        LABELS "worker;mysql"
+    )
+
+    add_test(NAME snf_worker_layer
+             COMMAND ${CMAKE_COMMAND} -DWORKER_ROOTS=${CMAKE_SOURCE_DIR}/include/snf/worker:${CMAKE_SOURCE_DIR}/src/worker
+                     -P ${CMAKE_SOURCE_DIR}/cmake/check_worker_layer.cmake)
+    set_tests_properties(snf_worker_layer PROPERTIES LABELS worker)
 
     add_test(NAME snf_game_layer
              COMMAND ${CMAKE_COMMAND} -DGAME_ROOTS=${CMAKE_SOURCE_DIR}/include/snf/game:${CMAKE_SOURCE_DIR}/src/game
@@ -257,5 +438,6 @@ if(BUILD_TESTING)
     set_tests_properties(snf_mysql_integration_tests PROPERTIES
         TIMEOUT 30
         SKIP_RETURN_CODE 77
+        LABELS mysql
     )
 endif()
