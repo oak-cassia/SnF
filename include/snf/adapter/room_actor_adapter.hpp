@@ -1,5 +1,6 @@
 #pragma once
 
+#include "snf/adapter/game_payloads.hpp"
 #include "snf/game/room.hpp"
 #include "snf/worker/actor.hpp"
 #include "snf/worker/timer_queue.hpp"
@@ -39,5 +40,6 @@ namespace snf::adapter
         snf::server::Room _room;
         snf::worker::TimerAdmission* _timer_admission{nullptr};
         std::unordered_map<snf::server::PlayerId, snf::worker::ConnectionRef, snf::server::PlayerIdHash> _player_connections{};
+        std::unordered_map<snf::server::PlayerId, RoomMembership, snf::server::PlayerIdHash> _memberships{};
     };
 }

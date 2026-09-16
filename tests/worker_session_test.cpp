@@ -485,7 +485,7 @@ namespace
         // in this combined flow.
         assert(harness.metrics().network.received_frames == 2);
         assert(harness.metrics().network.sent_frames == 2);
-        assert(harness.metrics().actor.actor_turns == 2);
+        assert(harness.metrics().actor.actor_turns - harness.metrics().actor.lifecycle_turns - harness.metrics().actor.resumed_turns == 2);
     }
 
     // Serving Ping before authentication must not loosen the boundary for
@@ -889,7 +889,7 @@ namespace
         harness.stop();
         assert(harness.metrics().network.protocol_errors == 0);
         // Authenticate, two purchases, and the connection release.
-        assert(harness.metrics().actor.actor_turns == 4);
+        assert(harness.metrics().actor.actor_turns - harness.metrics().actor.lifecycle_turns - harness.metrics().actor.resumed_turns == 4);
         assert(harness.metrics().network.sent_frames == 3);
     }
 
@@ -968,7 +968,10 @@ namespace
         // ever produced a domain response.
         assert(harness.metrics().network.sent_frames == malformed.size());
         // Authenticate plus release per iteration, and nothing else.
-        assert(harness.metrics().actor.actor_turns == malformed.size() * 2);
+        assert(
+            harness.metrics().actor.actor_turns - harness.metrics().actor.lifecycle_turns - harness.metrics().actor.resumed_turns ==
+            malformed.size() * 2
+        );
     }
 
     // 27-byte zone frame layout round trip: status=Applied(0), zone id,
@@ -1253,7 +1256,10 @@ namespace
         harness.stop();
         assert(harness.metrics().network.protocol_errors == malformed.size());
         assert(harness.metrics().network.sent_frames == malformed.size());
-        assert(harness.metrics().actor.actor_turns == malformed.size() * 2);
+        assert(
+            harness.metrics().actor.actor_turns - harness.metrics().actor.lifecycle_turns - harness.metrics().actor.resumed_turns ==
+            malformed.size() * 2
+        );
     }
 
     // When a connection closes, an implicit LeaveZone is dispatched to the zone.

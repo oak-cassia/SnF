@@ -8,6 +8,19 @@
 
 namespace snf::adapter
 {
+    void GameRequestSink::cancelConnectionCloseRetries() noexcept
+    {
+        assertOwnerThread();
+        _cancelled_closes.fetch_add(_pending_closes, std::memory_order_relaxed);
+        _records = {};
+        _sessions.clear();
+        _live_sessions.store(0, std::memory_order_relaxed);
+        _pending_closes = 0;
+        _pending_closes_atomic.store(0, std::memory_order_relaxed);
+        _next_retry_deadline.reset();
+        _retry_cursor = 0;
+    }
+
     namespace
     {
         constexpr std::size_t PLAYER_ID_WIRE_SIZE = 8;

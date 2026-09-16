@@ -8,6 +8,7 @@
 #include "snf/worker/actor.hpp"
 #include "snf/worker/timer_queue.hpp"
 
+#include <array>
 #include <chrono>
 #include <variant>
 #include <vector>
@@ -123,6 +124,29 @@ namespace snf::adapter
         }
 
         [[nodiscard]] snf::worker::TurnResult dispatch(snf::worker::ActorEnvelope&& envelope, const snf::worker::ActorTurnContext& context) override;
+        [[nodiscard]] std::optional<snf::worker::TimePoint> lifecycleDeadline() const noexcept override;
+        [[nodiscard]] bool needsShutdownTurn() const noexcept override
+        {
+            return !_shutdown_started;
+        }
+        [[nodiscard]] bool shutdownPending() const noexcept override
+        {
+            return !_shutdown_started || _cleanup_count != 0 || !_final_save_finished;
+        }
+        [[nodiscard]] bool finalizationFailed() const noexcept override
+        {
+            return _final_save_failed;
+        }
+        [[nodiscard]] snf::worker::TurnResult lifecycleTurn(const snf::worker::ActorTurnContext& context, bool shutdown) override;
+        void cancelLifecycle() noexcept override;
+        [[nodiscard]] std::size_t pendingCleanupCount() const noexcept
+        {
+            return _cleanup_count;
+        }
+        [[nodiscard]] std::optional<RoomMembership> roomMembership() const noexcept
+        {
+            return _room_membership;
+        }
 
         // Called from the save continuation once the database has answered. Public
         // because the continuation is a free coroutine, not a member.
@@ -173,6 +197,31 @@ namespace snf::adapter
         }
 
     private:
+        struct Cleanup
+        {
+            snf::worker::ActorKey target{};
+            std::uint64_t epoch{0};
+            std::uint64_t correlation{0};
+            snf::worker::ConnectionGeneration generation{};
+            std::optional<RoomMembership> membership{std::nullopt};
+        };
+        void prepareLifecycleEffects(snf::worker::EffectBatch& effects, const snf::worker::ActorTurnContext& context);
+        [[nodiscard]] snf::worker::ActorEnvelope cleanupMessage(const Cleanup& cleanup) const;
+        [[nodiscard]] snf::worker::TurnResult handleCleanupOutcome(ZoneOutcomeMessage&& msg);
+        [[nodiscard]] snf::worker::TurnResult handleCleanupOutcome(RoomOutcomeMessage&& msg, const snf::worker::ActorTurnContext& context);
+        void releaseCleanup(std::size_t index) noexcept;
+        static constexpr std::size_t MAX_CLEANUPS = 19;
+        std::array<std::optional<Cleanup>, MAX_CLEANUPS> _cleanups{};
+        std::size_t _cleanup_count{0};
+        std::uint64_t _cleanup_sequence{0};
+        std::optional<snf::worker::TimePoint> _cleanup_deadline;
+        std::optional<RoomMembership> _room_membership;
+        std::optional<ZoneOutcomeMessage> _deferred_return;
+        bool _shutdown_started{false};
+        bool _final_save_started{false};
+        bool _final_save_finished{false};
+        bool _final_save_failed{false};
+        [[nodiscard]] snf::worker::TurnResult dispatchMessage(snf::worker::ActorEnvelope&& envelope, const snf::worker::ActorTurnContext& context);
         void scheduleSaveIfDirty(snf::worker::EffectBatch& effects, std::chrono::steady_clock::time_point now);
         [[nodiscard]] std::optional<snf::worker::EffectBatch> rejectConflictingAuthentication(
             const std::optional<snf::worker::ConnectionRef>& connection

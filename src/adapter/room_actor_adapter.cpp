@@ -11,6 +11,7 @@ namespace snf::adapter
     namespace
     {
         using PlayerConnections = std::unordered_map<snf::server::PlayerId, snf::worker::ConnectionRef, snf::server::PlayerIdHash>;
+        using Memberships = std::unordered_map<snf::server::PlayerId, RoomMembership, snf::server::PlayerIdHash>;
 
         [[nodiscard]] snf::server::RoomConfig validatedConfig(snf::server::RoomConfig config)
         {
@@ -42,7 +43,7 @@ namespace snf::adapter
             return std::nullopt;
         }
 
-        [[nodiscard]] std::vector<RoomAudienceRoute> routesOf(const PlayerConnections& connections)
+        [[nodiscard]] std::vector<RoomAudienceRoute> routesOf(const PlayerConnections& connections, const Memberships& memberships)
         {
             std::vector<RoomAudienceRoute> routes;
             routes.reserve(connections.size());
@@ -51,8 +52,12 @@ namespace snf::adapter
                 routes.push_back(RoomAudienceRoute{
                     .player = player,
                     .connection = connection,
+                    .membership = memberships.contains(player) ? std::optional{memberships.at(player)} : std::nullopt,
                 });
             }
+            for (const auto& [player, membership] : memberships)
+                if (!connections.contains(player))
+                    routes.push_back(RoomAudienceRoute{.player = player, .membership = membership});
             return routes;
         }
     }
@@ -66,6 +71,7 @@ namespace snf::adapter
         , _timer_admission(timer_admission)
     {
         _player_connections.reserve(MAX_ROOM_PARTICIPANTS);
+        _memberships.reserve(MAX_ROOM_PARTICIPANTS);
     }
 
     snf::worker::TurnResult RoomActorAdapter::dispatch(snf::worker::ActorEnvelope&& envelope, const snf::worker::ActorTurnContext& context)
@@ -74,6 +80,30 @@ namespace snf::adapter
         {
             auto msg = envelope.take<RoomCommandMessage>();
             const auto command_reply_kind = replyKind(msg.command);
+            if (const auto* leave = std::get_if<snf::server::LeaveRoom>(&msg.command); leave != nullptr)
+            {
+                const auto found = _memberships.find(leave->player);
+                if ((msg.membership && (found == _memberships.end() || found->second != *msg.membership)) ||
+                    (!msg.membership && found != _memberships.end()))
+                {
+                    // The old membership is absent. A delayed cleanup must not
+                    // remove the same player's newer seat.
+                    return snf::worker::CompletedTurn{
+                        .effects = toEffects(
+                            RoomTurnContext{
+                                .request_id = msg.request_id,
+                                .room = _room.id(),
+                                .now = context.now,
+                                .reply_to = msg.reply_to,
+                                .membership = msg.membership
+                            },
+                            snf::server::RoomResult{
+                                .status = snf::server::RoomCommandStatus::NotJoined, .phase = _room.phase(), .player = leave->player
+                            }
+                        )
+                    };
+                }
+            }
 
             if (std::holds_alternative<snf::server::StartBattle>(msg.command) && _room.canStartBattle())
             {
@@ -95,8 +125,9 @@ namespace snf::adapter
                     .room = _room.id(),
                     .reply_kind = command_reply_kind,
                     .now = context.now,
-                    .audience_routes = routesOf(_player_connections),
+                    .audience_routes = routesOf(_player_connections, _memberships),
                     .reply_to = msg.reply_to,
+                    .membership = msg.membership,
                 };
 
                 if (!reservation.has_value())
@@ -129,6 +160,8 @@ namespace snf::adapter
             if (std::holds_alternative<snf::server::JoinRoom>(msg.command))
             {
                 const auto& join = std::get<snf::server::JoinRoom>(msg.command);
+                if (msg.membership && result.status == snf::server::RoomCommandStatus::Applied)
+                    _memberships.insert_or_assign(join.player, *msg.membership);
                 if (msg.connection.has_value() &&
                     (result.status == snf::server::RoomCommandStatus::Applied || result.status == snf::server::RoomCommandStatus::AlreadyJoined))
                 {
@@ -138,6 +171,7 @@ namespace snf::adapter
             else if (std::holds_alternative<snf::server::LeaveRoom>(msg.command) && result.status == snf::server::RoomCommandStatus::Applied)
             {
                 _player_connections.erase(std::get<snf::server::LeaveRoom>(msg.command).player);
+                _memberships.erase(std::get<snf::server::LeaveRoom>(msg.command).player);
             }
 
             const RoomTurnContext turn_context{
@@ -146,8 +180,9 @@ namespace snf::adapter
                 .room = _room.id(),
                 .reply_kind = command_reply_kind,
                 .now = context.now,
-                .audience_routes = routesOf(_player_connections),
+                .audience_routes = routesOf(_player_connections, _memberships),
                 .reply_to = msg.reply_to,
+                .membership = msg.membership,
             };
             auto effects = toEffects(turn_context, result);
             return snf::worker::CompletedTurn{.effects = std::move(effects)};
@@ -167,7 +202,7 @@ namespace snf::adapter
                 .room = _room.id(),
                 .reply_kind = std::nullopt,
                 .now = context.now,
-                .audience_routes = routesOf(_player_connections),
+                .audience_routes = routesOf(_player_connections, _memberships),
             };
             const auto result = _room.handle(snf::server::BattleDeadline{}, context.now);
             auto effects = toEffects(turn_context, result);
@@ -188,7 +223,7 @@ namespace snf::adapter
                 .room = _room.id(),
                 .reply_kind = std::nullopt,
                 .now = context.now,
-                .audience_routes = routesOf(_player_connections),
+                .audience_routes = routesOf(_player_connections, _memberships),
             };
             const auto result = _room.handle(snf::server::RoomSimulationTick{}, context.now);
             auto effects = toEffects(turn_context, result);

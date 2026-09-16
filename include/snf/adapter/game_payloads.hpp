@@ -40,6 +40,15 @@ namespace snf::adapter
         CrossZoneLeaveSource = 8,
         CrossZoneEnterTarget = 9,
         CrossZoneRestoreSource = 10,
+        CleanupZone = 11,
+        CleanupRoom = 12,
+    };
+
+    struct RoomMembership
+    {
+        snf::worker::ActorIncarnation incarnation{};
+        std::uint64_t sequence{0};
+        [[nodiscard]] bool operator==(const RoomMembership&) const noexcept = default;
     };
 
     struct WorkflowReplyTo
@@ -83,6 +92,7 @@ namespace snf::adapter
         std::uint32_t request_id{0};
         snf::server::RoomCommand command;
         std::optional<WorkflowReplyTo> reply_to{std::nullopt};
+        std::optional<RoomMembership> membership{std::nullopt};
     };
 
     struct RoomDeadlineMessage
@@ -165,6 +175,7 @@ namespace snf::adapter
         snf::server::RoomId room{0};
         std::uint32_t request_id{0};
         snf::server::RoomResult result;
+        std::optional<RoomMembership> membership{std::nullopt};
     };
 
     struct PlayerWorkflowTimeoutMessage

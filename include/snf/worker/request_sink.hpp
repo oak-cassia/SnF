@@ -66,6 +66,12 @@ namespace snf::worker
         virtual void retryActorConnectionClosed(std::chrono::steady_clock::time_point /*now*/, const CountTimeBudget& /*budget*/)
         {
         }
+
+        // Shutdown phase D, after every connection has closed. Cancel retained
+        // notifications explicitly; this is not a mailbox or cleanup receipt.
+        virtual void cancelConnectionCloseRetries() noexcept
+        {
+        }
     };
 
     class NullRequestSink final : public RequestSink

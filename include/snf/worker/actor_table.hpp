@@ -140,11 +140,24 @@ namespace snf::worker
             _blocked.reset();
         }
 
+        // Mirrors membership in the Worker's lifecycle index, so arming stays
+        // one entry per actor without searching that index.
+        [[nodiscard]] bool lifecycleArmed() const noexcept
+        {
+            return _lifecycle_armed;
+        }
+
+        void setLifecycleArmed(const bool armed) noexcept
+        {
+            _lifecycle_armed = armed;
+        }
+
     private:
         ActorKey _key;
         ActorIncarnation _incarnation;
         std::size_t _slot_index;
         ActorState _state{ActorState::Idle};
+        bool _lifecycle_armed{false};
         std::unique_ptr<ActorInstance> _instance{nullptr};
         std::optional<BlockedTask> _blocked{std::nullopt};
         Mailbox _mailbox{};
@@ -238,6 +251,9 @@ namespace snf::worker
         [[nodiscard]] std::size_t activeCount() const noexcept;
         [[nodiscard]] std::size_t availableCount() const noexcept;
         [[nodiscard]] std::vector<ActorHandle> activeHandles() const;
+        // Allocation-free, bounded lifecycle scans over the preallocated table.
+        [[nodiscard]] ActorSlot* activeAt(std::size_t index) noexcept;
+        [[nodiscard]] const ActorSlot* activeAt(std::size_t index) const noexcept;
 
     private:
         struct Slot

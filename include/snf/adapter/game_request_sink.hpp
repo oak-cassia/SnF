@@ -57,6 +57,13 @@ namespace snf::adapter
 
         void retryActorConnectionClosed(std::chrono::steady_clock::time_point now, const snf::worker::CountTimeBudget& budget) override;
 
+        void cancelConnectionCloseRetries() noexcept override;
+
+        [[nodiscard]] std::size_t cancelledConnectionCloseCount() const noexcept
+        {
+            return _cancelled_closes.load(std::memory_order_relaxed);
+        }
+
         // Live session count, bounded by the connection table because an entry
         // only exists while its connection is open. This mirror is atomic so it
         // can be observed while the Worker runs; the map itself stays
@@ -138,6 +145,7 @@ namespace snf::adapter
         std::array<SessionRecord, MAX_TRACKED_SESSIONS> _records{};
         std::size_t _pending_closes{0};
         std::atomic<std::size_t> _pending_closes_atomic{0};
+        std::atomic<std::size_t> _cancelled_closes{0};
         std::optional<std::chrono::steady_clock::time_point> _next_retry_deadline{std::nullopt};
         std::size_t _retry_cursor{0};
     };

@@ -140,6 +140,7 @@ namespace snf::adapter
                     .room = context.room,
                     .request_id = context.request_id,
                     .result = result,
+                    .membership = context.membership,
                 }),
             });
         }
@@ -233,6 +234,10 @@ namespace snf::adapter
 
             for (const auto player : result.audience)
             {
+                std::optional<RoomMembership> membership;
+                for (const auto& route : context.audience_routes)
+                    if (route.player == player)
+                        membership = route.membership;
                 const snf::worker::ActorKey player_key{
                     .kind = snf::worker::ActorKind::Player,
                     .entity = player.value,
@@ -247,6 +252,7 @@ namespace snf::adapter
                         .room = context.room,
                         .request_id = 0,
                         .result = result,
+                        .membership = membership,
                     }),
                 });
             }

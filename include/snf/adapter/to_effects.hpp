@@ -52,6 +52,7 @@ namespace snf::adapter
     {
         snf::server::PlayerId player;
         std::optional<snf::worker::ConnectionRef> connection{std::nullopt};
+        std::optional<RoomMembership> membership{std::nullopt};
     };
 
     struct RoomTurnContext
@@ -63,6 +64,7 @@ namespace snf::adapter
         std::chrono::steady_clock::time_point now{};
         std::vector<RoomAudienceRoute> audience_routes{};
         std::optional<WorkflowReplyTo> reply_to{std::nullopt};
+        std::optional<RoomMembership> membership{std::nullopt};
     };
 
     [[nodiscard]] snf::worker::EffectBatch toEffects(const PlayerTurnContext& context, const snf::server::PlayerResult& result);

@@ -398,6 +398,7 @@ namespace snf::worker
 
         _actors = std::make_unique<ActorTable>(config.actor_table_capacity);
         _ready_queue = std::make_unique<ReadyActorQueue>(config.actor_table_capacity);
+        _lifecycle_armed.reserve(config.actor_table_capacity);
         _actor_factory = &factory;
         _actor_config = config;
         _timers.setMaxApplicationTimerBytes(config.max_application_timer_bytes_total);
@@ -442,6 +443,64 @@ namespace snf::worker
     void Worker::attachBarrier(WorkerQuiescenceBarrier* barrier) noexcept
     {
         _barrier = barrier;
+    }
+
+    bool Worker::hasPendingActorLifecycle() const noexcept
+    {
+        for (const auto handle : _lifecycle_armed)
+        {
+            const auto* slot = _actors->find(handle);
+            if (slot != nullptr && slot->incarnation() == handle.incarnation && slot->hasInstance() && slot->instance()->shutdownPending())
+                return true;
+        }
+        return false;
+    }
+
+    // An Actor's lifecycle state only changes in its own turn, so one query after
+    // each turn keeps the index exact. Blocked finalization is covered by
+    // hasBlockedActors(), and shutdownPending() keeps the entry until it ends.
+    void Worker::refreshLifecycleArm(const ActorHandle handle)
+    {
+        assertOwnerThread();
+        ActorSlot* slot = _actors == nullptr ? nullptr : _actors->find(handle);
+        if (slot == nullptr || slot->incarnation() != handle.incarnation)
+        {
+            return;
+        }
+
+        const bool armed =
+            slot->hasInstance() && (slot->instance()->lifecycleDeadline().has_value() ||
+                                    (_shutting_down && (slot->instance()->needsShutdownTurn() || slot->instance()->shutdownPending())));
+        if (armed == slot->lifecycleArmed())
+        {
+            return;
+        }
+
+        slot->setLifecycleArmed(armed);
+        if (armed)
+        {
+            _lifecycle_armed.push_back(handle);
+            return;
+        }
+        std::erase(_lifecycle_armed, handle);
+    }
+
+    // One pass when shutdown begins. Every Actor owes a shutdown turn from here,
+    // so the index is filled once instead of being rebuilt per loop iteration.
+    void Worker::armLifecycleForShutdown()
+    {
+        assertOwnerThread();
+        if (_actors == nullptr)
+        {
+            return;
+        }
+        for (std::size_t i = 0; i < _actors->capacity(); ++i)
+        {
+            if (const auto* slot = _actors->activeAt(i); slot != nullptr)
+            {
+                refreshLifecycleArm(slot->handle());
+            }
+        }
     }
 
     bool Worker::hasBlockedActors() const noexcept
@@ -1072,6 +1131,18 @@ namespace snf::worker
     std::optional<std::chrono::milliseconds> Worker::pollTimeout() const
     {
         std::optional<TimePoint> earliest_deadline = _timers.nextDeadline();
+        for (const auto handle : _lifecycle_armed)
+        {
+            const auto* slot = _actors->find(handle);
+            if (slot == nullptr || slot->incarnation() != handle.incarnation || !slot->hasInstance() || slot->hasBlocked() ||
+                slot->state() == ActorState::Stopping)
+                continue;
+            if (_shutting_down && slot->instance()->needsShutdownTurn())
+                return std::chrono::milliseconds(0);
+            const auto deadline = slot->instance()->lifecycleDeadline();
+            if (deadline && (!earliest_deadline || *deadline < *earliest_deadline))
+                earliest_deadline = deadline;
+        }
         if (!_shutting_down && !_stop_requested.load(std::memory_order_acquire) && actorsConfigured() && _request_sink != nullptr)
         {
             const auto sink_deadline = _request_sink->nextActorConnectionCloseRetryDeadline();
@@ -1520,12 +1591,34 @@ namespace snf::worker
     void Worker::runReadyActors(const CountTimeBudget& budget)
     {
         assertOwnerThread();
-        if (!actorsConfigured() || _ready_queue->empty())
+        if (!actorsConfigured())
         {
             return;
         }
 
         const auto phase_started_at = std::chrono::steady_clock::now();
+        // At most one ready entry per actor. No separate unbounded control queue,
+        // and maintenance cannot be stranded by a full mailbox or TimerQueue.
+        for (std::size_t i = 0; i < _lifecycle_armed.size();)
+        {
+            const auto handle = _lifecycle_armed[i];
+            auto* slot = _actors->find(handle);
+            if (slot == nullptr || slot->incarnation() != handle.incarnation || !slot->lifecycleArmed())
+            {
+                _lifecycle_armed[i] = _lifecycle_armed.back();
+                _lifecycle_armed.pop_back();
+                continue;
+            }
+            ++i;
+            if (!slot->hasInstance() || slot->hasBlocked() || slot->state() != ActorState::Idle)
+                continue;
+            const auto deadline = slot->instance()->lifecycleDeadline();
+            if ((_shutting_down && slot->instance()->needsShutdownTurn()) || (deadline && *deadline <= phase_started_at))
+            {
+                slot->setState(ActorState::Queued);
+                _ready_queue->push(handle);
+            }
+        }
         std::size_t turns_executed = 0;
         bool phase_budget_exhausted = false;
 
@@ -1549,6 +1642,20 @@ namespace snf::worker
             {
                 continue;
             }
+
+            // Re-queries this Actor's lifecycle state once the turn is over, on
+            // every exit path. The slot may be gone by then, so it is looked up
+            // again by handle.
+            struct LifecycleArmScope final
+            {
+                Worker& worker;
+                ActorHandle handle;
+
+                ~LifecycleArmScope()
+                {
+                    worker.refreshLifecycleArm(handle);
+                }
+            } lifecycle_arm_scope{*this, handle};
 
             // A suspended DB continuation resumes here, in its own turn. completeDb()
             // only recorded the result and queued the actor.
@@ -1760,17 +1867,13 @@ namespace snf::worker
             bool suspended = false;
             const auto slice_started_at = std::chrono::steady_clock::now();
 
-            while (slice_turns < slice_limit && !slot->mailbox().empty())
+            while (slice_turns < slice_limit)
             {
                 if (budgetExpired(phase_started_at, budget.max_duration))
                 {
                     phase_budget_exhausted = true;
                     break;
                 }
-
-                ActorEnvelope envelope = slot->mailbox().pop();
-                _total_mailbox_messages -= 1;
-                _total_mailbox_bytes -= envelope.chargedBytes();
 
                 ActorTurnScope turn_scope{*this};
                 const ActorTurnContext context{
@@ -1779,7 +1882,22 @@ namespace snf::worker
                     .turn_id = turn_scope.id(),
                 };
 
-                TurnResult result = slot->instance()->dispatch(std::move(envelope), context);
+                const auto deadline = slot->instance()->lifecycleDeadline();
+                const bool lifecycle = (_shutting_down && slot->instance()->needsShutdownTurn()) || (deadline && *deadline <= context.now);
+                if (!lifecycle && slot->mailbox().empty())
+                    break;
+                TurnResult result = [&]() -> TurnResult
+                {
+                    if (lifecycle)
+                    {
+                        ++_metrics.actor.lifecycle_turns;
+                        return slot->instance()->lifecycleTurn(context, _shutting_down);
+                    }
+                    auto envelope = slot->mailbox().pop();
+                    _total_mailbox_messages -= 1;
+                    _total_mailbox_bytes -= envelope.chargedBytes();
+                    return slot->instance()->dispatch(std::move(envelope), context);
+                }();
                 ++turns_executed;
                 ++slice_turns;
                 ++_metrics.actor.actor_turns;
@@ -1794,7 +1912,7 @@ namespace snf::worker
                     if (task.hasDbRequest())
                     {
                         ++_metrics.actor.suspended_turns;
-                        if (!suspendOnDbRequest(*slot, std::move(task)))
+                        if (!suspendOnDbRequest(*slot, std::move(task), lifecycle && _shutting_down))
                         {
                             removeActor(slot->handle(), ActorRemovalReason::ActivationRejected);
                         }
@@ -2129,7 +2247,7 @@ namespace snf::worker
 
     // Turns a DbAwait suspension into a submitted request. Returns false when the
     // turn suspended without asking for anything, which is a handler bug.
-    bool Worker::suspendOnDbRequest(ActorSlot& slot, ActorTask task)
+    bool Worker::suspendOnDbRequest(ActorSlot& slot, ActorTask task, const bool final_save)
     {
         assertOwnerThread();
         auto request = task.takeDbRequest();
@@ -2162,7 +2280,7 @@ namespace snf::worker
         }
 
         std::optional<DbResult> immediate_failure;
-        if (_db == nullptr || _shutting_down)
+        if (_db == nullptr || (_shutting_down && !(final_save && std::holds_alternative<SavePlayerRequest>(*request))))
         {
             immediate_failure = DbResult{DbFailure{.kind = DbFailureKind::Overloaded, .reached_server = false, .message = "no database"}};
         }
@@ -2507,6 +2625,20 @@ namespace snf::worker
 
         // 1. slot.clearBlocked() (coroutine frame / activation load destroyed first)
         slot->clearBlocked();
+
+        if (slot->hasInstance())
+        {
+            if (_shutting_down && slot->instance()->shutdownPending())
+                ++_metrics.actor.lifecycle_forced_cancellations;
+            if (slot->instance()->finalizationFailed())
+                ++_metrics.actor.lifecycle_finalization_failures;
+            slot->instance()->cancelLifecycle();
+        }
+        if (slot->lifecycleArmed())
+        {
+            slot->setLifecycleArmed(false);
+            std::erase(_lifecycle_armed, handle);
+        }
 
         // 2. discardMailbox(slot)
         static_cast<void>(discardMailbox(*slot));
@@ -3167,13 +3299,10 @@ namespace snf::worker
     {
         _shutting_down = true;
         _network_stopping = true;
+        armLifecycleForShutdown();
 
-        // Stop admitting new DB work first. Completions that are already possible
-        // still arrive while the phases below drain.
-        if (_db != nullptr)
-        {
-            _db->beginShutdown();
-        }
+        // Ordinary DB submit is gated by _shutting_down. Keep the backend open
+        // through phase B for a lifecycle turn's single final SavePlayerRequest.
 
         if (_listener_registration)
         {
@@ -3245,6 +3374,11 @@ namespace snf::worker
             {
                 continue;
             }
+
+            // The ordinary blocked operation was cancelled before the lifecycle
+            // turn. Do not immediately cancel the final save admitted by it.
+            if (slot->hasInstance() && !slot->instance()->needsShutdownTurn() && slot->instance()->shutdownPending())
+                continue;
 
             if (std::holds_alternative<SyntheticSuspendedCommand>(*slot->blocked()))
             {
@@ -3334,7 +3468,7 @@ namespace snf::worker
                         }
                     }
 
-                    if (!hasBlockedActors())
+                    if (!hasBlockedActors() && !hasPendingActorLifecycle())
                     {
                         break;
                     }
@@ -3366,6 +3500,7 @@ namespace snf::worker
 
                     drainInbox(_budgets.inbox);
                     expireTimers(now, _budgets.timers);
+                    advanceDb(now);
                     runReadyActors(_budgets.actors);
                     flushWrites(_budgets.writes);
 
@@ -3392,6 +3527,8 @@ namespace snf::worker
                         }
                     }
 
+                    if (hasPendingActorLifecycle())
+                        continue;
                     state = ShutdownBState::Waiting;
                 }
 
@@ -3418,7 +3555,8 @@ namespace snf::worker
 
                     const bool has_work = (!_inbox.isEmpty()) || (_ready_queue != nullptr && !_ready_queue->empty()) ||
                                           (_actors != nullptr && hasBlockedActors()) || (_timers.applicationTimerCount() > 0) ||
-                                          (_timers.reservedApplicationTimerCount() > 0) || (_timers.reservedApplicationTimerBytes() > 0);
+                                          (_timers.reservedApplicationTimerCount() > 0) || (_timers.reservedApplicationTimerBytes() > 0) ||
+                                          hasPendingActorLifecycle();
 
                     if (has_work)
                     {
@@ -3461,6 +3599,8 @@ namespace snf::worker
             }
         }
 
+        if (_db != nullptr)
+            _db->beginShutdown();
         if (_actors != nullptr)
         {
             const auto handles = _actors->activeHandles();
@@ -3530,6 +3670,9 @@ namespace snf::worker
         }
 
         _inbox.close();
+
+        if (_request_sink != nullptr)
+            _request_sink->cancelConnectionCloseRetries();
 
         while (std::chrono::steady_clock::now() < deadline)
         {

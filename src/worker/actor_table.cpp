@@ -6,6 +6,15 @@
 
 namespace snf::worker
 {
+    ActorSlot* ActorTable::activeAt(const std::size_t index) noexcept
+    {
+        return index < _slots.size() && _slots[index].committed ? &*_slots[index].actor : nullptr;
+    }
+
+    const ActorSlot* ActorTable::activeAt(const std::size_t index) const noexcept
+    {
+        return index < _slots.size() && _slots[index].committed ? &*_slots[index].actor : nullptr;
+    }
     ActorSlot::ActorSlot(const ActorKey key, const ActorIncarnation incarnation, const std::size_t slot_index) noexcept
         : _key(key)
         , _incarnation(incarnation)

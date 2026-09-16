@@ -182,6 +182,16 @@ namespace snf::worker
         {
             worker.removeActor(handle, reason);
         }
+
+        static std::size_t lifecycleArmedCount(const Worker& worker)
+        {
+            return worker._lifecycle_armed.size();
+        }
+
+        static bool hasPendingActorLifecycle(const Worker& worker)
+        {
+            return worker.hasPendingActorLifecycle();
+        }
     };
 
     struct WorkerGroupTestAccess
@@ -340,6 +350,66 @@ namespace
 
     private:
         DispatchFn _fn;
+    };
+
+    // Reports lifecycle work the way PlayerActorAdapter does: the deadline only
+    // changes inside this Actor's own turn, which is what lets the Worker keep an
+    // index instead of asking every slot.
+    class LifecycleProbeActor final : public ActorInstance
+    {
+    public:
+        TurnResult dispatch(ActorEnvelope&&, const ActorTurnContext&) override
+        {
+            ++dispatch_turns;
+            deadline = deadline_after_dispatch;
+            return CompletedTurn{.effects = EffectBatch{}};
+        }
+
+        [[nodiscard]] std::optional<TimePoint> lifecycleDeadline() const noexcept override
+        {
+            return deadline;
+        }
+
+        [[nodiscard]] bool needsShutdownTurn() const noexcept override
+        {
+            return shutdown_turn_owed;
+        }
+
+        [[nodiscard]] bool shutdownPending() const noexcept override
+        {
+            return shutdown_turn_owed;
+        }
+
+        TurnResult lifecycleTurn(const ActorTurnContext&, const bool shutdown) override
+        {
+            ++lifecycle_turns;
+            if (shutdown)
+            {
+                shutdown_turn_owed = false;
+            }
+            deadline = deadline_after_lifecycle;
+            return CompletedTurn{.effects = EffectBatch{}};
+        }
+
+        void cancelLifecycle() noexcept override
+        {
+            ++cancellations;
+            if (cancellations_after_removal != nullptr)
+            {
+                ++*cancellations_after_removal;
+            }
+        }
+
+        // removeActor() destroys the instance, so cancellation is observed
+        // through a location that outlives it.
+        std::size_t* cancellations_after_removal{nullptr};
+        std::optional<TimePoint> deadline{std::nullopt};
+        std::optional<TimePoint> deadline_after_dispatch{std::nullopt};
+        std::optional<TimePoint> deadline_after_lifecycle{std::nullopt};
+        bool shutdown_turn_owed{false};
+        std::size_t dispatch_turns{0};
+        std::size_t lifecycle_turns{0};
+        std::size_t cancellations{0};
     };
 
     class FunctionalActorFactory final : public ActorFactory
@@ -3887,6 +3957,93 @@ namespace
         defaults.retryActorConnectionClosed(Clock::now(), {64, 100us});
     }
 
+    // Lifecycle work reaches the Actor phase through the Worker's index, never by
+    // scanning the actor table. Scanning it cost 200-500us of the 1ms Actor phase
+    // budget on an idle default table (16384 slots) every loop iteration, which
+    // starved ordinary mailbox turns.
+    void test_lifecycle_index_arms_only_actors_with_work()
+    {
+        LifecycleProbeActor* first = nullptr;
+        LifecycleProbeActor* second = nullptr;
+        std::size_t cancellations = 0;
+        FunctionalActorFactory factory(
+            [&](const ActorKey key)
+            {
+                auto actor = std::make_unique<LifecycleProbeActor>();
+                actor->cancellations_after_removal = &cancellations;
+                if (key.entity == 1)
+                {
+                    first = actor.get();
+                }
+                else
+                {
+                    second = actor.get();
+                }
+                return ActorConstructionResult::ready(std::move(actor));
+            }
+        );
+        Worker worker(WorkerId{0}, 1, WorkerBudgets::defaults(), WorkerInboxConfig{});
+        worker.configureActors(WorkerActorConfig{}, factory);
+        const CountTimeBudget budget{100, 1s};
+        const ActorKey first_key{ActorKind::Player, 1};
+        const ActorKey second_key{ActorKind::Player, 2};
+
+        assert(worker.tryDeliverLocal(first_key, makeEnvelope()) == DeliveryResult::Accepted);
+        assert(worker.tryDeliverLocal(second_key, makeEnvelope()) == DeliveryResult::Accepted);
+        WorkerActorTestAccess::runReadyActors(worker, budget);
+        // An Actor with no lifecycle work never enters the index, whatever the
+        // table capacity is.
+        assert(first->dispatch_turns == 1 && second->dispatch_turns == 1);
+        assert(WorkerActorTestAccess::lifecycleArmedCount(worker) == 0);
+        assert(WorkerActorTestAccess::pollTimeout(worker) == WorkerBudgets::defaults().max_poll_timeout);
+
+        // The turn that creates the work is what arms the Actor.
+        second->deadline_after_dispatch = Clock::now() + 10s;
+        assert(worker.tryDeliverLocal(second_key, makeEnvelope()) == DeliveryResult::Accepted);
+        WorkerActorTestAccess::runReadyActors(worker, budget);
+        assert(WorkerActorTestAccess::lifecycleArmedCount(worker) == 1);
+        const auto armed_timeout = WorkerActorTestAccess::pollTimeout(worker);
+        assert(armed_timeout && *armed_timeout > 0ms && *armed_timeout <= WorkerBudgets::defaults().max_poll_timeout);
+
+        // Armed but not due: no turn is spent on it.
+        WorkerActorTestAccess::runReadyActors(worker, budget);
+        assert(second->lifecycle_turns == 0 && worker.metrics().actor.lifecycle_turns == 0);
+
+        // Due with an empty mailbox: the lifecycle turn runs, and reporting no
+        // further deadline disarms the Actor.
+        second->deadline = Clock::now() - 1ms;
+        second->deadline_after_lifecycle = std::nullopt;
+        WorkerActorTestAccess::runReadyActors(worker, budget);
+        assert(second->lifecycle_turns == 1 && worker.metrics().actor.lifecycle_turns == 1);
+        assert(second->dispatch_turns == 2); // No mailbox message was consumed.
+        assert(WorkerActorTestAccess::lifecycleArmedCount(worker) == 0);
+        assert(WorkerActorTestAccess::pollTimeout(worker) == WorkerBudgets::defaults().max_poll_timeout);
+
+        // Removal drops the entry, so a re-used slot cannot inherit arming.
+        second->deadline_after_dispatch = Clock::now() + 10s;
+        assert(worker.tryDeliverLocal(second_key, makeEnvelope()) == DeliveryResult::Accepted);
+        WorkerActorTestAccess::runReadyActors(worker, budget);
+        assert(WorkerActorTestAccess::lifecycleArmedCount(worker) == 1);
+        WorkerActorTestAccess::removeActor(worker, WorkerActorTestAccess::handle(worker, second_key), ActorRemovalReason::Stopped);
+        second = nullptr; // The instance is destroyed with the slot.
+        assert(cancellations == 1);
+        assert(WorkerActorTestAccess::lifecycleArmedCount(worker) == 0);
+        assert(worker.metrics().actor.lifecycle_forced_cancellations == 0);
+
+        // Shutdown arms every remaining Actor once, and the index is what answers
+        // whether phase B still has lifecycle work.
+        first->shutdown_turn_owed = true;
+        assert(!WorkerActorTestAccess::hasPendingActorLifecycle(worker));
+        WorkerActorTestAccess::beginShutdownPhaseA(worker);
+        assert(WorkerActorTestAccess::lifecycleArmedCount(worker) == 1);
+        assert(WorkerActorTestAccess::hasPendingActorLifecycle(worker));
+        assert(WorkerActorTestAccess::pollTimeout(worker) == 0ms);
+        WorkerActorTestAccess::runReadyActors(worker, budget);
+        assert(first->lifecycle_turns == 1 && first->dispatch_turns == 1);
+        assert(!WorkerActorTestAccess::hasPendingActorLifecycle(worker));
+        assert(WorkerActorTestAccess::lifecycleArmedCount(worker) == 0);
+    }
+
     void test_close_retry_idle_wakeup_phase_budget_and_iteration_limit()
     {
         CloseRetryProbe sink;
@@ -5272,6 +5429,7 @@ void run_worker_actor_tests()
     test_connection_closed_receipts_local_remote_and_fifo();
     test_close_retry_poll_deadline_matrix();
     test_close_retry_idle_wakeup_phase_budget_and_iteration_limit();
+    test_lifecycle_index_arms_only_actors_with_work();
     test_close_retry_inbox_precedes_hook_and_stop_gates();
     test_close_retry_runs_before_due_timer();
     test_connection_closed_absent_and_state_admission();

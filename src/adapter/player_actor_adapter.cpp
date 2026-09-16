@@ -54,7 +54,7 @@ namespace snf::adapter
     // await, so this is what keeps a second save from ever being queued behind it.
     void PlayerActorAdapter::scheduleSaveIfDirty(snf::worker::EffectBatch& effects, const std::chrono::steady_clock::time_point now)
     {
-        if (_save_scheduled || !_player.hasFlushableDirtyState() || !_player.state().identity().has_value())
+        if (_shutdown_started || _save_scheduled || !_player.hasFlushableDirtyState() || !_player.state().identity().has_value())
         {
             return;
         }
@@ -94,6 +94,12 @@ namespace snf::adapter
     void PlayerActorAdapter::onSaveCompleted(const snf::worker::DbResult& result, const snf::server::PlayerStateComponentMask cleared)
     {
         _save_scheduled = false;
+        if (_final_save_started)
+        {
+            _final_save_finished = true;
+            const auto* saved = std::get_if<snf::worker::SavePlayerResult>(&result);
+            _final_save_failed = saved == nullptr || saved->outcome != snf::worker::SaveOutcome::Committed;
+        }
 
         const auto* saved = std::get_if<snf::worker::SavePlayerResult>(&result);
         if (saved == nullptr)
@@ -126,6 +132,34 @@ namespace snf::adapter
 
     snf::worker::TurnResult PlayerActorAdapter::dispatch(snf::worker::ActorEnvelope&& envelope, const snf::worker::ActorTurnContext& context)
     {
+        auto result = dispatchMessage(std::move(envelope), context);
+        if (_cleanup_count == 0 && _deferred_return && !_connection_closing && !_shutdown_started)
+        {
+            auto outcome = std::move(*_deferred_return);
+            _deferred_return.reset();
+            result = handleZoneOutcome(std::move(outcome), context);
+        }
+        if (auto* completed = std::get_if<snf::worker::CompletedTurn>(&result))
+        {
+            prepareLifecycleEffects(completed->effects, context);
+            for (const auto& effect : completed->effects.effects())
+            {
+                if (const auto* close = std::get_if<snf::worker::CloseConnectionEffect>(&effect);
+                    close != nullptr && _bound_connection == close->connection)
+                {
+                    _connection_closing = true;
+                }
+            }
+        }
+        return result;
+    }
+
+    snf::worker::TurnResult PlayerActorAdapter::dispatchMessage(snf::worker::ActorEnvelope&& envelope, const snf::worker::ActorTurnContext& context)
+    {
+        if (_shutdown_started && (envelope.is<PlayerCommandMessage>() || envelope.is<PlayerZoneRequestMessage>() ||
+                                  envelope.is<PlayerRoomRequestMessage>() || envelope.is<PingMessage>() || envelope.is<PlayerSaveMessage>()))
+            return snf::worker::CompletedTurn{.effects = {}};
+
         if (envelope.is<PlayerSaveMessage>())
         {
             static_cast<void>(envelope.take<PlayerSaveMessage>());
@@ -158,6 +192,12 @@ namespace snf::adapter
             }
             if (std::holds_alternative<snf::server::AuthenticateCommand>(msg.command))
             {
+                if (_cleanup_count != 0 && msg.connection)
+                {
+                    snf::worker::EffectBatch effects;
+                    effects.push(snf::worker::CloseConnectionEffect{.connection = *msg.connection});
+                    return snf::worker::CompletedTurn{.effects = std::move(effects)};
+                }
                 if (auto conflict = rejectConflictingAuthentication(msg.connection))
                 {
                     return snf::worker::CompletedTurn{.effects = std::move(*conflict)};
@@ -293,12 +333,16 @@ namespace snf::adapter
         if (envelope.is<ZoneOutcomeMessage>())
         {
             auto msg = envelope.take<ZoneOutcomeMessage>();
+            if (msg.step == WorkflowStep::CleanupZone)
+                return handleCleanupOutcome(std::move(msg));
             return handleZoneOutcome(std::move(msg), context);
         }
 
         if (envelope.is<RoomOutcomeMessage>())
         {
             auto msg = envelope.take<RoomOutcomeMessage>();
+            if (msg.step == WorkflowStep::CleanupRoom)
+                return handleCleanupOutcome(std::move(msg), context);
             return handleRoomOutcome(std::move(msg), context);
         }
 
@@ -333,6 +377,13 @@ namespace snf::adapter
         {
             auto msg = envelope.take<ExperienceGrantMessage>();
             _player.grantStreetExperience(msg.grant.experience);
+            if (_shutdown_started && _final_save_finished && !_final_save_failed)
+            {
+                // A cross-worker grant can arrive after a successful final save
+                // but before group quiescence. Persist this newer snapshot too.
+                _final_save_started = false;
+                _final_save_finished = false;
+            }
             snf::worker::EffectBatch effects;
             scheduleSaveIfDirty(effects, context.now);
             return snf::worker::CompletedTurn{.effects = std::move(effects)};
@@ -342,6 +393,186 @@ namespace snf::adapter
     }
 
     constexpr auto WORKFLOW_TIMEOUT = std::chrono::milliseconds{1000};
+
+    snf::worker::ActorEnvelope PlayerActorAdapter::cleanupMessage(const Cleanup& cleanup) const
+    {
+        const auto player = *_player.state().identity();
+        const WorkflowReplyTo reply{
+            .player = player,
+            .connection_generation = cleanup.generation,
+            .correlation_id = cleanup.correlation,
+            .step = cleanup.target.kind == snf::worker::ActorKind::Zone ? WorkflowStep::CleanupZone : WorkflowStep::CleanupRoom,
+            .route_epoch = cleanup.epoch,
+            .request_id = 0
+        };
+        if (cleanup.target.kind == snf::worker::ActorKind::Zone)
+            return GameActorPayloadRegistry::create(
+                ZoneCommandMessage{.command = snf::server::LeaveZoneCommand{.player = player, .route_epoch = cleanup.epoch}, .reply_to = reply}
+            );
+        return GameActorPayloadRegistry::create(
+            RoomCommandMessage{.command = snf::server::LeaveRoom{.player = player}, .reply_to = reply, .membership = cleanup.membership}
+        );
+    }
+
+    void PlayerActorAdapter::prepareLifecycleEffects(snf::worker::EffectBatch& effects, const snf::worker::ActorTurnContext& context)
+    {
+        if (!_player.state().identity())
+            return;
+        for (auto& effect : effects.mutableEffects())
+        {
+            auto* tell = std::get_if<snf::worker::TellActorEffect>(&effect);
+            if (tell == nullptr)
+                continue;
+            std::optional<Cleanup> cleanup;
+            if (tell->message.is<ZoneCommandMessage>())
+            {
+                auto command = tell->message.take<ZoneCommandMessage>();
+                if (!command.reply_to && std::holds_alternative<snf::server::LeaveZoneCommand>(command.command))
+                    cleanup = Cleanup{.target = tell->target, .epoch = std::get<snf::server::LeaveZoneCommand>(command.command).route_epoch};
+                tell->message = GameActorPayloadRegistry::create(std::move(command));
+            }
+            else if (tell->message.is<RoomCommandMessage>())
+            {
+                auto command = tell->message.take<RoomCommandMessage>();
+                if (std::holds_alternative<snf::server::JoinRoom>(command.command) && command.reply_to)
+                {
+                    _room_membership = RoomMembership{context.activation.incarnation, command.reply_to->correlation_id};
+                    command.membership = _room_membership;
+                }
+                if (!command.reply_to && std::holds_alternative<snf::server::LeaveRoom>(command.command))
+                    cleanup = Cleanup{.target = tell->target, .membership = _room_membership};
+                tell->message = GameActorPayloadRegistry::create(std::move(command));
+            }
+            if (!cleanup)
+                continue;
+            std::optional<std::size_t> selected;
+            for (std::size_t i = 0; i < MAX_CLEANUPS; ++i)
+                if (_cleanups[i] && _cleanups[i]->target == cleanup->target && _cleanups[i]->epoch == cleanup->epoch &&
+                    _cleanups[i]->membership == cleanup->membership)
+                    selected = i;
+            if (!selected)
+            {
+                for (std::size_t i = 0; i < MAX_CLEANUPS; ++i)
+                    if (!_cleanups[i])
+                    {
+                        selected = i;
+                        break;
+                    }
+                if (!selected)
+                    throw std::logic_error{"Player cleanup bound exceeded"};
+                cleanup->correlation = ++_cleanup_sequence;
+                cleanup->generation = _bound_connection ? _bound_connection->generation : snf::worker::ConnectionGeneration{};
+                _cleanups[*selected] = *cleanup;
+                ++_cleanup_count;
+            }
+            tell->message = cleanupMessage(*_cleanups[*selected]);
+            if (!_cleanup_deadline)
+                _cleanup_deadline = context.now + std::chrono::milliseconds{10};
+        }
+    }
+
+    void PlayerActorAdapter::releaseCleanup(const std::size_t index) noexcept
+    {
+        _cleanups[index].reset();
+        --_cleanup_count;
+        if (_cleanup_count == 0)
+            _cleanup_deadline.reset();
+    }
+
+    snf::worker::TurnResult PlayerActorAdapter::handleCleanupOutcome(ZoneOutcomeMessage&& msg)
+    {
+        for (std::size_t i = 0; i < MAX_CLEANUPS; ++i)
+        {
+            const auto& cleanup = _cleanups[i];
+            if (!cleanup || cleanup->target.kind != snf::worker::ActorKind::Zone || cleanup->target.entity != msg.zone.value ||
+                cleanup->correlation != msg.correlation_id || cleanup->epoch != msg.route_epoch || cleanup->generation != msg.connection_generation ||
+                msg.request_id != 0 || msg.player != _player.state().identity() ||
+                (msg.result.player && msg.result.player != _player.state().identity()))
+                continue;
+            // Exact-epoch Leave is fenced: a different epoch means our old
+            // membership is absent, not permission to delete the newer one.
+            if (msg.result.status == snf::server::ZoneCommandStatus::Applied || msg.result.status == snf::server::ZoneCommandStatus::PlayerMissing ||
+                msg.result.status == snf::server::ZoneCommandStatus::StaleRoute)
+                releaseCleanup(i);
+            break;
+        }
+        return snf::worker::CompletedTurn{.effects = {}};
+    }
+
+    snf::worker::TurnResult PlayerActorAdapter::handleCleanupOutcome(RoomOutcomeMessage&& msg, const snf::worker::ActorTurnContext&)
+    {
+        for (std::size_t i = 0; i < MAX_CLEANUPS; ++i)
+        {
+            const auto& cleanup = _cleanups[i];
+            if (!cleanup || cleanup->target.kind != snf::worker::ActorKind::Room || cleanup->target.entity != msg.room.value ||
+                cleanup->correlation != msg.correlation_id || cleanup->membership != msg.membership ||
+                cleanup->generation != msg.connection_generation || msg.request_id != 0 || msg.player != _player.state().identity() ||
+                (msg.result.player && msg.result.player != _player.state().identity()))
+                continue;
+            if (msg.result.status == snf::server::RoomCommandStatus::Applied || msg.result.status == snf::server::RoomCommandStatus::NotJoined ||
+                (msg.result.status == snf::server::RoomCommandStatus::WrongPhase &&
+                 (msg.result.phase == snf::server::RoomPhase::Cleared || msg.result.phase == snf::server::RoomPhase::Failed)))
+                releaseCleanup(i);
+            break;
+        }
+        return snf::worker::CompletedTurn{.effects = {}};
+    }
+
+    std::optional<snf::worker::TimePoint> PlayerActorAdapter::lifecycleDeadline() const noexcept
+    {
+        if (_shutdown_started && _cleanup_count == 0 && !_final_save_started)
+            return snf::worker::TimePoint{};
+        return _cleanup_deadline;
+    }
+
+    snf::worker::TurnResult PlayerActorAdapter::lifecycleTurn(const snf::worker::ActorTurnContext& context, const bool shutdown)
+    {
+        if (shutdown && !_shutdown_started)
+        {
+            _shutdown_started = true;
+            _deferred_return.reset();
+            _save_scheduled = false; // Worker cancelled application timers.
+            if (_bound_connection)
+                return dispatch(GameActorPayloadRegistry::create(PlayerConnectionClosedMessage{*_bound_connection}), context);
+        }
+        if (_cleanup_count != 0)
+        {
+            snf::worker::EffectBatch effects;
+            for (const auto& cleanup : _cleanups)
+                if (cleanup)
+                    effects.push(snf::worker::TellActorEffect{.target = cleanup->target, .message = cleanupMessage(*cleanup)});
+            _cleanup_deadline = context.now + std::chrono::milliseconds{10};
+            return snf::worker::CompletedTurn{.effects = std::move(effects)};
+        }
+        if (_shutdown_started && !_final_save_started)
+        {
+            _final_save_started = true;
+            if (!_player.state().identity())
+            {
+                _final_save_finished = true;
+                return snf::worker::CompletedTurn{.effects = {}};
+            }
+            // Final snapshot includes location/session even when those are the
+            // only dirty components. Never automatically retry an unknown commit.
+            auto task = makeSaveTask(*this, toSaveRequest(_player.snapshot()), 0);
+            if (task.resume() == snf::worker::ActorTaskStatus::Suspended)
+                return snf::worker::SuspendedTurn{std::move(task)};
+            return task.takeCompleted();
+        }
+        return snf::worker::CompletedTurn{.effects = {}};
+    }
+
+    void PlayerActorAdapter::cancelLifecycle() noexcept
+    {
+        _cleanups = {};
+        _cleanup_count = 0;
+        _cleanup_deadline.reset();
+        _pending_zone_ops.clear();
+        _deferred_return.reset();
+        _bound_connection.reset();
+        _workflow_state = StableRoute{};
+        _connection_closing = false;
+    }
 
     bool PlayerActorAdapter::isClosingConnection(const snf::worker::ConnectionRef& connection) const noexcept
     {
@@ -400,6 +631,31 @@ namespace snf::adapter
 
     snf::worker::TurnResult PlayerActorAdapter::handleZoneRequest(PlayerZoneRequestMessage&& msg, const snf::worker::ActorTurnContext& context)
     {
+        if (_cleanup_count != 0 && !_connection_closing && _bound_connection == msg.connection)
+        {
+            snf::worker::EffectBatch effects;
+            const auto kind = std::holds_alternative<EnterZoneRequest>(msg.request)
+                                  ? ZoneReplyFrameKind::Entered
+                                  : (std::holds_alternative<MoveRequest>(msg.request) ? ZoneReplyFrameKind::Moved : ZoneReplyFrameKind::Left);
+            const auto zone = std::holds_alternative<EnterZoneRequest>(msg.request) ? std::get<EnterZoneRequest>(msg.request).zone
+                                                                                    : currentZone().value_or(snf::server::ZoneId{0});
+            effects.push(snf::worker::SendFrameEffect{
+                .connection = msg.connection,
+                .frame = encodeZoneReply(
+                    kind,
+                    zone,
+                    snf::server::ZoneResult{
+                        .status = snf::server::ZoneCommandStatus::TransitionInProgress,
+                        .player = _player.state().identity(),
+                        .position = std::nullopt,
+                        .route_epoch = _route_epoch,
+                        .visible_players = {}
+                    },
+                    msg.request_id
+                )
+            });
+            return snf::worker::CompletedTurn{.effects = std::move(effects)};
+        }
         if (isClosingConnection(msg.connection))
         {
             return snf::worker::CompletedTurn{.effects = snf::worker::EffectBatch{}};
@@ -1083,7 +1339,7 @@ namespace snf::adapter
                         return snf::worker::CompletedTurn{.effects = std::move(effects)};
                     }
 
-                    if (std::holds_alternative<EnteringRoute>(_workflow_state) ||
+                    if (_cleanup_count != 0 || std::holds_alternative<EnteringRoute>(_workflow_state) ||
                         std::holds_alternative<ReturningRoute>(_workflow_state))
                     {
                         const snf::server::RoomResult result{
@@ -1424,6 +1680,10 @@ namespace snf::adapter
 
     snf::worker::TurnResult PlayerActorAdapter::handleZoneOutcome(ZoneOutcomeMessage&& msg, const snf::worker::ActorTurnContext& context)
     {
+        if (_connection_closing)
+        {
+            return snf::worker::CompletedTurn{.effects = {}};
+        }
         const auto player_id = _player.state().identity();
         if (!player_id.has_value() || msg.player != *player_id)
         {
@@ -1661,7 +1921,9 @@ namespace snf::adapter
             if (std::holds_alternative<EnteringRoute>(_workflow_state))
             {
                 auto& entering = std::get<EnteringRoute>(_workflow_state);
-                if (entering.correlation_id == msg.correlation_id && entering.step == msg.step && entering.source_zone == msg.zone)
+                if (entering.correlation_id == msg.correlation_id && entering.step == msg.step && entering.source_zone == msg.zone &&
+                    entering.source_epoch == msg.route_epoch && entering.request_id == msg.request_id &&
+                    (!msg.result.player.has_value() || msg.result.player == player_id))
                 {
                     snf::worker::EffectBatch effects;
                     if (msg.result.status == snf::server::ZoneCommandStatus::Applied)
@@ -1694,7 +1956,11 @@ namespace snf::adapter
                         const auto room = entering.target_room;
                         const auto zone = entering.source_zone;
                         const auto request_id = entering.request_id;
-                        _workflow_state = StableRoute{.zone = zone};
+                        const auto epoch =
+                            msg.result.status == snf::server::ZoneCommandStatus::StaleRoute ? msg.result.route_epoch : entering.source_epoch;
+                        const bool lost_source = msg.result.status == snf::server::ZoneCommandStatus::PlayerMissing ||
+                                                 msg.result.status == snf::server::ZoneCommandStatus::StaleRoute;
+                        _workflow_state = StableRoute{.zone = lost_source ? std::nullopt : std::optional{zone}};
                         effects.push(snf::worker::TellActorEffect{
                             .target = snf::worker::ActorKey{snf::worker::ActorKind::Room, room.value},
                             .message = GameActorPayloadRegistry::create(RoomCommandMessage{
@@ -1717,6 +1983,18 @@ namespace snf::adapter
                             ),
                             .critical = false,
                         });
+                        if (lost_source)
+                        {
+                            _route_epoch = std::max(_route_epoch, epoch);
+                            _player.setLastLocation(std::nullopt);
+                            effects.push(snf::worker::TellActorEffect{
+                                .target = snf::worker::ActorKey{snf::worker::ActorKind::Zone, zone.value},
+                                .message = GameActorPayloadRegistry::create(
+                                    ZoneCommandMessage{.command = snf::server::LeaveZoneCommand{.player = *player_id, .route_epoch = epoch}}
+                                )
+                            });
+                            effects.push(snf::worker::CloseConnectionEffect{.connection = *_bound_connection});
+                        }
                     }
                     scheduleSaveIfDirty(effects, context.now);
                     return snf::worker::CompletedTurn{.effects = std::move(effects)};
@@ -1730,8 +2008,16 @@ namespace snf::adapter
             if (std::holds_alternative<ReturningRoute>(_workflow_state))
             {
                 auto& returning = std::get<ReturningRoute>(_workflow_state);
-                if (returning.correlation_id == msg.correlation_id && returning.step == msg.step && returning.return_zone == msg.zone)
+                if (returning.correlation_id == msg.correlation_id && returning.step == msg.step && returning.return_zone == msg.zone &&
+                    returning.return_epoch == msg.route_epoch && msg.request_id == snf::protocol::UNSOLICITED_REQUEST_ID &&
+                    (!msg.result.player.has_value() || msg.result.player == player_id))
                 {
+                    if (_cleanup_count != 0 && (msg.result.status == snf::server::ZoneCommandStatus::Applied ||
+                                                msg.result.status == snf::server::ZoneCommandStatus::AlreadyPresent))
+                    {
+                        _deferred_return = std::move(msg);
+                        return snf::worker::CompletedTurn{.effects = {}};
+                    }
                     snf::worker::EffectBatch effects;
                     if (msg.result.status == snf::server::ZoneCommandStatus::Applied ||
                         msg.result.status == snf::server::ZoneCommandStatus::AlreadyPresent)
@@ -1751,6 +2037,15 @@ namespace snf::adapter
                     }
                     else
                     {
+                        const auto epoch =
+                            msg.result.status == snf::server::ZoneCommandStatus::StaleRoute ? msg.result.route_epoch : returning.return_epoch;
+                        _route_epoch = std::max(_route_epoch, epoch);
+                        effects.push(snf::worker::TellActorEffect{
+                            .target = snf::worker::ActorKey{snf::worker::ActorKind::Zone, returning.return_zone.value},
+                            .message = GameActorPayloadRegistry::create(ZoneCommandMessage{
+                                .command = snf::server::LeaveZoneCommand{.player = *player_id, .route_epoch = epoch},
+                            }),
+                        });
                         _player.setLastLocation(std::nullopt);
                         _workflow_state = StableRoute{.zone = std::nullopt};
                         effects.push(snf::worker::CloseConnectionEffect{
@@ -1779,6 +2074,11 @@ namespace snf::adapter
         }
 
         const auto op = *it;
+        if (msg.zone != op.target_zone || msg.route_epoch != op.target_epoch || msg.request_id != op.request_id ||
+            (msg.result.player.has_value() && msg.result.player != player_id))
+        {
+            return snf::worker::CompletedTurn{.effects = {}};
+        }
         _pending_zone_ops.erase(it);
 
         snf::worker::EffectBatch effects;
@@ -1836,6 +2136,10 @@ namespace snf::adapter
 
     snf::worker::TurnResult PlayerActorAdapter::handleRoomOutcome(RoomOutcomeMessage&& msg, const snf::worker::ActorTurnContext& context)
     {
+        if (_connection_closing)
+        {
+            return snf::worker::CompletedTurn{.effects = {}};
+        }
         const auto player_id = _player.state().identity();
         if (!player_id.has_value() || msg.player != *player_id)
         {
@@ -1844,6 +2148,8 @@ namespace snf::adapter
 
         if (msg.step == WorkflowStep::RoomTerminalNotification)
         {
+            if (_room_membership != msg.membership)
+                return snf::worker::CompletedTurn{.effects = {}};
             if (std::holds_alternative<InRoomRoute>(_workflow_state))
             {
                 const auto in_room = std::get<InRoomRoute>(_workflow_state);
@@ -1935,11 +2241,12 @@ namespace snf::adapter
         if (std::holds_alternative<EnteringRoute>(_workflow_state))
         {
             auto& entering = std::get<EnteringRoute>(_workflow_state);
-            if (entering.correlation_id == msg.correlation_id && entering.step == msg.step && entering.target_room == msg.room)
+            if (entering.step == WorkflowStep::RoomJoinStep1_JoinRoom && entering.correlation_id == msg.correlation_id && entering.step == msg.step &&
+                entering.target_room == msg.room && entering.request_id == msg.request_id &&
+                (!msg.result.player.has_value() || msg.result.player == player_id))
             {
                 snf::worker::EffectBatch effects;
-                if (msg.result.status == snf::server::RoomCommandStatus::Applied ||
-                    msg.result.status == snf::server::RoomCommandStatus::AlreadyJoined)
+                if (msg.result.status == snf::server::RoomCommandStatus::Applied)
                 {
                     auto timeout_msg = GameActorPayloadRegistry::create(PlayerWorkflowTimeoutMessage{
                         .correlation_id = entering.correlation_id,
@@ -2043,6 +2350,10 @@ namespace snf::adapter
         const snf::worker::ActorTurnContext& context
     )
     {
+        if (_connection_closing)
+        {
+            return snf::worker::CompletedTurn{.effects = {}};
+        }
         auto it = std::find_if(
             _pending_zone_ops.begin(),
             _pending_zone_ops.end(),

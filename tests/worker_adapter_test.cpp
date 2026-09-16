@@ -191,7 +191,7 @@ namespace
     // Drive real domain adapters, retaining outcomes/timers for replay after close.
     // Cleanup delivery is explicit: this proves no occupancy remains only when
     // both the close notification and the cleanup tells are delivered.
-    void assert_disconnect_cleanup(const DisconnectPoint point)
+    void assert_disconnect_cleanup(const DisconnectPoint point, const bool shutdown = false)
     {
         using namespace snf::adapter;
         using namespace snf::server;
@@ -406,7 +406,7 @@ namespace
                 expected.push_back({ActorKind::Zone, 10, 1});
             }
         }
-        auto closed = dispatch(PlayerConnectionClosedMessage{.connection = connection});
+        auto closed = shutdown ? actor.lifecycleTurn(context, true) : dispatch(PlayerConnectionClosedMessage{.connection = connection});
         assert(!actor.boundConnection().has_value());
         assert(std::holds_alternative<StableRoute>(actor.workflowState()));
         assert(!actor.currentZone().has_value());
@@ -431,18 +431,20 @@ namespace
             if (want.kind == ActorKind::Zone)
             {
                 auto message = tell.message.take<ZoneCommandMessage>();
-                assert(!message.connection.has_value() && message.request_id == 0 && !message.reply_to.has_value());
+                assert(!message.connection.has_value() && message.request_id == 0 && message.reply_to->step == WorkflowStep::CleanupZone);
                 const auto& leave = std::get<LeaveZoneCommand>(message.command);
                 assert(leave.player == player && leave.route_epoch == want.epoch);
                 auto& zone = want.entity == 10 ? source : target;
-                static_cast<void>(zone.dispatch(GameActorPayloadRegistry::create(std::move(message)), context));
+                auto ack = zone.dispatch(GameActorPayloadRegistry::create(std::move(message)), context);
+                static_cast<void>(actor.dispatch(takeTellMessage(ack), context));
             }
             else
             {
                 auto message = tell.message.take<RoomCommandMessage>();
-                assert(!message.connection.has_value() && message.request_id == 0 && !message.reply_to.has_value());
+                assert(!message.connection.has_value() && message.request_id == 0 && message.reply_to->step == WorkflowStep::CleanupRoom);
                 assert(std::get<LeaveRoom>(message.command).player == player);
-                static_cast<void>(room.dispatch(GameActorPayloadRegistry::create(std::move(message)), context));
+                auto ack = room.dispatch(GameActorPayloadRegistry::create(std::move(message)), context);
+                static_cast<void>(actor.dispatch(takeTellMessage(ack), context));
             }
         }
         assert(cleanup_count == expected.size() && cleanup_count <= 2 && save_count <= 1);
@@ -472,6 +474,27 @@ namespace
             }
         };
         replay_stale();
+        if (shutdown)
+        {
+            assert(actor.pendingCleanupCount() == 0 && actor.shutdownPending());
+            assert(!actor.needsShutdownTurn());
+            auto final = actor.lifecycleTurn(context, true);
+            auto& task = std::get<SuspendedTurn>(final).task;
+            auto request = task.takeDbRequest();
+            const auto& save = std::get<SavePlayerRequest>(*request);
+            const auto expected_location = cross_zone ? std::nullopt : location;
+            assert(save.player_id == player.value && save.has_location == expected_location.has_value());
+            if (expected_location)
+            {
+                assert(save.zone_id == expected_location->zone.value);
+                assert(save.position_x == expected_location->position.x && save.position_y == expected_location->position.y);
+            }
+            assert(task.resume(DbResult{SavePlayerResult{.outcome = SaveOutcome::Committed}}) == ActorTaskStatus::Completed);
+            assert(!actor.shutdownPending() && !actor.finalizationFailed() && !actor.lifecycleDeadline());
+            auto rejected = dispatch(PlayerCommandMessage{connection, 99, AuthenticateCommand{.player = player}});
+            assert(completedTurn(rejected).effects.empty() && !actor.boundConnection());
+            return;
+        }
         auto reconnected = connection;
         reconnected.generation = ConnectionGeneration{3};
         static_cast<void>(dispatch(PlayerCommandMessage{.connection = reconnected, .request_id = 50, .command = AuthenticateCommand{.player = player}}
@@ -521,6 +544,7 @@ namespace
              })
         {
             assert_disconnect_cleanup(point);
+            assert_disconnect_cleanup(point, true);
             std::cout << "    disconnect point " << static_cast<int>(point) << " PASSED" << std::endl;
         }
 
@@ -1451,8 +1475,8 @@ namespace
         assert(std::get<snf::server::LeaveZoneCommand>(cleanup_command).route_epoch == 7);
         auto cleaned_source = source_actor.dispatch(std::move(source_cleanup), turn_ctx);
         auto cleaned_target = target_actor.dispatch(takeTellMessage(terminal, 1), turn_ctx);
-        static_cast<void>(completedTurn(cleaned_source));
-        static_cast<void>(completedTurn(cleaned_target));
+        static_cast<void>(player_actor.dispatch(takeTellMessage(cleaned_source), turn_ctx));
+        static_cast<void>(player_actor.dispatch(takeTellMessage(cleaned_target), turn_ctx));
         assert(source_actor.zone().playerCount() == 0);
         assert(target_actor.zone().playerCount() == 0);
 
@@ -1881,6 +1905,11 @@ namespace
         assert(zone_enter_tell.target.entity == 10);
         assert(std::holds_alternative<snf::adapter::ReturningRoute>(player_actor.workflowState()));
 
+        // Confirm the Room cleanup before publishing the return route.
+        snf::adapter::RoomActorAdapter empty_room(snf::server::RoomId{1});
+        auto leave_ack = empty_room.dispatch(takeTellMessage(leave_room_res, 0), turn_ctx);
+        static_cast<void>(player_actor.dispatch(takeTellMessage(leave_ack), turn_ctx));
+
         // 8. ZoneActor returns ZoneOutcomeMessage for RoomReturnStep1_ZoneEnter
         auto return_zone_out = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::ZoneOutcomeMessage{
             .player = snf::server::PlayerId{105},
@@ -2000,7 +2029,7 @@ namespace
         assert(!player_actor.isInRoom());
     }
 
-    void test_room_join_zone_leave_failure_compensates_and_keeps_zone_route()
+    void test_room_join_zone_leave_failure_closes_known_none()
     {
         snf::adapter::PlayerActorAdapter player_actor(snf::server::PlayerId{107});
         const snf::worker::ActorTurnContext turn_ctx{
@@ -2094,8 +2123,8 @@ namespace
         assert(std::holds_alternative<snf::worker::CompletedTurn>(fail_res));
         auto& fail_comp = std::get<snf::worker::CompletedTurn>(fail_res);
 
-        // Compensation: LeaveRoom tell to Room 3 + EntryFailed reply to client
-        assert(fail_comp.effects.size() == 2);
+        // Lost source occupancy: compensate both domains and close known-none.
+        assert(fail_comp.effects.size() == 4);
         assert(std::holds_alternative<snf::worker::TellActorEffect>(fail_comp.effects.effects()[0]));
         const auto& comp_tell = std::get<snf::worker::TellActorEffect>(fail_comp.effects.effects()[0]);
         assert(comp_tell.target.kind == snf::worker::ActorKind::Room);
@@ -2106,8 +2135,10 @@ namespace
         assert(fail_reply.frame.type == snf::protocol::MessageType::RoomJoined);
         assert(fail_reply.frame.payload[0] == static_cast<std::byte>(snf::server::RoomCommandStatus::EntryFailed));
 
-        // Zone route maintained!
-        assert(player_actor.currentZone() == snf::server::ZoneId{10});
+        assert(std::holds_alternative<snf::worker::TellActorEffect>(fail_comp.effects.effects()[2]));
+        assert(std::holds_alternative<snf::worker::CloseConnectionEffect>(fail_comp.effects.effects()[3]));
+        assert(!player_actor.currentZone().has_value());
+        assert(!player_actor.player().state().lastLocation().has_value());
         assert(!player_actor.isInRoom());
     }
 
@@ -2143,14 +2174,14 @@ namespace
         assert(eff1.size() == 1);
         assert(std::holds_alternative<snf::worker::CloseConnectionEffect>(eff1.effects()[0]));
 
-        // Other room requests while not in room also close connection
+        // Queued requests after a close decision are ignored.
         auto skill_not_in_room = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerRoomRequestMessage{
             .connection = conn,
             .request_id = 101,
             .request = snf::adapter::UseSkillRequest{.room = snf::server::RoomId{1}, .skill_id = snf::server::SkillId{1}, .request_sequence = 1},
         });
         auto res_skill = player_actor.dispatch(std::move(skill_not_in_room), turn_ctx);
-        assert(std::holds_alternative<snf::worker::CloseConnectionEffect>(std::get<snf::worker::CompletedTurn>(res_skill).effects.effects()[0]));
+        assert(completedTurn(res_skill).effects.empty());
 
         auto move_not_in_room = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerRoomRequestMessage{
             .connection = conn,
@@ -2158,7 +2189,7 @@ namespace
             .request = snf::adapter::SetMoveIntentRequest{.room = snf::server::RoomId{1}, .direction = snf::server::MoveDirection::North, .request_sequence = 1},
         });
         auto res_move = player_actor.dispatch(std::move(move_not_in_room), turn_ctx);
-        assert(std::holds_alternative<snf::worker::CloseConnectionEffect>(std::get<snf::worker::CompletedTurn>(res_move).effects.effects()[0]));
+        assert(completedTurn(res_move).effects.empty());
 
         auto leave_not_in_room = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerRoomRequestMessage{
             .connection = conn,
@@ -2166,7 +2197,16 @@ namespace
             .request = snf::adapter::RoomLeaveRequest{},
         });
         auto res_leave = player_actor.dispatch(std::move(leave_not_in_room), turn_ctx);
-        assert(std::holds_alternative<snf::worker::CloseConnectionEffect>(std::get<snf::worker::CompletedTurn>(res_leave).effects.effects()[0]));
+        assert(completedTurn(res_leave).effects.empty());
+        static_cast<void>(
+            player_actor.dispatch(snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerConnectionClosedMessage{conn}), turn_ctx)
+        );
+        static_cast<void>(player_actor.dispatch(
+            snf::adapter::GameActorPayloadRegistry::create(
+                snf::adapter::PlayerCommandMessage{conn, 1, snf::server::AuthenticateCommand{.player = snf::server::PlayerId{108}}}
+            ),
+            turn_ctx
+        ));
 
         // Join room 5 via saga
         auto enter_env = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerZoneRequestMessage{
@@ -2250,6 +2290,16 @@ namespace
         assert(player_actor.isInRoom());
         assert(player_actor.currentRoom() == snf::server::RoomId{5});
 
+        // A matching request is forwarded before any close decision.
+        auto valid_start = player_actor.dispatch(
+            snf::adapter::GameActorPayloadRegistry::create(
+                snf::adapter::PlayerRoomRequestMessage{conn, 12, snf::adapter::BattleStartRequest{snf::server::RoomId{5}}}
+            ),
+            turn_ctx
+        );
+        assert(completedTurn(valid_start).effects.size() == 1);
+        assert(std::get<snf::worker::TellActorEffect>(completedTurn(valid_start).effects.effects()[0]).target.entity == 5);
+
         // Now in room 5: BattleStart for room 99 (different room!) closes connection
         auto bs_wrong_room = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerRoomRequestMessage{
             .connection = conn,
@@ -2269,7 +2319,7 @@ namespace
             .request = snf::adapter::UseSkillRequest{.room = snf::server::RoomId{99}, .skill_id = snf::server::SkillId{1}, .request_sequence = 1},
         });
         auto res_skill_wrong = player_actor.dispatch(std::move(skill_wrong_room), turn_ctx);
-        assert(std::holds_alternative<snf::worker::CloseConnectionEffect>(std::get<snf::worker::CompletedTurn>(res_skill_wrong).effects.effects()[0]));
+        assert(completedTurn(res_skill_wrong).effects.empty());
 
         // SetMoveIntent for wrong room closes connection
         auto move_wrong_room = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerRoomRequestMessage{
@@ -2278,9 +2328,9 @@ namespace
             .request = snf::adapter::SetMoveIntentRequest{.room = snf::server::RoomId{99}, .direction = snf::server::MoveDirection::South, .request_sequence = 1},
         });
         auto res_move_wrong = player_actor.dispatch(std::move(move_wrong_room), turn_ctx);
-        assert(std::holds_alternative<snf::worker::CloseConnectionEffect>(std::get<snf::worker::CompletedTurn>(res_move_wrong).effects.effects()[0]));
+        assert(completedTurn(res_move_wrong).effects.empty());
 
-        // BattleStart for room 5 (matching room!) is forwarded to Room 5
+        // Even a matching request cannot escape the closing gate.
         auto bs_matching_room = snf::adapter::GameActorPayloadRegistry::create(snf::adapter::PlayerRoomRequestMessage{
             .connection = conn,
             .request_id = 12,
@@ -2289,11 +2339,7 @@ namespace
         auto res3 = player_actor.dispatch(std::move(bs_matching_room), turn_ctx);
         assert(std::holds_alternative<snf::worker::CompletedTurn>(res3));
         auto& comp3 = std::get<snf::worker::CompletedTurn>(res3);
-        assert(comp3.effects.size() == 1);
-        assert(std::holds_alternative<snf::worker::TellActorEffect>(comp3.effects.effects()[0]));
-        const auto& bs_tell = std::get<snf::worker::TellActorEffect>(comp3.effects.effects()[0]);
-        assert(bs_tell.target.kind == snf::worker::ActorKind::Room);
-        assert(bs_tell.target.entity == 5);
+        assert(comp3.effects.empty());
     }
 
     void test_room_join_step1_timeout_compensates_applied_room_join()
@@ -2869,11 +2915,13 @@ namespace
             .step = snf::adapter::WorkflowStep::RoomTerminalNotification,
             .room = snf::server::RoomId{8},
             .request_id = 0,
-            .result = snf::server::RoomResult{
-                .status = snf::server::RoomCommandStatus::Applied,
-                .phase = snf::server::RoomPhase::Cleared,
-                .player = snf::server::PlayerId{114},
-            },
+            .result =
+                snf::server::RoomResult{
+                    .status = snf::server::RoomCommandStatus::Applied,
+                    .phase = snf::server::RoomPhase::Cleared,
+                    .player = snf::server::PlayerId{114},
+                },
+            .membership = player_actor2.roomMembership(),
         });
         auto term_res = player_actor2.dispatch(std::move(term_env), turn_ctx);
         assert(std::holds_alternative<snf::worker::CompletedTurn>(term_res));
@@ -2928,11 +2976,13 @@ namespace
             .step = snf::adapter::WorkflowStep::RoomTerminalNotification,
             .room = snf::server::RoomId{5},
             .request_id = 0,
-            .result = snf::server::RoomResult{
-                .status = snf::server::RoomCommandStatus::Applied,
-                .phase = snf::server::RoomPhase::Cleared,
-                .player = snf::server::PlayerId{115},
-            },
+            .result =
+                snf::server::RoomResult{
+                    .status = snf::server::RoomCommandStatus::Applied,
+                    .phase = snf::server::RoomPhase::Cleared,
+                    .player = snf::server::PlayerId{115},
+                },
+            .membership = player_actor.roomMembership(),
         });
         static_cast<void>(player_actor.dispatch(std::move(term_env), turn_ctx));
 
@@ -3064,20 +3114,22 @@ namespace
             .step = snf::adapter::WorkflowStep::RoomTerminalNotification,
             .room = snf::server::RoomId{1},
             .request_id = 0,
-            .result = snf::server::RoomResult{
-                .status = snf::server::RoomCommandStatus::Applied,
-                .phase = snf::server::RoomPhase::Cleared,
-                .player = snf::server::PlayerId{109},
-                .deadline_after = std::nullopt,
-                .tick_after = std::nullopt,
-                .boss_health = 0,
-                .boss_spawned = false,
-                .digest = std::nullopt,
-                .outcome = snf::server::BattleOutcome::Cleared,
-                .failure_reason = std::nullopt,
-                .audience = {snf::server::PlayerId{109}},
-                .grants = {},
-            },
+            .result =
+                snf::server::RoomResult{
+                    .status = snf::server::RoomCommandStatus::Applied,
+                    .phase = snf::server::RoomPhase::Cleared,
+                    .player = snf::server::PlayerId{109},
+                    .deadline_after = std::nullopt,
+                    .tick_after = std::nullopt,
+                    .boss_health = 0,
+                    .boss_spawned = false,
+                    .digest = std::nullopt,
+                    .outcome = snf::server::BattleOutcome::Cleared,
+                    .failure_reason = std::nullopt,
+                    .audience = {snf::server::PlayerId{109}},
+                    .grants = {},
+                },
+            .membership = player_actor.roomMembership(),
         });
         auto term_res = player_actor.dispatch(std::move(term_out), turn_ctx);
         assert(std::holds_alternative<snf::worker::CompletedTurn>(term_res));
@@ -3494,6 +3546,31 @@ namespace
         {
         }
 
+        std::optional<snf::worker::TimePoint> lifecycleDeadline() const noexcept override
+        {
+            return _actor->lifecycleDeadline();
+        }
+        bool needsShutdownTurn() const noexcept override
+        {
+            return _actor->needsShutdownTurn();
+        }
+        bool shutdownPending() const noexcept override
+        {
+            return _actor->shutdownPending();
+        }
+        bool finalizationFailed() const noexcept override
+        {
+            return _actor->finalizationFailed();
+        }
+        void cancelLifecycle() noexcept override
+        {
+            _actor->cancelLifecycle();
+        }
+        snf::worker::TurnResult lifecycleTurn(const snf::worker::ActorTurnContext& context, bool shutdown) override
+        {
+            return _actor->lifecycleTurn(context, shutdown);
+        }
+
         snf::worker::TurnResult dispatch(snf::worker::ActorEnvelope&& envelope, const snf::worker::ActorTurnContext& context) override
         {
             using namespace snf::worker;
@@ -3646,7 +3723,17 @@ namespace
         assert(factory.player->routeEpoch() == 2);
         assert(factory.observation.close_effects == 1 && factory.observation.handoff_replies == 0);
         assert(factory.source->zone().playerCount() == 0 && factory.target->zone().playerCount() == 0);
-        assert(worker.metrics().actor.effect_tell_failures == 0);
+        // Both cleanup acknowledgements compete for the one-slot Player mailbox.
+        // Retry until even the lost acknowledgement has been recovered.
+        const auto cleanup_limit = std::chrono::steady_clock::now() + std::chrono::seconds{1};
+        while (factory.player->pendingCleanupCount() != 0 && std::chrono::steady_clock::now() < cleanup_limit)
+        {
+            std::this_thread::yield();
+            run();
+        }
+        assert(factory.player->pendingCleanupCount() == 0);
+        assert(worker.metrics().actor.effect_tell_failures >= 1);
+        assert(worker.metrics().actor.lifecycle_turns >= 1);
         assert(worker.metrics().actor.application_timer_delivery_failures == 0);
 
         post(ZoneOutcomeMessage{*factory.observation.held_target_outcome});
@@ -4173,6 +4260,439 @@ namespace
         assert(worker.metrics().actor.actor_connection_closed_mailbox_accepted == 1);
     }
 
+    struct WorkflowFailureFixture
+    {
+        snf::server::PlayerId id{140};
+        snf::adapter::PlayerActorAdapter player{id};
+        snf::adapter::ZoneActorAdapter zone{snf::server::ZoneId{10}};
+        snf::adapter::RoomActorAdapter room{snf::server::RoomId{7}};
+        snf::worker::ActorTurnContext context{.activation = {}, .now = std::chrono::steady_clock::now(), .turn_id = 1};
+        snf::worker::ConnectionRef connection{snf::worker::ConnectionId{50}, snf::worker::ConnectionGeneration{2}, snf::worker::WorkerId{0}};
+
+        WorkflowFailureFixture()
+        {
+            authenticateAndEnterZone(player, zone, connection, id, {.x = 8, .y = 9}, context);
+        }
+
+        template <class Message> snf::worker::TurnResult dispatch(Message message)
+        {
+            return player.dispatch(snf::adapter::GameActorPayloadRegistry::create(std::move(message)), context);
+        }
+
+        snf::adapter::RoomOutcomeMessage join()
+        {
+            auto request = dispatch(snf::adapter::PlayerRoomRequestMessage{connection, 3, snf::adapter::RoomJoinRequest{room.room().id()}});
+            auto applied = room.dispatch(takeTellMessage(request), context);
+            return takeTellMessage(applied).take<snf::adapter::RoomOutcomeMessage>();
+        }
+
+        snf::adapter::ZoneOutcomeMessage join2()
+        {
+            auto request = dispatch(join());
+            auto applied = zone.dispatch(takeTellMessage(request), context);
+            return takeTellMessage(applied).take<snf::adapter::ZoneOutcomeMessage>();
+        }
+
+        snf::worker::TurnResult startReturn(const bool automatic = false)
+        {
+            static_cast<void>(dispatch(join2()));
+            assert(player.isInRoom());
+            if (automatic)
+            {
+                return dispatch(snf::adapter::RoomOutcomeMessage{
+                    .player = id,
+                    .step = snf::adapter::WorkflowStep::RoomTerminalNotification,
+                    .room = room.room().id(),
+                    .result = {.status = snf::server::RoomCommandStatus::Applied, .phase = snf::server::RoomPhase::Cleared},
+                    .membership = player.roomMembership()
+                });
+            }
+            auto request = dispatch(snf::adapter::PlayerRoomRequestMessage{connection, 4, snf::adapter::RoomLeaveRequest{}});
+            auto ack = room.dispatch(takeTellMessage(request), context);
+            static_cast<void>(player.dispatch(takeTellMessage(ack), context));
+            return request;
+        }
+
+        void cleanup(snf::worker::TurnResult& result)
+        {
+            for (auto& effect : completedTurn(result).effects.mutableEffects())
+            {
+                if (auto* tell = std::get_if<snf::worker::TellActorEffect>(&effect))
+                {
+                    auto ack = tell->target.kind == snf::worker::ActorKind::Zone ? zone.dispatch(std::move(tell->message), context)
+                                                                                 : room.dispatch(std::move(tell->message), context);
+                    static_cast<void>(player.dispatch(takeTellMessage(ack), context));
+                }
+            }
+        }
+    };
+
+    void test_workflow_outcome_identity_matrix()
+    {
+        using namespace snf::adapter;
+        using namespace snf::server;
+        using namespace snf::worker;
+        // One field at a time, preserving correlation for all other cases.
+        for (unsigned field = 0; field < 7; ++field)
+        {
+            WorkflowFailureFixture f;
+            const auto valid = f.join();
+            auto invalid = valid;
+            switch (field)
+            {
+            case 0:
+                invalid.player = PlayerId{999};
+                break;
+            case 1:
+                invalid.connection_generation = ConnectionGeneration{999};
+                break;
+            case 2:
+                ++invalid.correlation_id;
+                break;
+            case 3:
+                invalid.step = WorkflowStep::RoomJoinStep2_LeaveZone;
+                break;
+            case 4:
+                invalid.room = RoomId{999};
+                break;
+            case 5:
+                ++invalid.request_id;
+                break;
+            case 6:
+                invalid.result.player = PlayerId{999};
+                break;
+            }
+            auto ignored = f.dispatch(invalid);
+            assert(completedTurn(ignored).effects.empty());
+            assert(std::get<EnteringRoute>(f.player.workflowState()).step == WorkflowStep::RoomJoinStep1_JoinRoom);
+            auto accepted = f.dispatch(valid);
+            assert(completedTurn(accepted).effects.size() == 1);
+            auto duplicate = f.dispatch(valid);
+            assert(completedTurn(duplicate).effects.empty());
+            auto old_timer = f.dispatch(PlayerWorkflowTimeoutMessage{valid.correlation_id, valid.step});
+            assert(completedTurn(old_timer).effects.empty());
+        }
+        // Join2, explicit/automatic Return, ordinary Enter/Move/Leave.
+        for (unsigned stage = 0; stage < 6; ++stage)
+        {
+            for (unsigned field = 0; field < 8; ++field)
+            {
+                WorkflowFailureFixture f;
+                ZoneOutcomeMessage valid;
+                if (stage == 0)
+                    valid = f.join2();
+                else if (stage == 1 || stage == 2)
+                {
+                    auto request = f.startReturn(stage == 2);
+                    auto applied = f.zone.dispatch(takeTellMessage(request, stage == 2 ? 0 : 1), f.context);
+                    valid = takeTellMessage(applied).take<ZoneOutcomeMessage>();
+                    assert(valid.request_id == 0);
+                }
+                else
+                {
+                    ZoneRequest request = EnterZoneRequest{f.zone.zone().id(), {.x = 3, .y = 4}};
+                    if (stage == 4)
+                        request = MoveRequest{{.x = 11, .y = 12}};
+                    if (stage == 5)
+                        request = LeaveRequest{};
+                    auto sent = f.dispatch(PlayerZoneRequestMessage{f.connection, 6, std::move(request)});
+                    auto applied = f.zone.dispatch(takeTellMessage(sent), f.context);
+                    valid = takeTellMessage(applied).take<ZoneOutcomeMessage>();
+                }
+                const auto original_zone = f.player.currentZone();
+                const auto original_epoch = f.player.routeEpoch();
+                const auto original_state = f.player.workflowState().index();
+                const auto original_location = f.player.player().state().lastLocation();
+                auto invalid = valid;
+                switch (field)
+                {
+                case 0:
+                    invalid.player = PlayerId{999};
+                    break;
+                case 1:
+                    invalid.connection_generation = ConnectionGeneration{999};
+                    break;
+                case 2:
+                    ++invalid.correlation_id;
+                    break;
+                case 3:
+                    invalid.step = WorkflowStep::None;
+                    break;
+                case 4:
+                    invalid.zone = ZoneId{999};
+                    break;
+                case 5:
+                    ++invalid.request_id;
+                    break;
+                case 6:
+                    ++invalid.route_epoch;
+                    break;
+                case 7:
+                    invalid.result.player = PlayerId{999};
+                    break;
+                }
+                auto ignored = f.dispatch(invalid);
+                assert(completedTurn(ignored).effects.empty());
+                assert(f.player.currentZone() == original_zone);
+                assert(f.player.routeEpoch() == original_epoch);
+                assert(f.player.workflowState().index() == original_state);
+                assert(f.player.player().state().lastLocation() == original_location);
+                auto accepted = f.dispatch(valid);
+                assert(completedTurn(accepted).effects.size() == 1);
+                auto duplicate = f.dispatch(valid);
+                assert(completedTurn(duplicate).effects.empty());
+                auto old_timer = f.dispatch(PlayerWorkflowTimeoutMessage{valid.correlation_id, valid.step});
+                assert(completedTurn(old_timer).effects.empty());
+            }
+        }
+    }
+
+    void test_room_return_stale_route_cleans_observed_epoch()
+    {
+        using namespace snf::adapter;
+        using namespace snf::server;
+        using namespace snf::worker;
+        WorkflowFailureFixture f;
+        auto request = f.startReturn();
+        static_cast<void>(f.zone.dispatch(
+            GameActorPayloadRegistry::create(
+                ZoneCommandMessage{.command = EnterZoneCommand{.player = f.id, .route_epoch = 7, .position = {.x = 80, .y = 90}}}
+            ),
+            f.context
+        ));
+        auto applied = f.zone.dispatch(takeTellMessage(request, 1), f.context);
+        auto outcome = takeTellMessage(applied).take<ZoneOutcomeMessage>();
+        assert(outcome.route_epoch == 2 && outcome.result.route_epoch == 7);
+        assert(outcome.result.status == ZoneCommandStatus::StaleRoute);
+        auto failed = f.dispatch(outcome);
+        assert(!f.player.currentZone());
+        assert(f.player.routeEpoch() == 7);
+        assert(!f.player.player().state().lastLocation());
+        assert(
+            std::count_if(
+                completedTurn(failed).effects.effects().begin(),
+                completedTurn(failed).effects.effects().end(),
+                [](const auto& effect)
+                {
+                    return std::holds_alternative<CloseConnectionEffect>(effect);
+                }
+            ) == 1
+        );
+        f.cleanup(failed);
+        assert(f.zone.zone().playerCount() == 0);
+        auto duplicate = f.dispatch(outcome);
+        assert(completedTurn(duplicate).effects.empty());
+        auto closed = f.dispatch(PlayerConnectionClosedMessage{f.connection});
+        f.cleanup(closed);
+        f.connection.generation = ConnectionGeneration{3};
+        static_cast<void>(f.dispatch(PlayerCommandMessage{f.connection, 7, AuthenticateCommand{.player = f.id}}));
+        auto reenter = f.dispatch(PlayerZoneRequestMessage{f.connection, 8, EnterZoneRequest{f.zone.zone().id(), {.x = 1, .y = 2}}});
+        auto entered = f.zone.dispatch(takeTellMessage(reenter), f.context);
+        static_cast<void>(f.dispatch(takeTellMessage(entered).take<ZoneOutcomeMessage>()));
+        assert(f.player.routeEpoch() == 8 && f.zone.zone().playerCount() == 1);
+    }
+
+    void test_non_cross_close_decision_gates_queued_input()
+    {
+        using namespace snf::adapter;
+        using namespace snf::server;
+        using namespace snf::worker;
+        for (unsigned failure = 0; failure < 4; ++failure)
+        {
+            WorkflowFailureFixture f;
+            TurnResult closed = CompletedTurn{.effects = {}};
+            if (failure < 2)
+            {
+                auto request = f.startReturn();
+                const auto route = std::get<ReturningRoute>(f.player.workflowState());
+                if (failure == 0)
+                    closed = f.dispatch(ZoneOutcomeMessage{
+                        .player = f.id,
+                        .connection_generation = f.connection.generation,
+                        .correlation_id = route.correlation_id,
+                        .step = route.step,
+                        .zone = route.return_zone,
+                        .route_epoch = route.return_epoch,
+                        .request_id = 0,
+                        .result = {.status = ZoneCommandStatus::TransferFailed, .player = f.id, .position = std::nullopt, .visible_players = {}}
+                    });
+                else
+                    closed = f.dispatch(PlayerWorkflowTimeoutMessage{route.correlation_id, route.step});
+            }
+            else if (failure == 2)
+            {
+                auto request = f.dispatch(PlayerZoneRequestMessage{f.connection, 4, LeaveRequest{}});
+                auto command = takeTellMessage(request).take<ZoneCommandMessage>();
+                closed = f.dispatch(PlayerWorkflowTimeoutMessage{command.reply_to->correlation_id, command.reply_to->step});
+            }
+            else
+                closed = f.dispatch(PlayerRoomRequestMessage{f.connection, 4, BattleStartRequest{RoomId{7}}});
+            assert(std::any_of(
+                completedTurn(closed).effects.effects().begin(),
+                completedTurn(closed).effects.effects().end(),
+                [](const auto& effect)
+                {
+                    return std::holds_alternative<CloseConnectionEffect>(effect);
+                }
+            ));
+            for (ZoneRequest queued :
+                 {ZoneRequest{EnterZoneRequest{ZoneId{20}, {.x = 1, .y = 2}}}, ZoneRequest{MoveRequest{{.x = 3, .y = 4}}}, ZoneRequest{LeaveRequest{}}
+                 })
+            {
+                auto ignored = f.dispatch(PlayerZoneRequestMessage{f.connection, 5, std::move(queued)});
+                assert(completedTurn(ignored).effects.empty());
+            }
+            auto join = f.dispatch(PlayerRoomRequestMessage{f.connection, 6, snf::adapter::RoomJoinRequest{RoomId{9}}});
+            assert(completedTurn(join).effects.empty());
+            auto auth = f.dispatch(PlayerCommandMessage{f.connection, 7, AuthenticateCommand{.player = f.id}});
+            assert(completedTurn(auth).effects.empty());
+            auto notice = f.dispatch(PlayerConnectionClosedMessage{f.connection});
+            f.cleanup(closed);
+            f.cleanup(notice);
+            f.connection.generation = ConnectionGeneration{3};
+            auto reauth = f.dispatch(PlayerCommandMessage{f.connection, 8, AuthenticateCommand{.player = f.id}});
+            assert(!completedTurn(reauth).effects.empty());
+        }
+        // Closing a conflicting connection must not gate the incumbent.
+        WorkflowFailureFixture f;
+        auto other = f.connection;
+        other.id = ConnectionId{99};
+        auto conflict = f.dispatch(PlayerCommandMessage{other, 8, AuthenticateCommand{.player = f.id}});
+        assert(std::holds_alternative<CloseConnectionEffect>(completedTurn(conflict).effects.effects()[0]));
+        auto move = f.dispatch(PlayerZoneRequestMessage{f.connection, 9, MoveRequest{{.x = 3, .y = 4}}});
+        assert(std::holds_alternative<TellActorEffect>(completedTurn(move).effects.effects()[0]));
+    }
+
+    void test_cleanup_retry_fences_and_deferred_return()
+    {
+        using namespace snf::adapter;
+        using namespace snf::server;
+        using namespace snf::worker;
+        WorkflowFailureFixture f;
+        static_cast<void>(f.dispatch(f.join2()));
+        const auto old_membership = f.player.roomMembership();
+        auto request = f.dispatch(PlayerRoomRequestMessage{f.connection, 4, RoomLeaveRequest{}});
+        auto first_leave = takeTellMessage(request).take<RoomCommandMessage>();
+        const auto original_reply = *first_leave.reply_to;
+        // Drop LeaveRoom entirely; target Zone entry nevertheless applies.
+        auto entered = f.zone.dispatch(takeTellMessage(request, 1), f.context);
+        auto deferred = f.player.dispatch(takeTellMessage(entered), f.context);
+        assert(completedTurn(deferred).effects.empty() && !f.player.currentZone());
+        assert(f.player.pendingCleanupCount() == 1 && f.room.room().participantCount() == 1);
+        for (int i = 0; i < 50; ++i)
+        {
+            f.context.now += 10ms;
+            auto retry = f.player.lifecycleTurn(f.context, false);
+            assert(completedTurn(retry).effects.size() == 1);
+            const auto& command = std::get<TellActorEffect>(completedTurn(retry).effects.effects()[0]).message.get<RoomCommandMessage>();
+            assert(command.membership == old_membership && command.reply_to->correlation_id == original_reply.correlation_id);
+            assert(f.player.pendingCleanupCount() == 1);
+        }
+        auto busy = f.dispatch(PlayerZoneRequestMessage{f.connection, 5, EnterZoneRequest{ZoneId{20}, {1, 2}}});
+        assert(
+            std::get<SendFrameEffect>(completedTurn(busy).effects.effects()[0]).frame.payload[0] ==
+            static_cast<std::byte>(ZoneCommandStatus::TransitionInProgress)
+        );
+        f.context.now += 10ms;
+        auto retry = f.player.lifecycleTurn(f.context, false);
+        auto applied = f.room.dispatch(takeTellMessage(retry), f.context);
+        auto valid = takeTellMessage(applied).take<RoomOutcomeMessage>();
+        for (int field = 0; field < 8; ++field)
+        {
+            auto stale = valid;
+            switch (field)
+            {
+            case 0:
+                ++stale.correlation_id;
+                break;
+            case 1:
+                stale.player = PlayerId{999};
+                break;
+            case 2:
+                stale.room = RoomId{999};
+                break;
+            case 3:
+                stale.connection_generation = ConnectionGeneration{999};
+                break;
+            case 4:
+                ++stale.request_id;
+                break;
+            case 5:
+                ++stale.membership->sequence;
+                break;
+            case 6:
+                stale.step = WorkflowStep::RoomTerminalNotification;
+                break;
+            case 7:
+                stale.result.player = PlayerId{999};
+                break;
+            }
+            auto ignored = f.dispatch(stale);
+            assert(completedTurn(ignored).effects.empty() && f.player.pendingCleanupCount() == 1);
+        }
+        // Lose the first valid ack, replay the identical command to recover NotJoined.
+        auto duplicate = f.room.dispatch(GameActorPayloadRegistry::create(RoomCommandMessage{first_leave}), f.context);
+        auto terminal = f.player.dispatch(takeTellMessage(duplicate), f.context);
+        assert(
+            std::count_if(
+                completedTurn(terminal).effects.effects().begin(),
+                completedTurn(terminal).effects.effects().end(),
+                [](const auto& effect)
+                {
+                    return std::holds_alternative<SendFrameEffect>(effect);
+                }
+            ) == 1
+        );
+        assert(f.player.pendingCleanupCount() == 0 && f.player.currentZone() == f.zone.zone().id());
+        static_cast<void>(f.dispatch(f.join2()));
+        assert(f.player.roomMembership() != old_membership && f.room.room().participantCount() == 1);
+        auto late_leave = f.room.dispatch(GameActorPayloadRegistry::create(std::move(first_leave)), f.context);
+        auto ignored_ack = f.player.dispatch(takeTellMessage(late_leave), f.context);
+        assert(completedTurn(ignored_ack).effects.empty() && f.room.room().participantCount() == 1 && f.player.isInRoom());
+        auto old_terminal = f.dispatch(RoomOutcomeMessage{
+            .player = f.id,
+            .step = WorkflowStep::RoomTerminalNotification,
+            .room = f.room.room().id(),
+            .result = {.status = RoomCommandStatus::Applied, .phase = RoomPhase::Cleared},
+            .membership = old_membership
+        });
+        assert(completedTurn(old_terminal).effects.empty() && f.player.isInRoom());
+    }
+
+    void test_shutdown_final_save_failure_and_late_grant()
+    {
+        using namespace snf::adapter;
+        using namespace snf::worker;
+        for (const auto outcome : {SaveOutcome::Committed, SaveOutcome::FailedBeforeCommit, SaveOutcome::CommitOutcomeUnknown})
+        {
+            WorkflowFailureFixture f;
+            auto cancelled = f.player.lifecycleTurn(f.context, true);
+            assert(f.player.shutdownPending() && f.player.pendingCleanupCount() == 1);
+            f.cleanup(cancelled);
+            auto final = f.player.lifecycleTurn(f.context, true);
+            auto& task = std::get<SuspendedTurn>(final).task;
+            auto request = task.takeDbRequest();
+            assert(std::get<SavePlayerRequest>(*request).has_location);
+            assert(task.resume(DbResult{SavePlayerResult{.outcome = outcome}}) == ActorTaskStatus::Completed);
+            assert(!f.player.shutdownPending() && f.player.finalizationFailed() == (outcome != SaveOutcome::Committed));
+            assert(!f.player.lifecycleDeadline());
+            static_cast<void>(f.dispatch(ExperienceGrantMessage{.grant = {.player = f.id, .experience = 100}}));
+            if (outcome == SaveOutcome::Committed)
+            {
+                assert(f.player.shutdownPending());
+                auto resave = f.player.lifecycleTurn(f.context, true);
+                auto& next = std::get<SuspendedTurn>(resave).task;
+                auto newer = next.takeDbRequest();
+                assert(std::get<SavePlayerRequest>(*newer).street_experience == 100);
+                assert(next.resume(DbResult{SavePlayerResult{.outcome = SaveOutcome::Committed}}) == ActorTaskStatus::Completed);
+            }
+            else
+                assert(!f.player.lifecycleDeadline()); // No automatic retry of uncertain/failed final save.
+            f.player.cancelLifecycle();
+            assert(f.player.pendingCleanupCount() == 0 && !f.player.boundConnection());
+        }
+    }
+
     void test_ping_request_sink_vertical_slice()
     {
         snf::worker::WorkerActorConfig actor_config{
@@ -4352,8 +4872,8 @@ int main()
     test_room_join_refusal_keeps_zone_route();
     std::cout << "  - test_room_join_refusal_keeps_zone_route PASSED" << std::endl;
 
-    test_room_join_zone_leave_failure_compensates_and_keeps_zone_route();
-    std::cout << "  - test_room_join_zone_leave_failure_compensates_and_keeps_zone_route PASSED" << std::endl;
+    test_room_join_zone_leave_failure_closes_known_none();
+    std::cout << "  - test_room_join_zone_leave_failure_closes_known_none PASSED" << std::endl;
 
     test_battle_start_only_allowed_when_in_room();
     std::cout << "  - test_battle_start_only_allowed_when_in_room PASSED" << std::endl;
@@ -4409,6 +4929,15 @@ int main()
     test_sink_close_all_pending_remains_bounded();
     test_sink_close_retries_from_idle_worker_loop();
     std::cout << "  - GameRequestSink disconnect retry regressions PASSED" << std::endl;
+
+    test_workflow_outcome_identity_matrix();
+    test_room_return_stale_route_cleans_observed_epoch();
+    test_non_cross_close_decision_gates_queued_input();
+    std::cout << "  - workflow identity and failure terminal regressions PASSED" << std::endl;
+
+    test_cleanup_retry_fences_and_deferred_return();
+    test_shutdown_final_save_failure_and_late_grant();
+    std::cout << "  - cleanup retry fence and shutdown finalization regressions PASSED" << std::endl;
 
     test_ping_request_sink_vertical_slice();
     std::cout << "  - test_ping_request_sink_vertical_slice PASSED" << std::endl;

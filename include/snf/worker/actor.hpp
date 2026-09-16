@@ -575,6 +575,31 @@ namespace snf::worker
     public:
         virtual ~ActorInstance() = default;
         [[nodiscard]] virtual TurnResult dispatch(ActorEnvelope&& envelope, const ActorTurnContext& context) = 0;
+        // Owner-thread queries only. Lifecycle turns run in the Actor phase,
+        // under the normal turn budget; they never consume mailbox capacity.
+        [[nodiscard]] virtual std::optional<std::chrono::steady_clock::time_point> lifecycleDeadline() const noexcept
+        {
+            return std::nullopt;
+        }
+        [[nodiscard]] virtual bool needsShutdownTurn() const noexcept
+        {
+            return false;
+        }
+        [[nodiscard]] virtual bool shutdownPending() const noexcept
+        {
+            return false;
+        }
+        [[nodiscard]] virtual bool finalizationFailed() const noexcept
+        {
+            return false;
+        }
+        [[nodiscard]] virtual TurnResult lifecycleTurn(const ActorTurnContext&, bool)
+        {
+            return CompletedTurn{.effects = {}};
+        }
+        virtual void cancelLifecycle() noexcept
+        {
+        }
     };
 
     struct ActorConstructionResult
@@ -707,6 +732,9 @@ namespace snf::worker
         std::uint64_t application_timers_delivered{0};
         std::uint64_t application_timer_delivery_failures{0};
         std::uint64_t application_timer_delivery_retries{0};
+        std::uint64_t lifecycle_turns{0};
+        std::uint64_t lifecycle_forced_cancellations{0};
+        std::uint64_t lifecycle_finalization_failures{0};
         std::uint64_t actor_connection_closed_notifications_sent{0};
         std::uint64_t actor_connection_closed_rejections{0};
         std::uint64_t actor_connection_closed_notification_rejections{0};

@@ -376,7 +376,13 @@ namespace snf::worker
         bool completeSyntheticCommand(AwaitKey key, SyntheticAwaitOutcome outcome);
         [[nodiscard]] bool tryMarkSyntheticCommandReady(AwaitKey key, SyntheticAwaitOutcome outcome);
         [[nodiscard]] bool tryMarkDbCommandReady(AwaitKey key, DbResult result);
-        [[nodiscard]] bool suspendOnDbRequest(ActorSlot& slot, ActorTask task);
+        [[nodiscard]] bool suspendOnDbRequest(ActorSlot& slot, ActorTask task, bool final_save = false);
+        [[nodiscard]] bool hasPendingActorLifecycle() const noexcept;
+        // Lifecycle work is found through an index, never by scanning the actor
+        // table: an idle 16384-slot table cost 200-500us of the Actor phase
+        // budget per loop iteration and starved mailbox turns.
+        void refreshLifecycleArm(ActorHandle handle);
+        void armLifecycleForShutdown();
         [[nodiscard]] DeliveryResult beginActivationLoad(ActorKey key, ActorEnvelope&& first_message);
         void completeSyntheticActivation(AwaitKey key, SyntheticActivationOutcome outcome);
         void removeActor(ActorHandle handle, ActorRemovalReason reason);
@@ -432,6 +438,8 @@ namespace snf::worker
 
         std::unique_ptr<ActorTable> _actors;
         std::unique_ptr<ReadyActorQueue> _ready_queue;
+        // Owner thread only. Bounded by the actor table: one entry per armed slot.
+        std::vector<ActorHandle> _lifecycle_armed{};
         std::unique_ptr<DbClient> _db;
         bool _db_started{false};
         std::chrono::milliseconds _db_shutdown_timeout{0};
